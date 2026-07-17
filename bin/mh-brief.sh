@@ -133,6 +133,14 @@ branch. Do NOT push or open a PR yourself unless the manhandler tells you to.
 EOF
 fi
 
+# coding standards (baked verbatim from the coding-guidelines skill so every
+# crewmate carries them in its prompt, with no dependency on skill loading) -----
+cg_skill="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.claude/skills/coding-guidelines/SKILL.md"
+if [ -f "$cg_skill" ]; then
+  printf '\n## Coding standards - follow these whenever you write or change code\n\n'
+  awk 'NR==1 && /^---$/ {f=1; next} f && /^---$/ {f=0; next} !f' "$cg_skill"
+fi
+
 # status protocol (shared) -----------------------------------------------------
 cat <<EOF
 
