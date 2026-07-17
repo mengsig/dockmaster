@@ -29,11 +29,11 @@ cron — which do the same job with less machinery and no polling. See
 - **Two task shapes.** *Ship* delivers a change (PR or approved local merge);
   *scout* investigates and leaves a report — a diagnosis is never an
   authorization to implement.
-- **Per-repo + global memory.** Each managed repo gets its own
-  [contextgraph](https://www.npmjs.com/package/contextgraph) memory, committed in
-  the repo so it travels with it and reaches crewmates in every worktree;
-  operator and fleet-wide knowledge live in the manhandler's global memory. One
-  owner per fact.
+- **Per-repo + global memory.** Memory is plain markdown, no bespoke tool: each
+  managed repo's shared knowledge lives in an `mh:knowledge` section of its own
+  `AGENTS.md` (committed, so it travels and reaches crewmates in every worktree),
+  with manhandler-private notes in a git-excluded `.mh/`; operator and fleet-wide
+  knowledge live in the manhandler's global memory. One owner per fact.
 - **Lavish approval, then modular PR pipelines.** Every change is first rendered
   as a lavish artifact you approve (with back-and-forth); then you choose PR or
   local. On the PR path, delivery is an ordered list of named gates — two review
@@ -67,8 +67,8 @@ state/ repos/ data/  operator-private runtime, clones, and artifacts (gitignored
 > add my repo git@github.com:me/app.git and fix the flaky login test in #412
 ```
 
-The manhandler registers the repo (cloning it and initializing its memory),
-spawns a crewmate in a fresh worktree, runs the PR pipeline, and comes back with:
+The manhandler registers the repo (cloning it and seeding its memory), spawns a
+crewmate in a fresh worktree, runs the PR pipeline, and comes back with:
 
 ```
 PR ready for review: https://github.com/me/app/pull/57
@@ -84,8 +84,9 @@ each usable directly. Run any script with no arguments for its usage.
 ## Requirements
 
 - Claude Code, with `git` and the GitHub CLI authenticated (`gh auth login`).
-- `gh-axi`, `lavish-axi`, and `contextgraph` on `PATH` (the manhandler uses them
-  for GitHub, review surfaces, and per-repo memory). `jq` for the registry.
+- `gh-axi` and `lavish-axi` on `PATH` (the manhandler uses them for GitHub and
+  review surfaces). `jq` for the registry. Per-repo memory is plain markdown —
+  no extra tool to install.
 
 ## License
 

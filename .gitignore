@@ -15,9 +15,3 @@
 # Editor / OS cruft.
 .DS_Store
 node_modules/
-
-# ContextGraph hidden per-file sidecars (.<filename>.md) — managed local artifacts.
-# The canonical memory lives in .contextgraph/, which stays tracked (see below).
-.*.md
-
-# NOTE: .contextgraph/ is this repo's own tracked memory — intentionally NOT ignored.

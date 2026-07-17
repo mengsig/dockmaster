@@ -31,7 +31,6 @@ REQUIRED_TOOLS=(
 RECOMMENDED_TOOLS=(
   "gh"           "GitHub auth + API for the PR delivery path"
   "gh-axi"       "ergonomic GitHub wrapper used on the PR path"
-  "contextgraph" "per-repo memory (recall/remember) inside managed repos"
   "lavish-axi"   "review surfaces and structured reports"
 )
 
@@ -40,7 +39,6 @@ tool_hint() {
     git|jq)            printf 'install with your package manager (e.g. apt install %s / brew install %s)' "$1" "$1" ;;
     gh)                printf 'https://cli.github.com' ;;
     gh-axi|lavish-axi) printf 'part of the axi toolset — install it and ensure it is on PATH' ;;
-    contextgraph)      printf 'install the contextgraph CLI and ensure it is on PATH' ;;
     *)                 printf 'install %s and ensure it is on PATH' "$1" ;;
   esac
 }

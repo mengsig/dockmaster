@@ -177,6 +177,34 @@ check "doctor fails on invalid repos.json" '! b mh-doctor.sh >/dev/null 2>&1'
 check "doctor names the invalid JSON"      'grep -q "not valid JSON" <<<"$DOCBAD"'
 cp "$TMP/repos.bak" "$MH_HOME/state/repos.json"
 
+echo "== mh-memory (native plain-markdown context) =="
+# seed scaffolds only the git-excluded private store; it never touches the clone's
+# AGENTS.md, so the clone stays pristine (landable and fast-forward-syncable).
+b mh-memory.sh seed demo >/dev/null
+check "seed creates the private notes store"          '[ -f "$MH_HOME/repos/demo/.mh/notes.md" ]'
+check "seed git-excludes the private store"           'grep -qxF ".mh/" "$MH_HOME/repos/demo/.git/info/exclude"'
+check "seed leaves the clone pristine"                '[ -z "$(git -C "$MH_HOME/repos/demo" status --porcelain)" ]'
+check "seed is idempotent"                            'b mh-memory.sh seed demo >/dev/null 2>&1'
+# SHARED knowledge is authored by a crewmate in a worktree and committed; simulate
+# a committed mh:knowledge section and assert recall surfaces + filters it.
+printf '# demo\n\n<!-- mh:knowledge:start -->\n## Repository knowledge\n- **[command]** run tests with pytest -q\n<!-- mh:knowledge:end -->\n' > "$MH_HOME/repos/demo/AGENTS.md"
+b mh-memory.sh remember demo --private --kind routing "prefer squash merges here" >/dev/null
+check "remember --private appends the fact"           'grep -q "squash merges" "$MH_HOME/repos/demo/.mh/notes.md"'
+b mh-memory.sh remember --global --kind pitfall "fleet gotcha alpha" >/dev/null
+check "remember --global appends to learnings"        'grep -q "fleet gotcha alpha" "$MH_HOME/state/learnings.md"'
+RECALL="$(b mh-memory.sh recall demo)"          # capture once (grep -q + pipefail)
+check "recall shows shared knowledge"                 'grep -q "pytest -q" <<<"$RECALL"'
+check "recall shows private knowledge"                'grep -q "squash merges" <<<"$RECALL"'
+RQ="$(b mh-memory.sh recall demo pytest)"
+check "recall query keeps the matching line"          'grep -q "pytest -q" <<<"$RQ"'
+check "recall query drops non-matching lines"         '! grep -q "squash merges" <<<"$RQ"'
+GRECALL="$(b mh-memory.sh recall --global)"
+check "recall --global shows fleet learnings"         'grep -q "fleet gotcha alpha" <<<"$GRECALL"'
+check "multi-line fact is rejected"     '! b mh-memory.sh remember demo --private --kind command "$(printf "a\nb")" >/dev/null 2>&1'
+check "invalid kind is rejected"        '! b mh-memory.sh remember demo --private --kind bogus "x" >/dev/null 2>&1'
+check "shared append via tool is refused" '! b mh-memory.sh remember demo --kind command "x" >/dev/null 2>&1'
+check "unregistered repo is rejected"   '! b mh-memory.sh seed nope >/dev/null 2>&1'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -152,25 +152,13 @@ mh_default_branch() {
   printf 'main\n'
 }
 
-# --- contextgraph: memory is TRACKED in each managed repo -------------------
-# Per-repo memory lives in the repo's own committed .contextgraph/ (plus file
-# sidecars), so git materializes it in every worktree and clone and recall works
-# for crewmates. It is delivered through the normal PR/land flow (mh-repo.sh
-# init-memory for onboarding; crewmates commit memory changes with their work).
-# The manhandler never force-commits it onto a clone's default branch, which
-# would diverge from origin and break fast-forward sync.
-
-# Stage whatever contextgraph init created/modified in a worktree, ready to
-# commit: the .contextgraph/ store and, when init created them, AGENTS.md /
-# CLAUDE.md. Only stages paths that exist.
-mh_cg_stage() {
-  local dir="$1" p
-  for p in .contextgraph AGENTS.md CLAUDE.md; do
-    [ -e "$dir/$p" ] && git -C "$dir" add "$p" 2>/dev/null || true
-  done
-  # also stage any file-level sidecars contextgraph wrote next to source files
-  git -C "$dir" add -A ':(glob)**/.*.md' 2>/dev/null || true
-}
+# --- per-repo memory: the mh-memory hybrid model -----------------------------
+# Repo knowledge lives in plain markdown, not a bespoke store (see mh-memory.sh):
+# SHARED facts in the repo's own committed AGENTS.md mh:knowledge section (travels
+# with every clone/worktree, authored by a crewmate in a worktree), and PRIVATE
+# manhandler notes in git-excluded repos/<repo>/.mh/. The manhandler never
+# force-commits shared knowledge onto a clone's default branch; it lands through
+# the normal PR/local flow like any other change.
 
 # --- registry (repos.json): single owner path via jq ------------------------
 mh_registry_get() {

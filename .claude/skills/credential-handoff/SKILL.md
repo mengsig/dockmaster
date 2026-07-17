@@ -12,9 +12,10 @@ renders — only a **reference** to it travels.
 
 ## Where a secret may never go
 
-Never write a secret value into: contextgraph or any memory, a brief, a commit,
-task meta, the backlog, a log, or a lavish artifact. (`memory-routing` already
-forbids storing secrets — this is the same rule at the boundary.)
+Never write a secret value into: any memory store (a repo's `mh:knowledge`
+section, `.mh/` private notes, or global memory), a brief, a commit, task meta,
+the backlog, a log, or a lavish artifact. (`memory-routing` already forbids
+storing secrets — this is the same rule at the boundary.)
 
 ## The handoff
 

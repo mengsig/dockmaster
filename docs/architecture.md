@@ -32,7 +32,7 @@ the machinery those contracts needed a shell daemon to fake.
 | durable backlog | `tasks-axi` markdown backend | native **Task list** (session) mirrored to `state/backlog.md` (cross-session) |
 | project registry | `data/projects.md` | `state/repos.json` + clones under `repos/` |
 | global memory | `data/captain.md`, `data/learnings.md` | manhandler home memory: native `memory/`, `state/operator.md`, `state/learnings.md` |
-| per-repo memory | committed project `AGENTS.md` | **contextgraph**, initialized inside every managed repo |
+| per-repo memory | committed project `AGENTS.md` | **mh-memory hybrid**: committed `mh:knowledge` section in the repo's `AGENTS.md` + git-excluded private `.mh/` notes |
 | delivery modes | no-mistakes / direct-PR / local-only | modular **PR pipeline** (ordered gates) per repo |
 | the no-mistakes gate | external pipeline tool | composable gates the manhandler drives (`code-review` / `lavish`), optionally a `Workflow` script |
 | persistent domain supervisor ("secondmate") | isolated `FM_HOME` + separate session | long-lived **background agent** addressed via `SendMessage` (can spawn its own crew) |
@@ -75,25 +75,35 @@ full agent with the full tool surface, not a constrained pane.
 ## Memory model (the centerpiece)
 
 Knowledge is routed to its **most specific durable owner**, exactly as firstmate
-routes it — but the per-repo owner is contextgraph, which travels with the clone.
+routes it. Per-repo memory is **plain markdown** driven by `bin/mh-memory.sh` — no
+bespoke store, no query engine, nothing to install. It is a hybrid of two stores
+so contributor knowledge travels while manhandler-private context stays local.
 
-**Per-repo (contextgraph, tracked in each managed repo):**
-- Repo-specific facts: build/test commands, invariants, conventions, pitfalls,
-  routing hints, decisions. Stored with `contextgraph remember file|repo …`.
-- Memory is **committed in the repo's own `.contextgraph/`** (plus file
-  sidecars), so git materializes it in every worktree and clone — which is what
-  makes recall work for crewmates, who work in worktrees. (Verified: recall
-  returns a stored fact from a fresh worktree only when the store is tracked; a
-  symlinked or clone-local store does not reach the worktree.)
-- Delivered through the normal PR/land flow: `bin/mh-repo.sh init-memory`
-  onboards it as a reviewable change, and crewmates commit the memory they add
-  alongside their work, so it travels with the repo. The manhandler never
-  force-commits it onto a clone's default branch (that would diverge from origin
-  and break fast-forward sync).
-- Before working, the manhandler and every crewmate run
-  `contextgraph recall --query "<task>" --file <path>` instead of loading repo
-  memory wholesale — bounded, task-relevant recall keeps token cost flat as the
-  store grows.
+**Per-repo SHARED (`mh:knowledge` section of the repo's own `AGENTS.md`):**
+- Contributor-relevant facts: build/test commands, invariants, conventions,
+  pitfalls, routing hints, decisions — one curated `- **[<kind>]** <fact>` bullet
+  each, between `<!-- mh:knowledge:start -->` / `<!-- mh:knowledge:end -->`.
+- It is **committed** in the repo's own `AGENTS.md`, so git materializes it in
+  every worktree and clone — which is what makes recall work for crewmates, who
+  work in worktrees.
+- Delivered through the normal PR/land flow: a crewmate edits the section in its
+  worktree and commits it alongside its work, so it travels with the repo. The
+  manhandler **never hand-writes** a managed repo's `AGENTS.md` (prime directive)
+  and never force-commits onto a clone's default branch (that would diverge from
+  origin and break fast-forward sync). `bin/mh-repo.sh seed` scaffolds only the
+  private store at onboarding and never touches the clone's `AGENTS.md`, so the
+  clone stays pristine.
+
+**Per-repo PRIVATE (`repos/<repo>/.mh/notes.md`):**
+- Manhandler-only context that must not enter the user's project history: fleet
+  strategy, sensitive routing, per-repo operator preferences.
+- Git-excluded via the clone's `.git/info/exclude`, so it never shows as untracked
+  or gets committed. Written with `bin/mh-memory.sh remember <repo> --private`.
+
+Before working, the manhandler and every crewmate recall with
+`bin/mh-memory.sh recall <repo> [query]` instead of loading memory wholesale — and
+the crewmate brief injects that recall output automatically, so a crewmate has the
+repo's knowledge with no tool call.
 
 **Global (manhandler home):**
 - `memory/` — Claude Code native file memory (operator identity, standing
@@ -104,8 +114,9 @@ routes it — but the per-repo owner is contextgraph, which travels with the clo
   specific to any one repo (dated, evidence-backed, pruned).
 - `state/repos.json` — the repo registry (source of truth for what is managed).
 
-**Routing rule:** a fact about *one repo* → that repo's contextgraph. A fact
-about the *operator* or *the fleet as a whole* → global memory. Task-scoped
+**Routing rule:** a contributor-relevant fact about *one repo* → that repo's
+`mh:knowledge` section; a manhandler-private repo fact → that repo's `.mh/` notes.
+A fact about the *operator* or *the fleet as a whole* → global memory. Task-scoped
 notes → the backlog item. Investigation findings → the scout report. This is the
 single source of truth per fact — no duplication that can drift.
 
@@ -193,8 +204,10 @@ config/                  pipeline defaults + per-repo overrides (committed defau
 state/                   runtime, gitignored: repos.json, operator.md, learnings.md, backlog.md
 repos/                   managed clones, gitignored, READ-ONLY to the manhandler
 data/                    per-task artifacts (scout reports), gitignored
-.contextgraph/           manhandler's own repo memory
 ```
+
+This distro is itself a managed repo: its own per-repo memory is the
+`mh:knowledge` section of this `AGENTS.md`.
 
 `state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
 tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `workflows/`, `config/`

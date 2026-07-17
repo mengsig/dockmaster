@@ -25,6 +25,15 @@ mode="$(mh_meta_get "$id" mode)"; wt="$(mh_meta_get "$id" worktree)"
 out="$MH_DATA/$id"; mkdir -p "$out"
 brief="$out/brief.md"
 
+# Inject the repo's known context (shared AGENTS.md mh:knowledge + private notes)
+# so the crewmate has it without a tool call. Best-effort: an unregistered repo or
+# empty store must not fail brief generation.
+mem=""
+if [ -n "$repo" ]; then
+  mem="$("$(dirname "${BASH_SOURCE[0]}")/mh-memory.sh" recall "$repo" 2>/dev/null || true)"
+fi
+[ -n "$mem" ] || mem="(no repository knowledge recorded yet.)"
+
 # shared header ----------------------------------------------------------------
 {
 cat <<EOF
@@ -48,21 +57,24 @@ primary clone. If it is not, do nothing else - append a blocked status and stop:
 
     $MH_HOME/bin/mh-task.sh event $id blocked "not in isolated worktree"
 
-## Memory (per-repo, via contextgraph - tracked in this repo)
+## Memory (per-repo, plain markdown - no bespoke tool)
 
-Before you start, recall what this repo already knows that bears on your task:
+What this repo already knows that bears on your task is injected below. SHARED
+knowledge lives in this repo's own \`AGENTS.md\` \`mh:knowledge\` section (committed,
+so it travels to every clone and worktree); PRIVATE notes are manhandler-internal
+context. Read it before you start.
 
-    cd "$wt" && contextgraph recall --query "<your task in a sentence>" --file <path you will touch>
+$mem
 
-When you learn something durable, non-obvious, and repo-specific (a build/test
-command, an invariant, a pitfall, a convention), persist ONE atomic fact:
+When you learn something durable, non-obvious, and repo-specific, record it:
+- A SHARED, contributor-relevant fact (a build/test command, an invariant, a
+  pitfall, a convention, a routing hint) → edit the \`mh:knowledge\` section of
+  this repo's \`AGENTS.md\` IN YOUR WORKTREE and commit it with your change, as one
+  curated \`- **[<kind>]** <fact>\` bullet. Rewrite a superseded fact; do not append
+  forever.
+- A private/orchestration fact → \`$MH_HOME/bin/mh-memory.sh remember $repo --private --kind <kind> "<fact>"\`.
 
-    contextgraph remember file <path> --key <slug> --kind <command|convention|decision|invariant|pitfall|routing> --source verified --fact "<fact>" --reason "<why it matters next time>" --evidence <path>
-
-This repo's memory is TRACKED, so commit any memory you add as part of your
-change (\`git add .contextgraph\` and any \`.<file>.md\` sidecars) - that is how it
-travels with the repo to every future worktree and clone. Do not store secrets,
-transient failures, task status, or code excerpts. Keep reasons >= 8 characters.
+Do not store secrets, transient failures, task status, or code excerpts.
 
 ## The task
 
