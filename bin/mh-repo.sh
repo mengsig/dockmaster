@@ -8,6 +8,13 @@
 #
 # Commands:
 #   add <name> <remote> [--mode M] [--test-cmd C] [--branch B] [--no-memory]
+#   create <name> [<remote>] [--mode M] [--test-cmd C] [--branch B]
+#          [--public|--private] [--https] [--description D] [--no-memory]
+#                            stand up a BRAND-NEW repo: create the GitHub repo
+#                            (when no remote is given) or use an empty remote you
+#                            supply, initialize repos/<name> with a first commit,
+#                            set upstream, publish, and register it. (add clones
+#                            an EXISTING populated remote; create makes a new one.)
 #   list
 #   get <name> [<field>]
 #   set <name> <field> <value>
@@ -28,6 +35,17 @@ registry_write() {
   # registry_write <jq-filter> [args...] - atomic update of repos.json
   local tmp; tmp="$(mktemp "$MH_STATE/.repos.XXXXXX")"
   jq "$@" "$MH_REGISTRY" > "$tmp" && mv -f "$tmp" "$MH_REGISTRY"
+}
+
+# register_repo <name> <remote> <branch> <mode> <test_cmd> - write the canonical
+# registry entry for a managed repo. Single owner of the entry shape, shared by
+# `add` (clone existing) and `create` (make new) so the two cannot drift.
+register_repo() {
+  registry_write \
+    --arg n "$1" --arg r "$2" --arg p "repos/$1" \
+    --arg b "$3" --arg m "$4" --arg t "$5" \
+    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '.repos[$n] = {remote:$r, path:$p, default_branch:$b, mode:$m, yolo:false, test_cmd:$t, pipeline:"default", contextgraph:false, added:$ts}'
 }
 
 # Deliver contextgraph memory INTO the repo as tracked content, through the
@@ -97,13 +115,75 @@ case "$cmd" in
     mh_info "cloning $remote -> $dir"
     git clone "$remote" "$dir" || mh_die "clone failed"
     [ -n "$branch" ] || branch="$(mh_default_branch "$dir")"
-    registry_write \
-      --arg n "$name" --arg r "$remote" --arg p "repos/$name" \
-      --arg b "$branch" --arg m "$mode" --arg t "$test_cmd" \
-      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '.repos[$n] = {remote:$r, path:$p, default_branch:$b, mode:$m, yolo:false, test_cmd:$t, pipeline:"default", contextgraph:false, added:$ts}'
+    register_repo "$name" "$remote" "$branch" "$mode" "$test_cmd"
     [ "$want_memory" -eq 1 ] && init_memory "$name" || true
     mh_info "registered '$name' (mode=$mode, default_branch=$branch)"
+    ;;
+
+  create)
+    name="${1:-}"; shift || true
+    [ -n "$name" ] || mh_die "usage: mh-repo.sh create <name> [<remote>] [--mode M] [--test-cmd C] [--branch B] [--public|--private] [--https] [--description D] [--no-memory]"
+    mh_require_id "$name"
+    # optional positional remote: the first arg that is not a flag
+    remote=""
+    case "${1:-}" in ""|-*) ;; *) remote="$1"; shift ;; esac
+    mode="pipeline"; test_cmd=""; branch="main"; visibility="private"; scheme="ssh"; description=""; want_memory=1
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --mode) mode="${2:-}"; shift 2 ;;
+        --test-cmd) test_cmd="${2:-}"; shift 2 ;;
+        --branch) branch="${2:-}"; shift 2 ;;
+        --public) visibility="public"; shift ;;
+        --private) visibility="private"; shift ;;
+        --https) scheme="https"; shift ;;
+        --description) description="${2:-}"; shift 2 ;;
+        --no-memory) want_memory=0; shift ;;
+        *) mh_die "unknown flag: $1" ;;
+      esac
+    done
+    case "$mode" in pipeline|direct-pr|local-only) ;; *) mh_die "mode must be pipeline|direct-pr|local-only" ;; esac
+    jq -e --arg n "$name" '.repos[$n]' "$MH_REGISTRY" >/dev/null 2>&1 && mh_die "repo '$name' already registered"
+    dir="$MH_REPOS/$name"
+    [ -e "$dir" ] && mh_die "path already exists: $dir"
+
+    # Resolve the remote. Either the operator supplies an EMPTY remote they made,
+    # or (no remote given) we create the GitHub repo ourselves.
+    if [ -n "$remote" ]; then
+      refs="$(git ls-remote --heads "$remote" 2>/dev/null)" || mh_die "cannot reach remote '$remote' (bad url or auth?)"
+      [ -z "$refs" ] || mh_die "remote '$remote' already has branches; use 'mh-repo.sh add' to clone an existing repo"
+    else
+      mh_need gh-axi
+      mh_info "creating GitHub repository '$name' ($visibility)"
+      create_args=(repo create "$name" "--$visibility")
+      [ -n "$description" ] && create_args+=(--description "$description")
+      out="$(gh-axi "${create_args[@]}" 2>&1)" || mh_die "gh repo create failed:
+$out"
+      html="$(printf '%s\n' "$out" | grep -oE 'https://github\.com/[A-Za-z0-9._/-]+' | head -n1)"
+      [ -n "$html" ] || mh_die "could not parse the new repo url from gh output:
+$out"
+      slug="$(printf '%s' "$html" | sed -E 's#^https://github\.com/##; s#\.git$##')"
+      case "$scheme" in
+        https) remote="https://github.com/$slug.git" ;;
+        *)     remote="git@github.com:$slug.git" ;;
+      esac
+    fi
+
+    # Initialize a local repo with ONE commit so it has a default branch and a
+    # base for worktrees, then publish and set upstream. This is the repo-init
+    # write sanctioned for mh-repo.sh; it never forces and never touches an
+    # existing clone (the path is guaranteed absent above).
+    git init -q -b "$branch" "$dir" || mh_die "git init failed"
+    git -C "$dir" remote add origin "$remote"
+    printf '# %s\n' "$name" > "$dir/README.md"
+    git -C "$dir" add README.md
+    git -C "$dir" -c commit.gpgsign=false commit -q -m "chore: initialize repository" \
+      || mh_die "initial commit failed (set git user.name and user.email)"
+    mh_info "publishing initial commit to origin and setting upstream"
+    git -C "$dir" push -u origin "$branch" >/dev/null 2>&1 \
+      || mh_die "push to origin failed (check auth; the remote must be empty). Local repo left at $dir"
+    register_repo "$name" "$remote" "$branch" "$mode" "$test_cmd"
+    [ "$want_memory" -eq 1 ] && init_memory "$name" || true
+    mh_info "created and registered '$name' (mode=$mode, default_branch=$branch, origin=$remote)"
     ;;
 
   list)
@@ -156,5 +236,5 @@ case "$cmd" in
     ;;
 
   *)
-    echo "usage: mh-repo.sh {add|list|get|set|remove|init-memory} ..." >&2; exit 2 ;;
+    echo "usage: mh-repo.sh {add|create|list|get|set|remove|init-memory} ..." >&2; exit 2 ;;
 esac

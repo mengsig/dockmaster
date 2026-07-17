@@ -39,6 +39,16 @@ check "doctor check passes (git+jq present)" 'b mh-doctor.sh check >/dev/null'
 check "doctor reports git ok"                'grep -qE "ok +git" <<<"$DOC"'
 check "doctor scaffolds home"                'b mh-doctor.sh >/dev/null && [ -d "$MH_HOME/state/tasks" ] && [ -d "$MH_HOME/state/worktrees" ] && [ -f "$MH_HOME/state/repos.json" ]'
 
+echo "== create (new repo from an empty remote) =="
+git init -q --bare -b main "$TMP/new.git"   # an empty remote the operator "made"
+b mh-repo.sh create fresh "$TMP/new.git" --mode local-only --test-cmd "true" --no-memory >/dev/null
+check "create registers repo"        '[ "$(b mh-repo.sh get fresh mode)" = "local-only" ]'
+check "create initializes clone"     '[ -d "$MH_HOME/repos/fresh/.git" ]'
+check "create sets origin upstream"  '[ "$(git -C "$MH_HOME/repos/fresh" remote get-url origin)" = "$TMP/new.git" ]'
+check "create publishes first commit" 'git -C "$TMP/new.git" log --oneline -1 2>/dev/null | grep -q "initialize repository"'
+check "create yields a workable base" 'b mh-worktree.sh create fresh-wt fresh >/dev/null 2>&1'
+check "create refuses populated remote" '! b mh-repo.sh create taken "$TMP/origin.git" --no-memory >/dev/null 2>&1'
+
 echo "== task + worktree + brief =="
 b mh-task.sh new demo-1 --kind ship --repo demo --title "add multiply" >/dev/null
 WT="$(b mh-worktree.sh create demo-1 demo | tail -n1)"
@@ -89,7 +99,8 @@ git -C "$WT3" checkout -q -b feat/x/wip
 printf 'x\n' > "$WT3/stray.txt"   # untracked
 check "teardown refuses untracked" '! b mh-worktree.sh remove demo-3 >/dev/null 2>&1'
 b mh-worktree.sh remove demo-3 --force >/dev/null 2>&1
-check "sync reports OK"   'b mh-sync.sh all | grep -q "OK:"'
+SYNC="$(b mh-sync.sh all)"   # capture once (see doctor note on grep -q + pipefail)
+check "sync reports OK"   'grep -q "OK:" <<<"$SYNC"'
 
 echo
 echo "smoke: $pass passed, $fail failed"

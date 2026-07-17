@@ -30,6 +30,34 @@ crewmates in their worktrees.
   - **direct-pr** — crewmate opens a PR without the gate pipeline (faster).
   - **local-only** — never pushes; lands via guarded local fast-forward.
 
+## Create a brand-new repo
+
+`add` clones an **existing, populated** remote. When the operator wants a repo
+that does not exist yet — "make me a repo called X", or "I created an empty
+GitHub repo, wire it up" — use `create`:
+
+```
+bin/mh-repo.sh create <name> [<remote>] [--mode M] [--test-cmd "<cmd>"] \
+  [--branch <default>] [--public|--private] [--https] [--description D] [--no-memory]
+```
+
+- **No remote given** → creates the GitHub repo via `gh-axi` (default
+  `--private`; pass `--public` to publish), then wires it up. Requires GitHub
+  auth. The git remote defaults to SSH (`git@github.com:…`); pass `--https` for
+  an HTTPS origin.
+- **Remote given** → the operator already made the repo. It must be **empty**;
+  `create` refuses a remote that already has branches and points you at `add`.
+
+Either way it initializes `repos/<name>` with one commit (a minimal `README.md`)
+so the repo has a default branch and a base for worktrees, sets `origin` as the
+upstream, publishes, registers it (same defaults as `add`), and delivers
+contextgraph memory. This publish is the repo-initialization write sanctioned for
+`mh-repo.sh`; it never forces and never touches an existing clone.
+
+- Confirm the visibility with the operator before creating a **public** repo —
+  publishing is outward-facing and hard to reverse.
+- Only name a remote the operator actually gave. Never invent one.
+
 ## Configure a repo
 
 ```

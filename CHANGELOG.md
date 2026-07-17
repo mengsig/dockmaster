@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`mh-repo create`**: stand up a brand-new repo. With no remote it creates the
+  GitHub repo via `gh-axi` (private by default; `--public` to publish, `--https`
+  for an HTTPS origin); with an empty remote you supply it wires that up instead
+  (and refuses a populated remote, pointing at `add`). Either way it initializes
+  `repos/<name>` with a first commit, sets the upstream, publishes, registers the
+  repo, and delivers contextgraph memory. Complements `add`, which clones an
+  existing populated remote.
+
 - **`mh-doctor`**: readiness check + `MH_HOME` scaffold. Owns the toolbelt's
   dependency contract (required vs recommended tools, GitHub auth) with
   actionable hints, and creates any missing home directories idempotently.
