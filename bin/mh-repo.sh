@@ -31,20 +31,10 @@ mh_ensure_dirs
 
 cmd="${1:-}"; shift || true
 
-registry_write() {
-  # registry_write <jq-filter> [args...] - locked, atomic update of repos.json.
-  # The lock serializes the read-modify-write against concurrent writers; on any
-  # failure the temp file is removed (no orphan) and we fail loudly.
-  local tmp
-  mh_lock "$MH_REGISTRY"
-  tmp="$(mktemp "$MH_STATE/.repos.XXXXXX")" || { mh_unlock "$MH_REGISTRY"; mh_die "mktemp failed for registry"; }
-  if jq "$@" "$MH_REGISTRY" > "$tmp"; then
-    mv -f "$tmp" "$MH_REGISTRY" || { rm -f "$tmp"; mh_unlock "$MH_REGISTRY"; mh_die "failed committing registry"; }
-  else
-    rm -f "$tmp"; mh_unlock "$MH_REGISTRY"; mh_die "registry update (jq) failed"
-  fi
-  mh_unlock "$MH_REGISTRY"
-}
+# registry_write <jq-filter> [args...] - locked, atomic update of repos.json.
+# Thin wrapper over the shared mh_json_update so the registry and any other JSON
+# state use one audited read-modify-write path (lock, atomic temp->mv, cleanup).
+registry_write() { mh_json_update "$MH_REGISTRY" "$@"; }
 
 # register_repo <name> <remote> <branch> <mode> <test_cmd> - write the canonical
 # registry entry for a managed repo. Single owner of the entry shape, shared by
@@ -113,6 +103,7 @@ This is an orphaned clone from a partial add/create (the clone succeeded but reg
     remote=""
     case "${1:-}" in ""|-*) ;; *) remote="$1"; shift ;; esac
     mode="pipeline"; test_cmd=""; branch="main"; visibility="private"; scheme="ssh"; description=""; want_memory=1
+    created_remote=0   # set when WE create the GitHub repo, so a later failure can warn it now exists empty
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --mode) mode="${2:-}"; shift 2 ;;
@@ -152,21 +143,29 @@ $out"
         https) remote="https://github.com/$slug.git" ;;
         *)     remote="git@github.com:$slug.git" ;;
       esac
+      created_remote=1
     fi
+
+    # If WE just created the GitHub repo, every step below can fail with a real
+    # (but empty) remote already live. Surface that in each failure so the
+    # operator knows to clean it up manually — this tool never auto-deletes it.
+    remote_note=""
+    [ "$created_remote" -eq 1 ] && remote_note="
+NOTE: the GitHub repository '$html' was just created and now exists (empty) on GitHub. If you do not re-run a successful create, delete it manually (e.g. gh repo delete). This tool never auto-deletes it."
 
     # Initialize a local repo with ONE commit so it has a default branch and a
     # base for worktrees, then publish and set upstream. This is the repo-init
     # write sanctioned for mh-repo.sh; it never forces and never touches an
     # existing clone (the path is guaranteed absent above).
-    git init -q -b "$branch" "$dir" || mh_die "git init failed"
-    git -C "$dir" remote add origin "$remote"
+    git init -q -b "$branch" "$dir" || mh_die "git init failed$remote_note"
+    git -C "$dir" remote add origin "$remote" || mh_die "failed to set origin remote. Local repo left at $dir$remote_note"
     printf '# %s\n' "$name" > "$dir/README.md"
     git -C "$dir" add README.md
     git -C "$dir" -c commit.gpgsign=false commit -q -m "chore: initialize repository" \
-      || mh_die "initial commit failed (set git user.name and user.email)"
+      || mh_die "initial commit failed (set git user.name and user.email)$remote_note"
     mh_info "publishing initial commit to origin and setting upstream"
     git -C "$dir" push -u origin "$branch" >/dev/null 2>&1 \
-      || mh_die "push to origin failed (check auth; the remote must be empty). Local repo left at $dir"
+      || mh_die "push to origin failed (check auth; the remote must be empty). Local repo left at $dir$remote_note"
     register_repo "$name" "$remote" "$branch" "$mode" "$test_cmd"
     [ "$want_memory" -eq 1 ] && seed_memory "$name" || true
     mh_info "created and registered '$name' (mode=$mode, default_branch=$branch, origin=$remote)"
@@ -220,10 +219,13 @@ $out"
       if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
         mh_die "clone $name has uncommitted changes; resolve them before removing"
       fi
-      if git -C "$dir" worktree list --porcelain 2>/dev/null | grep -q '^worktree' \
-         && [ "$(git -C "$dir" worktree list --porcelain | grep -c '^worktree')" -gt 1 ]; then
-        mh_die "clone $name has active worktrees; tear them down first"
-      fi
+      # Refuse if any worktree beyond the primary is checked out. Count in one
+      # shot: an early-closing `grep -q` in an `&&` guard can SIGPIPE git under
+      # `set -o pipefail`, short-circuit the `&&`, and silently SKIP this refusal.
+      # `grep -c` prints 0 (exit 1) when there are none, so `|| true` keeps set -e
+      # from firing; the primary worktree itself counts as 1.
+      n="$(git -C "$dir" worktree list --porcelain 2>/dev/null | grep -c '^worktree' || true)"
+      [ "${n:-0}" -gt 1 ] && mh_die "clone $name has active worktrees; tear them down first"
     fi
     # Fail closed on live tasks: a non-terminal task pointing at this repo would be
     # orphaned by removal — its later mh-worktree/mh-sync calls die "no clone".

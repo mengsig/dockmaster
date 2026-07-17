@@ -25,18 +25,11 @@ mh_ensure_dirs
 MH_WT="$MH_STATE/worktrees"
 mkdir -p "$MH_WT"
 
-repo_dir() {
-  local name="$1" dir
-  dir="$MH_HOME/$(mh_registry_get "$name" path)"
-  [ -d "$dir/.git" ] || mh_die "no clone for repo '$name' (expected $dir); add it with mh-repo.sh add"
-  printf '%s\n' "$dir"
-}
-
 # --- isolation assertion: the load-bearing safety invariant ------------------
 assert_isolated() {
   local path="$1" repo="$2" primary top
   path="$(cd "$path" 2>/dev/null && pwd -P)" || mh_die "worktree path does not exist: $1"
-  primary="$(cd "$(repo_dir "$repo")" && pwd -P)"
+  primary="$(cd "$(mh_repo_dir "$repo")" && pwd -P)"
   top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)"
   top="$(cd "$top" 2>/dev/null && pwd -P || true)"
   [ -n "$top" ] || mh_die "not inside a git worktree: $path"
@@ -48,7 +41,7 @@ assert_isolated() {
 # --- tangle detection: named non-default branch checked out in primary -------
 tangle_check() {
   local repo="$1" dir def cur
-  dir="$(repo_dir "$repo")"
+  dir="$(mh_repo_dir "$repo")"
   def="$(mh_default_branch "$dir")"
   cur="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
   if [ "$cur" != "$def" ] && [ "$cur" != "HEAD" ]; then
@@ -64,7 +57,7 @@ case "$cmd" in
     id="${1:-}"; repo="${2:-}"; branch="${3:-}"
     [ -n "$id" ] && [ -n "$repo" ] || mh_die "usage: mh-worktree.sh create <id> <repo> [<branch>]"
     mh_require_id "$id"
-    dir="$(repo_dir "$repo")"
+    dir="$(mh_repo_dir "$repo")"
     wt="$MH_WT/$id"
     [ -e "$wt" ] && mh_die "worktree already exists: $wt"
     git -C "$dir" fetch --quiet origin 2>/dev/null || mh_warn "$repo: fetch failed; base may be stale"
@@ -102,7 +95,7 @@ case "$cmd" in
     # Uncommitted changes to tracked files mean work is not committed => not landed.
     # (Untracked files are handled separately at teardown, not here.)
     ! mh_tracked_dirty "$wt" || { echo "unlanded: uncommitted changes to tracked files"; exit 1; }
-    dir="$(repo_dir "$repo")"
+    dir="$(mh_repo_dir "$repo")"
     def="$(mh_default_branch "$dir")"
     # MH_NO_FETCH=1 reconciles from local refs only (mh-status.sh sets it so its
     # read-only snapshot performs no network). Session-start leaves it unset and
@@ -150,7 +143,7 @@ case "$cmd" in
 $untracked"
       fi
     fi
-    dir="$(repo_dir "$repo")"
+    dir="$(mh_repo_dir "$repo")"
     git -C "$dir" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
     git -C "$dir" worktree prune 2>/dev/null || true
     mh_meta_set "$id" worktree ""

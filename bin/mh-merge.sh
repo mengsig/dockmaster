@@ -19,8 +19,6 @@ set -euo pipefail
 mh_need git
 mh_ensure_dirs
 
-repo_dir() { local d; d="$MH_HOME/$(mh_registry_get "$1" path)"; [ -d "$d/.git" ] || mh_die "no clone for repo '$1'"; printf '%s\n' "$d"; }
-
 cmd="${1:-}"; shift || true
 case "$cmd" in
   local)
@@ -32,7 +30,7 @@ case "$cmd" in
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || mh_die "worktree on detached HEAD; nothing to land"
     ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit before landing"
-    dir="$(repo_dir "$repo")"; def="$(mh_default_branch "$dir")"
+    dir="$(mh_repo_dir "$repo")"; def="$(mh_default_branch "$dir")"
     cur="$(git -C "$dir" rev-parse --abbrev-ref HEAD)"
     [ "$cur" = "$def" ] || mh_die "clone is on '$cur', not default '$def'; return it before landing"
     [ -z "$(git -C "$dir" status --porcelain)" ] || mh_die "clone working tree is dirty; refusing to land"
@@ -53,7 +51,7 @@ case "$cmd" in
     repo="$(mh_meta_get "$id" repo)"; wt="$(mh_meta_get "$id" worktree)"
     [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
     ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit or stash before rebasing"
-    dir="$(repo_dir "$repo")"; def="$(mh_default_branch "$dir")"
+    dir="$(mh_repo_dir "$repo")"; def="$(mh_default_branch "$dir")"
     git -C "$dir" fetch --quiet origin "$def" 2>/dev/null || mh_warn "$repo: fetch failed; base may be stale"
     # Pick the rebase base to MATCH the base a worktree is created from, or the
     # branch will loop between "clean rebase" and "diverged, rebase first". For a
