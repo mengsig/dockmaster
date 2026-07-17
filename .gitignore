@@ -8,6 +8,10 @@
 /.lavish/
 *.log
 
+# Personal/local Claude Code permission overrides — never committed into the
+# shared distro.
+/.claude/settings.local.json
+
 # Editor / OS cruft.
 .DS_Store
 node_modules/

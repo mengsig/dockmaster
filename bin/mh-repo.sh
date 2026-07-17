@@ -32,9 +32,18 @@ mh_ensure_dirs
 cmd="${1:-}"; shift || true
 
 registry_write() {
-  # registry_write <jq-filter> [args...] - atomic update of repos.json
-  local tmp; tmp="$(mktemp "$MH_STATE/.repos.XXXXXX")"
-  jq "$@" "$MH_REGISTRY" > "$tmp" && mv -f "$tmp" "$MH_REGISTRY"
+  # registry_write <jq-filter> [args...] - locked, atomic update of repos.json.
+  # The lock serializes the read-modify-write against concurrent writers; on any
+  # failure the temp file is removed (no orphan) and we fail loudly.
+  local tmp
+  mh_lock "$MH_REGISTRY"
+  tmp="$(mktemp "$MH_STATE/.repos.XXXXXX")" || { mh_unlock "$MH_REGISTRY"; mh_die "mktemp failed for registry"; }
+  if jq "$@" "$MH_REGISTRY" > "$tmp"; then
+    mv -f "$tmp" "$MH_REGISTRY" || { rm -f "$tmp"; mh_unlock "$MH_REGISTRY"; mh_die "failed committing registry"; }
+  else
+    rm -f "$tmp"; mh_unlock "$MH_REGISTRY"; mh_die "registry update (jq) failed"
+  fi
+  mh_unlock "$MH_REGISTRY"
 }
 
 # register_repo <name> <remote> <branch> <mode> <test_cmd> - write the canonical

@@ -67,7 +67,7 @@ case "$cmd" in
     dir="$(repo_dir "$repo")"
     wt="$MH_WT/$id"
     [ -e "$wt" ] && mh_die "worktree already exists: $wt"
-    git -C "$dir" fetch --quiet origin 2>/dev/null || true
+    git -C "$dir" fetch --quiet origin 2>/dev/null || mh_warn "$repo: fetch failed; base may be stale"
     def="$(mh_default_branch "$dir")"
     # Branch from the LOCAL default: it holds local-only landings and is kept
     # fast-forwarded to origin for PR repos by mh-sync. Fall back to origin.
@@ -104,7 +104,12 @@ case "$cmd" in
     ! mh_tracked_dirty "$wt" || { echo "unlanded: uncommitted changes to tracked files"; exit 1; }
     dir="$(repo_dir "$repo")"
     def="$(mh_default_branch "$dir")"
-    git -C "$dir" fetch --quiet origin "$def" 2>/dev/null || true
+    # MH_NO_FETCH=1 reconciles from local refs only (mh-status.sh sets it so its
+    # read-only snapshot performs no network). Session-start leaves it unset and
+    # still syncs. On a failed fetch, warn rather than hide a stale base.
+    if [ "${MH_NO_FETCH:-0}" != "1" ]; then
+      git -C "$dir" fetch --quiet origin "$def" 2>/dev/null || mh_warn "$repo: fetch failed; base may be stale"
+    fi
     head="$(git -C "$wt" rev-parse HEAD)"
     # Landed if HEAD is an ancestor of origin/<default> (merged) or there are no
     # commits ahead of the base at all (nothing to land).

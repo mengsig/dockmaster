@@ -70,6 +70,9 @@ git -C "$WT" checkout -q -b feat/x/add-multiply
 printf 'def multiply(a,b):\n    return a*b\n' >> "$WT/src/calc.py"
 git -C "$WT" -c user.email=c@c.co -c user.name=c commit -qam "add multiply" >/dev/null
 check "state working post-commit" 'b mh-task.sh state demo-1 | grep -q working'
+# MH_NO_FETCH (used by mh-status) must reconcile from local refs only and still
+# report the committed-but-unlanded case correctly.
+check "no-fetch landed: reports unlanded" '! MH_NO_FETCH=1 b mh-worktree.sh landed demo-1 >/dev/null 2>&1'
 
 echo "== test gate =="
 check "tests pass (registered cmd)" 'b mh-test.sh demo-1 >/dev/null'
@@ -86,8 +89,34 @@ check "hold is open"     'b mh-backlog.sh list | grep -q "demo-1-decision-scope"
 b mh-backlog.sh resolve demo-1-decision-scope "v1" >/dev/null
 check "hold resolved"    'b mh-backlog.sh list | grep -A2 "demo-1-decision-scope" | grep -q "answer: v1"'
 
+echo "== meta parsing (fixed-string keys; metachar/= values) =="
+b mh-task.sh set metatest re '.*[x]^$ +(a|b)' >/dev/null
+check "meta round-trips regex metachars" '[ "$(b mh-task.sh get metatest re)" = ".*[x]^$ +(a|b)" ]'
+b mh-task.sh set metatest eq 'k=v=x' >/dev/null
+check "meta round-trips value with ="   '[ "$(b mh-task.sh get metatest eq)" = "k=v=x" ]'
+check "meta update leaves sibling key"   '[ "$(b mh-task.sh get metatest re)" = ".*[x]^$ +(a|b)" ]'
+# KEY-side regression: the old sed/grep treated the key as a regex, so "a.c"
+# also matched "abc". awk matches the key as a fixed string. Set abc first, then
+# a.c: the old grep -v "^a.c=" would drop the abc line too (. matches b).
+b mh-task.sh set keytest abc WRONG >/dev/null
+b mh-task.sh set keytest a.c RIGHT >/dev/null
+check "meta get matches key literally"    '[ "$(b mh-task.sh get keytest a.c)" = "RIGHT" ]'
+check "meta set does not clobber sibling" '[ "$(b mh-task.sh get keytest abc)" = "WRONG" ]'
+
+echo "== concurrent meta writes (locking; no lost update) =="
+b mh-task.sh new conc --kind ship --repo demo >/dev/null
+for i in $(seq 1 20); do b mh-task.sh set conc "k$i" "v$i" & done
+wait
+missing=0
+for i in $(seq 1 20); do [ "$(b mh-task.sh get conc "k$i")" = "v$i" ] || missing=$((missing+1)); done
+check "all 20 concurrent keys survived" '[ "$missing" -eq 0 ]'
+
+echo "== gitignore =="
+check "gitignore ignores settings.local.json" 'git -C "$ROOT" check-ignore .claude/settings.local.json >/dev/null'
+
 echo "== guarded land + teardown =="
 check "local land ff"    'b mh-merge.sh local demo-1 >/dev/null'
+check "no-fetch landed: reports landed" 'MH_NO_FETCH=1 b mh-worktree.sh landed demo-1 >/dev/null 2>&1'
 check "state done"       'b mh-task.sh state demo-1 | grep -q done'
 check "teardown ok"      'b mh-worktree.sh remove demo-1 >/dev/null'
 check "origin has commit" 'git -C "$MH_HOME/repos/demo" log --oneline | grep -q "add multiply"'

@@ -16,6 +16,10 @@
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/mh-lib.sh"
 mh_ensure_dirs
+# This snapshot must perform NO network sync. Its reconcile path transitively
+# reaches mh-worktree.sh landed, which otherwise fetches; MH_NO_FETCH=1 makes it
+# reconcile from local refs only. (Session-start does not set this and still syncs.)
+export MH_NO_FETCH=1
 here="$(dirname "${BASH_SOURCE[0]}")"
 shopt -s nullglob
 

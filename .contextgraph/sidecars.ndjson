@@ -1,8 +1,9 @@
-<!-- contextgraph:sidecar-registry:v1 generation=c87982f39e746b77eb0c65d79d6b1c7d -->
+<!-- contextgraph:sidecar-registry:v1 generation=8e7c3ee6400eb5b20ade1afd3a58398a -->
 ".claude/skills/change-review/SKILL.md"
 ".claude/skills/pr-workflow/SKILL.md"
 ".gitignore"
 "bin/mh-lib.sh"
+"bin/mh-pr.sh"
 "bin/mh-repo.sh"
 "bin/mh-task.sh"
 "tests/smoke.sh"

@@ -29,7 +29,20 @@ BJSON="$MH_STATE/backlog.json"
 BMD="$MH_STATE/backlog.md"
 [ -f "$BJSON" ] || printf '{"items":[],"decisions":[]}\n' > "$BJSON"
 
-bwrite() { local tmp; tmp="$(mktemp "$MH_STATE/.backlog.XXXXXX")"; jq "$@" "$BJSON" > "$tmp" && mv -f "$tmp" "$BJSON"; }
+# Locked, atomic update of backlog.json. The lock serializes the read-modify-
+# write against concurrent writers; on any failure the temp is removed (no
+# orphan) and we fail loudly.
+bwrite() {
+  local tmp
+  mh_lock "$BJSON"
+  tmp="$(mktemp "$MH_STATE/.backlog.XXXXXX")" || { mh_unlock "$BJSON"; mh_die "mktemp failed for backlog"; }
+  if jq "$@" "$BJSON" > "$tmp"; then
+    mv -f "$tmp" "$BJSON" || { rm -f "$tmp"; mh_unlock "$BJSON"; mh_die "failed committing backlog"; }
+  else
+    rm -f "$tmp"; mh_unlock "$BJSON"; mh_die "backlog update (jq) failed"
+  fi
+  mh_unlock "$BJSON"
+}
 
 render() {
   {

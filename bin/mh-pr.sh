@@ -11,6 +11,10 @@
 # Explicit merge AUTHORITY (captain approval / standing yolo) is enforced by the
 # manhandler one layer up, per AGENTS.md. This script enforces mechanics only.
 #
+# GitHub access splits by need: reads that are parsed by jq use `gh api` (it
+# returns real JSON), while mutations use `gh-axi` (`gh-axi api` emits a
+# YAML-like format that jq cannot parse).
+#
 # Commands:
 #   open  <id> --title T (--body-file F | --body B) [--base B] [--draft]
 #   check <id>                    refresh pr_state + checks into meta; print summary
@@ -19,7 +23,7 @@
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/mh-lib.sh"
-mh_need git; mh_need gh-axi; mh_need jq
+mh_need git; mh_need gh-axi; mh_need gh; mh_need jq
 mh_ensure_dirs
 
 repo_dir() { local d; d="$MH_HOME/$(mh_registry_get "$1" path)"; [ -d "$d/.git" ] || mh_die "no clone for repo '$1'"; printf '%s\n' "$d"; }
@@ -42,6 +46,20 @@ pr_number_from_url() {
   printf '%s' "$url" | grep -qE '^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$' \
     || mh_die "not a canonical PR url: $url"
   printf '%s' "$url" | sed -E 's#.*/pull/##'
+}
+
+# Combine two CI rollups, worst-wins, in precedence:
+#   failing > unknown > pending > passing > none
+# `unknown` ranks above `pending` so an API error is never silently treated as
+# mergeable; `none` (no signal at all) ranks lowest.
+rollup_rank() {
+  case "$1" in
+    failing) echo 4 ;; unknown) echo 3 ;; pending) echo 2 ;;
+    passing) echo 1 ;; none) echo 0 ;; *) echo 3 ;;
+  esac
+}
+worst_rollup() {
+  if [ "$(rollup_rank "$1")" -ge "$(rollup_rank "$2")" ]; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi
 }
 
 cmd="${1:-}"; shift || true
@@ -90,24 +108,41 @@ case "$cmd" in
     url="$(mh_meta_get "$id" pr)"; [ -n "$url" ] || mh_die "no PR recorded for $id"
     n="$(pr_number_from_url "$url")"; repo="$(mh_meta_get "$id" repo)"
     slug="$(owner_repo "$(git -C "$(repo_dir "$repo")" remote get-url origin)")"
-    json="$(gh-axi api "repos/$slug/pulls/$n" 2>/dev/null)" || mh_die "could not read PR $url"
+    json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" || mh_die "could not read PR $url"
     state="$(printf '%s' "$json" | jq -r '.state // "unknown" | ascii_upcase')"
     merged="$(printf '%s' "$json" | jq -r '.merged // false')"
     sha="$(printf '%s' "$json" | jq -r '.head.sha // empty')"
     [ "$merged" = "true" ] && state="MERGED"
-    # roll up check status for the head sha
-    rollup="none"
+    # Roll up CI for the head sha from BOTH the check-runs API and the legacy
+    # combined commit-status API, worst-wins. A repo whose CI reports only via
+    # commit statuses returns an empty check-runs array; taking that alone as
+    # "none" would let a red PR merge (violating "never merge red").
+    runs_rollup="none"; status_rollup="none"
     if [ -n "$sha" ]; then
-      rollup="$(gh-axi api "repos/$slug/commits/$sha/check-runs" 2>/dev/null \
+      # action_required (needs manual action) counts as failing, not green;
+      # stale (result is for an older commit) is inconclusive, so pending.
+      runs_rollup="$(gh api "repos/$slug/commits/$sha/check-runs" 2>/dev/null \
         | jq -r 'if (.check_runs|length)==0 then "none"
-                 elif any(.check_runs[]; .conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out") then "failing"
-                 elif any(.check_runs[]; .status!="completed") then "pending"
+                 elif any(.check_runs[]; .conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out" or .conclusion=="action_required") then "failing"
+                 elif any(.check_runs[]; .status!="completed" or .conclusion=="stale") then "pending"
                  else "passing" end' 2>/dev/null || echo unknown)"
+      # GitHub returns .state=="pending" even with ZERO statuses, so treat
+      # total_count==0 as "none" (no signal), not pending.
+      status_rollup="$(gh api "repos/$slug/commits/$sha/status" 2>/dev/null \
+        | jq -r 'if ((.total_count // 0) == 0) then "none"
+                 elif (.state=="failure" or .state=="error") then "failing"
+                 elif (.state=="success") then "passing"
+                 else "pending" end' 2>/dev/null || echo unknown)"
     fi
+    rollup="$(worst_rollup "$runs_rollup" "$status_rollup")"
+    # mergeable_state (clean/blocked/unstable/dirty/behind/draft/unknown) gates
+    # the merge alongside CI; GitHub often reports "unknown" on first fetch.
+    merge_state="$(printf '%s' "$json" | jq -r '.mergeable_state // "unknown"')"
     mh_meta_set "$id" pr_state "$state"
     mh_meta_set "$id" checks "$rollup"
+    mh_meta_set "$id" merge_state "$merge_state"
     [ -n "$sha" ] && mh_meta_set "$id" pr_head "$sha"
-    echo "pr: $url · state: $state · checks: $rollup"
+    echo "pr: $url · state: $state · checks: $rollup · merge_state: $merge_state"
     ;;
 
   merge)
@@ -126,6 +161,7 @@ case "$cmd" in
     # refresh state, then guard
     "$0" check "$id" >/dev/null
     state="$(mh_meta_get "$id" pr_state)"; checks="$(mh_meta_get "$id" checks)"
+    merge_state="$(mh_meta_get "$id" merge_state)"
     [ "$state" = "MERGED" ] && mh_die "PR already merged: $url"
     [ "$state" = "CLOSED" ] && mh_die "PR is closed, refusing to merge: $url"
     case "$checks" in
@@ -133,6 +169,15 @@ case "$cmd" in
       pending) mh_die "REFUSED: PR checks still running: $url" ;;
       passing|none) : ;;
       *) mh_die "REFUSED: could not confirm check status ($checks): $url" ;;
+    esac
+    # mergeable_state gate. Refuse a conflicted, draft, or branch-protection-
+    # blocked PR. Do NOT refuse solely on "unknown" (GitHub often hasn't computed
+    # it on first fetch); the gh pr merge failure path is the remaining backstop.
+    case "$merge_state" in
+      dirty)   mh_die "REFUSED: PR has merge conflicts (mergeable_state=dirty): $url" ;;
+      draft)   mh_die "REFUSED: PR is a draft (mergeable_state=draft): $url" ;;
+      blocked) mh_die "REFUSED: required checks/reviews not satisfied (mergeable_state=blocked): $url" ;;
+      *) : ;;
     esac
     n="$(pr_number_from_url "$url")"; repo="$(mh_meta_get "$id" repo)"
     slug="$(owner_repo "$(git -C "$(repo_dir "$repo")" remote get-url origin)")"
