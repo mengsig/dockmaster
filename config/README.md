@@ -16,7 +16,8 @@ Three shipped tiers share one gate schema; the tier is a per-task choice (see
   or anything the operator is nervous about). Its `review` gate is
   **dimension-parallel** (one reviewer per lens), followed by an adversarial
   **`verify-findings`** gate, then fix → tests → a behavioral `verify` gate →
-  auto `security` → `await-checks` → `pr`.
+  auto `security` → `pr`. (The CI-wait is not a config gate; it runs in the
+  operator-mediated merge tail after the PR opens — see `pr-workflow`.)
 
 ## The default executor: the manhandler (agent-driven)
 
@@ -54,9 +55,12 @@ Workflow tool — nothing auto-discovers it). It reads the rest:
 - **`method`** on the `pr` gate — surfaced in the runner's result so the
   operator-mediated merge step can honor it (the runner never merges).
 
-The rigorous `await-checks` gate is the CI-wait; because the runner opens the PR
-at the terminal `pr` gate and never merges, the runner defers it to the
-operator-mediated merge gate rather than waiting on a PR it has not opened.
+There is no CI-wait gate in the config. Because every executor opens the PR at
+the terminal `pr` gate and never merges, waiting for CI (`bin/mh-pr.sh
+await-checks`) belongs to the operator-mediated merge tail that runs after the
+PR is open — see `.claude/skills/pr-workflow` ("Merge authority"). The runner
+still recognizes a stray `await-checks` in a custom config and defers it there
+rather than waiting on a PR it has not opened.
 
 ## `note`
 

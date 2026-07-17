@@ -52,15 +52,23 @@ if (!base) {
 }
 
 // Built-in gate lists, one per tier, used only as a fallback when the caller
-// passes no explicit gates. They follow the same gate ORDER as the shipped
+// passes no explicit gates. They mirror the gates and ORDER of the shipped
 // config/pr-pipeline.<tier>.json files but omit config-only annotations
-// (per-gate `effort`, the default tier's optional `security` gate); real runs
-// pass args.gates from the config, which drives behavior.
+// (per-gate `effort` and `note`); real runs pass args.gates from the config,
+// which drives behavior.
+const FAST_GATES = [
+  { gate: 'review', pass: 'coldstart' }, { gate: 'fix', max_rounds: 2 }, { gate: 'tests' },
+  { gate: 'pr' },
+]
 const DEFAULT_GATES = [
   { gate: 'review', pass: 'coldstart' }, { gate: 'fix', max_rounds: 2 }, { gate: 'tests' },
   { gate: 'review', pass: 'merge-gate' }, { gate: 'fix', max_rounds: 2 }, { gate: 'tests' },
+  { gate: 'security', optional: true },
   { gate: 'pr' },
 ]
+// await-checks is deliberately NOT here: waiting for CI belongs to the
+// operator-mediated merge tail that runs AFTER the PR opens, not to any pre-pr
+// gate (this runner opens the PR at `pr` and never merges).
 const RIGOROUS_GATES = [
   { gate: 'review', pass: 'coldstart', dimensions: ['correctness', 'security', 'concurrency', 'portability', 'tests'] },
   { gate: 'verify-findings', voters: 3 },
@@ -68,12 +76,11 @@ const RIGOROUS_GATES = [
   { gate: 'tests' },
   { gate: 'verify', optional: true },
   { gate: 'security', method: 'auto' },
-  { gate: 'await-checks' },
   { gate: 'pr' },
 ]
 const gates = (t.gates && t.gates.length)
   ? t.gates
-  : (t.tier === 'rigorous' ? RIGOROUS_GATES : DEFAULT_GATES)
+  : (t.tier === 'rigorous' ? RIGOROUS_GATES : t.tier === 'fast' ? FAST_GATES : DEFAULT_GATES)
 
 const TEST_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -133,6 +140,8 @@ async function review(pass, effort, dimensions) {
       { label: `review:${which}:${dim}`, phase: 'Review', effort: effort || 'high', schema: REVIEW_SCHEMA },
     )))
     const findings = []
+    // Label each finding by position: results[i] is the reviewer for dimensions[i].
+    // This assumes parallel() preserves input order; the labels are cosmetic only.
     for (let i = 0; i < results.length; i++) {
       for (const f of results[i].findings) findings.push({ ...f, dimension: dimensions[i] })
     }
@@ -271,11 +280,11 @@ for (const g of gates) {
       `Security review of the diff ${base}...HEAD in ${t.worktree}: auth, input handling, secrets, crypto, external I/O. ` +
       `Report concrete issues only.`, { label: 'security', phase: 'Review', effort: g.effort || 'high' })
   } else if (g.gate === 'await-checks') {
-    // The runner opens the PR at the terminal `pr` gate and returns; it never
-    // merges. Waiting for CI (bin/mh-pr.sh await-checks) and the merge itself are
-    // the operator-mediated merge-gate tail that runs AFTER the PR is open, so
-    // there is no PR for this run to wait on yet. Record the step and defer it
-    // rather than faking a pass or waiting on a PR that does not exist.
+    // Compatibility no-op: no shipped tier lists await-checks anymore (the CI-wait
+    // moved to the operator-mediated merge tail, which this runner never reaches —
+    // it opens the PR at the terminal `pr` gate and returns without merging). A
+    // custom config that still carries this gate is deferred here rather than
+    // faking a pass or waiting on a PR that does not exist yet.
     log('await-checks: deferred to the operator-mediated merge gate after the PR opens (the runner never merges)')
   } else if (g.gate === 'pr') {
     const out = await openPR()

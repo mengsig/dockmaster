@@ -8,7 +8,6 @@
     { "gate": "tests", "note": "must pass after fixes" },
     { "gate": "verify", "optional": true, "note": "behavioral gate: drive the changed behavior end to end via the verify skill and report what was exercised; skippable only when the diff has no runtime surface (docs/config-only)" },
     { "gate": "security", "method": "auto", "note": "auto-triggered: run bin/mh-pr.sh security-scan <id>; if it reports a security surface run security-review, otherwise skip explicitly (never a silent forget)" },
-    { "gate": "await-checks", "note": "wait for CI to settle (bin/mh-pr.sh await-checks <id>) before the merge gate, so the gate acts on a terminal result rather than refusing a pending PR" },
     { "gate": "pr", "method": "squash", "note": "open the PR with the branch convention and a short human description" }
   ]
 }
