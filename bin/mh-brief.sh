@@ -61,8 +61,11 @@ primary clone. If it is not, do nothing else - append a blocked status and stop:
 
 What this repo already knows that bears on your task is injected below. SHARED
 knowledge lives in this repo's own \`AGENTS.md\` \`mh:knowledge\` section (committed,
-so it travels to every clone and worktree); PRIVATE notes are manhandler-internal
-context. Read it before you start.
+so it travels to every clone and worktree). PRIVATE notes (the \`private notes\`
+section) are manhandler-internal orchestration context for your awareness ONLY:
+use them to inform your work, but never copy or paraphrase them into commits, PR
+descriptions, code comments, or the repo's \`AGENTS.md\` — they must not enter the
+project's history. Read it all before you start.
 
 $mem
 

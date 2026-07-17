@@ -49,12 +49,16 @@ mh-memory.sh - native plain-markdown context for the manhandler
 
   recall <repo> [query]            print a repo's SHARED knowledge (its AGENTS.md
                                    mh:knowledge section) + PRIVATE notes; [query]
-                                   filters matching lines (grep -i).
+                                   filters to lines containing it as a literal,
+                                   case-insensitive substring (grep -i -F).
   recall --global [query]          print state/learnings.md + state/operator.md.
-  remember <repo> --private --kind <kind> "<fact>"
+  remember <repo> --private --kind <kind> [--] "<fact>"
                                    append one dated bullet to repos/<repo>/.mh/notes.md.
-  remember --global --kind <kind> "<fact>"
+  remember --global --kind <kind> [--] "<fact>"
                                    append one dated bullet to state/learnings.md.
+
+  Use -- to end flag parsing when the fact itself begins with - or -- (e.g.
+  remember demo --private --kind command -- "-Wall enables all warnings").
   seed <repo>                      ensure the git-excluded private store exists.
                                    Idempotent. Never touches the clone's AGENTS.md.
 
@@ -77,6 +81,9 @@ validate_kind() {
 validate_fact() {
   [ -n "$1" ] || mh_die "fact must not be empty"
   case "$1" in *$'\n'*) mh_die "fact must be a single line (no newlines)" ;; esac
+  # The "never store a secret value" rule is advisory here: this validation does
+  # not (and cannot reliably) detect secrets. credential-handoff owns that
+  # control — pass a reference, never the value.
 }
 
 require_registered() {
@@ -91,14 +98,23 @@ clone_dir() {
 }
 
 # --- shared-knowledge extraction ---------------------------------------------
-# Print the lines strictly between the mh:knowledge markers of file $1.
+# Print the lines strictly between the mh:knowledge markers of file $1. Only a
+# block closed by a matching end marker is emitted: lines are buffered between
+# markers and flushed on `end`. A start marker with no end (a truncated or
+# mis-edited AGENTS.md) emits NOTHING and warns to stderr, so the file's whole
+# tail — including the coding-guidelines mirror — can never leak into recall and
+# every crewmate brief.
 extract_knowledge() {
   local f="$1"
   [ -f "$f" ] || return 0
-  awk -v s="$MH_KNOWLEDGE_START" -v e="$MH_KNOWLEDGE_END" '
-    index($0, s) { inside = 1; next }
-    index($0, e) { inside = 0 }
-    inside
+  awk -v s="$MH_KNOWLEDGE_START" -v e="$MH_KNOWLEDGE_END" -v file="$f" '
+    index($0, s) { inside = 1; buf = ""; next }
+    inside && index($0, e) { printf "%s", buf; inside = 0; buf = ""; next }
+    inside { buf = buf $0 "\n" }
+    END {
+      if (inside)
+        print "mh-memory: mh:knowledge start marker without a matching end in " file "; recall omits it (file may be truncated)" > "/dev/stderr"
+    }
   ' "$f"
 }
 
@@ -111,7 +127,7 @@ print_section() {
     printf '  (empty)\n\n'; return 0
   fi
   if [ -n "$query" ]; then
-    shown="$(printf '%s\n' "$content" | grep -i -e "$query" || true)"
+    shown="$(printf '%s\n' "$content" | grep -i -F -e "$query" || true)"
     if [ -z "$shown" ]; then printf '  (no lines match "%s")\n\n' "$query"; return 0; fi
     printf '%s\n\n' "$shown"
   else
@@ -128,9 +144,15 @@ ensure_private_store() {
   [ -d "$dir/.git" ] || mh_die "no clone at $dir for repo '$repo'"
   mhdir="$dir/.mh"; notes="$mhdir/notes.md"
   mkdir -p "$mhdir"
-  if [ ! -f "$notes" ]; then
-    printf '<!-- manhandler private notes for %s - git-excluded, never committed -->\n' "$repo" > "$notes"
+  # Create the header under the lock so concurrent first `remember --private`
+  # calls cannot truncate each other's store; `-s` guards against re-truncating
+  # an already-populated file (mirrors remember_global's create-under-lock).
+  mh_lock "$notes"
+  if [ ! -s "$notes" ]; then
+    printf '<!-- manhandler private notes for %s - git-excluded, never committed -->\n' "$repo" > "$notes" \
+      || { mh_unlock "$notes"; mh_die "failed creating private notes store for '$repo'"; }
   fi
+  mh_unlock "$notes"
   excl="$(git -C "$dir" rev-parse --git-path info/exclude 2>/dev/null || true)"
   [ -n "$excl" ] || return 0
   case "$excl" in /*) ;; *) excl="$dir/$excl" ;; esac
