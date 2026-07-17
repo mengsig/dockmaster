@@ -95,6 +95,13 @@ check "meta round-trips regex metachars" '[ "$(b mh-task.sh get metatest re)" = 
 b mh-task.sh set metatest eq 'k=v=x' >/dev/null
 check "meta round-trips value with ="   '[ "$(b mh-task.sh get metatest eq)" = "k=v=x" ]'
 check "meta update leaves sibling key"   '[ "$(b mh-task.sh get metatest re)" = ".*[x]^$ +(a|b)" ]'
+# KEY-side regression: the old sed/grep treated the key as a regex, so "a.c"
+# also matched "abc". awk matches the key as a fixed string. Set abc first, then
+# a.c: the old grep -v "^a.c=" would drop the abc line too (. matches b).
+b mh-task.sh set keytest abc WRONG >/dev/null
+b mh-task.sh set keytest a.c RIGHT >/dev/null
+check "meta get matches key literally"    '[ "$(b mh-task.sh get keytest a.c)" = "RIGHT" ]'
+check "meta set does not clobber sibling" '[ "$(b mh-task.sh get keytest abc)" = "WRONG" ]'
 
 echo "== concurrent meta writes (locking; no lost update) =="
 b mh-task.sh new conc --kind ship --repo demo >/dev/null
