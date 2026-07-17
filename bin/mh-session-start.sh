@@ -19,9 +19,11 @@ section() { printf '\n=== %s ===\n' "$1"; }
 
 section "TOOLING"
 # mh-doctor owns the dependency contract; delegate so the list never drifts. A
-# missing required tool makes doctor exit non-zero — do not let that abort the
-# rest of the digest (the missing tool is already reported in its output).
-"$here/mh-doctor.sh" check || true
+# missing required tool makes doctor exit non-zero. Capture that verdict rather
+# than swallowing it (the old `|| true` always exited 0, hiding a broken
+# environment behind a green-looking digest); still render the full digest, then
+# surface an explicit NOT READY banner and a non-zero exit at the end.
+if "$here/mh-doctor.sh" check; then ready=1; else ready=0; fi
 
 section "MANAGED REPOS"
 "$here/mh-repo.sh" list 2>/dev/null || echo "  (none registered)"
@@ -45,3 +47,11 @@ done
 section "NEXT"
 echo "  Reconcile any STUCK clones and non-pending in-flight tasks before taking new work."
 echo "  Load task-lifecycle before dispatching; supervision whenever work is in flight."
+
+# A broken environment must not read as a clean start. Render the whole digest
+# first (above), then make the failure the last thing seen and the exit code, so
+# both a human and a scripted caller can gate on readiness.
+if [ "$ready" -ne 1 ]; then
+  printf '\n*** NOT READY: required tooling/auth check FAILED (see TOOLING) — resolve before dispatching work. ***\n'
+  exit 1
+fi

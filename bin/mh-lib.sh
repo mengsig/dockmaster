@@ -160,6 +160,26 @@ mh_default_branch() {
 # force-commits shared knowledge onto a clone's default branch; it lands through
 # the normal PR/local flow like any other change.
 
+# --- locked, atomic JSON update ----------------------------------------------
+# mh_json_update <file> <jq-args...>  -- apply a jq filter to a JSON file in
+# place, serialized by the advisory lock and committed atomically. The temp is
+# created in the target's own directory so the final `mv` is a same-filesystem
+# rename (atomic); on any failure the temp is removed (no orphan) and we fail
+# loudly. Single owner of the "locked read-modify-write of a JSON file" pattern.
+mh_json_update() {
+  local file="$1"; shift
+  local tmp dir base
+  dir="$(dirname "$file")"; base="$(basename "$file")"
+  mh_lock "$file"
+  tmp="$(mktemp "$dir/.$base.XXXXXX")" || { mh_unlock "$file"; mh_die "mktemp failed for $base"; }
+  if jq "$@" "$file" > "$tmp"; then
+    mv -f "$tmp" "$file" || { rm -f "$tmp"; mh_unlock "$file"; mh_die "failed committing $base"; }
+  else
+    rm -f "$tmp"; mh_unlock "$file"; mh_die "update (jq) of $base failed"
+  fi
+  mh_unlock "$file"
+}
+
 # --- registry (repos.json): single owner path via jq ------------------------
 mh_registry_get() {
   # mh_registry_get <name> [<field>]  -> prints repo object or a field
@@ -169,4 +189,14 @@ mh_registry_get() {
   else
     jq -e --arg n "$1" '.repos[$n]' "$MH_REGISTRY" 2>/dev/null
   fi
+}
+
+# mh_repo_dir <name>  -> print the managed clone's directory, or die if absent.
+# Single owner of "resolve a registered repo's clone path"; every script that
+# needs a repo's working tree goes through here so the error is identical.
+mh_repo_dir() {
+  local name="$1" dir
+  dir="$MH_HOME/$(mh_registry_get "$name" path)"
+  [ -d "$dir/.git" ] || mh_die "no clone for repo '$name' (expected $dir); add it with mh-repo.sh add"
+  printf '%s\n' "$dir"
 }

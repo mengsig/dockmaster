@@ -38,8 +38,6 @@ mh_ensure_dirs
 AWAIT_TIMEOUT_SECS=600
 AWAIT_INTERVAL_SECS=15
 
-repo_dir() { local d; d="$MH_HOME/$(mh_registry_get "$1" path)"; [ -d "$d/.git" ] || mh_die "no clone for repo '$1'"; printf '%s\n' "$d"; }
-
 owner_repo() {
   # derive owner/repo from a git remote url (ssh or https), strictly
   local url="$1" slug
@@ -77,10 +75,14 @@ worst_rollup() {
 cmd="${1:-}"; shift || true
 case "$cmd" in
   open)
-    mh_need gh-axi
     id="${1:-}"; shift || true
     [ -n "$id" ] || mh_die "usage: mh-pr.sh open <id> --title T (--body-file F | --body B) [--base B] [--draft]"
     mh_require_id "$id"
+    # A local-only task never opens a PR — that path lands by fast-forward via
+    # mh-merge.sh local. Refuse here (before any GitHub tool or push) so the
+    # wrong delivery path fails fast with the right instruction.
+    mode="$(mh_meta_get "$id" mode)"
+    [ "$mode" = "local-only" ] && mh_die "task $id is mode 'local-only'; a PR is not its delivery path — land it with: mh-merge.sh local $id"
     title=""; body_file=""; body=""; base=""; draft=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -93,12 +95,13 @@ case "$cmd" in
       esac
     done
     [ -n "$title" ] || mh_die "--title is required"
+    mh_need gh-axi
     wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
     [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || mh_die "worktree is on a detached HEAD; crewmate must create a branch first"
     ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit before opening a PR"
-    dir="$(repo_dir "$repo")"; slug="$(owner_repo "$(git -C "$dir" remote get-url origin)")"
+    dir="$(mh_repo_dir "$repo")"; slug="$(owner_repo "$(git -C "$dir" remote get-url origin)")"
     [ -n "$base" ] || base="$(mh_default_branch "$dir")"
     mh_info "pushing $branch -> origin"
     git -C "$wt" push -u origin "$branch" >/dev/null 2>&1 || git -C "$wt" push origin "$branch"
@@ -121,7 +124,7 @@ case "$cmd" in
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-pr.sh check <id>"
     url="$(mh_meta_get "$id" pr)"; [ -n "$url" ] || mh_die "no PR recorded for $id"
     n="$(pr_number_from_url "$url")"; repo="$(mh_meta_get "$id" repo)"
-    slug="$(owner_repo "$(git -C "$(repo_dir "$repo")" remote get-url origin)")"
+    slug="$(owner_repo "$(git -C "$(mh_repo_dir "$repo")" remote get-url origin)")"
     json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" || mh_die "could not read PR $url"
     state="$(printf '%s' "$json" | jq -r '.state // "unknown" | ascii_upcase')"
     merged="$(printf '%s' "$json" | jq -r '.merged // false')"
@@ -243,7 +246,7 @@ case "$cmd" in
       *) : ;;
     esac
     n="$(pr_number_from_url "$url")"; repo="$(mh_meta_get "$id" repo)"
-    slug="$(owner_repo "$(git -C "$(repo_dir "$repo")" remote get-url origin)")"
+    slug="$(owner_repo "$(git -C "$(mh_repo_dir "$repo")" remote get-url origin)")"
     args=(pr merge "$n" -R "$slug" "--$method")
     [ "$delete" -eq 1 ] && args+=(--delete-branch)
     gh-axi "${args[@]}" || mh_die "merge failed"
@@ -263,7 +266,7 @@ case "$cmd" in
     mh_require_id "$id"
     wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
     [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
-    base="$(mh_default_branch "$(repo_dir "$repo")")"
+    base="$(mh_default_branch "$(mh_repo_dir "$repo")")"
     # Diff the branch against the default branch when that ref is reachable from
     # the worktree; otherwise fall back to the working diff against HEAD.
     if git -C "$wt" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then

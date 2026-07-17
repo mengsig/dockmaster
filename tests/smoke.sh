@@ -172,6 +172,12 @@ check "security-scan names the signals"             'grep -qi "signals present" 
 check "security-scan clears a benign diff"          '! b mh-pr.sh security-scan demo-1 >/dev/null 2>&1'
 check "security-scan requires an id"                '! b mh-pr.sh security-scan >/dev/null 2>&1'
 b mh-worktree.sh remove sec-scan --force >/dev/null 2>&1
+# `open` on a local-only task must refuse (its path is mh-merge.sh local). The
+# guard fires before any GitHub tool or push, so it is exercisable offline.
+b mh-task.sh new pr-localonly --kind ship --repo demo --mode local-only >/dev/null
+check "pr open refuses a local-only task" '! b mh-pr.sh open pr-localonly --title x >/dev/null 2>&1'
+PRLO="$(b mh-pr.sh open pr-localonly --title x 2>&1 || true)"
+check "pr open names the local-only path" 'grep -q "local-only" <<<"$PRLO"'
 
 echo "== status drift lint (three-source reconciliation) =="
 # demo-1 is marked done in the backlog above, but its work is committed and not
@@ -328,6 +334,17 @@ check "remove keeps registry entry on refusal" '[ "$(b mh-repo.sh get rmtest mod
 mkdir -p "$MH_HOME/data/rmscout"; printf '# report\n' > "$MH_HOME/data/rmscout/report.md"   # task now terminal (done)
 check "remove proceeds once referencing task is done" 'b mh-repo.sh remove rmtest >/dev/null 2>&1'
 check "removed repo is unregistered"         '! b mh-repo.sh get rmtest >/dev/null 2>&1'
+# A live extra worktree off the clone must block removal (the guard counts
+# worktrees in one shot so a SIGPIPE'd `grep -q` cannot silently skip it). Use
+# raw `git worktree add` so no task meta is created — this isolates the
+# worktree guard from the live-task guard exercised above.
+b mh-repo.sh add wtguard "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+git -C "$MH_HOME/repos/wtguard" worktree add -q --detach "$TMP/wtguard-extra" >/dev/null 2>&1
+check "remove refuses repo with a live worktree" '! b mh-repo.sh remove wtguard >/dev/null 2>&1'
+WTGUARD="$(b mh-repo.sh remove wtguard 2>&1 || true)"
+check "remove names the active-worktree reason"  'grep -q "active worktrees" <<<"$WTGUARD"'
+git -C "$MH_HOME/repos/wtguard" worktree remove "$TMP/wtguard-extra" >/dev/null 2>&1
+check "remove proceeds after the worktree is torn down" 'b mh-repo.sh remove wtguard >/dev/null 2>&1'
 
 echo "== merge rebase (offline) =="
 # Clean rebase: worktree branch adds a new file, primary main advances with an
