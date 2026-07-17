@@ -19,6 +19,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`rigorous` PR-pipeline tier** (`config/pr-pipeline.rigorous.json`) for
+  high-stakes changes: a **dimension-parallel** cold review (one reviewer per
+  lens — correctness, security, concurrency, portability, tests), an adversarial
+  **`verify-findings`** gate (N skeptics refute each finding; only findings not
+  refuted by a majority survive to the fix round), then fix → tests → a
+  behavioral `verify` gate → auto `security` → `await-checks` → pr. Documented
+  with selection criteria in the `pr-workflow` skill and `config/README.md`, and
+  implemented in the optional deterministic runner (`workflows/pr-pipeline.js`)
+  via `parallel()`. Complements the existing `fast` and `default` tiers; the
+  never-merge-red merge gate and lavish-approval-first ordering are unchanged.
+
 - **`mh-repo create`**: stand up a brand-new repo. With no remote it creates the
   GitHub repo via `gh-axi` (private by default; `--public` to publish, `--https`
   for an HTTPS origin); with an empty remote you supply it wires that up instead

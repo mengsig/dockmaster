@@ -15,11 +15,51 @@ reorder, drop, or add gates by editing one array.
 1. Per repo: `config/pr-pipeline.<repo>.json` if it exists.
 2. Otherwise: `config/pr-pipeline.default.json`.
 
-For an **objectively trivial** change (see `change-review` for the criteria) the
-task may instead select `config/pr-pipeline.fast.json` — one review pass instead
-of two. This is a per-task choice, not a per-repo default. The fast pipeline
-still runs the coldstart `review` and `tests` gates and does not touch merge
-authority; it only drops the second (merge-gate) review pass.
+## Rigor tiers
+
+Scale review rigor to stakes. The tier is a **per-task** choice (not a per-repo
+default); when in doubt, use `default`.
+
+- **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial** changes
+  only (see `change-review` for the criteria): one review pass instead of two,
+  the lavish approval gate may be skipped. Tests still run; merge authority
+  unchanged.
+- **`default`** (`config/pr-pipeline.default.json`) — **the norm.** Two
+  independent review passes (coldstart, then merge-gate), each followed by
+  fix + tests.
+- **`rigorous`** (`config/pr-pipeline.rigorous.json`) — **high-stakes changes.**
+  Select it for: this distro's own merge-gate / safety-gate code, auth,
+  migrations, concurrency or locking, anything touching money or secrets, or any
+  change the operator is nervous about. It replaces the two generalist passes
+  with a dimension-parallel cold review, adversarially verifies every finding
+  before spending a fix round, and adds a behavioral `verify` gate.
+
+The tiers share one gate schema, so a tier is just a different ordered `gates`
+array. The two new mechanics the rigorous tier introduces are executable
+procedure the manhandler drives agent-style (and the optional runner drives the
+same way):
+
+- **dimension-parallel review** — instead of one generalist read, spawn one
+  fresh reviewer per lens (`dimensions`: `correctness`, `security`,
+  `concurrency`, `portability`, `tests`), each reading **only** the diff
+  `git -C <worktree> diff <base>...HEAD`. Merge their findings. One cold pass,
+  fanned out by lens.
+- **adversarial `verify-findings`** — before any fix round, each review finding
+  is independently checked by `voters` skeptics (default 3), **each prompted to
+  REFUTE it** by citing the actual code. A finding survives only if it is **not
+  refuted by a majority** (a tie is not a majority). This is the key quality
+  lever: it kills plausible-but-wrong findings before they cost a fix cycle. Only
+  the survivors go to `fix`.
+
+The rigorous gate order is
+`review (dimension-parallel) → verify-findings → fix → tests → verify → security
+→ await-checks → pr`. The behavioral `verify` gate drives the changed behavior
+end to end (via the `verify` skill) and reports what was actually exercised — not
+just that tests pass; it is skippable only when the diff has no runtime surface
+(docs/config-only). `security` is auto-triggered (`bin/mh-pr.sh security-scan`,
+then `security-review` only on a hit, else an explicit skip). `await-checks`
+waits for CI, and `pr` opens the PR. The never-merge-red merge gate and the
+lavish-approval-first ordering are unchanged across all three tiers.
 
 The file has a `gates` array. Run the gates top to bottom. A repo's delivery
 **mode** (registry: `pipeline` | `direct-pr` | `local-only`) shapes it:
@@ -145,8 +185,11 @@ merges always escalate, even under `yolo`.
 
 The default is to drive the gates above with ordinary `Agent` calls. For a
 hands-off run of the whole pipeline instead, `workflows/pr-pipeline.js` executes
-the same gates as a `Workflow` (coldstart review → fix → tests → merge-gate
-review → fix → tests → pr) with zero-token idle between stages. It is opt-in and
-not wired to anything — invoke it via the Workflow tool only when the operator
-has asked for multi-agent orchestration. See `config/README.md` for which config
-fields it reads versus the agent-driven path.
+the same gates as a `Workflow` with zero-token idle between stages — the default
+two-pass tier, or the `rigorous` tier (dimension-parallel review via
+`parallel()`, adversarial `verify-findings`, then fix → tests → verify →
+security → await-checks → pr) when the caller passes `tier: "rigorous"` or the
+rigorous `gates`. It is opt-in and not wired to anything — invoke it via the
+Workflow tool only when the operator has asked for multi-agent orchestration, and
+a live **rigorous** run is a manhandler/operator action. See `config/README.md`
+for which config fields it reads versus the agent-driven path.

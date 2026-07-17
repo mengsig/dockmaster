@@ -1,0 +1,14 @@
+{
+  "version": "manhandler-pr-pipeline/2",
+  "description": "Rigorous PR pipeline for HIGH-STAKES changes: this distro's own merge-gate/safety-gate code, auth, migrations, concurrency/locking, anything touching money or secrets, or any change the operator is nervous about. Instead of two generalist review passes it fans the cold review out by dimension, then adversarially verifies every finding before spending a fix round, and adds a behavioral verify gate that drives the changed behavior end to end. Select per task, not per repo (see .claude/skills/pr-workflow for the selection criteria); when the stakes are ordinary use pr-pipeline.default.json. Tests still run and merge authority is unchanged (never merge red).",
+  "gates": [
+    { "gate": "review", "pass": "coldstart", "effort": "high", "dimensions": ["correctness", "security", "concurrency", "portability", "tests"], "note": "dimension-parallel: one fresh reviewer per lens, each reads only the diff against base" },
+    { "gate": "verify-findings", "voters": 3, "method": "refute-majority", "note": "adversarial: N skeptics per finding each prompted to REFUTE it; a finding survives only if it is NOT refuted by a majority" },
+    { "gate": "fix", "max_rounds": 2, "note": "apply only the surviving findings on the same branch" },
+    { "gate": "tests", "note": "must pass after fixes" },
+    { "gate": "verify", "optional": true, "note": "behavioral gate: drive the changed behavior end to end via the verify skill and report what was exercised; skippable only when the diff has no runtime surface (docs/config-only)" },
+    { "gate": "security", "method": "auto", "note": "auto-triggered: run bin/mh-pr.sh security-scan <id>; if it reports a security surface run security-review, otherwise skip explicitly (never a silent forget)" },
+    { "gate": "await-checks", "note": "wait for CI to settle (bin/mh-pr.sh await-checks <id>) before the merge gate, so the gate acts on a terminal result rather than refusing a pending PR" },
+    { "gate": "pr", "method": "squash", "note": "open the PR with the branch convention and a short human description" }
+  ]
+}

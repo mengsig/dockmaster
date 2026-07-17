@@ -74,7 +74,9 @@ Do not dispatch until required tools are present and GitHub auth is good. Use
 - **change-review** — when a crewmate signals `review-ready`; the lavish approval
   gate and the PR-or-local decision (the gate every requested change passes).
 - **pr-workflow** — after approval, on the PR path (the two-pass gate pipeline,
-  branch naming, PR-description style, and the merge gate).
+  branch naming, PR-description style, and the merge gate). Scale rigor per task
+  with the `fast` / `default` / `rigorous` tiers — the skill has the selection
+  criteria.
 - **post-pr-review** — when an open PR gets review comments, or its CI goes red
   after it was opened (the tail of the PR pipeline, after PR creation).
 - **testing-policy** — before relying on the tests gate for a repo with no
