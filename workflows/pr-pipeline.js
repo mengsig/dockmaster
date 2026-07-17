@@ -51,8 +51,11 @@ if (!base) {
   throw new Error('pr-pipeline requires args.base or args.defaultBranch (origin/HEAD is unreliable in a fresh worktree)')
 }
 
-// Built-in gate lists, one per tier, used only when the caller passes no explicit
-// gates. They mirror the shipped config/pr-pipeline.<tier>.json files.
+// Built-in gate lists, one per tier, used only as a fallback when the caller
+// passes no explicit gates. They follow the same gate ORDER as the shipped
+// config/pr-pipeline.<tier>.json files but omit config-only annotations
+// (per-gate `effort`, the default tier's optional `security` gate); real runs
+// pass args.gates from the config, which drives behavior.
 const DEFAULT_GATES = [
   { gate: 'review', pass: 'coldstart' }, { gate: 'fix', max_rounds: 2 }, { gate: 'tests' },
   { gate: 'review', pass: 'merge-gate' }, { gate: 'fix', max_rounds: 2 }, { gate: 'tests' },
@@ -120,7 +123,9 @@ async function runTests(label) {
 async function review(pass, effort, dimensions) {
   const which = pass || 'review'
   if (dimensions && dimensions.length) {
-    const results = await parallel(dimensions.map((dim) => agent(
+    // parallel() takes an array of THUNKS (() => Promise), not already-invoked
+    // promises — each thunk is invoked by the runtime to fan the work out.
+    const results = await parallel(dimensions.map((dim) => () => agent(
       `Cold, independent review of ONLY the ${dim} dimension of this change. In ${t.worktree}, read the diff of this branch against its base:\n\n` +
       `    git -C ${t.worktree} diff ${base}...HEAD\n\n` +
       `and the changed files. Do not trust any prior summary or earlier review. Report concrete, real ${dim} findings only, ranked by severity. ` +
@@ -150,7 +155,9 @@ async function verifyFindings(findings, voters) {
   const survivors = []
   for (const f of findings) {
     const desc = `[${f.severity}] ${f.file || ''} ${f.summary}${f.dimension ? ` (dimension: ${f.dimension})` : ''}`
-    const votes = await parallel(Array.from({ length: voters }, () => agent(
+    // parallel() takes thunks (() => Promise); Array.from's factory returns one
+    // per skeptic, each of which the runtime invokes to run the votes in parallel.
+    const votes = await parallel(Array.from({ length: voters }, () => () => agent(
       `You are a skeptical verifier. A prior reviewer raised this finding against the diff ${base}...HEAD in ${t.worktree}:\n\n` +
       `    ${desc}\n\n` +
       `Read the actual diff and the changed files and try to REFUTE it. Set refuted=true ONLY if the finding is wrong, already ` +
@@ -224,6 +231,11 @@ for (const g of gates) {
     while (lastReview && lastReview.findings.length && round < max) {
       round++
       await applyFixes(lastReview.findings)
+      // Intentional asymmetry: the adversarial skeptic filter (verify-findings)
+      // runs once, before the first fix round. This in-loop re-review is NOT
+      // re-filtered through skeptics, so a false positive here can only
+      // false-BLOCK (hold the PR for another round / fail the fix gate), never
+      // false-merge. That fails safe, which is the direction we want.
       lastReview = await review(currentPass, currentEffort, currentDimensions)
     }
     if (lastReview && lastReview.findings.length) {
