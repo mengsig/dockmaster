@@ -46,28 +46,39 @@ else
 fi
 
 section "WORKTREES (active local copies)"
-# recorded[path]=task-id for every worktree a task claims; used to cross-check
-# the on-disk state/worktrees/ directory for orphans and dangling records.
-declare -A recorded
+# Parallel indexed arrays record, for every worktree a task claims, its path
+# (rec_wt) and owning task id (rec_id) at the same index. bash 3.2 (macOS) has no
+# associative arrays; the fleet is small, so the linear membership scan below is
+# fine. Used to cross-check the on-disk state/worktrees/ directory for orphans
+# and dangling records.
+rec_wt=(); rec_id=()
 rows=""
 while IFS=$'\t' read -r id repo wt; do
   [ -n "$wt" ] || continue
-  recorded["$wt"]="$id"
+  rec_wt+=("$wt"); rec_id+=("$id")
   if [ -d "$wt" ]; then
     size="$(du -sh "$wt" 2>/dev/null | cut -f1)"
     rows+="$id"$'\t'"$repo"$'\t'"${size:-?}"$'\t'"$wt"$'\n'
   fi
 done < <("$here/mh-worktree.sh" list 2>/dev/null || true)
 if [ -n "$rows" ]; then printf '%s' "$rows" | column -t -s$'\t' 2>/dev/null || printf '%s' "$rows"; else echo "  (none)"; fi
+# recorded_id <path> -> echo the owning task id if <path> is recorded, else empty.
+recorded_id() {
+  local target="$1" i
+  for ((i = 0; i < ${#rec_wt[@]}; i++)); do
+    [ "${rec_wt[i]}" = "$target" ] && { printf '%s' "${rec_id[i]}"; return 0; }
+  done
+  return 1
+}
 # A directory under state/worktrees/ that no task claims (leftover from a crash
 # or a manual removal) — teardown never created it through the normal path.
 for d in "$MH_STATE"/worktrees/*/; do
   d="${d%/}"
-  [ -n "${recorded[$d]:-}" ] || printf '  ORPHAN (on disk, no task record): %s\n' "$d"
+  recorded_id "$d" >/dev/null || printf '  ORPHAN (on disk, no task record): %s\n' "$d"
 done
 # A task that records a worktree which no longer exists on disk.
-for wt in "${!recorded[@]}"; do
-  [ -d "$wt" ] || printf '  DANGLING (recorded by %s, missing on disk): %s\n' "${recorded[$wt]}" "$wt"
+for ((i = 0; i < ${#rec_wt[@]}; i++)); do
+  [ -d "${rec_wt[i]}" ] || printf '  DANGLING (recorded by %s, missing on disk): %s\n' "${rec_id[i]}" "${rec_wt[i]}"
 done
 
 section "BACKLOG (ready to start)"

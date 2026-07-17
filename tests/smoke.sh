@@ -131,6 +131,25 @@ b mh-worktree.sh remove demo-3 --force >/dev/null 2>&1
 SYNC="$(b mh-sync.sh all)"   # capture once (see doctor note on grep -q + pipefail)
 check "sync reports OK"   'grep -q "OK:" <<<"$SYNC"'
 
+echo "== toolbelt input guards =="
+# mh-repo.sh set: whitelist + default_branch validation. 'main' is a real branch
+# in the clone; a bogus ref and an unknown field must both be refused.
+check "set default_branch to a real branch works" 'b mh-repo.sh set demo default_branch main >/dev/null 2>&1'
+check "set default_branch to a bogus ref refused"  '! b mh-repo.sh set demo default_branch no-such-branch >/dev/null 2>&1'
+check "set unknown field refused"                  '! b mh-repo.sh set demo not_a_field x >/dev/null 2>&1'
+# mh-worktree.sh remove: flag order must not matter (`--force` before the id).
+b mh-task.sh new demo-4 --kind ship --repo demo >/dev/null
+WT4="$(b mh-worktree.sh create demo-4 demo | tail -n1)"
+git -C "$WT4" checkout -q -b feat/x/wip4
+check "remove parses '--force <id>' regardless of order" 'b mh-worktree.sh remove --force demo-4 >/dev/null 2>&1'
+# mh-doctor.sh validates state JSON: corrupt repos.json, expect a named failure.
+cp "$MH_HOME/state/repos.json" "$TMP/repos.bak"
+printf 'not json{' > "$MH_HOME/state/repos.json"
+DOCBAD="$(b mh-doctor.sh 2>&1 || true)"
+check "doctor fails on invalid repos.json" '! b mh-doctor.sh >/dev/null 2>&1'
+check "doctor names the invalid JSON"      'grep -q "not valid JSON" <<<"$DOCBAD"'
+cp "$TMP/repos.bak" "$MH_HOME/state/repos.json"
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

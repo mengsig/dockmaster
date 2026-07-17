@@ -211,12 +211,25 @@ $out"
     name="${1:-}"; field="${2:-}"; value="${3:-}"
     [ -n "$name" ] && [ -n "$field" ] || mh_die "usage: mh-repo.sh set <name> <field> <value>"
     jq -e --arg n "$name" '.repos[$n]' "$MH_REGISTRY" >/dev/null 2>&1 || mh_die "no such repo: $name"
+    # Whitelist the settable fields. A free-form setter let a bad default_branch or
+    # path silently misroute sync/merge; only known fields, validated, may change.
     case "$field" in
       yolo) case "$value" in true|false) ;; *) mh_die "yolo must be true|false" ;; esac
             registry_write --arg n "$name" --argjson v "$value" '.repos[$n].yolo = $v' ;;
       mode) case "$value" in pipeline|direct-pr|local-only) ;; *) mh_die "mode must be pipeline|direct-pr|local-only" ;; esac
             registry_write --arg n "$name" --arg v "$value" '.repos[$n].mode = $v' ;;
-      *)    registry_write --arg n "$name" --arg f "$field" --arg v "$value" '.repos[$n][$f] = $v' ;;
+      default_branch)
+            dir="$MH_REPOS/$name"
+            [ -d "$dir/.git" ] || mh_die "cannot set default_branch: no clone at $dir"
+            # It must actually resolve as a branch in the clone (local or on origin);
+            # a bogus value would break worktree base selection and ff sync.
+            git -C "$dir" rev-parse --verify --quiet "refs/heads/$value" >/dev/null 2>&1 \
+              || git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/$value" >/dev/null 2>&1 \
+              || mh_die "default_branch '$value' is not a branch in the clone '$name'; fetch or create it first"
+            registry_write --arg n "$name" --arg v "$value" '.repos[$n].default_branch = $v' ;;
+      test_cmd|pipeline|remote)
+            registry_write --arg n "$name" --arg f "$field" --arg v "$value" '.repos[$n][$f] = $v' ;;
+      *)    mh_die "unknown field '$field'; settable fields: mode, yolo, test_cmd, pipeline, default_branch, remote" ;;
     esac
     mh_info "set $name.$field = $value"
     ;;

@@ -99,6 +99,24 @@ case "$mode" in
       if [ -d "$MH_HOME/$p" ]; then printf '  ok   %s/\n' "$p"; else printf '  MISSING %s/\n' "$p"; fi
     done
     if [ -f "$MH_REGISTRY" ]; then printf '  ok   state/repos.json\n'; else printf '  MISSING state/repos.json\n'; fi
+
+    # State JSON must PARSE, not just exist: a corrupt registry or backlog silently
+    # breaks every jq-driven command. Validate with jq (present as a required tool);
+    # a parse failure is a readiness failure with a recovery hint.
+    badjson=0
+    if command -v jq >/dev/null 2>&1; then
+      if [ -f "$MH_REGISTRY" ] && ! jq . "$MH_REGISTRY" >/dev/null 2>&1; then
+        printf '  FAIL state/repos.json is not valid JSON\n'
+        printf '       ^ restore from git or a backup, or reset to {"repos":{}}\n'
+        badjson=$((badjson + 1))
+      fi
+      backlog="$MH_STATE/backlog.json"
+      if [ -f "$backlog" ] && ! jq . "$backlog" >/dev/null 2>&1; then
+        printf '  FAIL state/backlog.json is not valid JSON\n'
+        printf '       ^ restore from git or a backup, or reset to {"items":{}}\n'
+        badjson=$((badjson + 1))
+      fi
+    fi
     if [ -f "$MH_CONFIG/pr-pipeline.default.json" ]; then
       printf '  ok   config/pr-pipeline.default.json\n'
     else
@@ -111,7 +129,11 @@ case "$mode" in
       printf '  NOT READY: %d required tool(s) missing (see above).\n' "$miss"
       exit 1
     fi
-    printf '  READY: required tools present; home scaffolded.\n'
+    if [ "$badjson" -gt 0 ]; then
+      printf '  NOT READY: %d state file(s) are not valid JSON (see above).\n' "$badjson"
+      exit 1
+    fi
+    printf '  READY: required tools present; state valid; home scaffolded.\n'
     ;;
 
   *)
