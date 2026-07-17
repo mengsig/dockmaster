@@ -57,6 +57,7 @@ check "isolation asserts"       'b mh-worktree.sh assert "$WT" demo >/dev/null'
 b mh-brief.sh demo-1 >/dev/null
 check "brief bakes commandments" 'grep -q "The Ten Commandments" "$MH_HOME/data/demo-1/brief.md"'
 check "brief has review-ready"    'grep -q "review-ready" "$MH_HOME/data/demo-1/brief.md"'
+check "brief labels the private-notes boundary" 'grep -q "never copy or paraphrase them" "$MH_HOME/data/demo-1/brief.md"'
 
 echo "== status (read-only view) =="
 STATUS="$(b mh-status.sh)"   # capture once (see doctor note on grep -q + pipefail)
@@ -392,6 +393,44 @@ check "multi-line fact is rejected"     '! b mh-memory.sh remember demo --privat
 check "invalid kind is rejected"        '! b mh-memory.sh remember demo --private --kind bogus "x" >/dev/null 2>&1'
 check "shared append via tool is refused" '! b mh-memory.sh remember demo --kind command "x" >/dev/null 2>&1'
 check "unregistered repo is rejected"   '! b mh-memory.sh seed nope >/dev/null 2>&1'
+
+echo "== mh-memory: recall query is a literal substring, not a regex (fix 4) =="
+# 'p.test' matches 'pytest' as a regex but not as a literal string; grep -F must
+# treat the query literally, so the pytest line is NOT returned.
+RXQ="$(b mh-memory.sh recall demo 'p.test')"
+check "recall treats a regex-metachar query literally" '! grep -q "pytest" <<<"$RXQ"'
+LITQ="$(b mh-memory.sh recall demo 'pytest -q')"
+check "recall matches a literal substring query"       'grep -q "pytest -q" <<<"$LITQ"'
+
+echo "== mh-memory: -- ends flag parsing so a fact can start with a dash (fix 3) =="
+b mh-memory.sh remember demo --private --kind command -- "-Wall enables all warnings" >/dev/null
+check "-- lets a fact begin with a dash"  'grep -q -- "-Wall enables all warnings" "$MH_HOME/repos/demo/.mh/notes.md"'
+check "usage documents the -- terminator" 'b mh-memory.sh --help | grep -q -- "-- to end flag parsing"'
+
+echo "== mh-memory: a start marker with no end must not leak the file tail (fix 1) =="
+# A truncated/mis-edited AGENTS.md (start marker, no matching end) must yield an
+# empty shared block and a stderr warning — never the file's whole tail.
+cp "$MH_HOME/repos/demo/AGENTS.md" "$TMP/agents.bak"
+printf '# demo\n\n<!-- mh:knowledge:start -->\n- **[command]** buffered fact\nSECRET_TAIL_LEAK\n' > "$MH_HOME/repos/demo/AGENTS.md"
+NOEND="$(b mh-memory.sh recall demo 2>/dev/null)"
+check "recall omits an unclosed knowledge block" '! grep -q "buffered fact" <<<"$NOEND"'
+check "recall does not leak the file tail"        '! grep -q "SECRET_TAIL_LEAK" <<<"$NOEND"'
+NOEND_ERR="$(b mh-memory.sh recall demo 2>&1 >/dev/null)"
+check "recall warns about the missing end marker" 'grep -q "without a matching end" <<<"$NOEND_ERR"'
+cp "$TMP/agents.bak" "$MH_HOME/repos/demo/AGENTS.md"
+
+echo "== mh-memory: concurrent first private writes don't truncate each other (fix 2) =="
+# No notes store yet: fire concurrent first `remember --private` calls. The header
+# is created under the lock, so they cannot erase each other (mirrors the
+# concurrent-meta-writes test).
+b mh-repo.sh add memconc "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+check "memconc starts with no private notes store" '[ ! -f "$MH_HOME/repos/memconc/.mh/notes.md" ]'
+for i in $(seq 1 15); do b mh-memory.sh remember memconc --private --kind routing "concfact$i" & done
+wait
+cmiss=0
+for i in $(seq 1 15); do grep -q "concfact$i" "$MH_HOME/repos/memconc/.mh/notes.md" || cmiss=$((cmiss+1)); done
+check "all 15 concurrent private facts survived" '[ "$cmiss" -eq 0 ]'
+check "exactly one private-notes header"         '[ "$(grep -c "manhandler private notes" "$MH_HOME/repos/memconc/.mh/notes.md")" -eq 1 ]'
 
 echo
 echo "smoke: $pass passed, $fail failed"
