@@ -248,4 +248,3 @@ Summarize what changed and what verification you actually performed. For substan
 ## Additional Info
 - Do not use default agent name tag for commit messages. Just let my github tag inherit.
 - Do not write written by claude code or anything like that.
-

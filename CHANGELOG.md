@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-18
+
 ### Changed
 
 - **Per-repo memory is now native plain markdown** (`bin/mh-memory.sh`),
@@ -90,4 +92,5 @@ of autonomous subagents across many repositories from a single liaison agent.
   (`config/pr-pipeline.default.json`), with an optional deterministic runner
   (`workflows/pr-pipeline.js`).
 
+[0.2.0]: https://github.com/mengsig/manhandler/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mengsig/manhandler/releases/tag/v0.1.0

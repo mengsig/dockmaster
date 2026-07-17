@@ -78,8 +78,12 @@ Every requested change goes through the same gated flow:
    feedback (poll as a background task), relay it to the crewmate, loop until the
    operator approves. Nothing lands before this approval.
 3. **Ask how it lands: PR or local?** Put the plain question to the operator.
-   - **local** (or a `local-only` repo) → `bin/mh-merge.sh local <id>` after
-     approval.
+   - **local** (or a `local-only` repo) → set the task to local mode, then land
+     after approval: `bin/mh-task.sh set <id> mode local-only` then
+     `bin/mh-merge.sh local <id>`. `mh-merge.sh local` refuses any task whose
+     mode isn't `local-only`, and a task on a pipeline/direct-pr repo inherits
+     that repo's mode — so set it explicitly here (or classify the task local at
+     dispatch with `mh-task.sh new --mode local-only`).
    - **PR** → load `pr-workflow` and run the pipeline: coldstart review → fix +
      tests → merge-gate review → fix + tests → PR creation.
 4. **Merge gate.** After the PR is open, the operator either merges on GitHub

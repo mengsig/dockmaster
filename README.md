@@ -2,7 +2,7 @@
 
 **Talk to one agent. Ship across every repo.**
 
-> v0.1.0 · MIT licensed · built for [Claude Code](https://claude.com/claude-code)
+> v0.2.0 · MIT licensed · built for [Claude Code](https://claude.com/claude-code)
 
 manhandler is an *agent distro* for Claude Code: a portable directory of
 instructions, skills, and helper scripts that turns a Claude Code session into a

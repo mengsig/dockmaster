@@ -5,9 +5,10 @@ description: How the manhandler supervises in-flight crew work using Claude Code
 
 # supervision
 
-firstmate needed a bash watcher daemon, a wake queue, and turn-end guard hooks
-to fake asynchronous supervision on generic harnesses. Claude Code gives it to
-us natively. Use the primitive; do not rebuild the daemon.
+firstmate (the predecessor system manhandler re-implements — see README and
+`docs/architecture.md`) needed a bash watcher daemon, a wake queue, and turn-end
+guard hooks to fake asynchronous supervision on generic harnesses. Claude Code
+gives it to us natively. Use the primitive; do not rebuild the daemon.
 
 ## The model
 
@@ -57,6 +58,8 @@ deploy, a remote queue — do not busy-wait:
   on passing/none and non-zero on failing/timeout.
 - **ScheduleWakeup / CronCreate** — schedule a periodic check-in for very
   long-running or recurring supervision, or a routine "babysit the PRs" sweep.
+  (On a harness without these tools, the `schedule` and `loop` skills provide the
+  same recurring/scheduled-run capability.)
 
 ## Checking up and reporting
 
