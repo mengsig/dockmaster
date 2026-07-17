@@ -20,7 +20,7 @@
 #   set <name> <field> <value>
 #   remove <name>            (registry entry only; never deletes a clone with
 #                             uncommitted or unpushed work)
-#   seed <name>              (idempotent mh-memory scaffold in the clone)
+#   seed <name>              (idempotent private memory store in the clone)
 #
 # Modes: pipeline (default, full PR gate pipeline) | direct-pr | local-only.
 
@@ -57,12 +57,13 @@ register_repo() {
     '.repos[$n] = {remote:$r, path:$p, default_branch:$b, mode:$m, yolo:false, test_cmd:$t, pipeline:"default", memory:false, added:$ts}'
 }
 
-# Scaffold the repo's mh-memory stores in the clone: the git-excluded private
-# store and the AGENTS.md mh:knowledge markers (see mh-memory.sh for the model).
-# SHARED knowledge itself is authored later by a crewmate in a worktree and
-# committed with its work — seed only guarantees the scaffold exists. Fail OPEN:
-# memory is optional, so a scaffold failure warns and leaves the repo registered
-# without it (retry with `mh-repo.sh seed <name>`), never blocking onboarding.
+# Scaffold the repo's private memory store in the clone: git-excluded
+# repos/<name>/.mh/ (see mh-memory.sh for the model). SHARED knowledge is authored
+# later by a crewmate in a worktree (the repo's AGENTS.md mh:knowledge section),
+# never seeded into the clone — so the clone stays pristine and landable. Fail
+# OPEN: memory is optional, so a scaffold failure warns and leaves the repo
+# registered without it (retry with `mh-repo.sh seed <name>`), never blocking
+# onboarding.
 seed_memory() {
   local name="$1" dir="$MH_REPOS/$1" out
   [ -d "$dir/.git" ] || mh_die "no clone at $dir"

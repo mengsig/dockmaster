@@ -18,9 +18,9 @@ bin/mh-repo.sh add <name> <remote> [--mode pipeline|direct-pr|local-only] \
 ```
 
 This clones the repo, resolves its default branch, registers it (`mode=pipeline`,
-`yolo=false` by default), and scaffolds per-repo memory via `seed` (below): the
-git-excluded private store and the `AGENTS.md` `mh:knowledge` markers a crewmate
-later populates.
+`yolo=false` by default), and scaffolds the repo's git-excluded private memory
+store via `seed` (below). The shared `AGENTS.md` `mh:knowledge` section is added
+later by a crewmate in a worktree.
 
 - Only clone a remote the operator actually named. Never invent a remote.
 - Set `--test-cmd` so the `tests` gate has a command to run; without it the
@@ -73,11 +73,11 @@ destructive, irreversible, or security-sensitive actions.
 
 ## Per-repo memory
 
-`bin/mh-repo.sh seed <name>` scaffolds the repo's memory in the clone: the
-git-excluded private store (`repos/<name>/.mh/`) and the `mh:knowledge` markers in
-the repo's `AGENTS.md`. It is idempotent and never hand-writes a tracked
-`AGENTS.md` — the SHARED knowledge section is authored by a crewmate in a worktree
-and committed with its work, so it travels to every clone and worktree. Route
+`bin/mh-repo.sh seed <name>` scaffolds the repo's git-excluded private store
+(`repos/<name>/.mh/`) in the clone. It is idempotent and never touches the clone's
+`AGENTS.md`, so the clone stays pristine (landable and fast-forward-syncable). The
+SHARED `mh:knowledge` section is authored by a crewmate in a worktree and
+committed with its work, so it travels to every clone and worktree. Route
 knowledge with the `memory-routing` skill. The committed `mh:knowledge` section
 holds facts useful to *every* contributor; keep fleet-private strategy in the
 private store, never in the committed section.

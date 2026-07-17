@@ -90,8 +90,9 @@ so contributor knowledge travels while manhandler-private context stays local.
   worktree and commits it alongside its work, so it travels with the repo. The
   manhandler **never hand-writes** a managed repo's `AGENTS.md` (prime directive)
   and never force-commits onto a clone's default branch (that would diverge from
-  origin and break fast-forward sync). `bin/mh-repo.sh seed` scaffolds the markers
-  at onboarding without touching a tracked `AGENTS.md`.
+  origin and break fast-forward sync). `bin/mh-repo.sh seed` scaffolds only the
+  private store at onboarding and never touches the clone's `AGENTS.md`, so the
+  clone stays pristine.
 
 **Per-repo PRIVATE (`repos/<repo>/.mh/notes.md`):**
 - Manhandler-only context that must not enter the user's project history: fleet

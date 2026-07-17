@@ -33,9 +33,10 @@ AGENTS.md (prime directive): a crewmate edits this section **in its worktree** a
 commits it with the work, exactly like any other change — it lands through the
 normal PR/local flow, never force-committed onto a clone's default branch.
 
-- **Onboarding:** `bin/mh-repo.sh seed <repo>` scaffolds the section markers (and
-  the private store below). `bin/mh-repo.sh add` runs this by default. `seed` only
-  guarantees the scaffold; it never writes into a tracked AGENTS.md.
+- **Onboarding:** `bin/mh-repo.sh seed <repo>` scaffolds the git-excluded private
+  store below; `bin/mh-repo.sh add` runs it by default. `seed` never touches the
+  clone's AGENTS.md — the shared section is added by a crewmate in a worktree,
+  which keeps the clone pristine (landable and fast-forward-syncable).
 - **Recall:** `bin/mh-memory.sh recall <repo> [query]` prints the section (plus
   private notes), filtered by an optional query. Bounded and task-relevant — the
   crewmate brief injects this automatically so a crewmate needs no tool call.

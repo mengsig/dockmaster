@@ -5,12 +5,13 @@
 # and edit by hand. Three stores, each with exactly one owner:
 #
 #   1. SHARED (committed, travels)  - the `mh:knowledge` section inside a managed
-#      repo's own AGENTS.md. Contributor-relevant facts (build/test commands,
-#      conventions, invariants, pitfalls, routing). It is committed and so reaches
-#      every clone and worktree for free. The manhandler NEVER hand-writes a
-#      managed repo's tracked AGENTS.md (prime directive): a crewmate edits this
-#      section IN ITS WORKTREE and commits it with its work. `seed` only guarantees
-#      the scaffold exists, and only where doing so cannot dirty a tracked file.
+#      repo's own AGENTS.md, delimited by the markers below. Contributor-relevant
+#      facts (build/test commands, conventions, invariants, pitfalls, routing). It
+#      is committed and so reaches every clone and worktree for free. The manhandler
+#      NEVER writes it here: a crewmate adds/edits this section IN ITS WORKTREE and
+#      commits it with its work, so the clone stays pristine (landable and
+#      fast-forward-syncable). `seed` therefore never touches the clone's AGENTS.md;
+#      `recall` reads whatever committed section the clone has.
 #
 #   2. PRIVATE (git-excluded, manhandler-only)  - repos/<repo>/.mh/notes.md. Fleet
 #      strategy, per-repo operator preferences, sensitive routing: things that must
@@ -54,14 +55,14 @@ mh-memory.sh - native plain-markdown context for the manhandler
                                    append one dated bullet to repos/<repo>/.mh/notes.md.
   remember --global --kind <kind> "<fact>"
                                    append one dated bullet to state/learnings.md.
-  seed <repo>                      ensure the private store (git-excluded) and the
-                                   AGENTS.md mh:knowledge markers exist. Idempotent.
+  seed <repo>                      ensure the git-excluded private store exists.
+                                   Idempotent. Never touches the clone's AGENTS.md.
 
   kinds: command convention invariant pitfall routing decision
 
-SHARED knowledge is authored by a crewmate editing the AGENTS.md mh:knowledge
-section in its worktree and committing it - never appended through this tool.
-Never record a secret value in any store.
+SHARED knowledge is authored by a crewmate adding an mh:knowledge section to the
+repo's AGENTS.md in its worktree and committing it - never written through this
+tool (that would dirty the clone). Never record a secret value in any store.
 EOF
 }
 
@@ -139,33 +140,6 @@ ensure_private_store() {
   fi
 }
 
-# --- shared-knowledge scaffolding --------------------------------------------
-# Ensure the AGENTS.md mh:knowledge markers exist. Honors the prime directive:
-# a managed repo's TRACKED AGENTS.md is never hand-written here (the section is
-# authored by a crewmate in a worktree). Only an absent or untracked AGENTS.md,
-# which cannot dirty tracked content or break fast-forward sync, is scaffolded.
-ensure_shared_markers() {
-  local repo="$1" dir agents existed=0
-  dir="$(clone_dir "$repo")"
-  agents="$dir/AGENTS.md"
-  if [ -f "$agents" ] && grep -q 'mh:knowledge:start' "$agents" 2>/dev/null; then
-    return 0
-  fi
-  if [ -f "$agents" ] && git -C "$dir" ls-files --error-unmatch AGENTS.md >/dev/null 2>&1; then
-    mh_warn "repo '$repo' has a tracked AGENTS.md without an mh:knowledge section; a crewmate must add it in a worktree (not seeded here)."
-    return 0
-  fi
-  [ -f "$agents" ] && existed=1
-  {
-    if [ "$existed" = 1 ]; then printf '\n'; else printf '# %s\n\n' "$repo"; fi
-    printf '%s\n' "$MH_KNOWLEDGE_START"
-    printf '## Repository knowledge (manhandler-maintained)\n'
-    printf '_Durable, non-obvious facts about this repo: build/test commands, conventions,\n'
-    printf 'invariants, pitfalls, routing. Curated - not append-forever._\n\n'
-    printf '%s\n' "$MH_KNOWLEDGE_END"
-  } >> "$agents"
-}
-
 # --- verbs -------------------------------------------------------------------
 recall_repo() {
   local repo="$1" query="${2:-}" dir shared_content priv_content priv_file
@@ -219,8 +193,7 @@ seed_repo() {
   local repo="$1"
   require_registered "$repo"
   ensure_private_store "$repo"
-  ensure_shared_markers "$repo"
-  mh_info "seeded memory scaffold for '$repo' (.mh/ private store + AGENTS.md mh:knowledge markers)"
+  mh_info "seeded private memory store for '$repo' (git-excluded repos/$repo/.mh/). Shared knowledge is added to the repo's AGENTS.md mh:knowledge section by a crewmate in a worktree."
 }
 
 # --- dispatch ----------------------------------------------------------------
