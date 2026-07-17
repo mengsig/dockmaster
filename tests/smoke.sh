@@ -633,6 +633,16 @@ check "campaign rollup excludes non-members"    '! grep -q camp-other <<<"$ROLL"
 check "campaign rollup shows member status"     'grep -E "camp-web +inflight" <<<"$ROLL" >/dev/null && grep -E "camp-api +queued" <<<"$ROLL" >/dev/null'
 check "campaign rejects an invalid id"          '! b mh-backlog.sh campaign ".bad" >/dev/null 2>&1'
 check "add rejects an invalid campaign id"       '! b mh-backlog.sh add camp-bad "x" --campaign ".bad" >/dev/null 2>&1'
+# === repo-scout tests (#27) ===
+echo "== repo-scout onboarding hint (#27) =="
+# Adding a repo with no test_cmd must point at the onboarding scout (the tests
+# gate would otherwise soft-skip silently and knowledge start empty); supplying a
+# test_cmd means there is nothing to bootstrap, so no hint.
+ADDHINT="$(b mh-repo.sh add scouthint "$TMP/origin.git" --mode local-only --no-memory 2>&1)"
+check "add without a test_cmd hints the onboarding scout" 'grep -qi "onboarding scout" <<<"$ADDHINT"'
+check "scout hint names the set test_cmd escape hatch"    'grep -q "test_cmd" <<<"$ADDHINT"'
+ADDQUIET="$(b mh-repo.sh add scoutquiet "$TMP/origin.git" --mode local-only --test-cmd "true" --no-memory 2>&1)"
+check "add WITH a test_cmd prints no scout hint"          '! grep -qi "onboarding scout" <<<"$ADDQUIET"'
 
 echo
 echo "smoke: $pass passed, $fail failed"

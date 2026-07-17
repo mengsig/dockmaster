@@ -93,6 +93,11 @@ This is an orphaned clone from a partial add/create (the clone succeeded but reg
     register_repo "$name" "$remote" "$branch" "$mode" "$test_cmd"
     [ "$want_memory" -eq 1 ] && seed_memory "$name" || true
     mh_info "registered '$name' (mode=$mode, default_branch=$branch)"
+    # A fresh clone with no test_cmd leaves the tests gate a permanent soft-skip
+    # and an empty mh:knowledge section. Point at the onboarding scout that seeds
+    # both (project-management skill); a scout would find nothing in a repo the
+    # operator supplied a command for, so only hint when one is missing.
+    [ -n "$test_cmd" ] || mh_info "hint: no test command set, so the tests gate will soft-skip and repository knowledge starts empty. Dispatch an onboarding scout to propose a test_cmd and initial knowledge (see the project-management skill), or set one now: mh-repo.sh set $name test_cmd '<cmd>'"
     ;;
 
   create)

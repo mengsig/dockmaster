@@ -58,6 +58,31 @@ memory. This publish is the repo-initialization write sanctioned for
   publishing is outward-facing and hard to reverse.
 - Only name a remote the operator actually gave. Never invent one.
 
+## Onboarding scout (optional)
+
+`add`/`create` leave two things unbootstrapped: with no `test_cmd` the tests gate
+is a permanent soft-skip (see `testing-policy`), and the repo's SHARED
+`mh:knowledge` section starts empty. To seed both, you MAY dispatch an
+**onboarding scout** right after onboarding — an ordinary read-only scout task
+over the fresh clone (classify it `--kind scout` per `task-lifecycle`; no new
+machinery). It is optional: the operator can skip it and configure both by hand.
+
+The scout reads the clone (package-manager files, CI config, Makefile, existing
+test dirs) and **reports** — it never changes the clone:
+
+- a proposed `test_cmd`. You apply it on the operator's word with
+  `bin/mh-repo.sh set <repo> test_cmd '<cmd>'`; surface the proposal, never
+  auto-apply it silently.
+- a proposed initial `mh:knowledge` section (build/test, conventions,
+  invariants, pitfalls). Committing it is a **separate, gated task**: a crewmate
+  writes the section in a worktree and lands it through the normal PR/local flow
+  (`memory-routing`). The manhandler **never** hand-writes a managed repo's
+  `AGENTS.md` (prime directive) — the scout only proposes the text.
+
+The report is evidence, not authorization: the scout stays strictly read-only,
+and each follow-up (apply the command, commit the section) is a distinct step on
+the operator's word.
+
 ## Configure a repo
 
 ```
