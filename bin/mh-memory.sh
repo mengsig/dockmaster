@@ -166,8 +166,11 @@ extract_knowledge() {
 # set -u). An all-whitespace query degrades to "no filter" (returns content).
 filter_query() {
   local content="$1" query="$2" term
+  set -f  # $query is split on whitespace intentionally; -f stops pathname
+          # globbing (a term like "*.md" must stay literal, not match CWD files)
   set -- # reuse the positional args as the term list
   for term in $query; do set -- "$@" -e "$term"; done
+  set +f
   if [ "$#" -eq 0 ]; then printf '%s\n' "$content"; return 0; fi
   grep -i -F "$@" <<<"$content" || true
 }
