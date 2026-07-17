@@ -49,4 +49,16 @@ Canonical repository memory is stored in `.contextgraph/repo.md`; use `contextgr
 - **Priority:** normal
 - **Created:** `2026-07-17T13:36:38.350Z`
 - **Checked:** `2026-07-17T13:36:38.350Z`
+
+<!-- contextgraph:item:v1 -->
+### `bash-portability-target` · invariant
+
+**Fact:** Toolbelt scripts in bin/ must run on bash 3.2 \(macOS default\): no mapfile/readarray, no 'declare -A' associative arrays, no $\{var^^\}/$\{var,,\} case ops, no &amp;&gt;&gt; redirection. Use while-read loops and parallel indexed arrays instead.
+
+- **Why:** macOS ships bash 3.2; bash-4-only features break the toolbelt there
+- **Source:** verified
+- **Priority:** normal
+- **Created:** `2026-07-17T17:52:30.279Z`
+- **Checked:** `2026-07-17T17:52:30.279Z`
+- **Evidence:** [{"path":"bin/mh-status.sh","sha256":"64a4277924657857b5213bb125b86a853cf896aeefa30cc9b05933f5ae2b114f"}]
 <!-- contextgraph:managed:end -->

@@ -52,7 +52,13 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   one) name="${1:-}"; [ -n "$name" ] || mh_die "usage: mh-sync.sh one <name>"; sync_one "$name" ;;
   all)
-    mapfile -t names < <(jq -r '.repos | keys[]' "$MH_REGISTRY" 2>/dev/null || true)
+    # bash 3.2 has no mapfile; read the repo names into an indexed array with a
+    # while-read loop (same pattern as mh-status.sh).
+    names=()
+    while IFS= read -r n; do
+      [ -n "$n" ] || continue
+      names+=("$n")
+    done < <(jq -r '.repos | keys[]' "$MH_REGISTRY" 2>/dev/null || true)
     [ "${#names[@]}" -eq 0 ] && { echo "no repos registered"; exit 0; }
     for n in "${names[@]}"; do sync_one "$n"; done
     ;;

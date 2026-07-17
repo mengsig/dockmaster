@@ -124,8 +124,16 @@ case "$cmd" in
     ;;
 
   remove)
-    id="${1:-}"; force=0
-    [ "${2:-}" = "--force" ] && force=1
+    # Parse flags in a loop so order does not matter: both `remove <id> --force`
+    # and `remove --force <id>` are accepted.
+    id=""; force=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --force) force=1; shift ;;
+        -*) mh_die "unknown flag: $1" ;;
+        *) [ -z "$id" ] || mh_die "unexpected extra argument: $1"; id="$1"; shift ;;
+      esac
+    done
     [ -n "$id" ] || mh_die "usage: mh-worktree.sh remove <id> [--force]"
     wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
     [ -n "$wt" ] || mh_die "no worktree recorded for $id"
