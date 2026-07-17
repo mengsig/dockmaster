@@ -115,10 +115,12 @@ case "$cmd" in
     # "none" would let a red PR merge (violating "never merge red").
     runs_rollup="none"; status_rollup="none"
     if [ -n "$sha" ]; then
+      # action_required (needs manual action) counts as failing, not green;
+      # stale (result is for an older commit) is inconclusive, so pending.
       runs_rollup="$(gh-axi api "repos/$slug/commits/$sha/check-runs" 2>/dev/null \
         | jq -r 'if (.check_runs|length)==0 then "none"
-                 elif any(.check_runs[]; .conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out") then "failing"
-                 elif any(.check_runs[]; .status!="completed") then "pending"
+                 elif any(.check_runs[]; .conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out" or .conclusion=="action_required") then "failing"
+                 elif any(.check_runs[]; .status!="completed" or .conclusion=="stale") then "pending"
                  else "passing" end' 2>/dev/null || echo unknown)"
       # GitHub returns .state=="pending" even with ZERO statuses, so treat
       # total_count==0 as "none" (no signal), not pending.
