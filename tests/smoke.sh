@@ -46,6 +46,9 @@ check "create registers repo"        '[ "$(b mh-repo.sh get fresh mode)" = "loca
 check "create initializes clone"     '[ -d "$MH_HOME/repos/fresh/.git" ]'
 check "create sets origin upstream"  '[ "$(git -C "$MH_HOME/repos/fresh" remote get-url origin)" = "$TMP/new.git" ]'
 check "create publishes first commit" 'git -C "$TMP/new.git" log --oneline -1 2>/dev/null | grep -q "initialize repository"'
+# A worktree needs a task record with a kind first (mh-worktree.sh create fails
+# closed without one, so `state` can always classify the task).
+b mh-task.sh new fresh-wt --kind ship --repo fresh >/dev/null
 check "create yields a workable base" 'b mh-worktree.sh create fresh-wt fresh >/dev/null 2>&1'
 check "create refuses populated remote" '! b mh-repo.sh create taken "$TMP/origin.git" --no-memory >/dev/null 2>&1'
 
@@ -120,7 +123,11 @@ echo "== state reconcile: 'merged:' in a note must not fake done (anchored verb)
 b mh-task.sh new fix1 --kind ship --repo demo >/dev/null
 b mh-task.sh event fix1 note "waiting on upstream PR merged: #123" >/dev/null
 check "note text 'merged:' does not reconcile to done" '! b mh-task.sh state fix1 | grep -q done'
-b mh-task.sh event fix1 merged "landed via local ff" >/dev/null
+# The sanctioned landing paths (mh-merge/mh-pr) append the 'merged' event
+# directly via the status-append helper; `mh-task.sh event` can no longer forge
+# it (see the state-gate-integrity block at the end). Simulate the sanctioned
+# append through the same helper those paths use.
+( . "$ROOT/bin/mh-lib.sh"; mh_status_append fix1 merged "landed via local ff" ) >/dev/null
 check "a real merge event reconciles to done"          'b mh-task.sh state fix1 | grep -q done'
 
 echo "== test gate =="
@@ -548,6 +555,66 @@ b mh-worktree.sh create memblank-1 memblank >/dev/null 2>&1
 b mh-brief.sh memblank-1 >/dev/null 2>/dev/null
 check "empty repo brief shows the friendly single line"     'grep -q "no repository knowledge recorded yet" "$MH_HOME/data/memblank-1/brief.md"'
 check "empty repo brief injects no empty knowledge scaffold" '! grep -q "== shared knowledge" "$MH_HOME/data/memblank-1/brief.md"'
+# === state-gate-integrity tests (#20 #21) ===
+# Kept in one clearly-marked block at the end so parallel branches union-merge
+# cleanly. All offline: GitHub-dependent paths are exercised via their pure
+# decision helpers (sourced from mh-lib) rather than the network.
+echo "== state-gate-integrity: forgeable 'merged' event (#20-a) =="
+b mh-repo.sh add sgi "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b mh-task.sh new sgi-land --kind ship --repo sgi >/dev/null
+check "event rejects the reserved 'merged' landing verb" '! b mh-task.sh event sgi-land merged "forged" >/dev/null 2>&1'
+SGIERR="$(b mh-task.sh event sgi-land merged "forged" 2>&1 || true)"
+check "event names the landing-signal reason"            'grep -q "landing signal" <<<"$SGIERR"'
+check "a forged merged event does not reconcile to done" '! b mh-task.sh state sgi-land | grep -q done'
+# The sanctioned local-land path (mh-merge.sh local) still records the landing
+# under the reservation (it appends 'merged' directly via the status helper).
+SGIWT="$(b mh-worktree.sh create sgi-land sgi | tail -n1)"
+git -C "$SGIWT" checkout -q -b feat/x/sgi-land
+printf 'sgi\n' > "$SGIWT/sgi.txt"
+git -C "$SGIWT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$SGIWT" -c user.email=c@c.co -c user.name=c commit -qm "sgi work" >/dev/null
+check "sanctioned merge path records the landing"        'b mh-merge.sh local sgi-land >/dev/null 2>&1'
+check "a real landing reconciles to done"                'b mh-task.sh state sgi-land | grep -q done'
+b mh-worktree.sh remove sgi-land >/dev/null 2>&1
+
+echo "== state-gate-integrity: kind-less worktree create (#20-c) =="
+check "worktree create refuses a task with no record" '! b mh-worktree.sh create sgi-norecord sgi >/dev/null 2>&1'
+SGINR="$(b mh-worktree.sh create sgi-norecord sgi 2>&1 || true)"
+check "worktree create points at mh-task.sh new"      'grep -q "mh-task.sh new" <<<"$SGINR"'
+
+echo "== state-gate-integrity: merge check-gate never merges red on 'none' (#21-a) =="
+gate() { ( . "$ROOT/bin/mh-lib.sh"; mh_merge_gate "$1" "$2" "$3" ); }
+check "gate refuses 'none' when CI exists and no flag"  '[ "$(gate none 0 1)" = "refuse-none" ]'
+check "gate allows 'none' with --allow-no-checks"       '[ "$(gate none 1 1)" = "allow" ]'
+check "gate allows 'none' when the repo has no CI"      '[ "$(gate none 0 0)" = "allow" ]'
+check "gate allows 'passing'"                           '[ "$(gate passing 0 1)" = "allow" ]'
+check "gate refuses 'failing'"                          '[ "$(gate failing 0 1)" = "refuse-failing" ]'
+check "gate refuses 'pending'"                          '[ "$(gate pending 0 1)" = "refuse-pending" ]'
+check "gate refuses an unknown rollup"                  '[ "$(gate bogus 0 1)" = "refuse-unknown" ]'
+
+echo "== state-gate-integrity: mutex reclaims a crashed holder (#21-b) =="
+# Pre-create a lock dir with a dead PID and an ancient timestamp; the next
+# mh_lock must reclaim it (with a loud warning) and succeed, while the primitive
+# stays mutually exclusive for a live holder.
+( . "$ROOT/bin/mh-lib.sh"
+  LF="$TMP/reclaim-test"
+  mkdir -p "$LF.lock"; printf '999999\n' > "$LF.lock/pid"; printf '1\n' > "$LF.lock/epoch"
+  mh_lock "$LF" 2>"$TMP/reclaim.warn"
+  mkdir "$LF.lock" 2>/dev/null && exit 11   # a successful mkdir => lock not exclusive
+  mh_unlock "$LF" )
+RECLAIM_RC=$?
+check "mh_lock reclaims a dead-PID stale lock and succeeds" '[ "$RECLAIM_RC" -eq 0 ]'
+check "stale reclaim warns loudly"                          'grep -q "reclaiming stale lock" "$TMP/reclaim.warn"'
+# A fresh live lock is still held exclusively: after acquiring, a bare mkdir of
+# the same lock dir fails (the concurrent-meta-writes test above covers the
+# no-lost-update guarantee end to end).
+( . "$ROOT/bin/mh-lib.sh"
+  LF2="$TMP/live-lock-test"
+  mh_lock "$LF2"
+  mkdir "$LF2.lock" 2>/dev/null && exit 12   # held => this mkdir must fail
+  mh_unlock "$LF2" )
+LIVE_RC=$?
+check "a live lock is still mutually exclusive" '[ "$LIVE_RC" -eq 0 ]'
 
 echo
 echo "smoke: $pass passed, $fail failed"

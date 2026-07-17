@@ -104,7 +104,15 @@ case "$cmd" in
     dir="$(mh_repo_dir "$repo")"; slug="$(owner_repo "$(git -C "$dir" remote get-url origin)")"
     [ -n "$base" ] || base="$(mh_default_branch "$dir")"
     mh_info "pushing $branch -> origin"
-    git -C "$wt" push -u origin "$branch" >/dev/null 2>&1 || git -C "$wt" push origin "$branch"
+    # The first push (-u) can fail for benign reasons (upstream already set), so
+    # retry a plain push. If THAT is rejected — typically a non-fast-forward
+    # because the branch was rebased locally and diverged from origin — surface a
+    # domain message instead of raw git text. No force is performed: a diverged
+    # branch is a signal to reconcile, never to overwrite origin.
+    if ! git -C "$wt" push -u origin "$branch" >/dev/null 2>&1; then
+      git -C "$wt" push origin "$branch" \
+        || mh_die "push rejected — branch '$branch' diverged on origin; was it rebased? no force performed. Reconcile with origin, then retry."
+    fi
     args=(pr create -R "$slug" --title "$title" --base "$base" --head "$branch")
     if [ -n "$body_file" ]; then args+=(--body-file "$body_file")
     elif [ -n "$body" ]; then args+=(--body "$body")
@@ -213,12 +221,13 @@ case "$cmd" in
   merge)
     mh_need gh-axi; mh_need gh
     id="${1:-}"; shift || true
-    [ -n "$id" ] || mh_die "usage: mh-pr.sh merge <id> [--method squash|merge|rebase] [--delete-branch]"
-    method="squash"; delete=0
+    [ -n "$id" ] || mh_die "usage: mh-pr.sh merge <id> [--method squash|merge|rebase] [--delete-branch] [--allow-no-checks]"
+    method="squash"; delete=0; allow_no_checks=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --method) method="${2:-}"; shift 2 ;;
         --delete-branch) delete=1; shift ;;
+        --allow-no-checks) allow_no_checks=1; shift ;;
         *) mh_die "unknown flag: $1" ;;
       esac
     done
@@ -230,11 +239,21 @@ case "$cmd" in
     merge_state="$(mh_meta_get "$id" merge_state)"
     [ "$state" = "MERGED" ] && mh_die "PR already merged: $url"
     [ "$state" = "CLOSED" ] && mh_die "PR is closed, refusing to merge: $url"
-    case "$checks" in
-      failing) mh_die "REFUSED: PR has failing checks (never merge red): $url" ;;
-      pending) mh_die "REFUSED: PR checks still running: $url" ;;
-      passing|none) : ;;
-      *) mh_die "REFUSED: could not confirm check status ($checks): $url" ;;
+    # Never merge red. A `none` rollup (no checks reported) does NOT auto-pass:
+    # it is the race window after a PR opens but before CI registers. Allow it
+    # only when there is genuinely nothing to wait for — an explicit
+    # --allow-no-checks, or a repo with no CI config (no .github/workflows in the
+    # branch's worktree or the managed clone).
+    repo="$(mh_meta_get "$id" repo)"; wt="$(mh_meta_get "$id" worktree)"
+    ci_dir="$(mh_repo_dir "$repo")"
+    has_ci=0
+    if { [ -n "$wt" ] && [ -d "$wt/.github/workflows" ]; } || [ -d "$ci_dir/.github/workflows" ]; then has_ci=1; fi
+    case "$(mh_merge_gate "$checks" "$allow_no_checks" "$has_ci")" in
+      allow) : ;;
+      refuse-failing) mh_die "REFUSED: PR has failing checks (never merge red): $url" ;;
+      refuse-pending) mh_die "REFUSED: PR checks still running: $url — wait for them with: mh-pr.sh await-checks $id" ;;
+      refuse-none)    mh_die "REFUSED: no checks reported yet for $url — CI may not have registered. Wait with: mh-pr.sh await-checks $id, or pass --allow-no-checks if this repo has no required CI." ;;
+      *)              mh_die "REFUSED: could not confirm check status ($checks): $url" ;;
     esac
     # mergeable_state gate. Refuse a conflicted, draft, or branch-protection-
     # blocked PR. Do NOT refuse solely on "unknown" (GitHub often hasn't computed
@@ -245,8 +264,8 @@ case "$cmd" in
       blocked) mh_die "REFUSED: required checks/reviews not satisfied (mergeable_state=blocked): $url" ;;
       *) : ;;
     esac
-    n="$(pr_number_from_url "$url")"; repo="$(mh_meta_get "$id" repo)"
-    slug="$(owner_repo "$(git -C "$(mh_repo_dir "$repo")" remote get-url origin)")"
+    n="$(pr_number_from_url "$url")"
+    slug="$(owner_repo "$(git -C "$ci_dir" remote get-url origin)")"
     args=(pr merge "$n" -R "$slug" "--$method")
     [ "$delete" -eq 1 ] && args+=(--delete-branch)
     gh-axi "${args[@]}" || mh_die "merge failed"
