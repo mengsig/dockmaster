@@ -53,20 +53,25 @@ same way):
 
 The rigorous gate order is
 `review (dimension-parallel) → verify-findings → fix → tests → verify → security
-→ await-checks → pr`. The behavioral `verify` gate drives the changed behavior
+→ pr`. The behavioral `verify` gate drives the changed behavior
 end to end (via the `verify` skill) and reports what was actually exercised — not
 just that tests pass; it is skippable only when the diff has no runtime surface
 (docs/config-only). `security` is auto-triggered (`bin/mh-pr.sh security-scan`,
-then `security-review` only on a hit, else an explicit skip). `await-checks`
-waits for CI, and `pr` opens the PR. The never-merge-red merge gate and the
-lavish-approval-first ordering are unchanged across all three tiers.
+then `security-review` only on a hit, else an explicit skip), and `pr` opens the
+PR. Waiting for CI is **not** a pipeline gate — it runs in the operator-mediated
+merge tail after the PR opens (see "Merge authority" below). The never-merge-red
+merge gate and the lavish-approval-first ordering are unchanged across all three
+tiers.
 
 The file has a `gates` array. Run the gates top to bottom. A repo's delivery
 **mode** (registry: `pipeline` | `direct-pr` | `local-only`) shapes it:
 
 - **pipeline** — run the full two-pass gate list below, ending in a PR.
-- **direct-pr** — skip the review/fix passes; the crewmate opens the PR itself;
-  you still record it (`bin/mh-pr.sh check`) and enforce the merge gate.
+- **direct-pr** — skip the review/fix passes; the crewmate opens the PR through
+  `bin/mh-pr.sh open <id>` so the URL is recorded to the task record (`check` and
+  `merge` need it); you then enforce the merge gate with `bin/mh-pr.sh check`. If
+  a PR was opened out of band, record its URL first with
+  `bin/mh-task.sh set <id> pr <url>`.
 - **local-only** — no PR; this skill does not apply. Land with
   `bin/mh-merge.sh local <id>` after approval (see `task-lifecycle`).
 
@@ -185,11 +190,11 @@ merges always escalate, even under `yolo`.
 
 The default is to drive the gates above with ordinary `Agent` calls. For a
 hands-off run of the whole pipeline instead, `workflows/pr-pipeline.js` executes
-the same gates as a `Workflow` with zero-token idle between stages — the default
-two-pass tier, or the `rigorous` tier (dimension-parallel review via
-`parallel()`, adversarial `verify-findings`, then fix → tests → verify →
-security → await-checks → pr) when the caller passes `tier: "rigorous"` or the
-rigorous `gates`. It is opt-in and not wired to anything — invoke it via the
+the same gates as a `Workflow` with zero-token idle between stages. It has a
+built-in gate list for each tier (`fast` | `default` | `rigorous`), selected by
+`tier:` when the caller passes no explicit `gates` — e.g. the `rigorous` tier
+(dimension-parallel review via `parallel()`, adversarial `verify-findings`, then
+fix → tests → verify → security → pr). It is opt-in and not wired to anything — invoke it via the
 Workflow tool only when the operator has asked for multi-agent orchestration, and
 a live **rigorous** run is a manhandler/operator action. See `config/README.md`
 for which config fields it reads versus the agent-driven path.
