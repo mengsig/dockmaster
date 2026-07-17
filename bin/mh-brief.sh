@@ -151,6 +151,11 @@ cg_skill="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.claude/skills/coding
 if [ -f "$cg_skill" ]; then
   printf '\n## Coding standards - follow these whenever you write or change code\n\n'
   awk 'NR==1 && /^---$/ {f=1; next} f && /^---$/ {f=0; next} !f' "$cg_skill"
+else
+  # The coding standards are a safety contract baked into every brief. If the
+  # skill file is missing or renamed, warn loudly (to stderr, not the brief) so
+  # the dropped standard is visible rather than silently omitted.
+  mh_warn "coding-guidelines skill not found at $cg_skill; brief $id omits the baked-in coding standards"
 fi
 
 # status protocol (shared) -----------------------------------------------------

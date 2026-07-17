@@ -95,7 +95,8 @@ case "$cmd" in
     case "$mode" in pipeline|direct-pr|local-only) ;; *) mh_die "mode must be pipeline|direct-pr|local-only" ;; esac
     jq -e --arg n "$name" '.repos[$n]' "$MH_REGISTRY" >/dev/null 2>&1 && mh_die "repo '$name' already registered"
     dir="$MH_REPOS/$name"
-    [ -e "$dir" ] && mh_die "path already exists: $dir"
+    [ -e "$dir" ] && mh_die "path already exists but '$name' is not registered: $dir
+This is an orphaned clone from a partial add/create (the clone succeeded but registration did not). Recover, then re-run: remove it (rm -rf '$dir') or move it aside."
     mh_info "cloning $remote -> $dir"
     git clone "$remote" "$dir" || mh_die "clone failed"
     [ -n "$branch" ] || branch="$(mh_default_branch "$dir")"
@@ -128,7 +129,8 @@ case "$cmd" in
     case "$mode" in pipeline|direct-pr|local-only) ;; *) mh_die "mode must be pipeline|direct-pr|local-only" ;; esac
     jq -e --arg n "$name" '.repos[$n]' "$MH_REGISTRY" >/dev/null 2>&1 && mh_die "repo '$name' already registered"
     dir="$MH_REPOS/$name"
-    [ -e "$dir" ] && mh_die "path already exists: $dir"
+    [ -e "$dir" ] && mh_die "path already exists but '$name' is not registered: $dir
+This is an orphaned clone from a partial add/create (the local repo was initialized but registration did not complete). Recover, then re-run: remove it (rm -rf '$dir') or move it aside."
 
     # Resolve the remote. Either the operator supplies an EMPTY remote they made,
     # or (no remote given) we create the GitHub repo ourselves.
@@ -223,6 +225,21 @@ $out"
         mh_die "clone $name has active worktrees; tear them down first"
       fi
     fi
+    # Fail closed on live tasks: a non-terminal task pointing at this repo would be
+    # orphaned by removal — its later mh-worktree/mh-sync calls die "no clone".
+    # Terminal (done) tasks are safe to leave behind. The registry entry is still
+    # present here, so `mh-task.sh state` can resolve each referencing task.
+    live=""
+    task_sh="$(dirname "$0")/mh-task.sh"
+    for m in "$MH_TASKS"/*.meta; do
+      [ -f "$m" ] || continue
+      tid="$(basename "$m" .meta)"
+      [ "$(mh_meta_get "$tid" repo)" = "$name" ] || continue
+      st="$("$task_sh" state "$tid" 2>/dev/null | sed -n 's/^state: \([^ ]*\).*/\1/p')"
+      [ "$st" = "done" ] && continue
+      live="$live $tid($st)"
+    done
+    [ -z "$live" ] || mh_die "repo $name is referenced by live task(s):$live — finish or tear them down before unregistering the repo"
     registry_write --arg n "$name" 'del(.repos[$n])'
     mh_info "unregistered '$name' (clone left on disk at $dir; delete manually if intended)"
     ;;
