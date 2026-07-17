@@ -157,7 +157,11 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     # base for worktrees, then publish and set upstream. This is the repo-init
     # write sanctioned for mh-repo.sh; it never forces and never touches an
     # existing clone (the path is guaranteed absent above).
-    git init -q -b "$branch" "$dir" || mh_die "git init failed$remote_note"
+    # Portable initial-branch selection: `git init -b` needs git >= 2.28. Init,
+    # then point HEAD at the desired branch ref (materialized by the first commit
+    # below) — works on all supported git versions.
+    git init -q "$dir" || mh_die "git init failed$remote_note"
+    git -C "$dir" symbolic-ref HEAD "refs/heads/$branch" || mh_die "failed to set initial branch to '$branch'$remote_note"
     git -C "$dir" remote add origin "$remote" || mh_die "failed to set origin remote. Local repo left at $dir$remote_note"
     printf '# %s\n' "$name" > "$dir/README.md"
     git -C "$dir" add README.md
