@@ -468,6 +468,16 @@ b mh-repo.sh create tbinit "$TMP/tb-init.git" --mode local-only --branch trunk -
 check "create registers with requested branch" '[ "$(b mh-repo.sh get tbinit default_branch)" = "trunk" ]'
 check "clone HEAD is the requested branch"      '[ "$(git -C "$MH_HOME/repos/tbinit" rev-parse --abbrev-ref HEAD)" = "trunk" ]'
 check "requested branch exists in the clone"    'git -C "$MH_HOME/repos/tbinit" rev-parse --verify --quiet refs/heads/trunk >/dev/null'
+# === docs-doctor tests (#24) ===
+echo "== doctor tool tiers (#24) =="
+DOCF="$(b mh-doctor.sh 2>&1 || true)"   # capture once (grep -q + pipefail)
+check "doctor verdict is READY with only git+jq required" 'grep -q "READY:" <<<"$DOCF"'
+check "doctor lists chrome-devtools-axi"                  'grep -q "chrome-devtools-axi" <<<"$DOCF"'
+# The axi wrappers must never read as required: a fresh clone without them still
+# gets a green verdict, matching the README contract.
+AXILINES="$(grep -E 'gh-axi|lavish-axi|chrome-devtools-axi' <<<"$DOCF" || true)"
+check "doctor does not mark axi tools required"           '! grep -qi "required" <<<"$AXILINES"'
+check "check mode still exits 0 without axi tools"        'b mh-doctor.sh check >/dev/null'
 
 echo
 echo "smoke: $pass passed, $fail failed"

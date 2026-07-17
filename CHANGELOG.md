@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Honest onboarding docs and one dependency contract.** The README and
+  `mh-doctor` now state the tool contract identically in three tiers: `git`/`jq`
+  required for anything, `gh` (or `gh-axi`) required for the PR flow, and the
+  `gh-axi`/`lavish-axi`/`chrome-devtools-axi` axi wrappers as optional
+  enhancements — the operator's own tooling, not bundled with this distro.
+  Without them the manhandler runs in a real, plainer mode (plain `gh` for
+  GitHub, operator-run review with no lavish artifact); a green doctor verdict
+  now needs only `git`+`jq`, matching what the README promises. Added a numbered
+  "Getting started" first-run path, a supported-platforms note (macOS/Linux,
+  bash 3.2+), and replaced the stale hand-maintained `bin/` list with a pointer
+  to `bin/mh help`.
+
+### Added
+
+- **`CONTRIBUTING.md`** (how to test, the bash-3.2 portability invariant,
+  branch/commit style) and **`SECURITY.md`** (trust model and private
+  vulnerability reporting).
+
 ## [0.2.0] - 2026-07-18
 
 ### Changed
