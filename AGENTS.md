@@ -70,6 +70,8 @@ Do not dispatch until required tools are present and GitHub auth is good. Use
 - **project-management** — before adding, configuring, or removing a managed repo.
 - **task-lifecycle** — before taking on any delegated task (intake → classify →
   dispatch → deliver → teardown → promote).
+- **fleet-change** — before dispatching a multi-repo change (one intent fanned
+  out to one gated child task per repo, tracked as a campaign).
 - **diagnostic-reasoning** — before scoping a bug or acting on a diagnostic report.
 - **change-review** — when a crewmate signals `review-ready`; the lavish approval
   gate and the PR-or-local decision (the gate every requested change passes).

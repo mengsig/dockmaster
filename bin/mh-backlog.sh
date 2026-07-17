@@ -6,12 +6,16 @@
 # Claude Code task list is an in-session convenience; this file survives restarts.
 #
 # Work items:
-#   add <id> "<title>" [--repo R] [--status queued|inflight] [--blocked-by a,b] [--note "..."]
+#   add <id> "<title>" [--repo R] [--status queued|inflight] [--blocked-by a,b] [--note "..."] [--campaign C]
 #   move <id> <queued|inflight|done>
 #   done <id> [--note "..."]
 #   ready                 queued items whose blockers are all done/absent
+#   campaign <id>         items grouped under a campaign, with their status
 #   decisions             open operator decisions (key + question), one per line
 #   list                  print the rendered backlog
+#
+# A campaign groups the child items of one multi-repo intent (one child task per
+# repo) so it can be tracked and reported as a unit; see the fleet-change skill.
 #
 # Operator decisions (used by the decision-hold skill):
 #   hold <key> "<question>" [--options "A | B"] [--origin <path>]
@@ -46,6 +50,7 @@ render() {
         "- [\(if .status=="done" then "x" else " " end)] \(.id) \(.title)" +
         (if (.repo//"")!="" then "  (\(.repo))" else "" end) +
         (if (.blocked_by|length)>0 then "\n    blocked-by: \(.blocked_by|join(", "))" else "" end) +
+        (if (.campaign//"")!="" then "\n    campaign: \(.campaign)" else "" end) +
         (if (.note//"")!="" then "\n    note: \(.note)" else "" end)
       ' "$BJSON"
       echo
@@ -65,18 +70,20 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   add)
     id="${1:-}"; title="${2:-}"; shift 2 2>/dev/null || true
-    [ -n "$id" ] && [ -n "$title" ] || mh_die "usage: mh-backlog.sh add <id> \"<title>\" [--repo R] [--status queued|inflight] [--blocked-by a,b] [--note ...]"
+    [ -n "$id" ] && [ -n "$title" ] || mh_die "usage: mh-backlog.sh add <id> \"<title>\" [--repo R] [--status queued|inflight] [--blocked-by a,b] [--note ...] [--campaign C]"
     mh_require_id "$id"
-    repo=""; status="queued"; blocked=""; note=""
+    repo=""; status="queued"; blocked=""; note=""; campaign=""
     while [ "$#" -gt 0 ]; do case "$1" in
       --repo) repo="${2:-}"; shift 2;; --status) status="${2:-}"; shift 2;;
       --blocked-by) blocked="${2:-}"; shift 2;; --note) note="${2:-}"; shift 2;;
+      --campaign) campaign="${2:-}"; shift 2;;
       *) mh_die "unknown flag: $1";; esac; done
     case "$status" in queued|inflight|done) ;; *) mh_die "status must be queued|inflight|done";; esac
+    [ -n "$campaign" ] && mh_require_id "$campaign"
     bj="$(printf '%s' "$blocked" | jq -R 'split(",") | map(select(length>0))')"
-    bwrite --arg id "$id" --arg t "$title" --arg r "$repo" --arg s "$status" --arg n "$note" --argjson b "${bj:-[]}" \
+    bwrite --arg id "$id" --arg t "$title" --arg r "$repo" --arg s "$status" --arg n "$note" --arg cp "$campaign" --argjson b "${bj:-[]}" \
       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '.items |= (map(select(.id!=$id)) + [{id:$id,title:$t,repo:$r,status:$s,blocked_by:$b,note:$n,ts:$ts}])'
+      '.items |= (map(select(.id!=$id)) + [{id:$id,title:$t,repo:$r,status:$s,blocked_by:$b,note:$n,campaign:$cp,ts:$ts}])'
     render; mh_info "backlog: added $id ($status)"
     ;;
   move)
@@ -124,6 +131,19 @@ EOF
       select(all(.blocked_by[]; . as $b | ($complete|index($b))!=null)) |
       "\(.id)\t\(.title)"' "$BJSON" | column -t -s$'\t' 2>/dev/null || true
     ;;
+  campaign)
+    # Rollup view: every item tagged with this campaign id and its current
+    # backlog status (id<TAB>status<TAB>title(repo)). Grouping only — each child
+    # is an ordinary gated task; the fleet-change skill drives the fan-out.
+    cid="${1:-}"
+    [ -n "$cid" ] || mh_die "usage: mh-backlog.sh campaign <id>"
+    mh_require_id "$cid"
+    jq -r --arg c "$cid" '
+      .items[] | select((.campaign//"")==$c) |
+      "\(.id)\t\(.status)\t\(.title)" +
+      (if (.repo//"")!="" then "  (\(.repo))" else "" end)' "$BJSON" \
+      | column -t -s$'\t' 2>/dev/null || true
+    ;;
   decisions)
     # open operator decisions, machine-readable (key<TAB>question); consumed by
     # status views. Resolved holds are omitted.
@@ -152,5 +172,5 @@ EOF
   list|show|"")
     render; cat "$BMD"
     ;;
-  *) echo "usage: mh-backlog.sh {add|move|done|ready|decisions|hold|resolve|list} ..." >&2; exit 2 ;;
+  *) echo "usage: mh-backlog.sh {add|move|done|ready|campaign|decisions|hold|resolve|list} ..." >&2; exit 2 ;;
 esac
