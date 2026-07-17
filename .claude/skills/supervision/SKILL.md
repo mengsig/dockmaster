@@ -32,9 +32,13 @@ merge event, report existence, committed-unlanded worktree), not the last line.
 
 Handle events by kind:
 - **done / ready** — advance delivery (run the next gate, or land after approval).
-- **blocked** — the crewmate needs *you* to act; do exactly what it names.
-- **needs-decision** — an operator choice; decide only under standing authority,
-  otherwise escalate to the operator (load `decision-hold` if it must persist).
+- **blocked** — the crewmate needs *you* to act; do exactly what it names. If the
+  blocker is an operator choice, treat it as **needs-decision** below.
+- **needs-decision** — an operator choice. Open a durable backlog hold that
+  references the task *first* (load `decision-hold`), then decide only under
+  standing authority, otherwise escalate to the operator. The hold must exist
+  before teardown or the choice is lost — `bin/mh-status.sh` flags a
+  `blocked`/`needs-decision`/`awaiting-review` task that has none.
 - **failed** — load `stuck-worker`; preserve work, never duplicate the crewmate.
 - **paused** — a bounded external wait expected to clear on its own; leave it,
   but re-check if it has been quiet unusually long.

@@ -8,8 +8,10 @@
 #
 # Sections: managed repos (flagging any clone left tangled on a feature branch),
 # in-flight tasks (with an attention summary), active worktrees (with disk use,
-# plus orphaned directories and dangling records), and the ready backlog with
-# open operator decisions.
+# plus orphaned directories, dangling records, and orphaned data artifacts),
+# three-source state drift (task meta vs backlog vs reconciled state), untracked
+# operator decisions (blocked/awaiting-review tasks with no open hold), and the
+# ready backlog with open operator decisions.
 #
 # Usage: mh-status.sh
 
@@ -25,7 +27,18 @@ shopt -s nullglob
 
 # Long-runner threshold: an in-flight task older than this is flagged as
 # possibly stuck. One knob, overridable via env for a deliberately slow fleet.
+# A non-integer or non-positive value (e.g. "4.5") would make the `* 3600`
+# arithmetic below throw or produce a nonsensical threshold, so validate it at
+# the boundary and fall back to the default rather than crash the snapshot.
 MH_STUCK_AGE_HOURS="${MH_STUCK_AGE_HOURS:-4}"
+case "$MH_STUCK_AGE_HOURS" in
+  ''|*[!0-9]*) stuck_age_ok=0 ;;
+  *) if [ "$MH_STUCK_AGE_HOURS" -gt 0 ] 2>/dev/null; then stuck_age_ok=1; else stuck_age_ok=0; fi ;;
+esac
+if [ "$stuck_age_ok" -ne 1 ]; then
+  mh_warn "MH_STUCK_AGE_HOURS='$MH_STUCK_AGE_HOURS' is not a positive integer; defaulting to 4"
+  MH_STUCK_AGE_HOURS=4
+fi
 
 section() { printf '\n=== %s ===\n' "$1"; }
 
@@ -139,6 +152,74 @@ done
 for ((i = 0; i < ${#rec_wt[@]}; i++)); do
   [ -d "${rec_wt[i]}" ] || printf '  DANGLING (recorded by %s, missing on disk): %s\n' "${rec_id[i]}" "${rec_wt[i]}"
 done
+# A data/<id>/ artifact dir whose task record is gone (torn down without archival,
+# or a crash) — dead weight every scan re-walks. Parallel to the ORPHAN/DANGLING
+# worktree checks above; a live or archivable task always keeps its .meta.
+for d in "$MH_DATA"/*/; do
+  d="${d%/}"
+  [ -f "$MH_TASKS/$(basename "$d").meta" ] || printf '  ORPHAN-DATA (artifacts, no task record): %s\n' "$d"
+done
+
+section "STATE DRIFT (task meta vs backlog vs reconciled state)"
+# Three sources describe the same work: the durable task metas, the backlog
+# items, and the reconciled current state. When they disagree, one of them is
+# lying. This lint surfaces the disagreements read-only and offline (MH_NO_FETCH
+# is exported above, so the transitive `mh-worktree.sh landed` uses local refs).
+backlog="$MH_STATE/backlog.json"
+drift=0
+if [ -f "$backlog" ] && command -v jq >/dev/null 2>&1; then
+  # (a) a task meta with no matching backlog item — dispatch always records a
+  #     backlog item, so a meta without one is untracked work.
+  for m in "$MH_TASKS"/*.meta; do
+    [ -f "$m" ] || continue
+    tid="$(basename "$m" .meta)"
+    if ! jq -e --arg id "$tid" 'any(.items[]; .id==$id)' "$backlog" >/dev/null 2>&1; then
+      printf '  DRIFT: task %s has no backlog item\n' "$tid"; drift=$((drift + 1))
+    fi
+  done
+  # (b) a backlog item whose stored status disagrees with the reconciled state,
+  #     and (c) a done backlog item whose worktree still holds unlanded work.
+  while IFS=$'\t' read -r bid bstatus; do
+    [ -n "$bid" ] || continue
+    [ -f "$MH_TASKS/$bid.meta" ] || continue   # only a task record can be reconciled
+    bstate="$("$here/mh-task.sh" state "$bid" 2>/dev/null | sed 's/ · .*//; s/^state: //' || true)"
+    if [ "$bstatus" = "done" ] && [ "$bstate" != "done" ]; then
+      printf '  DRIFT: backlog %s is done but task reconciles to %s\n' "$bid" "${bstate:-unknown}"
+      drift=$((drift + 1))
+    elif [ "$bstatus" != "done" ] && [ "$bstate" = "done" ]; then
+      printf '  DRIFT: task %s has landed but backlog still marks it %s\n' "$bid" "$bstatus"
+      drift=$((drift + 1))
+    fi
+    if [ "$bstatus" = "done" ]; then
+      bwt="$(mh_meta_get "$bid" worktree)"
+      if [ -n "$bwt" ] && [ -d "$bwt" ] && ! "$here/mh-worktree.sh" landed "$bid" >/dev/null 2>&1; then
+        printf '  DRIFT: backlog %s is done but its local copy holds unlanded work: %s\n' "$bid" "$bwt"
+        drift=$((drift + 1))
+      fi
+    fi
+  done < <(jq -r '.items[] | "\(.id)\t\(.status)"' "$backlog" 2>/dev/null || true)
+fi
+if [ "$drift" -eq 0 ]; then echo "  (no drift)"; fi
+
+section "UNTRACKED DECISIONS (blocked/awaiting-review with no open hold)"
+# A task waiting on the operator (blocked/needs-decision/awaiting-review) whose
+# decision lives only in the append-only status log evaporates at teardown. A
+# durable backlog hold must reference it; flag the ones that have none so the
+# operator sees the gap. (Detect + flag only — the decision text is not parsed.)
+nohold=0
+if [ -f "$backlog" ] && command -v jq >/dev/null 2>&1; then
+  holds="$(jq -r '.decisions[] | select(.status=="open") | "\(.key) \(.origin // "")"' "$backlog" 2>/dev/null || true)"
+  for m in "$MH_TASKS"/*.meta; do
+    [ -f "$m" ] || continue
+    tid="$(basename "$m" .meta)"
+    tstate="$("$here/mh-task.sh" state "$tid" 2>/dev/null | sed 's/ · .*//; s/^state: //' || true)"
+    case "$tstate" in blocked|needs-decision|awaiting-review) ;; *) continue ;; esac
+    if [ -n "$holds" ] && grep -qF "$tid" <<<"$holds"; then continue; fi
+    printf '  NO-HOLD: task %s is %s but no open decision hold references it\n' "$tid" "$tstate"
+    nohold=$((nohold + 1))
+  done
+fi
+if [ "$nohold" -eq 0 ]; then echo "  (none)"; fi
 
 section "BACKLOG (ready to start)"
 ready="$("$here/mh-backlog.sh" ready 2>/dev/null || true)"

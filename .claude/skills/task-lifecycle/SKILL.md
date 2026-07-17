@@ -114,11 +114,17 @@ obstacle to force past. `--force` requires explicit operator discard authority.
 A scout worktree may be removed once `data/<id>/report.md` exists and any
 operator decision it surfaced is recorded (load `decision-hold`).
 
-After teardown, record completion and re-evaluate the queue:
+After teardown, record completion, archive the landed task's records, and
+re-evaluate the queue:
 ```
 bin/mh-backlog.sh done <id> --note "<PR url / landed / report>"
+bin/mh-task.sh archive <id>    # move <id>.meta/.status + data/<id>/ to state/archive/
 bin/mh-backlog.sh ready        # queued items whose blockers have now cleared
 ```
+Archival fails closed unless the task reconciles to terminal `done` with no live
+worktree, so run it only after landing is confirmed and teardown has removed the
+local copy. It keeps `list`/`status` from re-scanning an unbounded set of
+finished tasks; the records stay recoverable under `state/archive/`.
 
 ## 6. Scout → ship promotion
 

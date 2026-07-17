@@ -101,6 +101,13 @@ check "state working post-commit" 'b mh-task.sh state demo-1 | grep -q working'
 # report the committed-but-unlanded case correctly.
 check "no-fetch landed: reports unlanded" '! MH_NO_FETCH=1 b mh-worktree.sh landed demo-1 >/dev/null 2>&1'
 
+echo "== state reconcile: 'merged:' in a note must not fake done (anchored verb) =="
+b mh-task.sh new fix1 --kind ship --repo demo >/dev/null
+b mh-task.sh event fix1 note "waiting on upstream PR merged: #123" >/dev/null
+check "note text 'merged:' does not reconcile to done" '! b mh-task.sh state fix1 | grep -q done'
+b mh-task.sh event fix1 merged "landed via local ff" >/dev/null
+check "a real merge event reconciles to done"          'b mh-task.sh state fix1 | grep -q done'
+
 echo "== test gate =="
 check "tests pass (registered cmd)" 'b mh-test.sh demo-1 >/dev/null'
 check "tests recorded pass"         '[ "$(b mh-task.sh get demo-1 tests)" = "pass" ]'
@@ -151,6 +158,29 @@ check "security-scan clears a benign diff"          '! b mh-pr.sh security-scan 
 check "security-scan requires an id"                '! b mh-pr.sh security-scan >/dev/null 2>&1'
 b mh-worktree.sh remove sec-scan --force >/dev/null 2>&1
 
+echo "== status drift lint (three-source reconciliation) =="
+# demo-1 is marked done in the backlog above, but its work is committed and not
+# yet landed (state reconciles to working) — a real three-source disagreement.
+DRIFT="$(b mh-status.sh)"
+check "drift flags backlog-done vs task-not-done" 'grep -q "DRIFT.*demo-1" <<<"$DRIFT"'
+# an artifact dir with no task record is an orphan (parallel to worktree ORPHAN)
+mkdir -p "$MH_HOME/data/orphan-xyz"; : > "$MH_HOME/data/orphan-xyz/leftover"
+DRIFT2="$(b mh-status.sh)"
+check "status flags orphan data dir" 'grep -q "ORPHAN-DATA.*orphan-xyz" <<<"$DRIFT2"'
+rm -rf "$MH_HOME/data/orphan-xyz"
+
+echo "== status: decision event without a hold is flagged =="
+b mh-task.sh new needdec --kind scout --repo demo >/dev/null
+b mh-task.sh event needdec needs-decision "ship option a or b?" >/dev/null
+NODEC="$(b mh-status.sh)"
+check "status flags missing decision hold" 'grep -q "NO-HOLD.*needdec" <<<"$NODEC"'
+b mh-backlog.sh hold needdec-decision-opt "ship option a or b?" --options "a | b" --origin data/needdec/report.md >/dev/null
+NODEC2="$(b mh-status.sh)"
+check "an open hold clears the missing-hold flag" '! grep -q "NO-HOLD.*needdec" <<<"$NODEC2"'
+
+echo "== status tolerates a non-integer stuck-age (fix 6) =="
+check "non-integer MH_STUCK_AGE_HOURS does not crash status" 'MH_STUCK_AGE_HOURS=4.5 b mh-status.sh >/dev/null 2>&1'
+
 echo "== meta parsing (fixed-string keys; metachar/= values) =="
 b mh-task.sh set metatest re '.*[x]^$ +(a|b)' >/dev/null
 check "meta round-trips regex metachars" '[ "$(b mh-task.sh get metatest re)" = ".*[x]^$ +(a|b)" ]'
@@ -187,6 +217,19 @@ b mh-backlog.sh move demo-1 inflight >/dev/null
 check "ready unblocks from real task state, not backlog status" 'b mh-backlog.sh ready | grep -q demo-2'
 check "teardown ok"      'b mh-worktree.sh remove demo-1 >/dev/null'
 check "origin has commit" 'git -C "$MH_HOME/repos/demo" log --oneline | grep -q "add multiply"'
+
+echo "== archive (prune a landed, torn-down task) =="
+# fail closed: a task that has not reached terminal done cannot be archived.
+b mh-task.sh new arch-wip --kind ship --repo demo >/dev/null
+check "archive refuses a non-done task"       '! b mh-task.sh archive arch-wip >/dev/null 2>&1'
+check "refused task keeps its meta"           '[ -f "$MH_HOME/state/tasks/arch-wip.meta" ]'
+# demo-1 landed and was torn down above (state done, no worktree) -> archivable.
+check "archive moves a done task's records"   'b mh-task.sh archive demo-1 >/dev/null'
+check "archived meta leaves tasks/"           '[ ! -f "$MH_HOME/state/tasks/demo-1.meta" ]'
+check "archived meta under archive/"          '[ -f "$MH_HOME/state/archive/demo-1.meta" ]'
+check "archived status under archive/"        '[ -f "$MH_HOME/state/archive/demo-1.status" ]'
+check "archived data dir under archive/"      '[ -d "$MH_HOME/state/archive/demo-1" ]'
+check "archived data dir left data/"          '[ ! -d "$MH_HOME/data/demo-1" ]'
 
 echo "== fail-closed guards =="
 b mh-task.sh new demo-3 --kind ship --repo demo >/dev/null
