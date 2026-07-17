@@ -26,4 +26,27 @@ Canonical repository memory is stored in `.contextgraph/repo.md`; use `contextgr
 - **Priority:** normal
 - **Created:** `2026-07-17T06:16:11.698Z`
 - **Checked:** `2026-07-17T06:16:11.698Z`
+
+<!-- contextgraph:item:v1 -->
+### `contextgraph-scope` · pitfall
+
+**Fact:** contextgraph doctor here reports many errors because the root store discovers sidecars inside gitignored repos/, state/, and data/ \(managed clones\), yielding orphan/misplaced/malformed nodes and CORRUPT\_STORE on recall. Sidecar discovery does not honor .gitignore; an ignore for repos/state/data is the fix.
+
+- **Why:** Avoids re-diagnosing the red doctor and recall corruption every session.
+- **Source:** verified
+- **Priority:** normal
+- **Created:** `2026-07-17T11:59:36.650Z`
+- **Checked:** `2026-07-17T11:59:36.650Z`
+- **Evidence:** [{"path":".gitignore","sha256":"5a62bf81fde8a1a28892c737782c22c5d08e53c935aff18c5ef662c598b9aedc"}]
+
+<!-- contextgraph:item:v1 -->
+### `pr-description-style` · convention
+
+**Fact:** PR descriptions and commit messages: 5-7 lines, dry and concrete, lead with what the change does, a little genuine enthusiasm is fine, no LLM cadence or filler. Always commit as the operator — never an agent co-author or a generated-by line.
+
+- **Why:** Operator directive on PR/commit voice; every PR and commit the manhandler produces must match it.
+- **Source:** user
+- **Priority:** normal
+- **Created:** `2026-07-17T13:36:38.350Z`
+- **Checked:** `2026-07-17T13:36:38.350Z`
 <!-- contextgraph:managed:end -->
