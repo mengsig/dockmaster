@@ -11,6 +11,10 @@
 # Explicit merge AUTHORITY (captain approval / standing yolo) is enforced by the
 # manhandler one layer up, per AGENTS.md. This script enforces mechanics only.
 #
+# GitHub access splits by need: reads that are parsed by jq use `gh api` (it
+# returns real JSON), while mutations use `gh-axi` (`gh-axi api` emits a
+# YAML-like format that jq cannot parse).
+#
 # Commands:
 #   open  <id> --title T (--body-file F | --body B) [--base B] [--draft]
 #   check <id>                    refresh pr_state + checks into meta; print summary
@@ -19,7 +23,7 @@
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/mh-lib.sh"
-mh_need git; mh_need gh-axi; mh_need jq
+mh_need git; mh_need gh-axi; mh_need gh; mh_need jq
 mh_ensure_dirs
 
 repo_dir() { local d; d="$MH_HOME/$(mh_registry_get "$1" path)"; [ -d "$d/.git" ] || mh_die "no clone for repo '$1'"; printf '%s\n' "$d"; }
@@ -104,7 +108,7 @@ case "$cmd" in
     url="$(mh_meta_get "$id" pr)"; [ -n "$url" ] || mh_die "no PR recorded for $id"
     n="$(pr_number_from_url "$url")"; repo="$(mh_meta_get "$id" repo)"
     slug="$(owner_repo "$(git -C "$(repo_dir "$repo")" remote get-url origin)")"
-    json="$(gh-axi api "repos/$slug/pulls/$n" 2>/dev/null)" || mh_die "could not read PR $url"
+    json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" || mh_die "could not read PR $url"
     state="$(printf '%s' "$json" | jq -r '.state // "unknown" | ascii_upcase')"
     merged="$(printf '%s' "$json" | jq -r '.merged // false')"
     sha="$(printf '%s' "$json" | jq -r '.head.sha // empty')"
@@ -117,14 +121,14 @@ case "$cmd" in
     if [ -n "$sha" ]; then
       # action_required (needs manual action) counts as failing, not green;
       # stale (result is for an older commit) is inconclusive, so pending.
-      runs_rollup="$(gh-axi api "repos/$slug/commits/$sha/check-runs" 2>/dev/null \
+      runs_rollup="$(gh api "repos/$slug/commits/$sha/check-runs" 2>/dev/null \
         | jq -r 'if (.check_runs|length)==0 then "none"
                  elif any(.check_runs[]; .conclusion=="failure" or .conclusion=="cancelled" or .conclusion=="timed_out" or .conclusion=="action_required") then "failing"
                  elif any(.check_runs[]; .status!="completed" or .conclusion=="stale") then "pending"
                  else "passing" end' 2>/dev/null || echo unknown)"
       # GitHub returns .state=="pending" even with ZERO statuses, so treat
       # total_count==0 as "none" (no signal), not pending.
-      status_rollup="$(gh-axi api "repos/$slug/commits/$sha/status" 2>/dev/null \
+      status_rollup="$(gh api "repos/$slug/commits/$sha/status" 2>/dev/null \
         | jq -r 'if ((.total_count // 0) == 0) then "none"
                  elif (.state=="failure" or .state=="error") then "failing"
                  elif (.state=="success") then "passing"
