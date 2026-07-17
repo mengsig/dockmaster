@@ -195,8 +195,26 @@ invariants, pitfalls, routing. Curated — not append-forever._
   (real JSON); mutations use `gh-axi` (`gh-axi api` emits YAML, not JSON).
 - **[invariant]** Shared-state writes (registry, task meta, memory appends) are
   serialized with the mkdir-based mutex in `mh-lib.sh` (`mh_lock`/`mh_unlock`) —
-  not `flock` (absent on macOS). Not reentrant; do not set your own EXIT trap
-  between lock and unlock.
+  not `flock` (absent on macOS). Not reentrant; do not set your own EXIT/INT/TERM
+  trap between lock and unlock (the lock owns them, and its signal handlers clean
+  up AND exit — a trapped signal must not resume the unlocked section). It
+  self-heals only a DEAD-PID lock (reclaim serialized by a second lock, re-verified
+  before removal); a stuck-but-alive or metadata-less lock fails visibly at ~30s.
+- **[invariant]** Landing/PR fields (`pr`, `pr_state`, `merge_state`, and the
+  `merged` status event) are written ONLY by `mh-pr`/`mh-merge` (directly via
+  `mh_meta_set`/`mh_status_append`); `mh-task.sh set`/`event` reject them so a
+  crewmate cannot forge a landed signal. `mh-task.sh state`/`landed` refresh
+  `pr_state` live (skipped under `MH_NO_FETCH=1`) so an out-of-band merge is seen;
+  bulk `list` and `mh-status` run offline.
+- **[invariant]** Never merge red: `mh-pr.sh merge` refuses `failing`/`pending`/
+  `unknown`, and refuses `none` (no checks reported) unless `--allow-no-checks` —
+  CI absence is never inferred from a missing `.github/workflows`. The decision is
+  the pure, offline-testable `mh_merge_gate`.
+- **[routing]** Multi-repo intent → `fleet-change` skill + `mh-backlog --campaign`
+  / `campaign` (grouping + rollup only; each child is an ordinary gated task).
+  Open-PR fleet health → `mh-pr.sh sweep` (read-only; surfaced in `mh-status`).
+  A new repo with no test command → the onboarding scout (project-management skill)
+  proposes a `test_cmd` and initial `mh:knowledge`.
 - **[pitfall]** `tests/smoke.sh` covers only the local-only, offline lifecycle;
   the PR path (`mh-pr`, `mh-merge` PR mode, gh-axi, `workflows/pr-pipeline.js`)
   has no automated coverage. Under `set -euo pipefail`, piping verbose output to
