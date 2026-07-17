@@ -13,9 +13,17 @@ through the normal gate (change-review + merge authority).
 ## Choose the path by how it landed
 
 - **Merged PR** — prefer a **revert PR**: `gh-axi pr revert <n>`. This is the
-  sanctioned path; the merge output itself surfaces the exact command. It opens a
-  clean PR that reverses the merge commit, which then flows through the normal
-  pipeline.
+  sanctioned path: it opens a clean PR that reverses the merge commit. To run it
+  through the normal gate tooling, **adopt the revert PR into a fresh task** — the
+  gates (`mh-pr check`, merge) read `meta.pr`, so record the revert PR's URL on a
+  new task id:
+  ```
+  bin/mh-task.sh new <revert-id> --kind ship --repo <repo> --title "revert #<n>"
+  bin/mh-task.sh set <revert-id> pr <revert-pr-url>
+  bin/mh-pr.sh check <revert-id>     # then the merge gate, as any PR
+  ```
+  A bare revert PR with no adopting task can still be merged on GitHub by the
+  operator, but then the gates are applied by hand, not by the tooling.
 - **local-only landing** — `git revert <sha>` in a **fresh worktree** (dispatch a
   crewmate; the manhandler stays read-only over `repos/`), then land it the same
   way the original did (`bin/mh-merge.sh local <id>` after approval).

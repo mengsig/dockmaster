@@ -100,5 +100,5 @@ Recall both global files with `bin/mh-memory.sh recall --global [query]`.
   excerpts. **Never** route knowledge into a skill — skills are instructions,
   not a memory sink.
 - Save progressively, at each durable discovery — not in one end-of-session
-  sweep. (The `/stow` habit: before a reset, sweep for uncaptured durable
-  knowledge and route each item by this table.)
+  sweep. Before a reset, sweep for any uncaptured durable knowledge and route
+  each item by this table.

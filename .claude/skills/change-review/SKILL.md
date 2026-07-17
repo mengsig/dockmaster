@@ -46,8 +46,14 @@ change; the PR-or-local decision and any pipeline come *after* approval.
 4. **Approval → decide how it lands.** Once the operator approves, end the
    session (`bin/mh-lavish.sh end <id>`) and ask the operator one plain question:
    **create a PR, or keep it local?**
-   - **local** → land with the guarded fast-forward after approval
-     (`bin/mh-merge.sh local <id>`); see `task-lifecycle`.
+   - **local** → set the task to local mode first — `bin/mh-merge.sh local`
+     refuses any task whose mode isn't `local-only` — then land with the guarded
+     fast-forward after approval:
+     ```
+     bin/mh-task.sh set <id> mode local-only
+     bin/mh-merge.sh local <id>
+     ```
+     See `task-lifecycle`.
    - **PR** → run the PR pipeline (load `pr-workflow`).
 
 ## Fast path for trivial changes
