@@ -9,13 +9,16 @@ export const meta = {
   ],
 }
 
-// Deterministic, opt-in runner for the modular PR pipeline described in
-// .claude/skills/pr-workflow/SKILL.md. The manhandler's default path is to
-// drive the gates with ordinary Agent calls; use this only when the operator
-// has opted into multi-agent orchestration.
+// OPTIONAL, opt-in runner for the modular PR pipeline described in
+// .claude/skills/pr-workflow/SKILL.md. It is NOT the default executor and NOT
+// wired to anything: nothing auto-discovers it, no bin/ script invokes it. The
+// manhandler's default path is to drive the gates with ordinary Agent calls
+// following the pr-workflow skill. Run this only via the Workflow tool, and only
+// when the operator has opted into hands-off multi-agent orchestration.
 //
 // args = {
-//   taskId, repo, worktree, branch, base,   // task context
+//   taskId, repo, worktree, branch,          // task context
+//   base, defaultBranch,                     // diff base; base wins, else defaultBranch
 //   testCmd,                                 // repo test command ("" = soft skip)
 //   binDir,                                  // absolute path to this distro's bin/
 //   gates,                                   // ordered gate list (from config); optional
@@ -28,7 +31,15 @@ if (!t.taskId || !t.worktree || !t.binDir) {
 }
 // Runs AFTER lavish approval and the operator choosing the PR path. Two review
 // passes (coldstart, merge-gate), each followed by fix + tests, then PR.
-const base = t.base || 'origin/HEAD'
+//
+// The diff base is what every review compares against. `origin/HEAD` is NOT a
+// safe default: a freshly created worktree/clone often has no local origin/HEAD
+// ref, so the diff would fail. Require an explicit base — the caller's resolved
+// base ref, or the repo's resolved default branch (e.g. "main"/"origin/main").
+const base = t.base || t.defaultBranch
+if (!base) {
+  throw new Error('pr-pipeline requires args.base or args.defaultBranch (origin/HEAD is unreliable in a fresh worktree)')
+}
 const gates = (t.gates && t.gates.length)
   ? t.gates
   : [
@@ -71,14 +82,14 @@ async function runTests(label) {
   )
 }
 
-async function review(pass) {
+async function review(pass, effort) {
   const which = pass || 'review'
   return agent(
     `Cold, independent ${which} review. In ${t.worktree}, read the diff of this branch against its base:\n\n` +
     `    git -C ${t.worktree} diff ${base}...HEAD\n\n` +
     `and the changed files. Do not trust any prior summary or earlier review. Report concrete, real findings ` +
     `(correctness, safety, then quality) ranked by severity. Return an empty findings array if the change is sound.`,
-    { label: `review:${which}`, phase: 'Review', effort: 'high', schema: REVIEW_SCHEMA },
+    { label: `review:${which}`, phase: 'Review', effort: effort || 'high', schema: REVIEW_SCHEMA },
   )
 }
 
@@ -107,23 +118,27 @@ async function openPR() {
 
 let lastReview = null
 let currentPass = 'review'
+let currentEffort            // effort of the active review pass, reused when a fix gate re-reviews
 for (const g of gates) {
   if (g.gate === 'tests') {
     const r = await runTests('gate')
     if (!r.passed) return { ok: false, stage: 'tests', detail: r.summary }
   } else if (g.gate === 'review') {
     currentPass = g.pass || 'review'
-    lastReview = await review(currentPass)
+    currentEffort = g.effort
+    lastReview = await review(currentPass, currentEffort)
     log(`${currentPass} review: ${lastReview.findings.length} finding(s)`)
   } else if (g.gate === 'fix') {
     const max = g.max_rounds || 2
     let round = 0
+    // Apply fixes and re-review until findings clear or the cap is hit. Tests are
+    // NOT run here: the dedicated `tests` gate that follows validates the tree, so
+    // tests run once per stage (never doubled) and still at least once even when a
+    // review found nothing to fix.
     while (lastReview && lastReview.findings.length && round < max) {
       round++
       await applyFixes(lastReview.findings)
-      const r = await runTests(`postfix-${round}`)
-      if (!r.passed) return { ok: false, stage: 'fix', detail: `tests failed after fix round ${round}` }
-      lastReview = await review(currentPass)
+      lastReview = await review(currentPass, currentEffort)
     }
     if (lastReview && lastReview.findings.length) {
       return { ok: false, stage: 'fix', detail: `unresolved ${currentPass} findings after ${max} rounds`, findings: lastReview.findings }
@@ -133,10 +148,12 @@ for (const g of gates) {
     if (g.optional && !t.securitySurface) { log('security: no declared surface — skipped'); continue }
     await agent(
       `Security review of the diff ${base}...HEAD in ${t.worktree}: auth, input handling, secrets, crypto, external I/O. ` +
-      `Report concrete issues only.`, { label: 'security', phase: 'Review', effort: 'high' })
+      `Report concrete issues only.`, { label: 'security', phase: 'Review', effort: g.effort || 'high' })
   } else if (g.gate === 'pr') {
     const out = await openPR()
-    return { ok: true, stage: 'pr', pr: out }
+    // Surface the configured merge method so the operator-mediated merge gate can
+    // honor it (bin/mh-pr.sh merge --method <method>); this runner never merges.
+    return { ok: true, stage: 'pr', pr: out, method: g.method || 'squash' }
   } else {
     log(`unknown gate '${g.gate}' — skipped`)
   }

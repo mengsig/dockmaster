@@ -119,7 +119,10 @@ security-sensitive merges always escalate, even under `yolo`.
 
 ## Optional: deterministic runner
 
-For a hands-off run of the whole pipeline, `workflows/pr-pipeline.js` executes
-the gates as a `Workflow` (tests → review → fix-loop → tests → pr) with
-zero-token idle between stages. Only use it when the operator has opted into
-multi-agent orchestration; otherwise drive the gates with ordinary Agent calls.
+The default is to drive the gates above with ordinary `Agent` calls. For a
+hands-off run of the whole pipeline instead, `workflows/pr-pipeline.js` executes
+the same gates as a `Workflow` (coldstart review → fix → tests → merge-gate
+review → fix → tests → pr) with zero-token idle between stages. It is opt-in and
+not wired to anything — invoke it via the Workflow tool only when the operator
+has asked for multi-agent orchestration. See `config/README.md` for which config
+fields it reads versus the agent-driven path.

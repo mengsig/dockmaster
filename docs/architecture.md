@@ -34,7 +34,7 @@ the machinery those contracts needed a shell daemon to fake.
 | global memory | `data/captain.md`, `data/learnings.md` | manhandler home memory: native `memory/`, `state/operator.md`, `state/learnings.md` |
 | per-repo memory | committed project `AGENTS.md` | **contextgraph**, initialized inside every managed repo |
 | delivery modes | no-mistakes / direct-PR / local-only | modular **PR pipeline** (ordered gates) per repo |
-| the no-mistakes gate | external pipeline tool | a **`Workflow`** script of composable gates + `code-review` / `lavish` |
+| the no-mistakes gate | external pipeline tool | composable gates the manhandler drives (`code-review` / `lavish`), optionally a `Workflow` script |
 | persistent domain supervisor ("secondmate") | isolated `FM_HOME` + separate session | long-lived **background agent** addressed via `SendMessage` (can spawn its own crew) |
 | per-task harness/model/effort | dispatch profiles config | `Agent` `model` / `effort` / `subagent_type` per dispatch |
 | review surface | lavish-axi | lavish-axi (`/lavish` skill) |
@@ -161,11 +161,15 @@ coldstart review → fix → tests → merge-gate review → fix → tests → (
 ```
 
 then a **merge gate**: the operator merges on GitHub, or the manhandler asks for
-approval and merges (`bin/mh-pr.sh merge`, never red). Gates are executed by
-`workflows/pr-pipeline.js` (a deterministic `Workflow`) so ordering, the
-fix→retest loops, and pass/fail are reproducible and zero-token-idle between
-stages. Adding a gate = add a module and list its name in the config array.
-See `.claude/skills/pr-workflow/SKILL.md`.
+approval and merges (`bin/mh-pr.sh merge`, never red). By default the gates are
+executed by the **manhandler itself**, driving each one with ordinary `Agent`
+calls while following `.claude/skills/pr-workflow/SKILL.md`; nothing else runs
+them. `workflows/pr-pipeline.js` is an **optional** deterministic `Workflow`
+runner for the same gates — used only when the operator opts into hands-off
+multi-agent orchestration (invoked via the Workflow tool; not auto-discovered and
+not wired to any `bin/` script). Adding a gate = document it in the skill and
+list its name in the config array. See `.claude/skills/pr-workflow/SKILL.md` and
+`config/README.md` (which part of the config each executor reads).
 
 **Branch naming:** `<type>/<issue>/<slug>` — `type ∈ {feat,fix,bug,chore,refactor,docs,perf,test}`,
 `issue` = the issue number (or `x` when none), `slug` = a short kebab summary.
@@ -184,7 +188,7 @@ README.md                overview
 docs/architecture.md     this file
 bin/                     portable helper scripts (repo/worktree/pr/backlog/merge/memory)
 .claude/skills/          manhandler skills (some /-invocable, some agent-loaded at triggers)
-workflows/               Workflow scripts (the PR pipeline)
+workflows/               optional Workflow runner for the PR pipeline (opt-in)
 config/                  pipeline defaults + per-repo overrides (committed defaults)
 state/                   runtime, gitignored: repos.json, operator.md, learnings.md, backlog.md
 repos/                   managed clones, gitignored, READ-ONLY to the manhandler
