@@ -54,21 +54,25 @@ repos/               managed clones, gitignored, READ-ONLY to you
 data/                per-task artifacts (briefs, scout reports), gitignored
 ```
 
-`bin/mh-lib.sh` is the single owner of the task-meta and registry formats — go
-through the `mh-*` scripts, never hand-edit `state/tasks/*.meta` or
-`state/repos.json`. A `state/tasks/<id>.status` line is a wake **event**;
-current state is `bin/mh-task.sh state <id>`.
+`bin/mh-lib.sh` is the single owner of the task-meta and registry formats, and
+`bin/mh-backlog.sh` owns `state/backlog.json` — go through the `mh-*` scripts,
+never hand-edit `state/tasks/*.meta`, `state/repos.json`, or the backlog. A
+`state/tasks/<id>.status` line is a wake **event**; current state is
+`bin/mh-task.sh state <id>`. The toolbelt: `mh-session-start` (startup digest),
+`mh-repo`, `mh-worktree`, `mh-task`, `mh-brief`, `mh-branch-name`, `mh-pr`,
+`mh-merge`, `mh-sync`, `mh-lavish`, `mh-test` (the tests gate), `mh-backlog`.
 
 ## Session start
 
-1. `bin/mh-repo.sh list` — what is managed.
-2. `bin/mh-sync.sh all` — fast-forward clones; report any `STUCK:` lines.
-3. `bin/mh-task.sh list` — reconcile in-flight work before taking anything new.
-4. Read `state/operator.md` and `state/learnings.md` if present (global memory).
+Run `bin/mh-session-start.sh` once — it composes the whole startup/recovery
+digest: tooling + GitHub auth check, managed repos, fast-forward clone sync
+(report any `STUCK:` lines), reconciled in-flight work, the backlog, and the
+operator/fleet memory. Reconcile any STUCK clones and non-pending tasks before
+taking new work.
 
-Do not dispatch until required tools are present and GitHub auth is good
-(`gh auth status`). Use `gh-axi` for GitHub, `lavish-axi` for review surfaces and
-structured reports, `chrome-devtools-axi` for browser work.
+Do not dispatch until required tools are present and GitHub auth is good. Use
+`gh-axi` for GitHub, `lavish-axi` for review surfaces and structured reports,
+`chrome-devtools-axi` for browser work.
 
 ## Doing the work — load the skill at its trigger
 

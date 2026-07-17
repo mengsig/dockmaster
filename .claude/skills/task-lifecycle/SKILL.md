@@ -33,7 +33,8 @@ when several or no repos plausibly match.
 - Dispatch immediately when the work does not overlap in-flight work — no
   concurrency cap.
 - Serialize (queue as blocked) when it touches the same repo subsystem as live
-  work or depends on unlanded work. Record the blocker durably in the backlog.
+  work or depends on unlanded work. Record it durably:
+  `bin/mh-backlog.sh add <id> "<title>" --repo <repo> --status queued --blocked-by <other-id>`.
 
 ## 3. Dispatch
 
@@ -41,6 +42,7 @@ Give the task an id (short kebab, e.g. `fix-login-412`), then:
 
 ```
 bin/mh-task.sh new <id> --kind ship|scout --repo <repo> --title "<title>"
+bin/mh-backlog.sh add <id> "<title>" --repo <repo> --status inflight
 bin/mh-worktree.sh create <id> <repo>
 bin/mh-brief.sh <id>              # scaffolds data/<id>/brief.md
 ```
@@ -96,8 +98,11 @@ obstacle to force past. `--force` requires explicit operator discard authority.
 A scout worktree may be removed once `data/<id>/report.md` exists and any
 operator decision it surfaced is recorded (load `decision-hold`).
 
-After teardown, record completion in the backlog and re-evaluate queued work
-whose blockers have cleared.
+After teardown, record completion and re-evaluate the queue:
+```
+bin/mh-backlog.sh done <id> --note "<PR url / landed / report>"
+bin/mh-backlog.sh ready        # queued items whose blockers have now cleared
+```
 
 ## 6. Scout → ship promotion
 

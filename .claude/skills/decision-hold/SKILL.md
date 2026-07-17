@@ -15,15 +15,12 @@ Before treating any investigation or visual review as complete:
 1. Read the complete result and **inventory the genuine unresolved choices**
    that belong to the operator. (You do this semantically — do not expect a
    script to infer decisions from prose.)
-2. For each, file a durable, operator-gated backlog item in `state/backlog.md`
-   with a stable, privacy-safe key, e.g.:
+2. For each, file a durable, operator-gated hold with a stable, privacy-safe key:
    ```
-   ## Decisions (operator)
-   - [ ] <origin-id>-decision-<key>  <the choice, in plain terms>
-       options: <A> | <B>
-       origin: data/<origin-id>/report.md
+   bin/mh-backlog.sh hold <origin-id>-decision-<key> "<the choice, in plain terms>" \
+     --options "<A> | <B>" --origin data/<origin-id>/report.md
    ```
-   Filing is idempotent on the key — re-running does not duplicate it.
+   Filing is idempotent on the key — re-running updates, never duplicates.
 3. Only then may the originating task be considered complete. A resolved
    finding, a no-choice recommendation, or merely decision-*sounding* prose does
    not create a hold.
@@ -32,11 +29,14 @@ Before treating any investigation or visual review as complete:
 
 - Relay each choice to the operator as a plain decision (evidence, options,
   recommendation). Never use the word "hold" in operator chat.
-- When the operator decides, record the exact decision in the item body and any
-  dependent work as a new backlog item blocked by nothing further, then close
-  the hold (mark it `[x]` with the decision recorded).
-- A hold stays open until the answer is durably recorded — tearing down the
-  originating task never closes it.
+- When the operator decides, record it and, if it unblocks work, queue that work:
+  ```
+  bin/mh-backlog.sh resolve <origin-id>-decision-<key> "<the operator's exact decision>"
+  bin/mh-backlog.sh add <new-id> "<dependent work>" --status queued   # if any
+  ```
+- A hold stays open until resolved — tearing down the originating task never
+  closes it. Verify with `bin/mh-backlog.sh list` before treating the
+  investigation as complete.
 
 ## Why
 

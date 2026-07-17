@@ -44,9 +44,9 @@ worktree/branch from meta, communicates only through the task record, and
 - **fix** — hand the findings to the implementing crewmate as one exact
   instruction; it fixes on the same branch and commits. Loop up to `max_rounds`;
   escalate if findings persist past the cap.
-- **tests** — run the repo's test command (`bin/mh-repo.sh get <repo> test_cmd`)
-  in the worktree. Non-zero fails the gate. No registered command → say so and
-  treat as a soft skip (never fabricate a pass).
+- **tests** — `bin/mh-test.sh <id>` runs the repo's registered test command in
+  the worktree and records the result. Non-zero fails the gate. No registered
+  command → it reports a soft skip (never a fabricated pass).
 - **review (merge-gate)** — a second, independent reviewer pass acting as the
   final gate before the PR: same cold-read discipline, on the fixed tree. This
   is the "merge gate."

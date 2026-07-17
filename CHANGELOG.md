@@ -14,10 +14,12 @@ of autonomous subagents across many repositories from a single liaison agent.
 - **Operating contract** (`AGENTS.md`) turning a Claude Code session into the
   manhandler: read-only over managed repos, delegates all project work, reports
   outcomes.
-- **Toolbelt** (`bin/`): repo registry + memory onboarding (`mh-repo`), isolated
-  worktrees with isolation/tangle/landed checks (`mh-worktree`), durable task
-  records with on-demand state reconciliation (`mh-task`), strict PR
-  open/check/merge that never merges red (`mh-pr`), guarded fast-forward local
+- **Toolbelt** (`bin/`): a composed startup/recovery digest (`mh-session-start`),
+  repo registry + memory onboarding (`mh-repo`), isolated worktrees with
+  isolation/tangle/landed checks (`mh-worktree`), durable task records with
+  on-demand state reconciliation (`mh-task`), a durable cross-session backlog and
+  operator-decision log (`mh-backlog`), the tests gate runner (`mh-test`), strict
+  PR open/check/merge that never merges red (`mh-pr`), guarded fast-forward local
   landing and conflict-aware rebase (`mh-merge`), fast-forward-only clone sync
   (`mh-sync`), the crewmate brief contract (`mh-brief`), the lavish review
   surface (`mh-lavish`), and branch naming `<type>/<issue>/<slug>`
@@ -25,7 +27,12 @@ of autonomous subagents across many repositories from a single liaison agent.
 - **Skills** (`.claude/skills/`): task-lifecycle, change-review (lavish approval
   gate), pr-workflow (two-pass gate pipeline), supervision (zero-token
   background-agent supervision), memory-routing, project-management,
-  merge-conflict, secondmate, diagnostic-reasoning, decision-hold, stuck-worker.
+  merge-conflict, secondmate, diagnostic-reasoning, decision-hold, stuck-worker,
+  and coding-guidelines (the maintainable-code commandments, baked verbatim into
+  every crewmate brief and mirrored in `AGENTS.md`).
+- **Claude Code integration**: `.claude/settings.json` permissions allowlist so
+  the toolbelt runs without repeated prompts, and a `tests/smoke.sh` end-to-end
+  regression check.
 - **Delivery flow** for a requested change: crewmate implements in a worktree and
   renders a lavish review artifact → operator approves (with back-and-forth) →
   choose PR or local → on PR: coldstart review → fix + tests → merge-gate review
