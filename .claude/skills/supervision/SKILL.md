@@ -60,6 +60,15 @@ deploy, a remote queue — do not busy-wait:
 - Waiting on a healthy in-flight task is silent. Empty polls and unchanged state
   are not progress worth reporting.
 
+## Session death / restart recovery
+
+Supervision state lives on disk, not in this conversation. On restart,
+`mh-session-start` reconciles it. For each in-flight task whose agent is gone but
+whose worktree still holds unlanded work, load `stuck-worker`: re-attach by
+`agent_id` if the agent is resumable, else re-dispatch the same task into the
+same worktree with the same identity. Never spawn a duplicate — a second worktree
+splits one task across two copies.
+
 ## Discipline
 
 - One dispatch, one crewmate, one worktree. Do not spawn a second crewmate for a
