@@ -177,6 +177,97 @@ check "doctor fails on invalid repos.json" '! b mh-doctor.sh >/dev/null 2>&1'
 check "doctor names the invalid JSON"      'grep -q "not valid JSON" <<<"$DOCBAD"'
 cp "$TMP/repos.bak" "$MH_HOME/state/repos.json"
 
+echo "== branch name =="
+# Pure function (no MH_HOME): type/issue validation, slug kebab-collapsing, cap.
+check "branch name maps issue+slug"        '[ "$(b mh-branch-name.sh fix 412 "flaky login test")" = "fix/412/flaky-login-test" ]'
+check "branch name accepts x issue"        '[ "$(b mh-branch-name.sh feat x "foo")" = "feat/x/foo" ]'
+check "branch name kebab-collapses slug"   '[ "$(b mh-branch-name.sh feat x "Dark   MODE!! toggle")" = "feat/x/dark-mode-toggle" ]'
+check "branch name rejects bad type"       '! b mh-branch-name.sh bogus x "foo" >/dev/null 2>&1'
+check "branch name rejects non-numeric issue" '! b mh-branch-name.sh feat abc "foo" >/dev/null 2>&1'
+BN="$(b mh-branch-name.sh chore x "this is an extremely long summary that should be truncated well beyond the forty eight character cap")"
+check "branch name caps slug at 48"        '[ "$(printf "%s" "${BN#chore/x/}" | wc -c | tr -d " ")" -le 48 ]'
+check "branch name drops trailing hyphen"  'case "$BN" in *-) false;; *) true;; esac'
+
+echo "== backlog move =="
+b mh-backlog.sh add mv-1 "movable item" --status queued >/dev/null
+check "queued item shows in ready"         'b mh-backlog.sh ready | grep -q mv-1'
+b mh-backlog.sh move mv-1 inflight >/dev/null
+check "moved-to-inflight leaves ready"     '! b mh-backlog.sh ready | grep -q mv-1'
+b mh-backlog.sh move mv-1 queued >/dev/null
+check "moved-back-to-queued rejoins ready" 'b mh-backlog.sh ready | grep -q mv-1'
+check "move rejects invalid status"        '! b mh-backlog.sh move mv-1 bogus >/dev/null 2>&1'
+check "move rejects unknown id"            '! b mh-backlog.sh move no-such queued >/dev/null 2>&1'
+
+echo "== worktree tangle detection =="
+check "tangle: clean clone on default is untangled" 'b mh-worktree.sh tangle demo >/dev/null 2>&1'
+git -C "$MH_HOME/repos/demo" checkout -q -b sidebranch
+check "tangle: detects non-default branch"  '! b mh-worktree.sh tangle demo >/dev/null 2>&1'
+TANGLE="$(b mh-worktree.sh tangle demo 2>&1 || true)"
+check "tangle: message names the branch"    'grep -q "TANGLE.*sidebranch" <<<"$TANGLE"'
+git -C "$MH_HOME/repos/demo" checkout -q main
+git -C "$MH_HOME/repos/demo" branch -q -D sidebranch
+check "tangle: clears after return to default" 'b mh-worktree.sh tangle demo >/dev/null 2>&1'
+
+echo "== scout lifecycle =="
+b mh-task.sh new sc-1 --kind scout --repo demo >/dev/null
+b mh-worktree.sh create sc-1 demo >/dev/null
+b mh-brief.sh sc-1 >/dev/null
+check "scout state pending before report"   'b mh-task.sh state sc-1 | grep -q pending'
+check "scout brief is scout-flavored"       'grep -q "Definition of done (scout)" "$MH_HOME/data/sc-1/brief.md"'
+check "scout brief names the report path"   'grep -q "data/sc-1/report.md" "$MH_HOME/data/sc-1/brief.md"'
+check "scout brief omits the ship branch flow" '! grep -q "Create a branch" "$MH_HOME/data/sc-1/brief.md"'
+printf '# findings\n' > "$MH_HOME/data/sc-1/report.md"
+check "scout state done once report exists"  'b mh-task.sh state sc-1 | grep -q done'
+
+echo "== repo remove guards =="
+b mh-repo.sh add rmtest "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+printf 'dirty\n' > "$MH_HOME/repos/rmtest/DIRTY.txt"   # uncommitted change in the clone
+check "remove refuses dirty clone"           '! b mh-repo.sh remove rmtest >/dev/null 2>&1'
+rm -f "$MH_HOME/repos/rmtest/DIRTY.txt"
+b mh-task.sh new rmscout --kind scout --repo rmtest >/dev/null   # non-terminal referencing task
+check "remove refuses repo with a live task" '! b mh-repo.sh remove rmtest >/dev/null 2>&1'
+check "remove keeps registry entry on refusal" '[ "$(b mh-repo.sh get rmtest mode)" = "local-only" ]'
+mkdir -p "$MH_HOME/data/rmscout"; printf '# report\n' > "$MH_HOME/data/rmscout/report.md"   # task now terminal (done)
+check "remove proceeds once referencing task is done" 'b mh-repo.sh remove rmtest >/dev/null 2>&1'
+check "removed repo is unregistered"         '! b mh-repo.sh get rmtest >/dev/null 2>&1'
+
+echo "== merge rebase (offline) =="
+# Clean rebase: worktree branch adds a new file, primary main advances with an
+# unrelated file -> rebase replays cleanly and picks up the base change.
+b mh-task.sh new rb-clean --kind ship --repo demo --mode local-only >/dev/null
+RBWT="$(b mh-worktree.sh create rb-clean demo | tail -n1)"
+git -C "$RBWT" checkout -q -b feat/x/rb-clean
+printf 'clean\n' > "$RBWT/rb_clean.txt"
+git -C "$RBWT" -c user.email=c@c.co -c user.name=c add rb_clean.txt >/dev/null
+git -C "$RBWT" -c user.email=c@c.co -c user.name=c commit -qm "rb clean feature"
+git -C "$MH_HOME/repos/demo" checkout -q main
+printf 'base\n' > "$MH_HOME/repos/demo/rb_base.txt"
+git -C "$MH_HOME/repos/demo" -c user.email=c@c.co -c user.name=c add rb_base.txt >/dev/null
+git -C "$MH_HOME/repos/demo" -c user.email=c@c.co -c user.name=c commit -qm "advance main unrelated"
+check "rebase clean succeeds"                'b mh-merge.sh rebase rb-clean >/dev/null 2>&1'
+check "rebase clean picks up base + keeps feature" '[ -f "$RBWT/rb_base.txt" ] && [ -f "$RBWT/rb_clean.txt" ]'
+check "rebase clean stays on its branch"     '[ "$(git -C "$RBWT" rev-parse --abbrev-ref HEAD)" = "feat/x/rb-clean" ]'
+check "rebase clean leaves no in-progress rebase" '! [ -d "$(git -C "$RBWT" rev-parse --git-path rebase-merge)" ] && ! [ -d "$(git -C "$RBWT" rev-parse --git-path rebase-apply)" ]'
+# Conflicting rebase: worktree branch and primary main edit the same file -> the
+# rebase must report CONFLICT, exit 3, abort, and leave the worktree restored.
+b mh-task.sh new rb-conf --kind ship --repo demo --mode local-only >/dev/null
+CFWT="$(b mh-worktree.sh create rb-conf demo | tail -n1)"
+git -C "$CFWT" checkout -q -b feat/x/rb-conf
+printf 'branch change\n' > "$CFWT/src/calc.py"
+git -C "$CFWT" -c user.email=c@c.co -c user.name=c commit -qam "branch edits calc"
+git -C "$MH_HOME/repos/demo" checkout -q main
+printf 'main change\n' > "$MH_HOME/repos/demo/src/calc.py"
+git -C "$MH_HOME/repos/demo" -c user.email=c@c.co -c user.name=c commit -qam "main edits calc"
+CF_HEAD_BEFORE="$(git -C "$CFWT" rev-parse HEAD)"
+if b mh-merge.sh rebase rb-conf >/dev/null 2>&1; then RBRC=0; else RBRC=$?; fi
+check "rebase conflict exits 3"              '[ "$RBRC" -eq 3 ]'
+check "rebase conflict restores worktree HEAD" '[ "$(git -C "$CFWT" rev-parse HEAD)" = "$CF_HEAD_BEFORE" ]'
+check "rebase conflict stays on its branch"  '[ "$(git -C "$CFWT" rev-parse --abbrev-ref HEAD)" = "feat/x/rb-conf" ]'
+check "rebase conflict leaves no in-progress rebase" '! [ -d "$(git -C "$CFWT" rev-parse --git-path rebase-merge)" ] && ! [ -d "$(git -C "$CFWT" rev-parse --git-path rebase-apply)" ]'
+CFOUT="$(b mh-merge.sh rebase rb-conf 2>&1 || true)"
+check "rebase conflict reports CONFLICT"     'grep -q "CONFLICT" <<<"$CFOUT"'
+git -C "$MH_HOME/repos/demo" checkout -q main   # leave the demo clone on default for later sections
+
 echo "== mh-memory (native plain-markdown context) =="
 # seed scaffolds only the git-excluded private store; it never touches the clone's
 # AGENTS.md, so the clone stays pristine (landable and fast-forward-syncable).
