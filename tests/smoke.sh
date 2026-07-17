@@ -449,6 +449,26 @@ for i in $(seq 1 15); do grep -q "concfact$i" "$MH_HOME/repos/memconc/.mh/notes.
 check "all 15 concurrent private facts survived" '[ "$cmiss" -eq 0 ]'
 check "exactly one private-notes header"         '[ "$(grep -c "manhandler private notes" "$MH_HOME/repos/memconc/.mh/notes.md")" -eq 1 ]'
 
+# === toolbelt-debt tests (#23) ===
+echo "== toolbelt debt: backlog write via delegated bwrite =="
+# bwrite now delegates to mh_json_update; the full add/list/close cycle must still
+# work (the read-modify-write behaves identically through the shared owner).
+b mh-backlog.sh add td-1 "delegated write" --status queued >/dev/null
+check "backlog add persists via delegated bwrite" 'b mh-backlog.sh list | grep -q "delegated write"'
+check "queued item shows in ready (delegated)"    'b mh-backlog.sh ready | grep -q td-1'
+b mh-backlog.sh done td-1 --note "closed" >/dev/null
+check "backlog close persists via delegated bwrite" 'b mh-backlog.sh list | grep -A2 "td-1" | grep -q "note: closed"'
+check "closed item drops out of ready (delegated)"  '! b mh-backlog.sh ready | grep -q td-1'
+
+echo "== toolbelt debt: create yields the requested initial branch (portable init) =="
+# Portable git init (no `-b`): the initial branch must be exactly the requested
+# one on a clean init. Use an empty bare local remote (offline).
+git init -q --bare -b main "$TMP/tb-init.git"
+b mh-repo.sh create tbinit "$TMP/tb-init.git" --mode local-only --branch trunk --test-cmd "true" --no-memory >/dev/null
+check "create registers with requested branch" '[ "$(b mh-repo.sh get tbinit default_branch)" = "trunk" ]'
+check "clone HEAD is the requested branch"      '[ "$(git -C "$MH_HOME/repos/tbinit" rev-parse --abbrev-ref HEAD)" = "trunk" ]'
+check "requested branch exists in the clone"    'git -C "$MH_HOME/repos/tbinit" rev-parse --verify --quiet refs/heads/trunk >/dev/null'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
