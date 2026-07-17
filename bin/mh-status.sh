@@ -117,6 +117,13 @@ else
   echo "  (no tasks)"
 fi
 
+section "OPEN PRs (needing attention)"
+# The fleet PR/health sweep, run through mh-pr.sh so the CI rollup has one owner.
+# MH_NO_FETCH is exported above, so the sweep performs NO network and reports the
+# cached pr_state/checks (live review state needs a fetch this snapshot must not
+# do). Best-effort: a sweep failure must not abort the snapshot.
+"$here/mh-pr.sh" sweep 2>/dev/null || echo "  (sweep unavailable)"
+
 section "WORKTREES (active local copies)"
 # Parallel indexed arrays record, for every worktree a task claims, its path
 # (rec_wt) and owning task id (rec_id) at the same index. bash 3.2 (macOS) has no

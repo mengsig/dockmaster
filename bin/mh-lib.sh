@@ -288,3 +288,22 @@ mh_merge_gate() {
     *)       printf 'refuse-unknown\n' ;;
   esac
 }
+
+# --- open-PR task selector: which tasks the fleet PR sweep visits ------------
+# Prints, one id per line, every task meta that records an OPEN pull request: a
+# non-empty `pr` whose cached `pr_state` is neither MERGED nor CLOSED. Pure and
+# offline (reads only task meta, no network), so the sweep's SELECTION is
+# testable without GitHub. pr_state may be empty (a PR opened but never checked);
+# that still counts as open. Ordering follows the shell glob (task-id order).
+mh_open_pr_tasks() {
+  local m id pr st
+  for m in "$MH_TASKS"/*.meta; do
+    [ -f "$m" ] || continue
+    id="$(basename "$m" .meta)"
+    pr="$(mh_meta_get "$id" pr)"
+    [ -n "$pr" ] || continue
+    st="$(mh_meta_get "$id" pr_state)"
+    case "$st" in MERGED|CLOSED) continue ;; esac
+    printf '%s\n' "$id"
+  done
+}
