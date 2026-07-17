@@ -10,6 +10,7 @@
 #   move <id> <queued|inflight|done>
 #   done <id> [--note "..."]
 #   ready                 queued items whose blockers are all done/absent
+#   decisions             open operator decisions (key + question), one per line
 #   list                  print the rendered backlog
 #
 # Operator decisions (used by the decision-hold skill):
@@ -99,6 +100,12 @@ case "$cmd" in
       select(all(.blocked_by[]; . as $b | ($done|index($b))!=null)) |
       "\(.id)\t\(.title)"' "$BJSON" | column -t -s$'\t' 2>/dev/null || true
     ;;
+  decisions)
+    # open operator decisions, machine-readable (key<TAB>question); consumed by
+    # status views. Resolved holds are omitted.
+    jq -r '.decisions[] | select(.status=="open") | "\(.key)\t\(.question)"' "$BJSON" \
+      | column -t -s$'\t' 2>/dev/null || true
+    ;;
   hold)
     key="${1:-}"; question="${2:-}"; shift 2 2>/dev/null || true
     [ -n "$key" ] && [ -n "$question" ] || mh_die "usage: mh-backlog.sh hold <key> \"<question>\" [--options \"A | B\"] [--origin <path>]"
@@ -121,5 +128,5 @@ case "$cmd" in
   list|show|"")
     render; cat "$BMD"
     ;;
-  *) echo "usage: mh-backlog.sh {add|move|done|ready|hold|resolve|list} ..." >&2; exit 2 ;;
+  *) echo "usage: mh-backlog.sh {add|move|done|ready|decisions|hold|resolve|list} ..." >&2; exit 2 ;;
 esac

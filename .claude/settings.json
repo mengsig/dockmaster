@@ -15,6 +15,8 @@
       "Bash(bin/mh-backlog.sh:*)",
       "Bash(bin/mh-test.sh:*)",
       "Bash(bin/mh-session-start.sh:*)",
+      "Bash(bin/mh-doctor.sh:*)",
+      "Bash(bin/mh-status.sh:*)",
       "Bash(gh-axi:*)",
       "Bash(contextgraph:*)",
       "Bash(lavish-axi:*)",

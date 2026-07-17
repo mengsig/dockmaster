@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and versioning is
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`mh-doctor`**: readiness check + `MH_HOME` scaffold. Owns the toolbelt's
+  dependency contract (required vs recommended tools, GitHub auth) with
+  actionable hints, and creates any missing home directories idempotently.
+  `mh-session-start` now delegates its tooling check here so the list lives in
+  one place.
+- **`mh-status`**: a read-only, no-sync mid-session snapshot — managed repos
+  (flagging tangled clones), in-flight tasks with an attention summary, active
+  worktrees with disk use plus orphaned directories and dangling records, and
+  the ready backlog with open operator decisions.
+- **`mh-backlog decisions`**: lists open operator decisions (key + question) as
+  a machine-readable interface for status views.
+
 ## [0.1.0] - 2026-07-17
 
 Initial release. manhandler is an agent distro for Claude Code that runs a crew

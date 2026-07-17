@@ -30,6 +30,15 @@ b mh-repo.sh add demo "$TMP/origin.git" --mode local-only --test-cmd "test -f sr
 check "repo registered" '[ "$(b mh-repo.sh get demo mode)" = "local-only" ]'
 check "clone present"    '[ -d "$MH_HOME/repos/demo/.git" ]'
 
+echo "== doctor =="
+# Capture once, match with a here-string: piping to `grep -q` would let grep
+# close the pipe on first match and SIGPIPE the script, which pipefail reports
+# as failure. Capturing avoids that flake.
+DOC="$(b mh-doctor.sh check)"
+check "doctor check passes (git+jq present)" 'b mh-doctor.sh check >/dev/null'
+check "doctor reports git ok"                'grep -qE "ok +git" <<<"$DOC"'
+check "doctor scaffolds home"                'b mh-doctor.sh >/dev/null && [ -d "$MH_HOME/state/tasks" ] && [ -d "$MH_HOME/state/worktrees" ] && [ -f "$MH_HOME/state/repos.json" ]'
+
 echo "== task + worktree + brief =="
 b mh-task.sh new demo-1 --kind ship --repo demo --title "add multiply" >/dev/null
 WT="$(b mh-worktree.sh create demo-1 demo | tail -n1)"
@@ -38,6 +47,12 @@ check "isolation asserts"       'b mh-worktree.sh assert "$WT" demo >/dev/null'
 b mh-brief.sh demo-1 >/dev/null
 check "brief bakes commandments" 'grep -q "The Ten Commandments" "$MH_HOME/data/demo-1/brief.md"'
 check "brief has review-ready"    'grep -q "review-ready" "$MH_HOME/data/demo-1/brief.md"'
+
+echo "== status (read-only view) =="
+STATUS="$(b mh-status.sh)"   # capture once (see doctor note on grep -q + pipefail)
+check "status runs"                'b mh-status.sh >/dev/null'
+check "status shows managed repo"  'grep -q demo <<<"$STATUS"'
+check "status shows in-flight task" 'grep -q demo-1 <<<"$STATUS"'
 
 echo "== state reconciliation =="
 check "state pending pre-work" 'b mh-task.sh state demo-1 | grep -q pending'

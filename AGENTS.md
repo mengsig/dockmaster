@@ -58,9 +58,11 @@ data/                per-task artifacts (briefs, scout reports), gitignored
 `bin/mh-backlog.sh` owns `state/backlog.json` — go through the `mh-*` scripts,
 never hand-edit `state/tasks/*.meta`, `state/repos.json`, or the backlog. A
 `state/tasks/<id>.status` line is a wake **event**; current state is
-`bin/mh-task.sh state <id>`. The toolbelt: `mh-session-start` (startup digest),
-`mh-repo`, `mh-worktree`, `mh-task`, `mh-brief`, `mh-branch-name`, `mh-pr`,
-`mh-merge`, `mh-sync`, `mh-lavish`, `mh-test` (the tests gate), `mh-backlog`.
+`bin/mh-task.sh state <id>`. The toolbelt: `mh-doctor` (readiness check +
+`MH_HOME` scaffold), `mh-session-start` (startup digest), `mh-status` (read-only
+mid-session snapshot), `mh-repo`, `mh-worktree`, `mh-task`, `mh-brief`,
+`mh-branch-name`, `mh-pr`, `mh-merge`, `mh-sync`, `mh-lavish`, `mh-test` (the
+tests gate), `mh-backlog`.
 
 ## Session start
 

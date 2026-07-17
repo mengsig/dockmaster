@@ -18,12 +18,10 @@ do_sync=1; [ "${1:-}" = "--no-sync" ] && do_sync=0
 section() { printf '\n=== %s ===\n' "$1"; }
 
 section "TOOLING"
-for t in git jq gh-axi lavish-axi contextgraph; do
-  if command -v "$t" >/dev/null 2>&1; then printf '  ok   %s\n' "$t"; else printf '  MISSING %s\n' "$t"; fi
-done
-if command -v gh >/dev/null 2>&1; then
-  gh auth status >/dev/null 2>&1 && printf '  ok   gh auth\n' || printf '  NEEDS_GH_AUTH (run: gh auth login)\n'
-fi
+# mh-doctor owns the dependency contract; delegate so the list never drifts. A
+# missing required tool makes doctor exit non-zero — do not let that abort the
+# rest of the digest (the missing tool is already reported in its output).
+"$here/mh-doctor.sh" check || true
 
 section "MANAGED REPOS"
 "$here/mh-repo.sh" list 2>/dev/null || echo "  (none registered)"
