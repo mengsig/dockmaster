@@ -13,10 +13,18 @@
 #      fast-forward-syncable). `seed` therefore never touches the clone's AGENTS.md;
 #      `recall` reads whatever committed section the clone has.
 #
-#   2. PRIVATE (git-excluded, manhandler-only)  - repos/<repo>/.mh/notes.md. Fleet
-#      strategy, per-repo operator preferences, sensitive routing: things that must
-#      NOT enter the user's project history. Excluded via the clone's
-#      .git/info/exclude so it never shows as untracked or gets committed.
+#   2. PRIVATE (git-excluded, RELAYED to crewmates)  - repos/<repo>/.mh/notes.md.
+#      Per-repo orchestration context: routing, per-repo operator preferences,
+#      strategy. Excluded via the clone's .git/info/exclude so it never enters the
+#      user's project history, but `recall` DOES inject it into every crewmate
+#      brief for the crewmate's awareness (not to be copied into commits or the
+#      repo's AGENTS.md). Do NOT put anything a crewmate must never see here; use
+#      the manhandler-only store below for that.
+#
+#   2b. MANHANDLER-ONLY (git-excluded, NEVER relayed)  - repos/<repo>/.mh/private.md.
+#      The truly orchestrator-private store: `recall` shows it to the manhandler,
+#      but `mh-brief.sh` recalls with --crew and EXCLUDES it, so it never reaches a
+#      crewmate brief. Sensitive routing the crew must not see lives here.
 #
 #   3. GLOBAL (orchestrator)  - state/learnings.md (fleet-wide facts + gotchas) and
 #      state/operator.md (operator preferences), in the manhandler home.
@@ -26,10 +34,14 @@
 # secrets, transient failures, task status, plans, or code excerpts.
 #
 # Usage:
-#   mh-memory.sh recall <repo> [query]
+#   mh-memory.sh recall <repo> [query] [--crew]
 #   mh-memory.sh recall --global [query]
 #   mh-memory.sh remember <repo> --private --kind <kind> "<fact>"
+#   mh-memory.sh remember <repo> --manhandler-only --kind <kind> "<fact>"
 #   mh-memory.sh remember --global --kind <kind> "<fact>"
+#   mh-memory.sh forget <repo> --private <substring>
+#   mh-memory.sh forget <repo> --manhandler-only <substring>
+#   mh-memory.sh forget --global <substring>
 #   mh-memory.sh seed <repo>
 #   mh-memory.sh --help
 #
@@ -43,22 +55,46 @@ mh_ensure_dirs
 MH_KNOWLEDGE_START='<!-- mh:knowledge:start -->'
 MH_KNOWLEDGE_END='<!-- mh:knowledge:end -->'
 
+# Soft per-store line cap for recall output. Keeps an unbounded store from
+# flooding a brief (mh-brief injects recall verbatim); a tail pointer tells the
+# reader how to see the rest with a query. Full content is always reachable via
+# an explicit query, which is filtered before the cap applies.
+MH_RECALL_MAX_LINES="${MH_RECALL_MAX_LINES:-40}"
+case "$MH_RECALL_MAX_LINES" in
+  ''|*[!0-9]*|0) mh_warn "MH_RECALL_MAX_LINES='$MH_RECALL_MAX_LINES' is not a positive integer; using 40"; MH_RECALL_MAX_LINES=40 ;;
+esac
+
 usage() {
   cat <<'EOF'
 mh-memory.sh - native plain-markdown context for the manhandler
 
-  recall <repo> [query]            print a repo's SHARED knowledge (its AGENTS.md
-                                   mh:knowledge section) + PRIVATE notes; [query]
-                                   filters to lines containing it as a literal,
-                                   case-insensitive substring (grep -i -F).
+  recall <repo> [query] [--crew]   print a repo's SHARED knowledge (its AGENTS.md
+                                   mh:knowledge section) + PRIVATE notes + the
+                                   MANHANDLER-ONLY store; [query] filters to lines
+                                   matching any whitespace-separated term as a
+                                   literal, case-insensitive substring (grep -i -F,
+                                   OR of terms). Output is soft-capped per store
+                                   (MH_RECALL_MAX_LINES, default 40) with a tail
+                                   pointer; narrow with a query to see the rest.
+                                   --crew omits the manhandler-only store (what
+                                   mh-brief injects into a crewmate brief).
   recall --global [query]          print state/learnings.md + state/operator.md.
   remember <repo> --private --kind <kind> [--] "<fact>"
-                                   append one dated bullet to repos/<repo>/.mh/notes.md.
+                                   append one dated bullet to repos/<repo>/.mh/notes.md
+                                   (relayed to crewmate briefs).
+  remember <repo> --manhandler-only --kind <kind> [--] "<fact>"
+                                   append one dated bullet to repos/<repo>/.mh/private.md
+                                   (never relayed to a crewmate).
   remember --global --kind <kind> [--] "<fact>"
                                    append one dated bullet to state/learnings.md.
 
   Use -- to end flag parsing when the fact itself begins with - or -- (e.g.
   remember demo --private --kind command -- "-Wall enables all warnings").
+  forget <repo> --private <substring>
+  forget <repo> --manhandler-only <substring>
+  forget --global <substring>      remove every bullet line matching <substring>
+                                   (literal) from the store, printing what it
+                                   removed. Fails if nothing matched.
   seed <repo>                      ensure the git-excluded private store exists.
                                    Idempotent. Never touches the clone's AGENTS.md.
 
@@ -104,12 +140,17 @@ clone_dir() {
 # mis-edited AGENTS.md) emits NOTHING and warns to stderr, so the file's whole
 # tail — including the coding-guidelines mirror — can never leak into recall and
 # every crewmate brief.
+#
+# A marker is recognized only when it is the WHOLE trimmed line, so a repo that
+# documents the literal marker in prose or a code fence does not mis-trigger
+# extraction. The buffered content uses the original ($0) lines, unmodified.
 extract_knowledge() {
   local f="$1"
   [ -f "$f" ] || return 0
   awk -v s="$MH_KNOWLEDGE_START" -v e="$MH_KNOWLEDGE_END" -v file="$f" '
-    index($0, s) { inside = 1; buf = ""; next }
-    inside && index($0, e) { printf "%s", buf; inside = 0; buf = ""; next }
+    { trimmed = $0; sub(/^[ \t]+/, "", trimmed); sub(/[ \t]+$/, "", trimmed) }
+    trimmed == s { inside = 1; buf = ""; next }
+    inside && trimmed == e { printf "%s", buf; inside = 0; buf = ""; next }
     inside { buf = buf $0 "\n" }
     END {
       if (inside)
@@ -118,41 +159,74 @@ extract_knowledge() {
   ' "$f"
 }
 
-# print_section <label> <content> <query> - render one store, filtered if a query
-# is given. Keeps the store label visible even when nothing matches.
+# filter_query <content> <query> - keep the lines of <content> that match ANY
+# whitespace-separated term of <query> as a literal, case-insensitive substring
+# (grep -i -F, OR of terms). Terms are built into a `-e` args array in a loop so
+# it stays bash-3.2-safe (no process substitution, no arrays expanded empty under
+# set -u). An all-whitespace query degrades to "no filter" (returns content).
+filter_query() {
+  local content="$1" query="$2" term
+  set -f  # $query is split on whitespace intentionally; -f stops pathname
+          # globbing (a term like "*.md" must stay literal, not match CWD files)
+  set -- # reuse the positional args as the term list
+  for term in $query; do set -- "$@" -e "$term"; done
+  set +f
+  if [ "$#" -eq 0 ]; then printf '%s\n' "$content"; return 0; fi
+  grep -i -F "$@" <<<"$content" || true
+}
+
+# emit_capped <content> <hint> - print at most MH_RECALL_MAX_LINES lines of
+# <content>; if more remain, print a tail pointer naming how many were omitted
+# and the recall invocation (<hint>) that narrows the view. Reads via here-string
+# (never a pipe into head) so an early-closing head cannot SIGPIPE the producer.
+emit_capped() {
+  local content="$1" hint="$2" total omitted
+  total="$(grep -c '' <<<"$content")"
+  if [ "$total" -le "$MH_RECALL_MAX_LINES" ]; then
+    printf '%s\n\n' "$content"; return 0
+  fi
+  head -n "$MH_RECALL_MAX_LINES" <<<"$content"
+  omitted=$((total - MH_RECALL_MAX_LINES))
+  printf '  … %s older line(s) omitted — run `%s`\n\n' "$omitted" "$hint"
+}
+
+# print_section <label> <content> <query> <hint> - render one store, filtered if
+# a query is given, then soft-capped. Keeps the store label visible even when
+# empty or nothing matches. <hint> is the recall invocation the cap tail suggests.
 print_section() {
-  local label="$1" content="$2" query="$3" shown
+  local label="$1" content="$2" query="$3" hint="${4:-mh-memory.sh recall <repo> <query>}" shown
   printf '== %s ==\n' "$label"
   if [ -z "$content" ]; then
     printf '  (empty)\n\n'; return 0
   fi
   if [ -n "$query" ]; then
-    shown="$(printf '%s\n' "$content" | grep -i -F -e "$query" || true)"
+    shown="$(filter_query "$content" "$query")"
     if [ -z "$shown" ]; then printf '  (no lines match "%s")\n\n' "$query"; return 0; fi
-    printf '%s\n\n' "$shown"
+    emit_capped "$shown" "$hint"
   else
-    printf '%s\n\n' "$content"
+    emit_capped "$content" "$hint"
   fi
 }
 
 # --- private store scaffolding -----------------------------------------------
-# Ensure repos/<repo>/.mh/notes.md exists and .mh/ is git-excluded in the clone,
-# so the private store never shows as untracked and can never be committed.
-ensure_private_store() {
-  local repo="$1" dir mhdir notes excl
+# Ensure repos/<repo>/.mh/<fname> exists (with a header) and .mh/ is git-excluded
+# in the clone, so the store never shows as untracked and can never be committed.
+# <header> is the leading text of the `<!-- ... for <repo> ... -->` comment.
+ensure_store() {
+  local repo="$1" fname="$2" header="$3" dir mhdir file excl
   dir="$(clone_dir "$repo")"
   [ -d "$dir/.git" ] || mh_die "no clone at $dir for repo '$repo'"
-  mhdir="$dir/.mh"; notes="$mhdir/notes.md"
+  mhdir="$dir/.mh"; file="$mhdir/$fname"
   mkdir -p "$mhdir"
-  # Create the header under the lock so concurrent first `remember --private`
-  # calls cannot truncate each other's store; `-s` guards against re-truncating
-  # an already-populated file (mirrors remember_global's create-under-lock).
-  mh_lock "$notes"
-  if [ ! -s "$notes" ]; then
-    printf '<!-- manhandler private notes for %s - git-excluded, never committed -->\n' "$repo" > "$notes" \
-      || { mh_unlock "$notes"; mh_die "failed creating private notes store for '$repo'"; }
+  # Create the header under the lock so concurrent first writes cannot truncate
+  # each other's store; `-s` guards against re-truncating an already-populated
+  # file (mirrors remember_global's create-under-lock).
+  mh_lock "$file"
+  if [ ! -s "$file" ]; then
+    printf '<!-- %s for %s - git-excluded, never committed -->\n' "$header" "$repo" > "$file" \
+      || { mh_unlock "$file"; mh_die "failed creating $fname store for '$repo'"; }
   fi
-  mh_unlock "$notes"
+  mh_unlock "$file"
   excl="$(git -C "$dir" rev-parse --git-path info/exclude 2>/dev/null || true)"
   [ -n "$excl" ] || return 0
   case "$excl" in /*) ;; *) excl="$dir/$excl" ;; esac
@@ -162,16 +236,29 @@ ensure_private_store() {
   fi
 }
 
+ensure_private_store()    { ensure_store "$1" notes.md   "manhandler private notes"; }
+ensure_manhandler_store() { ensure_store "$1" private.md "manhandler-only notes"; }
+
 # --- verbs -------------------------------------------------------------------
+# recall_repo <repo> [query] [crew] - print the repo's stores. When crew=1 the
+# manhandler-only store is OMITTED (mh-brief passes --crew so a crewmate never
+# sees it); the manhandler's own recall (crew=0) includes it.
 recall_repo() {
-  local repo="$1" query="${2:-}" dir shared_content priv_content priv_file
+  local repo="$1" query="${2:-}" crew="${3:-0}" dir hint
+  local shared_content priv_content priv_file mh_content mh_file
   require_registered "$repo"
   dir="$(clone_dir "$repo")"
+  hint="mh-memory.sh recall $repo <query>"
   shared_content="$(extract_knowledge "$dir/AGENTS.md")"
   priv_file="$dir/.mh/notes.md"; priv_content=""
   [ -f "$priv_file" ] && priv_content="$(cat "$priv_file")"
-  print_section "shared knowledge: $repo ($dir/AGENTS.md)" "$shared_content" "$query"
-  print_section "private notes: $repo ($priv_file)" "$priv_content" "$query"
+  print_section "shared knowledge: $repo ($dir/AGENTS.md)" "$shared_content" "$query" "$hint"
+  print_section "private notes: $repo ($priv_file)" "$priv_content" "$query" "$hint"
+  if [ "$crew" != "1" ]; then
+    mh_file="$dir/.mh/private.md"; mh_content=""
+    [ -f "$mh_file" ] && mh_content="$(cat "$mh_file")"
+    print_section "manhandler-only notes: $repo ($mh_file)" "$mh_content" "$query" "$hint"
+  fi
 }
 
 recall_global() {
@@ -179,21 +266,51 @@ recall_global() {
   learn="$MH_STATE/learnings.md"; operator="$MH_STATE/operator.md"
   lc=""; [ -f "$learn" ] && lc="$(cat "$learn")"
   oc=""; [ -f "$operator" ] && oc="$(cat "$operator")"
-  print_section "fleet learnings ($learn)" "$lc" "$query"
-  print_section "operator preferences ($operator)" "$oc" "$query"
+  print_section "fleet learnings ($learn)" "$lc" "$query" "mh-memory.sh recall --global <query>"
+  print_section "operator preferences ($operator)" "$oc" "$query" "mh-memory.sh recall --global <query>"
+}
+
+# warn_if_duplicate <file> <fact> - non-fatal stderr warning when a bullet with
+# the same fact BODY already exists, matched literally and ignoring the kind and
+# the trailing date (the framing around the fact is `]** <fact>  _(`). Advisory
+# only; the append still proceeds so no knowledge is silently dropped.
+warn_if_duplicate() {
+  local f="$1" fact="$2"
+  [ -f "$f" ] || return 0
+  if grep -qF -- "]** $fact  _(" "$f" 2>/dev/null; then
+    mh_warn "a note with this exact fact body already exists in $f; appending anyway (use 'forget' to curate)"
+  fi
+}
+
+# append_repo_note <repo> <kind> <fact> <file> <label> - append one dated bullet
+# to a repo store, serialized by the lock. Shared by the private and
+# manhandler-only paths, which differ only in target file and label.
+append_repo_note() {
+  local repo="$1" kind="$2" fact="$3" file="$4" label="$5" bullet
+  bullet="- **[$kind]** $fact  _($(date -u +%Y-%m-%dT%H:%M:%SZ))_"
+  warn_if_duplicate "$file" "$fact"
+  mh_lock "$file"
+  printf '%s\n' "$bullet" >> "$file" || { mh_unlock "$file"; mh_die "failed appending $label for '$repo'"; }
+  mh_unlock "$file"
+  mh_info "recorded $label for '$repo'"
 }
 
 remember_private() {
-  local repo="$1" kind="$2" fact="$3" dir notes bullet
+  local repo="$1" kind="$2" fact="$3" dir
   require_registered "$repo"
   validate_kind "$kind"; validate_fact "$fact"
   ensure_private_store "$repo"
-  dir="$(clone_dir "$repo")"; notes="$dir/.mh/notes.md"
-  bullet="- **[$kind]** $fact  _($(date -u +%Y-%m-%dT%H:%M:%SZ))_"
-  mh_lock "$notes"
-  printf '%s\n' "$bullet" >> "$notes" || { mh_unlock "$notes"; mh_die "failed appending private note for '$repo'"; }
-  mh_unlock "$notes"
-  mh_info "recorded private note for '$repo'"
+  dir="$(clone_dir "$repo")"
+  append_repo_note "$repo" "$kind" "$fact" "$dir/.mh/notes.md" "private note"
+}
+
+remember_manhandler() {
+  local repo="$1" kind="$2" fact="$3" dir
+  require_registered "$repo"
+  validate_kind "$kind"; validate_fact "$fact"
+  ensure_manhandler_store "$repo"
+  dir="$(clone_dir "$repo")"
+  append_repo_note "$repo" "$kind" "$fact" "$dir/.mh/private.md" "manhandler-only note"
 }
 
 remember_global() {
@@ -201,6 +318,7 @@ remember_global() {
   validate_kind "$kind"; validate_fact "$fact"
   f="$MH_STATE/learnings.md"
   bullet="- **[$kind]** $fact  _($(date -u +%Y-%m-%dT%H:%M:%SZ))_"
+  warn_if_duplicate "$f" "$fact"
   mh_lock "$f"
   if [ ! -f "$f" ]; then
     printf '# Fleet learnings (manhandler global memory)\n\n_Fleet-wide operational facts and gotchas - dated, evidence-backed, pruned._\n\n' > "$f" \
@@ -209,6 +327,44 @@ remember_global() {
   printf '%s\n' "$bullet" >> "$f" || { mh_unlock "$f"; mh_die "failed appending fleet learning"; }
   mh_unlock "$f"
   mh_info "recorded fleet learning"
+}
+
+# --- forget: locked removal of matching bullet lines -------------------------
+# Remove every BULLET line (starts with "- ") of <file> that contains <substr>
+# as a literal substring, rewriting the file atomically under the lock. Prints
+# the removed lines. Fails (removes nothing) if no bullet matched, so a typo'd
+# substring is a visible error, not a silent no-op. Non-bullet lines (the header)
+# are never touched, even if they contain the substring.
+forget_from_file() {
+  local f="$1" substr="$2" desc="$3" bullets removed tmp
+  bullets="$(grep -e '^- ' "$f" || true)"
+  removed="$(grep -F -e "$substr" <<<"$bullets" || true)"
+  if [ -z "$removed" ]; then
+    mh_die "no $desc match \"$substr\"; nothing removed"
+  fi
+  mh_lock "$f"
+  tmp="$(mktemp "$(dirname "$f")/.forget.XXXXXX")" || { mh_unlock "$f"; mh_die "mktemp failed for $(basename "$f")"; }
+  awk -v s="$substr" '/^- / && index($0, s) { next } { print }' "$f" > "$tmp" \
+    || { rm -f "$tmp"; mh_unlock "$f"; mh_die "failed rewriting $f"; }
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; mh_unlock "$f"; mh_die "failed committing $f"; }
+  mh_unlock "$f"
+  mh_info "removed $desc matching \"$substr\":"
+  printf '%s\n' "$removed"
+}
+
+forget_repo() {
+  local repo="$1" fname="$2" substr="$3" desc="$4" dir f
+  require_registered "$repo"
+  dir="$(clone_dir "$repo")"; f="$dir/.mh/$fname"
+  [ -f "$f" ] || mh_die "no $desc store for '$repo'; nothing to forget"
+  forget_from_file "$f" "$substr" "$desc for '$repo'"
+}
+
+forget_global() {
+  local substr="$1" f
+  f="$MH_STATE/learnings.md"
+  [ -f "$f" ] || mh_die "no fleet learnings store; nothing to forget"
+  forget_from_file "$f" "$substr" "fleet learning(s)"
 }
 
 seed_repo() {
@@ -226,9 +382,20 @@ case "$cmd" in
       shift
       recall_global "${1:-}"
     else
-      repo="${1:-}"; [ -n "$repo" ] || mh_die "usage: mh-memory.sh recall <repo> [query] | recall --global [query]"
-      shift || true
-      recall_repo "$repo" "${1:-}"
+      repo=""; query=""; crew=0; endflags=0
+      while [ "$#" -gt 0 ]; do
+        if [ "$endflags" -eq 0 ]; then
+          case "$1" in
+            --crew) crew=1; shift; continue ;;
+            --) endflags=1; shift; continue ;;
+            -*) mh_die "unknown flag for recall: $1" ;;
+          esac
+        fi
+        if [ -z "$repo" ]; then repo="$1"; else query="$query${query:+ }$1"; fi
+        shift
+      done
+      [ -n "$repo" ] || mh_die "usage: mh-memory.sh recall <repo> [query] [--crew] | recall --global [query]"
+      recall_repo "$repo" "$query" "$crew"
     fi
     ;;
 
@@ -249,20 +416,54 @@ case "$cmd" in
       fact="${1:-}"; [ -n "$fact" ] || mh_die "remember --global requires a \"<fact>\""
       remember_global "$kind" "$fact"
     else
-      repo="$target"; private=0; kind=""
+      repo="$target"; private=0; mhonly=0; kind=""
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --private) private=1; shift ;;
+          --manhandler-only) mhonly=1; shift ;;
           --kind) kind="${2:-}"; shift 2 ;;
           --) shift; break ;;
           -*) mh_die "unknown flag: $1" ;;
           *) break ;;
         esac
       done
-      [ "$private" = 1 ] || mh_die "repo-scoped remember must use --private; SHARED knowledge is authored by a crewmate in the repo's AGENTS.md mh:knowledge section, not appended here"
-      [ -n "$kind" ] || mh_die "remember <repo> --private requires --kind <kind>"
-      fact="${1:-}"; [ -n "$fact" ] || mh_die "remember <repo> --private requires a \"<fact>\""
-      remember_private "$repo" "$kind" "$fact"
+      [ "$private" = 1 ] || [ "$mhonly" = 1 ] || mh_die "repo-scoped remember must use --private or --manhandler-only; SHARED knowledge is authored by a crewmate in the repo's AGENTS.md mh:knowledge section, not appended here"
+      if [ "$private" = 1 ] && [ "$mhonly" = 1 ]; then mh_die "use only one of --private / --manhandler-only"; fi
+      [ -n "$kind" ] || mh_die "remember <repo> requires --kind <kind>"
+      fact="${1:-}"; [ -n "$fact" ] || mh_die "remember <repo> requires a \"<fact>\""
+      if [ "$mhonly" = 1 ]; then
+        remember_manhandler "$repo" "$kind" "$fact"
+      else
+        remember_private "$repo" "$kind" "$fact"
+      fi
+    fi
+    ;;
+
+  forget)
+    target="${1:-}"; shift || true
+    [ -n "$target" ] || mh_die "usage: mh-memory.sh forget <repo> --private <substring> | forget <repo> --manhandler-only <substring> | forget --global <substring>"
+    if [ "$target" = "--global" ]; then
+      substr="${1:-}"; [ -n "$substr" ] || mh_die "forget --global requires a <substring>"
+      forget_global "$substr"
+    else
+      repo="$target"; private=0; mhonly=0
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --private) private=1; shift ;;
+          --manhandler-only) mhonly=1; shift ;;
+          --) shift; break ;;
+          -*) mh_die "unknown flag: $1" ;;
+          *) break ;;
+        esac
+      done
+      [ "$private" = 1 ] || [ "$mhonly" = 1 ] || mh_die "repo-scoped forget must use --private or --manhandler-only"
+      if [ "$private" = 1 ] && [ "$mhonly" = 1 ]; then mh_die "use only one of --private / --manhandler-only"; fi
+      substr="${1:-}"; [ -n "$substr" ] || mh_die "forget <repo> requires a <substring>"
+      if [ "$mhonly" = 1 ]; then
+        forget_repo "$repo" private.md "$substr" "manhandler-only note(s)"
+      else
+        forget_repo "$repo" notes.md "$substr" "private note(s)"
+      fi
     fi
     ;;
 

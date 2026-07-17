@@ -47,16 +47,35 @@ normal PR/local flow, never force-committed onto a clone's default branch.
 
 ## Per-repo PRIVATE — `repos/<repo>/.mh/notes.md`
 
-Manhandler-only context that must **not** enter the user's project history: fleet
-strategy, per-repo operator preferences, sensitive routing. It is git-excluded via
+Per-repo orchestration context that must **not** enter the user's project
+history: routing, per-repo operator preferences, strategy. It is git-excluded via
 the clone's `.git/info/exclude`, so it never shows as untracked or gets committed.
 
 ```
 bin/mh-memory.sh remember <repo> --private --kind <kind> "<fact>"
 ```
 
-`recall <repo>` prints it alongside the shared knowledge. The manhandler injects
-the relevant parts into crewmate briefs. Never write a secret here.
+`recall <repo>` prints it alongside the shared knowledge, and **it is relayed
+into every crewmate brief** for the worker's awareness (the brief tells the
+worker not to copy it into the repo's history). So it is *private to the project
+history*, not private from the crew — do **not** put a secret or anything a
+crewmate must never see here. Curate with `bin/mh-memory.sh forget <repo>
+--private <substring>`.
+
+## Per-repo MANHANDLER-ONLY — `repos/<repo>/.mh/private.md`
+
+The truly orchestrator-private store, also git-excluded: sensitive routing the
+crew must **not** see. `recall <repo>` shows it to the manhandler, but
+`bin/mh-brief.sh` recalls with `--crew` and **excludes** it, so it never reaches
+a crewmate brief.
+
+```
+bin/mh-memory.sh remember <repo> --manhandler-only --kind <kind> "<fact>"
+bin/mh-memory.sh forget   <repo> --manhandler-only <substring>
+```
+
+Still never write a raw secret value in any store — pass a reference
+(credential-handoff), never the value.
 
 ## Global — the manhandler home
 
@@ -84,7 +103,8 @@ Recall both global files with `bin/mh-memory.sh recall --global [query]`.
 | Fact is about… | Owner |
 | --- | --- |
 | one managed repo, contributor-relevant | that repo's `AGENTS.md` mh:knowledge section |
-| one managed repo, manhandler-private | `repos/<repo>/.mh/notes.md` |
+| one managed repo, orchestration (crew may see) | `repos/<repo>/.mh/notes.md` |
+| one managed repo, crew must NOT see | `repos/<repo>/.mh/private.md` |
 | this distro's own code | this repo's `AGENTS.md` mh:knowledge section |
 | the operator (prefs, style) | `state/operator.md` + native `memory/` |
 | the fleet as a whole | `state/learnings.md` |
@@ -94,7 +114,10 @@ Recall both global files with `bin/mh-memory.sh recall --global [query]`.
 ## Discipline
 
 - **Inspect then update.** Read the destination first; rewrite the entry it
-  supersedes rather than appending forever. Prune stale facts.
+  supersedes rather than appending forever. Prune stale facts. In the two
+  tool-writable stores (private, manhandler-only, global), `remember` warns on a
+  duplicate fact body and `forget <…> <substring>` removes matching bullets —
+  use them to curate rather than let the store drift.
 - **One fact per entry.** Atomic, evidence-backed, non-obvious.
 - **Never** store secrets, transient failures, task status, plans, or code
   excerpts. **Never** route knowledge into a skill — skills are instructions,

@@ -26,13 +26,39 @@ out="$MH_DATA/$id"; mkdir -p "$out"
 brief="$out/brief.md"
 
 # Inject the repo's known context (shared AGENTS.md mh:knowledge + private notes)
-# so the crewmate has it without a tool call. Best-effort: an unregistered repo or
-# empty store must not fail brief generation.
-mem=""
+# plus a bounded fleet-wide slice so the crewmate has it without a tool call.
+# Best-effort on CONTENT (an unregistered repo or empty store must not fail brief
+# generation), but recall's STDERR is surfaced, not swallowed: a truncated
+# knowledge-block warning must reach the manhandler, or a crewmate is dispatched
+# context-blind. The manhandler-only store is excluded from the brief via --crew.
+memtool="$(dirname "${BASH_SOURCE[0]}")/mh-memory.sh"
+
+# recall_block <warn-tag> <friendly-empty-line> <recall-args...>  -- run recall,
+# re-emit any stderr via mh_warn (to the manhandler, NOT into the brief), and
+# collapse a genuinely-empty result (only section scaffolds) to the friendly line
+# instead of injecting empty scaffolds.
+recall_block() {
+  local warn_tag="$1" empty_line="$2"; shift 2
+  local errf res body line
+  errf="$(mktemp "$out/.recall.XXXXXX")" || mh_die "mktemp failed generating brief $id"
+  res="$("$memtool" recall "$@" 2>"$errf" || true)"
+  if [ -s "$errf" ]; then
+    while IFS= read -r line; do mh_warn "$warn_tag: $line"; done < "$errf"
+  fi
+  rm -f "$errf"
+  # Emptiness from CONTENT, not the labeled output: strip section headers, the
+  # (empty)/(no lines match)/cap-tail markers, and blank lines; if nothing
+  # remains, the stores hold no recorded knowledge.
+  body="$(grep -v -e '^== ' -e '^  (empty)$' -e '^  (no lines match' -e '^  … ' -e '^[[:space:]]*$' <<<"$res" || true)"
+  if [ -n "$body" ]; then printf '%s\n' "$res"; else printf '%s\n' "$empty_line"; fi
+}
+
 if [ -n "$repo" ]; then
-  mem="$("$(dirname "${BASH_SOURCE[0]}")/mh-memory.sh" recall "$repo" 2>/dev/null || true)"
+  mem="$(recall_block "recall($repo)" "(no repository knowledge recorded yet.)" --crew "$repo")"
+else
+  mem="(no repository knowledge recorded yet.)"
 fi
-[ -n "$mem" ] || mem="(no repository knowledge recorded yet.)"
+fleet="$(recall_block "recall(--global)" "(no fleet-wide context recorded yet.)" --global)"
 
 # shared header ----------------------------------------------------------------
 {
@@ -62,12 +88,19 @@ primary clone. If it is not, do nothing else - append a blocked status and stop:
 What this repo already knows that bears on your task is injected below. SHARED
 knowledge lives in this repo's own \`AGENTS.md\` \`mh:knowledge\` section (committed,
 so it travels to every clone and worktree). PRIVATE notes (the \`private notes\`
-section) are manhandler-internal orchestration context for your awareness ONLY:
-use them to inform your work, but never copy or paraphrase them into commits, PR
-descriptions, code comments, or the repo's \`AGENTS.md\` — they must not enter the
-project's history. Read it all before you start.
+section) are manhandler orchestration context relayed to you for your awareness
+ONLY: use them to inform your work, but never copy or paraphrase them into
+commits, PR descriptions, code comments, or the repo's \`AGENTS.md\` — they must
+not enter the project's history. Read it all before you start.
 
 $mem
+
+## Fleet-wide context (operator preferences + fleet learnings)
+
+Cross-repo context from the manhandler's global memory. Same rule as private
+notes: for your awareness, never copied into this repo's history.
+
+$fleet
 
 When you learn something durable, non-obvious, and repo-specific, record it:
 - A SHARED, contributor-relevant fact (a build/test command, an invariant, a

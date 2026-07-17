@@ -111,15 +111,21 @@ stores, one owner per fact (details in `memory-routing`):
   pitfalls, routing). Committed, so it travels to every clone and worktree. You
   NEVER hand-write it — a crewmate edits the section in its worktree and commits
   it with the work.
-- **Per-repo PRIVATE** → `repos/<repo>/.mh/notes.md`, git-excluded and
-  manhandler-only (fleet strategy, sensitive routing). Never enters project
-  history.
+- **Per-repo PRIVATE** → `repos/<repo>/.mh/notes.md`, git-excluded (routing,
+  per-repo operator prefs, strategy). Never enters project history, but it IS
+  relayed into every crewmate brief for the worker's awareness — do not put
+  anything a worker must never see here.
+- **Per-repo MANHANDLER-ONLY** → `repos/<repo>/.mh/private.md`, git-excluded and
+  never relayed: `recall` shows it to you, but a brief excludes it (`recall
+  --crew`). Sensitive routing the crew must not see lives here.
 - **Global** (operator, fleet) → `state/operator.md`, `state/learnings.md`, and
   native `memory/`.
 
 Recall with `bin/mh-memory.sh recall <repo> [query]` (or `recall --global`);
-record private/global facts with `bin/mh-memory.sh remember`. Save progressively
-at each durable discovery, not in an end-of-session sweep.
+record with `bin/mh-memory.sh remember` (`--private` / `--manhandler-only` /
+`--global`) and curate with `bin/mh-memory.sh forget`. Recall is soft-capped per
+store (a tail pointer names how to see the rest with a query). Save
+progressively at each durable discovery, not in an end-of-session sweep.
 
 ## Reporting and escalation
 

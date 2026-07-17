@@ -478,6 +478,76 @@ check "doctor lists chrome-devtools-axi"                  'grep -q "chrome-devto
 AXILINES="$(grep -E 'gh-axi|lavish-axi|chrome-devtools-axi' <<<"$DOCF" || true)"
 check "doctor does not mark axi tools required"           '! grep -qi "required" <<<"$AXILINES"'
 check "check mode still exits 0 without axi tools"        'b mh-doctor.sh check >/dev/null'
+# === memory-context tests (#22) ===
+# Relevance caps (F1), curation verbs (F2), fleet reach + manhandler-only store
+# (F3/F5), silent-failure surfacing (F4), multi-term recall (F6), and whole-line
+# marker anchoring (F7). A fresh repo keeps counts deterministic.
+b mh-repo.sh add memctx "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b mh-memory.sh seed memctx >/dev/null
+
+echo "== memory-context: multi-term OR recall (F6) =="
+b mh-memory.sh remember memctx --private --kind routing "alpha lions roam" >/dev/null
+b mh-memory.sh remember memctx --private --kind routing "beta tigers hunt" >/dev/null
+b mh-memory.sh remember memctx --private --kind routing "gamma bears sleep" >/dev/null
+ORQ="$(b mh-memory.sh recall memctx "lions bears")"   # capture once (grep -q + pipefail)
+check "OR recall keeps a line matching the first term"  'grep -q "alpha lions" <<<"$ORQ"'
+check "OR recall keeps a line matching the second term" 'grep -q "gamma bears" <<<"$ORQ"'
+check "OR recall drops a line matching neither term"    '! grep -q "beta tigers" <<<"$ORQ"'
+
+echo "== memory-context: soft line cap + tail pointer (F1) =="
+for i in $(seq 1 12); do b mh-memory.sh remember memctx --private --kind routing "capfact-$i" >/dev/null; done
+# Direct invocation so the env-var prefix reaches the external script unambiguously.
+CAP="$(MH_RECALL_MAX_LINES=5 "$ROOT/bin/mh-memory.sh" recall memctx)"
+check "cap emits the omitted-lines tail pointer" 'grep -q "older line(s) omitted" <<<"$CAP"'
+check "cap hides some bullets under the limit"   '[ "$(grep -c "capfact-" <<<"$CAP")" -lt 12 ]'
+# Full content stays reachable on an explicit query (filtered BEFORE the cap).
+CAPQ="$(MH_RECALL_MAX_LINES=5 "$ROOT/bin/mh-memory.sh" recall memctx "capfact-7")"
+check "explicit query still surfaces a capped-out fact" 'grep -q "capfact-7" <<<"$CAPQ"'
+
+echo "== memory-context: forget removes a bullet, fails on no-match (F2) =="
+b mh-memory.sh forget memctx --private "beta tigers" >/dev/null
+check "forget removes the matching bullet"   '! grep -q "beta tigers" "$MH_HOME/repos/memctx/.mh/notes.md"'
+check "forget leaves a non-matching bullet"  'grep -q "alpha lions" "$MH_HOME/repos/memctx/.mh/notes.md"'
+check "forget preserves the store header"    'grep -q "manhandler private notes" "$MH_HOME/repos/memctx/.mh/notes.md"'
+check "forget fails when nothing matches"    '! b mh-memory.sh forget memctx --private "no-such-substring-zzz" >/dev/null 2>&1'
+
+echo "== memory-context: duplicate-fact warning (F2) =="
+DUPERR="$(b mh-memory.sh remember memctx --private --kind routing "alpha lions roam" 2>&1 >/dev/null)"
+check "remember warns on a duplicate fact body" 'grep -qi "already exists" <<<"$DUPERR"'
+
+echo "== memory-context: manhandler-only store shown to manhandler, hidden from crew (F5) =="
+b mh-memory.sh remember memctx --manhandler-only --kind routing "MHONLY-crew-must-not-see" >/dev/null
+MREC="$(b mh-memory.sh recall memctx)"
+CREC="$(b mh-memory.sh recall memctx --crew)"
+check "manhandler recall includes the manhandler-only store" 'grep -q "MHONLY-crew-must-not-see" <<<"$MREC"'
+check "crew recall excludes the manhandler-only store"       '! grep -q "MHONLY-crew-must-not-see" <<<"$CREC"'
+
+echo "== memory-context: brief relays private + fleet, excludes manhandler-only (F3/F5) =="
+b mh-task.sh new memctx-1 --kind ship --repo memctx >/dev/null
+b mh-worktree.sh create memctx-1 memctx >/dev/null 2>&1
+b mh-brief.sh memctx-1 >/dev/null 2>/dev/null
+BR="$MH_HOME/data/memctx-1/brief.md"
+check "brief injects the Fleet-wide context heading" 'grep -q "Fleet-wide context" "$BR"'
+check "brief relays a fleet learning"                'grep -q "fleet gotcha alpha" "$BR"'
+check "brief relays a private note"                  'grep -q "alpha lions" "$BR"'
+check "brief excludes the manhandler-only note"      '! grep -q "MHONLY-crew-must-not-see" "$BR"'
+
+echo "== memory-context: marker recognized only as a whole line (F7) =="
+# An AGENTS.md that only MENTIONS the marker in prose (as a substring) must not
+# trigger extraction: no content surfaced and no false 'unclosed block' warning.
+printf '# memctx\n\nWrap facts between <!-- mh:knowledge:start --> and <!-- mh:knowledge:end --> in prose.\n- **[note]** PROSE-NOT-KNOWLEDGE should stay out\n' > "$MH_HOME/repos/memctx/AGENTS.md"
+F7ERR="$(b mh-memory.sh recall memctx 2>&1 >/dev/null)"
+check "prose marker mention raises no false unclosed-block warning" '! grep -q "without a matching end" <<<"$F7ERR"'
+F7OUT="$(b mh-memory.sh recall memctx)"
+check "prose marker mention surfaces no shared knowledge"           '! grep -q "PROSE-NOT-KNOWLEDGE" <<<"$F7OUT"'
+
+echo "== memory-context: empty repo yields the friendly line, not empty scaffolds (bug) =="
+b mh-repo.sh add memblank "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b mh-task.sh new memblank-1 --kind ship --repo memblank >/dev/null
+b mh-worktree.sh create memblank-1 memblank >/dev/null 2>&1
+b mh-brief.sh memblank-1 >/dev/null 2>/dev/null
+check "empty repo brief shows the friendly single line"     'grep -q "no repository knowledge recorded yet" "$MH_HOME/data/memblank-1/brief.md"'
+check "empty repo brief injects no empty knowledge scaffold" '! grep -q "== shared knowledge" "$MH_HOME/data/memblank-1/brief.md"'
 
 echo
 echo "smoke: $pass passed, $fail failed"
