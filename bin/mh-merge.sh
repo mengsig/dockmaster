@@ -54,15 +54,25 @@ case "$cmd" in
     [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
     ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit or stash before rebasing"
     dir="$(repo_dir "$repo")"; def="$(mh_default_branch "$dir")"
-    git -C "$dir" fetch --quiet origin "$def" 2>/dev/null || true
-    base="$(git -C "$dir" rev-parse --verify --quiet "origin/$def" 2>/dev/null || git -C "$dir" rev-parse "$def")"
+    git -C "$dir" fetch --quiet origin "$def" 2>/dev/null || mh_warn "$repo: fetch failed; base may be stale"
+    # Pick the rebase base to MATCH the base a worktree is created from, or the
+    # branch will loop between "clean rebase" and "diverged, rebase first". For a
+    # local-only repo the LOCAL <def> holds local landings and origin lags, so
+    # prefer local <def>; other modes prefer origin/<def>.
+    mode="$(mh_meta_get "$id" mode)"
+    if [ "$mode" = "local-only" ]; then
+      base="$(git -C "$dir" rev-parse --verify --quiet "$def" 2>/dev/null || git -C "$dir" rev-parse "origin/$def")"
+    else
+      base="$(git -C "$dir" rev-parse --verify --quiet "origin/$def" 2>/dev/null || git -C "$dir" rev-parse "$def")"
+    fi
     if git -C "$wt" rebase "$base" >/dev/null 2>&1; then
       mh_info "rebased $id onto $def cleanly"
       exit 0
     fi
     # conflicts: report and abort so the worktree is left untouched for a crewmate
     conflicts="$(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null || true)"
-    git -C "$wt" rebase --abort >/dev/null 2>&1 || true
+    git -C "$wt" rebase --abort >/dev/null 2>&1 \
+      || mh_die "rebase of $id hit conflicts and 'git rebase --abort' failed; worktree is half-rebased and could not be restored — resolve manually in $wt"
     echo "CONFLICT: rebasing $id onto $def hit conflicts in:" >&2
     printf '%s\n' "$conflicts" >&2
     echo "worktree left unchanged; dispatch a crewmate via the merge-conflict skill to resolve with full context" >&2
