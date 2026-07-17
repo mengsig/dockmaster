@@ -21,6 +21,9 @@
 #   await-checks <id> [--timeout-secs N] [--interval-secs N]
 #                                 poll check until the CI rollup is terminal
 #   merge <id> [--method squash|merge|rebase] [--delete-branch]
+#   sweep                         read-only fleet sweep: every task with an open
+#                                 PR, its CI rollup + whether a review requests
+#                                 changes (offline under MH_NO_FETCH: cached only)
 #   security-scan <id>            grep the diff for security-surface signals
 #   url   <id>                    print recorded PR url
 
@@ -308,10 +311,86 @@ case "$cmd" in
     exit 1
     ;;
 
+  sweep)
+    # Fleet PR/health sweep (#26): walk every task that records an OPEN PR and
+    # report, one line each, its CI rollup and whether a review is requesting
+    # changes, plus a summary. Purely READ-ONLY over GitHub and repos — it opens
+    # no PR, pushes nothing, merges nothing. It DOES refresh the cached
+    # pr_state/checks meta via `check` (the same cache mh-status trusts), reusing
+    # that rollup logic rather than recomputing it.
+    #
+    # Offline (MH_NO_FETCH=1 — how mh-status invokes it): perform NO network. Show
+    # the cached pr_state/checks and skip the review query, matching how
+    # mh_refresh_pr_state degrades offline.
+    offline=0
+    [ "${MH_NO_FETCH:-0}" = "1" ] && offline=1
+    [ "$offline" -eq 1 ] || mh_need gh
+    total=0; red=0; changes=0; missing=0
+    while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      total=$((total + 1))
+      url="$(mh_meta_get "$id" pr)"
+      repo="$(mh_meta_get "$id" repo)"
+      # A missing clone skips this PR (its slug/rollup are underivable) but must
+      # not abort the whole sweep; surface it per-line, never a silent skip.
+      dir="$MH_HOME/$(mh_registry_get "$repo" path)"
+      if [ ! -d "$dir/.git" ]; then
+        missing=$((missing + 1))
+        printf '  %s  (repo clone missing: %s — skipped)  %s\n' "$id" "${repo:-?}" "$url"
+        continue
+      fi
+      if [ "$offline" -eq 1 ]; then
+        checks="$(mh_meta_get "$id" checks)"; [ -n "$checks" ] || checks="?"
+        state="$(mh_meta_get "$id" pr_state)"; [ -n "$state" ] || state="?"
+        printf '  %s  state: %s  checks: %s (cached)  reviews: (no fetch)  %s\n' "$id" "$state" "$checks" "$url"
+        case "$checks" in failing) red=$((red + 1)) ;; esac
+        continue
+      fi
+      # Online: refresh the rollup through `check` (single owner of the rollup
+      # computation), then read the review state. A failed check is surfaced
+      # per-line, never swallowed.
+      if ! "$0" check "$id" >/dev/null 2>&1; then
+        printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
+        continue
+      fi
+      checks="$(mh_meta_get "$id" checks)"; [ -n "$checks" ] || checks="?"
+      state="$(mh_meta_get "$id" pr_state)"; [ -n "$state" ] || state="?"
+      n="$(pr_number_from_url "$url")"
+      slug="$(owner_repo "$(git -C "$dir" remote get-url origin)")"
+      # Unaddressed review = a reviewer whose LATEST actionable review (the last
+      # APPROVED/CHANGES_REQUESTED per author) is CHANGES_REQUESTED. jq returns
+      # true/false; a null/API error becomes "error" so it reads as unknown, never
+      # a false "clean".
+      cr="$(gh api "repos/$slug/pulls/$n/reviews" 2>/dev/null \
+        | jq -r '[.[] | select(.state=="APPROVED" or .state=="CHANGES_REQUESTED")]
+                 | group_by(.user.login)
+                 | map(max_by(.submitted_at).state)
+                 | any(. == "CHANGES_REQUESTED")' 2>/dev/null || echo error)"
+      case "$cr" in
+        true)  review="changes-requested"; changes=$((changes + 1)) ;;
+        false) review="clean" ;;
+        *)     review="unknown" ;;
+      esac
+      case "$checks" in failing) red=$((red + 1)) ;; esac
+      printf '  %s  state: %s  checks: %s  reviews: %s  %s\n' "$id" "$state" "$checks" "$review" "$url"
+    done < <(mh_open_pr_tasks)
+    if [ "$total" -eq 0 ]; then
+      mh_info "  (no open PRs)"
+    else
+      note=""
+      [ "$red" -gt 0 ] && note="$note, $red with red CI"
+      [ "$changes" -gt 0 ] && note="$note, $changes with changes requested"
+      [ "$missing" -gt 0 ] && note="$note, $missing with a missing clone"
+      note="${note#, }"
+      [ -n "$note" ] && note=" ($note)"
+      mh_info "  sweep: $total open PR(s)$note"
+    fi
+    ;;
+
   url)
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-pr.sh url <id>"
     mh_meta_get "$id" pr ;;
 
   *)
-    echo "usage: mh-pr.sh {open|check|await-checks|merge|security-scan|url} ..." >&2; exit 2 ;;
+    echo "usage: mh-pr.sh {open|check|await-checks|merge|sweep|security-scan|url} ..." >&2; exit 2 ;;
 esac

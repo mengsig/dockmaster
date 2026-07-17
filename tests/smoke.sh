@@ -643,6 +643,45 @@ check "add without a test_cmd hints the onboarding scout" 'grep -qi "onboarding 
 check "scout hint names the set test_cmd escape hatch"    'grep -q "test_cmd" <<<"$ADDHINT"'
 ADDQUIET="$(b mh-repo.sh add scoutquiet "$TMP/origin.git" --mode local-only --test-cmd "true" --no-memory 2>&1)"
 check "add WITH a test_cmd prints no scout hint"          '! grep -qi "onboarding scout" <<<"$ADDQUIET"'
+# === pr-sweep tests (#26) ===
+# The GitHub-dependent path (check refresh + review query) is offline-unreachable
+# here, so we assert the SELECTION logic (the pure mh_open_pr_tasks selector) and
+# the offline sweep/status rendering. `pr`/`pr_state` are PR-tracking fields the
+# `set` verb refuses to hand-write, so seed them through mh_meta_set directly —
+# the same owner path mh-pr.sh check uses.
+echo "== pr-sweep: open-PR selector picks exactly open PRs (#26) =="
+b mh-task.sh new sweep-open   --kind ship --repo demo >/dev/null 2>&1 || true
+b mh-task.sh new sweep-merged --kind ship --repo demo >/dev/null 2>&1 || true
+b mh-task.sh new sweep-closed --kind ship --repo demo >/dev/null 2>&1 || true
+b mh-task.sh new sweep-nopr   --kind ship --repo demo >/dev/null 2>&1 || true
+( . "$ROOT/bin/mh-lib.sh"
+  mh_meta_set sweep-open   pr "https://github.com/o/r/pull/1"
+  mh_meta_set sweep-merged pr "https://github.com/o/r/pull/2"
+  mh_meta_set sweep-merged pr_state MERGED
+  mh_meta_set sweep-closed pr "https://github.com/o/r/pull/3"
+  mh_meta_set sweep-closed pr_state CLOSED ) >/dev/null 2>&1
+SEL="$( . "$ROOT/bin/mh-lib.sh"; mh_open_pr_tasks )"
+check "selector includes an open PR task"   'grep -qx "sweep-open" <<<"$SEL"'
+check "selector excludes a merged PR task"   '! grep -qx "sweep-merged" <<<"$SEL"'
+check "selector excludes a closed PR task"   '! grep -qx "sweep-closed" <<<"$SEL"'
+check "selector excludes a task with no PR"  '! grep -qx "sweep-nopr" <<<"$SEL"'
+
+echo "== pr-sweep: offline sweep renders open PRs from cache (#26) =="
+SWEEP="$(MH_NO_FETCH=1 b mh-pr.sh sweep 2>&1 || true)"
+check "offline sweep lists the open PR"    'grep -q "sweep-open" <<<"$SWEEP"'
+check "offline sweep omits the merged PR"  '! grep -q "sweep-merged" <<<"$SWEEP"'
+check "offline sweep marks output cached"  'grep -q "no fetch" <<<"$SWEEP"'
+check "offline sweep prints a summary"     'grep -q "open PR(s)" <<<"$SWEEP"'
+# A missing clone must be surfaced per-line, not abort the sweep.
+b mh-task.sh new sweep-noclone --kind ship --repo not-a-real-repo >/dev/null 2>&1 || true
+( . "$ROOT/bin/mh-lib.sh"; mh_meta_set sweep-noclone pr "https://github.com/o/r/pull/9" ) >/dev/null 2>&1
+SWEEP2="$(MH_NO_FETCH=1 b mh-pr.sh sweep 2>&1 || true)"
+check "sweep flags a missing clone, keeps going" 'grep -q "clone missing" <<<"$SWEEP2" && grep -q "sweep-open" <<<"$SWEEP2"'
+
+echo "== pr-sweep: status surfaces the open-PRs section (#26) =="
+STATUS_PR="$(b mh-status.sh 2>&1 || true)"
+check "status shows the open-PRs section"  'grep -q "OPEN PRs" <<<"$STATUS_PR"'
+check "status open-PRs lists the open PR"  'grep -q "sweep-open" <<<"$STATUS_PR"'
 
 echo
 echo "smoke: $pass passed, $fail failed"

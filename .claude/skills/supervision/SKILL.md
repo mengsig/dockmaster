@@ -61,6 +61,18 @@ deploy, a remote queue — do not busy-wait:
   (On a harness without these tools, the `schedule` and `loop` skills provide the
   same recurring/scheduled-run capability.)
 
+## Fleet PR sweep
+
+`bin/mh-pr.sh sweep` walks every task with an OPEN PR and reports, one line each,
+its CI rollup and whether a review requests changes — read-only, merges nothing.
+An open PR gets no completion notification when its CI later goes red or a
+reviewer requests changes, so run the sweep on a cadence (a `schedule`/`loop`
+"babysit the PRs" wakeup) or read it mid-session — `bin/mh-status.sh` folds the
+same sweep into its snapshot. Escalate to the operator only the PRs needing a
+decision: red CI or an unaddressed review (changes requested); load
+`post-pr-review` to drive them. A green PR with no review action is supervised
+silently.
+
 ## Checking up and reporting
 
 - "Check up on it" — `TaskList` / `bin/mh-task.sh state <id>`, or `SendMessage`
