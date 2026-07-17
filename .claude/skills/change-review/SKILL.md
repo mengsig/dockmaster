@@ -50,10 +50,39 @@ change; the PR-or-local decision and any pipeline come *after* approval.
      (`bin/mh-merge.sh local <id>`); see `task-lifecycle`.
    - **PR** → run the PR pipeline (load `pr-workflow`).
 
+## Fast path for trivial changes
+
+The full ceremony — lavish approval gate plus a two-pass PR pipeline — is right
+for real code but heavy for a typo or a doc line. A change that is **objectively
+trivial** MAY skip the lavish approval gate and use the single-pass `fast`
+pipeline (`config/pr-pipeline.fast.json`; see `pr-workflow`).
+
+**A change is trivial only if it is one of:**
+- docs, comments, a config *value*, or string/copy text only; OR
+- a very small diff with **no** logic, control-flow, dependency, schema, auth,
+  security, or externally-visible-contract change.
+
+Anything that touches logic, control flow, dependencies, a schema, auth,
+security, or a public/externally-visible contract is **not** trivial — take the
+full path. When unsure, it is not trivial: default to the full path.
+
+**The fast path relaxes only two things, and nothing else:**
+- the lavish approval gate MAY be skipped, and
+- the PR pipeline runs one review pass instead of two.
+
+**These hard rules never relax, on any path:**
+- Tests still run (`fast` keeps the `tests` gate).
+- One cold, independent review still happens (`fast` keeps the coldstart
+  `review` gate).
+- Merge authority is unchanged: never merge red, and it is still the operator's
+  explicit word or the repo's standing `yolo` for routine green work.
+- The operator can always demand the full path for any change.
+
 ## Rules
 
 - The lavish approval gate is not skippable for a requested change — it is how
-  the operator steers the change before any pipeline spends effort on it.
+  the operator steers the change before any pipeline spends effort on it — with
+  the single carve-out above: an objectively trivial change may skip it.
 - Keep the operator-facing summary in outcomes, not mechanics. The artifact
   carries the detail; the chat line says what the change does and that it is
   ready to look at.

@@ -15,6 +15,12 @@ reorder, drop, or add gates by editing one array.
 1. Per repo: `config/pr-pipeline.<repo>.json` if it exists.
 2. Otherwise: `config/pr-pipeline.default.json`.
 
+For an **objectively trivial** change (see `change-review` for the criteria) the
+task may instead select `config/pr-pipeline.fast.json` — one review pass instead
+of two. This is a per-task choice, not a per-repo default. The fast pipeline
+still runs the coldstart `review` and `tests` gates and does not touch merge
+authority; it only drops the second (merge-gate) review pass.
+
 The file has a `gates` array. Run the gates top to bottom. A repo's delivery
 **mode** (registry: `pipeline` | `direct-pr` | `local-only`) shapes it:
 
