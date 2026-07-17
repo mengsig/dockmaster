@@ -57,6 +57,10 @@ case "$cmd" in
     id="${1:-}"; repo="${2:-}"; branch="${3:-}"
     [ -n "$id" ] && [ -n "$repo" ] || mh_die "usage: mh-worktree.sh create <id> <repo> [<branch>]"
     mh_require_id "$id"
+    # Require an existing task record with a kind. Without it, create would write
+    # a kind-less meta that `mh-task.sh state` cannot classify (it reconciles by
+    # kind). Fail closed and point at the record-creating command.
+    [ -n "$(mh_meta_get "$id" kind)" ] || mh_die "no task record for '$id' (or it has no kind); create it first: mh-task.sh new $id --kind ship|scout --repo $repo"
     dir="$(mh_repo_dir "$repo")"
     wt="$MH_WT/$id"
     [ -e "$wt" ] && mh_die "worktree already exists: $wt"
@@ -92,6 +96,9 @@ case "$cmd" in
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-worktree.sh landed <id>"
     wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
     [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree recorded for $id"
+    # Refresh pr_state so an out-of-band merge is reflected in the pr_state
+    # fallback below. No-op offline (MH_NO_FETCH) or with no/already-merged PR.
+    mh_refresh_pr_state "$id"
     # Uncommitted changes to tracked files mean work is not committed => not landed.
     # (Untracked files are handled separately at teardown, not here.)
     ! mh_tracked_dirty "$wt" || { echo "unlanded: uncommitted changes to tracked files"; exit 1; }

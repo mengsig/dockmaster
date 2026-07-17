@@ -37,27 +37,76 @@ mh_need() { command -v "$1" >/dev/null 2>&1 || mh_die "required tool not found: 
 # flock. THIS HELPER OWNS THE EXIT TRAP: mh_lock arms a trap that removes the
 # lock dir so an mh_die/exit inside the critical section cannot leak it, and
 # mh_unlock clears it. It is not reentrant: do not nest mh_lock calls in one
-# process, and do not set your own EXIT trap between mh_lock and mh_unlock.
+# process, and do not set your own EXIT/INT/TERM trap between mh_lock/mh_unlock.
+#
+# Crash-safety: a holder killed with SIGKILL cannot run its trap, so the lock
+# dir survives and would otherwise wedge every future write (~30s spin, then
+# hard death). To self-heal, the holder records its PID and an epoch timestamp
+# inside the lock dir; a waiter reclaims the lock only on POSITIVE evidence of
+# abandonment — the recorded PID is not alive, or the lock is older than
+# MH_LOCK_STALE_SECS. Genuine LIVE contention still blocks, then fails visibly.
 mh_lock() {
   # mh_lock <file>  -- acquire the advisory lock guarding <file>
-  local target="$1" lockdir waited=0
-  lockdir="$target.lock"
+  local target="$1" lockdir reclaim waited=0 pid rpid
+  lockdir="$target.lock"; reclaim="$lockdir.reclaim"
   while ! mkdir "$lockdir" 2>/dev/null; do
+    # The lock is held. Self-heal ONLY a lock abandoned by a crashed holder,
+    # identified by concrete evidence: a recorded numeric PID that is not alive.
+    # This is unambiguous — owning the lock requires a successful `mkdir`, after
+    # which the holder writes its OWN (live) PID, so a dead PID in an existing
+    # lock dir can only belong to a crashed holder, never a live owner. An empty
+    # or partial PID (a live holder in the microsecond gap between its mkdir and
+    # its write) is NOT evidence and is never reclaimed; such a metadata-less
+    # crash (astronomically rare) falls through to the visible ~30s timeout.
+    # A stuck-but-alive holder is likewise never reclaimed — it fails visibly
+    # rather than risk tearing the lock from a process that may still resume.
+    pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
+    case "$pid" in
+      ''|*[!0-9]*) : ;;
+      *)
+        if ! kill -0 "$pid" 2>/dev/null; then
+          # Serialize reclaimers with a second lock so exactly one acts, and
+          # re-verify the dead PID still owns the dir immediately before removing
+          # it. While the lock dir exists holding a dead PID no live holder can
+          # own it (owning requires a fresh mkdir, which needs the dir absent),
+          # so removing it here cannot tear a live holder away. If another waiter
+          # already reclaimed and a live holder took over, the re-read PID is now
+          # live (or the dir is gone) and we leave it be.
+          if mkdir "$reclaim" 2>/dev/null; then
+            rpid="$(cat "$lockdir/pid" 2>/dev/null || true)"
+            if [ -d "$lockdir" ] && [ "$rpid" = "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+              mh_warn "reclaiming stale lock on $(basename "$target") (holder pid=$pid not alive; previous holder likely crashed)"
+              rm -rf "$lockdir" 2>/dev/null || true
+            fi
+            rmdir "$reclaim" 2>/dev/null || true
+            continue
+          fi
+        fi
+        ;;
+    esac
     waited=$((waited + 1))
     if [ "$waited" -ge 300 ]; then
-      mh_die "could not acquire lock on $(basename "$target") after ~30s; if no mh-* process is running, remove the stale lock: rmdir '$lockdir'"
+      mh_die "could not acquire lock on $(basename "$target") after ~30s; if no mh-* process is running, remove the stale lock: rm -rf '$lockdir'"
     fi
     sleep 0.1
   done
-  # Expand the lock path into the trap string NOW so cleanup survives mh_die/exit.
-  trap "rmdir '$lockdir' 2>/dev/null || true" EXIT
+  # We hold the lock: record our PID so a future waiter can detect our crash.
+  printf '%s\n' "$$" > "$lockdir/pid" 2>/dev/null || true
+  # Clean up on normal exit / mh_die (EXIT), and on signal death. A trapped
+  # INT/TERM handler must ALSO terminate: without the explicit exit, bash runs
+  # the handler and then RESUMES the (now unlocked) critical section — which
+  # would let a waiter acquire and write concurrently. So each signal handler
+  # cleans up and exits with the conventional 128+signo code.
+  trap "rm -rf '$lockdir' 2>/dev/null || true" EXIT
+  trap "rm -rf '$lockdir' 2>/dev/null || true; exit 130" INT
+  trap "rm -rf '$lockdir' 2>/dev/null || true; exit 143" TERM
 }
 
 mh_unlock() {
-  # mh_unlock <file>  -- release the lock and clear the EXIT trap
+  # mh_unlock <file>  -- release the lock and clear the traps
   local lockdir="$1.lock"
-  rmdir "$lockdir" 2>/dev/null || true
-  trap - EXIT
+  rm -rf "$lockdir" 2>/dev/null || true
+  trap - EXIT INT TERM
 }
 
 mh_ensure_dirs() {
@@ -199,4 +248,43 @@ mh_repo_dir() {
   dir="$MH_HOME/$(mh_registry_get "$name" path)"
   [ -d "$dir/.git" ] || mh_die "no clone for repo '$name' (expected $dir); add it with mh-repo.sh add"
   printf '%s\n' "$dir"
+}
+
+# --- live PR-state refresh: the out-of-band-merge drift guard -----------------
+# The cached pr_state meta field goes stale when a PR is merged out of band
+# (the operator merges in the GitHub web UI — common), so state/landed decisions
+# that trust it report `working` forever. Refresh pr_state from GitHub via
+# `mh-pr.sh check` (which updates the meta) before such a decision, but only
+# when there is a PR to check and the task is not already MERGED. Offline mode
+# (MH_NO_FETCH=1, used by mh-status and the smoke tests) skips the network and
+# trusts the cached value. Best effort: a failed check must not abort the
+# caller's decision — it falls back to the cached pr_state. Single owner so
+# `state` and `landed` refresh identically.
+mh_refresh_pr_state() {
+  # mh_refresh_pr_state <id>
+  [ "${MH_NO_FETCH:-0}" = "1" ] && return 0
+  [ -n "$(mh_meta_get "$1" pr)" ] || return 0
+  [ "$(mh_meta_get "$1" pr_state)" = "MERGED" ] && return 0
+  "$(dirname "${BASH_SOURCE[0]}")/mh-pr.sh" check "$1" >/dev/null 2>&1 || true
+}
+
+# --- merge check-gate decision (never merge red) -----------------------------
+# Decide whether a CI rollup permits a merge, as a pure function so it is
+# testable offline. `none` (no checks reported) does NOT auto-pass: it is the
+# window after a PR opens but before CI registers — and we cannot reliably tell
+# "no CI configured" from "CI not yet reported" (a repo's CI may be an external
+# provider that posts commit statuses, with no .github/workflows to detect). So
+# `none` passes ONLY on an explicit operator acknowledgement (--allow-no-checks);
+# merging a genuinely CI-less repo is thus a conscious, logged choice rather than
+# an inference that could silently merge red. Prints one of:
+#   allow | refuse-failing | refuse-pending | refuse-none | refuse-unknown
+mh_merge_gate() {
+  # mh_merge_gate <rollup> <allow_no_checks:0|1>
+  case "$1" in
+    passing) printf 'allow\n' ;;
+    failing) printf 'refuse-failing\n' ;;
+    pending) printf 'refuse-pending\n' ;;
+    none)    if [ "$2" = "1" ]; then printf 'allow\n'; else printf 'refuse-none\n'; fi ;;
+    *)       printf 'refuse-unknown\n' ;;
+  esac
 }

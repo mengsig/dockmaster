@@ -62,6 +62,14 @@ case "$cmd" in
   set)
     id="${1:-}"; key="${2:-}"; value="${3:-}"
     [ -n "$id" ] && [ -n "$key" ] || mh_die "usage: mh-task.sh set <id> <key> <value>"
+    # The PR-tracking fields are DERIVED from GitHub by mh-pr.sh (check/open/
+    # merge) and are the trusted landing signal `mh-task.sh state` reads. Refuse
+    # to hand-set them here: `set pr_state MERGED` would otherwise forge a
+    # terminal landing over unlanded work (the same forge the `event merged`
+    # reservation blocks). The sanctioned writer uses mh_meta_set directly.
+    case "$key" in
+      pr|pr_state|merge_state) mh_die "'$key' is a PR-tracking field maintained by mh-pr.sh (check/open/merge); it must not be set by hand" ;;
+    esac
     mh_meta_set "$id" "$key" "$value"
     ;;
 
@@ -75,6 +83,15 @@ case "$cmd" in
   event)
     id="${1:-}"; st="${2:-}"; note="${3:-}"
     [ -n "$id" ] && [ -n "$st" ] || mh_die "usage: mh-task.sh event <id> <state> [<note>]"
+    # 'merged' is a LANDING signal: `state` treats a `merged` status line as
+    # terminal-done. It is appended ONLY by the sanctioned landing paths
+    # (mh-merge.sh local / mh-pr.sh merge), which write it directly via
+    # mh_status_append. Reject it here so a crewmate cannot forge a done/landed
+    # signal over unlanded work (which would mis-report done and let a repo be
+    # unregistered over a live worktree).
+    case "$st" in
+      merged) mh_die "'merged' is a landing signal appended only by mh-merge/mh-pr; mh-task.sh event must not forge it" ;;
+    esac
     mh_status_append "$id" "$st" "$note"
     ;;
 
@@ -83,6 +100,10 @@ case "$cmd" in
     [ -f "$(mh_meta_path "$id")" ] || { echo "state: unknown · source: none · no such task"; exit 0; }
     kind="$(mh_meta_get "$id" kind)"
     wt="$(mh_meta_get "$id" worktree)"
+    # Refresh pr_state from GitHub first so an out-of-band merge (operator merged
+    # in the web UI) is seen, not reported as `working` forever. No-op offline
+    # or when there is no PR / it is already MERGED.
+    mh_refresh_pr_state "$id"
     pr="$(mh_meta_get "$id" pr)"
     # 1) PR merged is terminal-done for a ship task.
     if [ -n "$pr" ]; then
@@ -165,7 +186,11 @@ case "$cmd" in
     for m in "$MH_TASKS"/*.meta; do
       [ -f "$m" ] || continue
       id="$(basename "$m" .meta)"
-      printf '%s\t%s\t%s\t%s\n' "$id" "$(mh_meta_get "$id" kind)" "$(mh_meta_get "$id" repo)" "$("$0" state "$id" | sed 's/ · .*//; s/^state: //')"
+      # Bulk overview: reconcile each row OFFLINE (MH_NO_FETCH=1). A per-task live
+      # PR refresh here would turn `list` (and the session-start digest that calls
+      # it) into N sequential GitHub round-trips on the hottest command. A single
+      # `state <id>` still refreshes live; `list` favors a fast local snapshot.
+      printf '%s\t%s\t%s\t%s\n' "$id" "$(mh_meta_get "$id" kind)" "$(mh_meta_get "$id" repo)" "$(MH_NO_FETCH=1 "$0" state "$id" | sed 's/ · .*//; s/^state: //')"
     done | column -t -s$'\t' 2>/dev/null || cat
     ;;
 
