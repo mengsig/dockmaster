@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Per-repo memory is now native plain markdown** (`bin/mh-memory.sh`),
+  replacing the third-party `contextgraph` dependency. Shared, contributor-facing
+  facts live in an `mh:knowledge` section of each repo's own `AGENTS.md`
+  (committed, so it travels); manhandler-private notes live in a git-excluded
+  `repos/<repo>/.mh/`; global facts stay in `state/learnings.md` and
+  `state/operator.md`. `mh-repo` now `seed`s this scaffold (the old `init-memory`
+  subcommand and contextgraph install requirement are gone), and briefs inject the
+  recalled knowledge directly. No external memory tool is required anymore.
+
 ### Added
 
 - **`mh-repo create`**: stand up a brand-new repo. With no remote it creates the
@@ -13,8 +24,8 @@ All notable changes to this project are documented here. The format follows
   for an HTTPS origin); with an empty remote you supply it wires that up instead
   (and refuses a populated remote, pointing at `add`). Either way it initializes
   `repos/<name>` with a first commit, sets the upstream, publishes, registers the
-  repo, and delivers contextgraph memory. Complements `add`, which clones an
-  existing populated remote.
+  repo, and seeds per-repo memory. Complements `add`, which clones an existing
+  populated remote.
 
 - **`mh-doctor`**: readiness check + `MH_HOME` scaffold. Owns the toolbelt's
   dependency contract (required vs recommended tools, GitHub auth) with
@@ -61,9 +72,9 @@ of autonomous subagents across many repositories from a single liaison agent.
   renders a lavish review artifact → operator approves (with back-and-forth) →
   choose PR or local → on PR: coldstart review → fix + tests → merge-gate review
   → fix + tests → PR creation → merge gate.
-- **Per-repo memory** via contextgraph, tracked in each managed repo so it
-  travels with the repo and reaches crewmates in every worktree; global
-  (operator/fleet) memory in the manhandler home.
+- **Per-repo memory**, tracked in each managed repo so it travels with the repo
+  and reaches crewmates in every worktree; global (operator/fleet) memory in the
+  manhandler home.
 - **Modular PR pipeline** declared as an ordered gate array
   (`config/pr-pipeline.default.json`), with an optional deterministic runner
   (`workflows/pr-pipeline.js`).

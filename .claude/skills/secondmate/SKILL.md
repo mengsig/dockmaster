@@ -50,10 +50,10 @@ the answer.
 ## Memory
 
 A domain supervisor keeps domain-local memory: per-repo facts in each repo's
-contextgraph (shared, since it uses the same clones), and domain-level operating
-notes in its own working notes. Operator preferences that should reach every
-domain live in the main home's global memory and are conveyed to the supervisor
-when it is created or when they change.
+`AGENTS.md` `mh:knowledge` section and private `.mh/` notes (shared, since it uses
+the same clones), and domain-level operating notes in its own working notes.
+Operator preferences that should reach every domain live in the main home's global
+memory and are conveyed to the supervisor when it is created or when they change.
 
 ## Idle and retire
 
