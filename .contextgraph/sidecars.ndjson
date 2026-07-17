@@ -1,0 +1,5 @@
+<!-- contextgraph:sidecar-registry:v1 generation=088a54a793853419e9a63c5f3e7d9889 -->
+".claude/skills/change-review/SKILL.md"
+".claude/skills/pr-workflow/SKILL.md"
+"bin/mh-lib.sh"
+"bin/mh-task.sh"

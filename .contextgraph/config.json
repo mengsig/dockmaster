@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "instructionFile": "AGENTS.md",
+  "maxRepoMemories": 24,
+  "maxFileMemories": 8,
+  "maxManagedBytes": 12288,
+  "recallLimit": 8,
+  "maxRecallChars": 4000
+}

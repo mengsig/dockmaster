@@ -1,0 +1,15 @@
+# Operator-private runtime and managed clones — never committed.
+/state/
+/repos/
+/data/
+/.env
+
+# Local review surfaces and scratch.
+/.lavish/
+*.log
+
+# Editor / OS cruft.
+.DS_Store
+node_modules/
+
+# NOTE: .contextgraph/ is this repo's own tracked memory — intentionally NOT ignored.

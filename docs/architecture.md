@@ -1,0 +1,197 @@
+# manhandler architecture
+
+manhandler is an **agent distro**: a portable directory of instructions, skills,
+helper scripts, and state conventions that turns a Claude Code session into a
+fleet handler. You talk to one agent — the **manhandler** — and it runs a crew
+of autonomous subagents across many repositories on your behalf.
+
+It re-implements the *ideas* proven by [firstmate](https://github.com/kunchenguid/firstmate)
+but is deliberately **not** built the way firstmate is. firstmate is ~43k lines
+of bash + a terminal multiplexer (tmux/zellij/…) because it must supervise
+agents inside *generic* terminal harnesses that have no native async, no task
+list, and no structured subagent primitive. manhandler targets exactly one
+runtime — **Claude Code** — and Claude Code already provides those primitives
+natively. So manhandler keeps firstmate's hard-won *contracts* and throws away
+the machinery those contracts needed a shell daemon to fake.
+
+## The core bet
+
+> Every place firstmate builds infrastructure to *simulate* async supervision,
+> Claude Code has a native primitive that does it with zero idle token cost and
+> higher fidelity. Use the primitive.
+
+| firstmate concern | firstmate mechanism | manhandler mechanism |
+| --- | --- | --- |
+| liaison agent | `AGENTS.md` persona | `AGENTS.md` persona (same idea) |
+| per-task worker ("crewmate") | tmux window running a spawned harness | **`Agent` subagent** run in background |
+| visible session backend | tmux / zellij / cmux / herdr / orca panes | Claude Code task list + background-agent transcripts (`/tasks`) |
+| zero-token supervision | bash watcher daemon + wake queue + heartbeats | **background task → `<task-notification>`** (idle costs nothing; the harness re-invokes the manhandler on completion) |
+| external / periodic waits (CI, deploy) | watcher poll loop + `state/<id>.check.sh` | **`Monitor`** (until-condition) and **`CronCreate` / `ScheduleWakeup`** |
+| "no turn ends blind" | per-harness turn-end guard hooks | completion notifications + optional Stop hook; no polling |
+| worktree isolation | treehouse git worktrees | native `git worktree` (`bin/mh-worktree.sh`) + `Agent(isolation:"worktree")` |
+| durable backlog | `tasks-axi` markdown backend | native **Task list** (session) mirrored to `state/backlog.md` (cross-session) |
+| project registry | `data/projects.md` | `state/repos.json` + clones under `repos/` |
+| global memory | `data/captain.md`, `data/learnings.md` | manhandler home memory: native `memory/`, `state/operator.md`, `state/learnings.md` |
+| per-repo memory | committed project `AGENTS.md` | **contextgraph**, initialized inside every managed repo |
+| delivery modes | no-mistakes / direct-PR / local-only | modular **PR pipeline** (ordered gates) per repo |
+| the no-mistakes gate | external pipeline tool | a **`Workflow`** script of composable gates + `code-review` / `lavish` |
+| persistent domain supervisor ("secondmate") | isolated `FM_HOME` + separate session | long-lived **background agent** addressed via `SendMessage` (can spawn its own crew) |
+| per-task harness/model/effort | dispatch profiles config | `Agent` `model` / `effort` / `subagent_type` per dispatch |
+| review surface | lavish-axi | lavish-axi (`/lavish` skill) |
+| self-update / fleet sync | guarded `git` fast-forward | same, via `bin/` + `git` |
+
+The result is a distro that is roughly an order of magnitude smaller than
+firstmate, spends **zero tokens while work is in flight**, and loses no accuracy
+versus driving a Claude Code / Codex agent by hand — because each worker *is* a
+full agent with the full tool surface, not a constrained pane.
+
+## Roles and vocabulary
+
+- **operator** — you. The only human. You state intent and make the decisions
+  that are genuinely yours (merge, irreversible/destructive/security choices,
+  credentials).
+- **manhandler** — the single agent you talk to. It never edits managed repos
+  itself; it delegates, supervises, and reports outcomes. Read-only over
+  `repos/` except for the narrow guarded paths (clone, sync, approved local
+  merge).
+- **crewmate** — a subagent the manhandler spawns for one task, in its own git
+  worktree. Ship or scout (below). Crewmates never talk to the operator; all
+  reporting flows through the manhandler.
+- **domain agent** ("secondmate") — an optional *persistent* background agent
+  that owns a domain (one repo or a family of repos), keeps its own memory, and
+  can spawn its own crewmates. Addressed via `SendMessage`. Idle by default.
+
+## Task shapes
+
+- **ship** — delivers a change. Ends in a PR (or an approved local merge) and a
+  torn-down worktree. The default.
+- **scout** — investigates, plans, reproduces, or audits. Ends in a report at
+  `data/<id>/report.md` and never touches project code. The default for
+  "look into…", "why is…", "plan…", "audit…" requests. A scout report may
+  *recommend* implementation but never authorizes it — implementation is a
+  separate, explicit request (this is firstmate's discipline that diagnosis ≠
+  authorization, and it matters for accuracy).
+
+## Memory model (the centerpiece)
+
+Knowledge is routed to its **most specific durable owner**, exactly as firstmate
+routes it — but the per-repo owner is contextgraph, which travels with the clone.
+
+**Per-repo (contextgraph, tracked in each managed repo):**
+- Repo-specific facts: build/test commands, invariants, conventions, pitfalls,
+  routing hints, decisions. Stored with `contextgraph remember file|repo …`.
+- Memory is **committed in the repo's own `.contextgraph/`** (plus file
+  sidecars), so git materializes it in every worktree and clone — which is what
+  makes recall work for crewmates, who work in worktrees. (Verified: recall
+  returns a stored fact from a fresh worktree only when the store is tracked; a
+  symlinked or clone-local store does not reach the worktree.)
+- Delivered through the normal PR/land flow: `bin/mh-repo.sh init-memory`
+  onboards it as a reviewable change, and crewmates commit the memory they add
+  alongside their work, so it travels with the repo. The manhandler never
+  force-commits it onto a clone's default branch (that would diverge from origin
+  and break fast-forward sync).
+- Before working, the manhandler and every crewmate run
+  `contextgraph recall --query "<task>" --file <path>` instead of loading repo
+  memory wholesale — bounded, task-relevant recall keeps token cost flat as the
+  store grows.
+
+**Global (manhandler home):**
+- `memory/` — Claude Code native file memory (operator identity, standing
+  feedback, cross-repo project state). Indexed by `MEMORY.md`.
+- `state/operator.md` — operator preferences and working style (inspect-then-update,
+  curated, never append-forever).
+- `state/learnings.md` — fleet-wide operational facts and gotchas that are *not*
+  specific to any one repo (dated, evidence-backed, pruned).
+- `state/repos.json` — the repo registry (source of truth for what is managed).
+
+**Routing rule:** a fact about *one repo* → that repo's contextgraph. A fact
+about the *operator* or *the fleet as a whole* → global memory. Task-scoped
+notes → the backlog item. Investigation findings → the scout report. This is the
+single source of truth per fact — no duplication that can drift.
+
+## Supervision model
+
+There is no daemon. The lifecycle of a background crewmate is:
+
+1. manhandler spawns it with `Agent(..., background)` → returns an `agentId`
+   immediately, costing nothing while it runs.
+2. manhandler records it in the backlog (native task + `state/backlog.md`
+   mirror) and resumes the conversation / other dispatches.
+3. When the crewmate finishes, Claude Code delivers a `<task-notification>`;
+   the manhandler wakes, reconciles state, and either reports an outcome to the
+   operator or advances the pipeline.
+4. For waits Claude Code cannot notify on (CI turning green, an external deploy),
+   the manhandler uses `Monitor` (poll an until-condition) or schedules a
+   `CronCreate`/`ScheduleWakeup` check sized to how fast that state changes.
+
+"Check up on them" = `TaskList` / `SendMessage` to a running agent. "Report
+back" = surface outcomes (not mechanics) in chat. See `escalation` etiquette in
+`AGENTS.md` §Escalation.
+
+## Concurrency & worktrees
+
+Independent work dispatches immediately with no cap. Work that touches the same
+repo subsystem, or depends on unlanded work, is serialized or recorded as
+blocked. Every ship task runs in its **own** worktree created by
+`bin/mh-worktree.sh` (or `Agent(isolation:"worktree")`), so parallel work on one
+repo never collides. Teardown refuses to discard uncommitted or unlanded work —
+a refusal is a stop-and-investigate signal, never an obstacle to force past.
+
+## Merge conflicts
+
+Handled by the `merge-conflict` skill: a crewmate rebases/merges inside the
+worktree with full repo context, resolves conflicts, re-runs the repo's tests,
+and reports. Never forced, never discards unlanded work.
+
+## The PR pipeline (modular gates)
+
+Every requested change follows one canonical flow. The crewmate implements in
+its worktree and renders the change as a **lavish review artifact**; the operator
+approves it (with back-and-forth, all mediated by the manhandler); only then does
+the manhandler ask **PR or local**. See `.claude/skills/change-review/SKILL.md`.
+
+On the PR path, delivery is an **ordered list of named gates** declared per repo
+in `config/pr-pipeline.<repo>.json` (falling back to
+`config/pr-pipeline.default.json`). Each gate is a small, composable module. The
+default pipeline runs **two independent review passes**, each followed by fix and
+tests:
+
+```
+coldstart review → fix → tests → merge-gate review → fix → tests → (security?) → pr
+```
+
+then a **merge gate**: the operator merges on GitHub, or the manhandler asks for
+approval and merges (`bin/mh-pr.sh merge`, never red). Gates are executed by
+`workflows/pr-pipeline.js` (a deterministic `Workflow`) so ordering, the
+fix→retest loops, and pass/fail are reproducible and zero-token-idle between
+stages. Adding a gate = add a module and list its name in the config array.
+See `.claude/skills/pr-workflow/SKILL.md`.
+
+**Branch naming:** `<type>/<issue>/<slug>` — `type ∈ {feat,fix,bug,chore,refactor,docs,perf,test}`,
+`issue` = the issue number (or `x` when none), `slug` = a short kebab summary.
+Computed by `bin/mh-branch-name.sh`.
+
+**PR descriptions** are short, plain, and human. Imperative summary of what
+changed and why, the risk level, and how it was verified. Never any
+"generated by an agent" line, never an agent co-author, never LLM
+throat-clearing. See the pr-workflow skill for the template and anti-patterns.
+
+## Layout
+
+```
+AGENTS.md                operating contract for the manhandler (CLAUDE.md → this)
+README.md                overview
+docs/architecture.md     this file
+bin/                     portable helper scripts (repo/worktree/pr/backlog/merge/memory)
+.claude/skills/          manhandler skills (some /-invocable, some agent-loaded at triggers)
+workflows/               Workflow scripts (the PR pipeline)
+config/                  pipeline defaults + per-repo overrides (committed defaults)
+state/                   runtime, gitignored: repos.json, operator.md, learnings.md, backlog.md
+repos/                   managed clones, gitignored, READ-ONLY to the manhandler
+data/                    per-task artifacts (scout reports), gitignored
+.contextgraph/           manhandler's own repo memory
+```
+
+`state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
+tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `workflows/`, `config/`
+defaults, docs) is the shared distro and ships through this repo's own PR path.

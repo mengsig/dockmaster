@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# mh-merge.sh - guarded local landing and conflict-aware rebase.
+#
+# Two operations, both fail closed:
+#   local <id>    land a local-only task branch into its clone's default branch
+#                 by FAST-FORWARD ONLY. A diverged branch is refused with a
+#                 rebase instruction, never force-merged.
+#   rebase <id>   update a task's worktree branch onto the latest default. On a
+#                 clean rebase it reports success; on conflicts it stops and
+#                 reports the conflicted files, then aborts to leave the worktree
+#                 exactly as it was (the merge-conflict skill dispatches a
+#                 crewmate to resolve with full context).
+#
+# This is one of the few paths allowed to change a managed clone, and only the
+# local, FF-only landing does so.
+
+set -euo pipefail
+. "$(dirname "${BASH_SOURCE[0]}")/mh-lib.sh"
+mh_need git
+mh_ensure_dirs
+
+repo_dir() { local d; d="$MH_HOME/$(mh_registry_get "$1" path)"; [ -d "$d/.git" ] || mh_die "no clone for repo '$1'"; printf '%s\n' "$d"; }
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  local)
+    id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-merge.sh local <id>"
+    mode="$(mh_meta_get "$id" mode)"
+    [ "$mode" = "local-only" ] || mh_die "task $id is mode '$mode', not local-only; use mh-pr.sh for PR-based landing"
+    repo="$(mh_meta_get "$id" repo)"; wt="$(mh_meta_get "$id" worktree)"
+    [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
+    branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
+    [ "$branch" != "HEAD" ] || mh_die "worktree on detached HEAD; nothing to land"
+    ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit before landing"
+    dir="$(repo_dir "$repo")"; def="$(mh_default_branch "$dir")"
+    cur="$(git -C "$dir" rev-parse --abbrev-ref HEAD)"
+    [ "$cur" = "$def" ] || mh_die "clone is on '$cur', not default '$def'; return it before landing"
+    [ -z "$(git -C "$dir" status --porcelain)" ] || mh_die "clone working tree is dirty; refusing to land"
+    head="$(git -C "$wt" rev-parse HEAD)"
+    before="$(git -C "$dir" rev-parse --short "$def")"
+    # FF only: default must be an ancestor of the task head.
+    if ! git -C "$dir" merge-base --is-ancestor "$def" "$head"; then
+      mh_die "REFUSED: '$def' is not an ancestor of '$branch' (diverged). Rebase the branch onto '$def' first: mh-merge.sh rebase $id"
+    fi
+    git -C "$dir" merge --ff-only "$head" >/dev/null || mh_die "fast-forward merge failed"
+    after="$(git -C "$dir" rev-parse --short "$def")"
+    mh_status_append "$id" merged "local $def $before -> $after"
+    mh_info "landed $id into $def ($before -> $after)"
+    ;;
+
+  rebase)
+    id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-merge.sh rebase <id>"
+    repo="$(mh_meta_get "$id" repo)"; wt="$(mh_meta_get "$id" worktree)"
+    [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
+    ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit or stash before rebasing"
+    dir="$(repo_dir "$repo")"; def="$(mh_default_branch "$dir")"
+    git -C "$dir" fetch --quiet origin "$def" 2>/dev/null || true
+    base="$(git -C "$dir" rev-parse --verify --quiet "origin/$def" 2>/dev/null || git -C "$dir" rev-parse "$def")"
+    if git -C "$wt" rebase "$base" >/dev/null 2>&1; then
+      mh_info "rebased $id onto $def cleanly"
+      exit 0
+    fi
+    # conflicts: report and abort so the worktree is left untouched for a crewmate
+    conflicts="$(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null || true)"
+    git -C "$wt" rebase --abort >/dev/null 2>&1 || true
+    echo "CONFLICT: rebasing $id onto $def hit conflicts in:" >&2
+    printf '%s\n' "$conflicts" >&2
+    echo "worktree left unchanged; dispatch a crewmate via the merge-conflict skill to resolve with full context" >&2
+    exit 3
+    ;;
+
+  *)
+    echo "usage: mh-merge.sh {local|rebase} ..." >&2; exit 2 ;;
+esac

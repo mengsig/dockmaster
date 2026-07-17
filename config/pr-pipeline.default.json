@@ -1,0 +1,14 @@
+{
+  "version": "manhandler-pr-pipeline/2",
+  "description": "Default PR pipeline, run AFTER lavish approval and the operator choosing the PR path (see .claude/skills/change-review and pr-workflow). Two review passes (coldstart, then merge-gate), each followed by fix + tests, then PR creation. Override per repo by copying to config/pr-pipeline.<repo>.json. Add a gate by defining it in the pr-workflow skill and inserting its name here.",
+  "gates": [
+    { "gate": "review", "pass": "coldstart", "effort": "high", "note": "fresh independent read of the diff against base" },
+    { "gate": "fix", "max_rounds": 2, "note": "apply coldstart findings on the same branch" },
+    { "gate": "tests", "note": "must pass after coldstart fixes" },
+    { "gate": "review", "pass": "merge-gate", "effort": "high", "note": "second independent review of the fixed tree; the merge gate" },
+    { "gate": "fix", "max_rounds": 2, "note": "apply merge-gate findings" },
+    { "gate": "tests", "note": "final validation, must be green" },
+    { "gate": "security", "optional": true, "note": "run only when the change has a security surface" },
+    { "gate": "pr", "method": "squash", "note": "open the PR with the branch convention and a short human description" }
+  ]
+}
