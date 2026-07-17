@@ -68,4 +68,4 @@ of autonomous subagents across many repositories from a single liaison agent.
   (`config/pr-pipeline.default.json`), with an optional deterministic runner
   (`workflows/pr-pipeline.js`).
 
-[0.1.0]: https://github.com/mengsig/manhandler-cc/releases/tag/v0.1.0
+[0.1.0]: https://github.com/mengsig/manhandler/releases/tag/v0.1.0

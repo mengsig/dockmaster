@@ -30,14 +30,14 @@ Canonical repository memory is stored in `.contextgraph/repo.md`; use `contextgr
 <!-- contextgraph:item:v1 -->
 ### `contextgraph-scope` · pitfall
 
-**Fact:** contextgraph doctor here reports many errors because the root store discovers sidecars inside gitignored repos/, state/, and data/ \(managed clones\), yielding orphan/misplaced/malformed nodes and CORRUPT\_STORE on recall. Sidecar discovery does not honor .gitignore; an ignore for repos/state/data is the fix.
+**Fact:** Root-store sidecar walk skips only hardcoded dirs \(.git/.contextgraph/node\_modules\); no config knob extends it, so it walks into gitignored repos/state/data and chokes on managed clones' sidecars — recall/doctor AT THE ROOT throw CORRUPT\_STORE. Per-clone recall \(crewmate --root inside a clone\) is UNAFFECTED. Only real fix is a contextgraph code change to skip nested .contextgraph roots.
 
-- **Why:** Avoids re-diagnosing the red doctor and recall corruption every session.
+- **Why:** Root recall stays broken until contextgraph is patched; do not hunt for a config knob and do not assume crew memory is impaired.
 - **Source:** verified
 - **Priority:** normal
 - **Created:** `2026-07-17T11:59:36.650Z`
-- **Checked:** `2026-07-17T11:59:36.650Z`
-- **Evidence:** [{"path":".gitignore","sha256":"5a62bf81fde8a1a28892c737782c22c5d08e53c935aff18c5ef662c598b9aedc"}]
+- **Checked:** `2026-07-17T16:51:14.157Z`
+- **Evidence:** [{"path":".gitignore","sha256":"b9cd7268ff3174b9bde858b8686e371369d9ca633eba36274525d6710997c463"}]
 
 <!-- contextgraph:item:v1 -->
 ### `pr-description-style` · convention
