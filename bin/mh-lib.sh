@@ -30,6 +30,36 @@ mh_info() { printf '%s\n' "$*"; }
 
 mh_need() { command -v "$1" >/dev/null 2>&1 || mh_die "required tool not found: $1"; }
 
+# --- portable advisory lock: mkdir-based mutex -------------------------------
+# Serializes the read-modify-write of a shared-state file across concurrent
+# mh-* invocations (parallel crew is the design premise, so unlocked RMW loses
+# updates). We use an atomic `mkdir` as the primitive, NOT flock — macOS has no
+# flock. THIS HELPER OWNS THE EXIT TRAP: mh_lock arms a trap that removes the
+# lock dir so an mh_die/exit inside the critical section cannot leak it, and
+# mh_unlock clears it. It is not reentrant: do not nest mh_lock calls in one
+# process, and do not set your own EXIT trap between mh_lock and mh_unlock.
+mh_lock() {
+  # mh_lock <file>  -- acquire the advisory lock guarding <file>
+  local target="$1" lockdir waited=0
+  lockdir="$target.lock"
+  while ! mkdir "$lockdir" 2>/dev/null; do
+    waited=$((waited + 1))
+    if [ "$waited" -ge 300 ]; then
+      mh_die "could not acquire lock on $(basename "$target") after ~30s; if no mh-* process is running, remove the stale lock: rmdir '$lockdir'"
+    fi
+    sleep 0.1
+  done
+  # Expand the lock path into the trap string NOW so cleanup survives mh_die/exit.
+  trap "rmdir '$lockdir' 2>/dev/null || true" EXIT
+}
+
+mh_unlock() {
+  # mh_unlock <file>  -- release the lock and clear the EXIT trap
+  local lockdir="$1.lock"
+  rmdir "$lockdir" 2>/dev/null || true
+  trap - EXIT
+}
+
 mh_ensure_dirs() {
   mkdir -p "$MH_STATE" "$MH_DATA" "$MH_REPOS" "$MH_CONFIG" "$MH_TASKS"
   [ -f "$MH_REGISTRY" ] || printf '{"repos":{}}\n' > "$MH_REGISTRY"
@@ -55,21 +85,30 @@ mh_meta_path() { printf '%s/%s.meta\n' "$MH_TASKS" "$1"; }
 mh_status_path() { printf '%s/%s.status\n' "$MH_TASKS" "$1"; }
 
 mh_meta_get() {
-  # mh_meta_get <id> <key>  -> prints value or empty
+  # mh_meta_get <id> <key>  -> prints value or empty. The key is matched as a
+  # FIXED string (not a regex); value may itself contain '='; last line wins.
   local f; f="$(mh_meta_path "$1")"
   [ -f "$f" ] || return 0
-  sed -n "s/^$2=//p" "$f" | tail -n1
+  awk -v k="$2" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) } END { print v }' "$f"
 }
 
 mh_meta_set() {
-  # mh_meta_set <id> <key> <value>  (value must be single-line)
+  # mh_meta_set <id> <key> <value>  (value must be single-line). The key is
+  # matched as a FIXED string (not a regex) when dropping the old line.
   mh_require_id "$1"
   mh_ensure_dirs
   local f tmp; f="$(mh_meta_path "$1")"
   case "$3" in *$'\n'*) mh_die "meta value for '$2' must be single-line" ;; esac
-  tmp="$(mktemp "$MH_TASKS/.meta.XXXXXX")"
-  { [ -f "$f" ] && grep -v "^$2=" "$f" || true; printf '%s=%s\n' "$2" "$3"; } > "$tmp"
-  mv -f "$tmp" "$f"
+  mh_lock "$f"
+  tmp="$(mktemp "$MH_TASKS/.meta.XXXXXX")" || { mh_unlock "$f"; mh_die "mktemp failed for meta '$1'"; }
+  # Build into $tmp; on any write failure remove the temp (no orphan) and fail
+  # loudly. `|| true` on the read keeps a missing file from tripping set -e.
+  {
+    [ -f "$f" ] && awk -v k="$2" 'index($0, k "=") != 1' "$f" || true
+    printf '%s=%s\n' "$2" "$3"
+  } > "$tmp" || { rm -f "$tmp"; mh_unlock "$f"; mh_die "failed writing meta for '$1'"; }
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; mh_unlock "$f"; mh_die "failed committing meta for '$1'"; }
+  mh_unlock "$f"
 }
 
 # --- status event log: append-only, best effort ------------------------------
