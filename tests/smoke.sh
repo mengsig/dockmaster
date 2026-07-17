@@ -105,16 +105,51 @@ echo "== test gate =="
 check "tests pass (registered cmd)" 'b mh-test.sh demo-1 >/dev/null'
 check "tests recorded pass"         '[ "$(b mh-task.sh get demo-1 tests)" = "pass" ]'
 
-echo "== backlog =="
+echo "== backlog (dependency completion from real task state) =="
 b mh-backlog.sh add demo-1 "add multiply" --repo demo --status inflight >/dev/null
 b mh-backlog.sh add demo-2 "docs" --status queued --blocked-by demo-1 >/dev/null
 check "ready hides blocked item"  '! b mh-backlog.sh ready | grep -q demo-2'
-b mh-backlog.sh done demo-1 --note landed >/dev/null
-check "ready shows unblocked item" 'b mh-backlog.sh ready | grep -q demo-2'
+# demo-1 is a real task, committed but NOT yet landed (state: working). Marking
+# it done in the backlog is a lie `ready` must not believe: it consults real
+# task state, so demo-2 stays blocked despite the hand-set done.
+b mh-backlog.sh done demo-1 --note "claimed landed" >/dev/null
+check "ready ignores hand-set done until the task has landed" '! b mh-backlog.sh ready | grep -q demo-2'
+# A blocker id with NO task record falls back to its hand-set backlog status.
+b mh-backlog.sh add blk-untracked "no task record" --status done >/dev/null
+b mh-backlog.sh add dep-untracked "needs blk-untracked" --status queued --blocked-by blk-untracked >/dev/null
+check "ready falls back to backlog status without a task record" 'b mh-backlog.sh ready | grep -q dep-untracked'
 b mh-backlog.sh hold demo-1-decision-scope "ship v1 or v2?" --options "v1 | v2" >/dev/null
 check "hold is open"     'b mh-backlog.sh list | grep -q "demo-1-decision-scope"'
 b mh-backlog.sh resolve demo-1-decision-scope "v1" >/dev/null
 check "hold resolved"    'b mh-backlog.sh list | grep -A2 "demo-1-decision-scope" | grep -q "answer: v1"'
+
+echo "== mh dispatcher (additive convenience entrypoint) =="
+MH="$ROOT/bin/mh"
+HELP="$("$MH" help)"   # capture once (see doctor note on grep -q + pipefail)
+check "mh help lists subcommands"     'grep -q "^  task " <<<"$HELP" && grep -q "^  backlog " <<<"$HELP" && grep -q "^  pr " <<<"$HELP"'
+check "mh help omits the sourced lib" '! grep -q "^  lib " <<<"$HELP"'
+check "mh (no args) prints usage"     '"$MH" >/dev/null'
+check "mh dispatches to target script" '[ "$("$MH" task list)" = "$(b mh-task.sh list)" ]'
+check "mh passes through exit codes"   '"$MH" task >/dev/null 2>&1; [ "$?" -eq 2 ]'
+check "mh rejects unknown subcommand"  '! "$MH" definitely-not-a-cmd >/dev/null 2>&1'
+check "mh rejects the sourced lib"     '! "$MH" lib >/dev/null 2>&1'
+
+echo "== security-scan (advisory gate hint; local-only, no GitHub tools) =="
+# A diff touching a security surface must be flagged (exit 0 + named signals);
+# the silent-skip failure mode is exactly what this guards against.
+b mh-task.sh new sec-scan --kind ship --repo demo >/dev/null
+WTS="$(b mh-worktree.sh create sec-scan demo | tail -n1)"
+git -C "$WTS" checkout -q -b feat/x/sec
+printf 'def login(password):\n    return authenticate(password)\n' > "$WTS/src/auth.py"
+git -C "$WTS" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$WTS" -c user.email=c@c.co -c user.name=c commit -qm "add auth" >/dev/null
+SCANOUT="$(b mh-pr.sh security-scan sec-scan 2>&1 || true)"   # capture once (grep -q + pipefail)
+check "security-scan flags a security-surface diff" 'b mh-pr.sh security-scan sec-scan >/dev/null 2>&1'
+check "security-scan names the signals"             'grep -qi "signals present" <<<"$SCANOUT"'
+# demo-1's diff is a pure arithmetic helper: no security surface -> exit non-zero.
+check "security-scan clears a benign diff"          '! b mh-pr.sh security-scan demo-1 >/dev/null 2>&1'
+check "security-scan requires an id"                '! b mh-pr.sh security-scan >/dev/null 2>&1'
+b mh-worktree.sh remove sec-scan --force >/dev/null 2>&1
 
 echo "== meta parsing (fixed-string keys; metachar/= values) =="
 b mh-task.sh set metatest re '.*[x]^$ +(a|b)' >/dev/null
@@ -145,6 +180,11 @@ echo "== guarded land + teardown =="
 check "local land ff"    'b mh-merge.sh local demo-1 >/dev/null'
 check "no-fetch landed: reports landed" 'MH_NO_FETCH=1 b mh-worktree.sh landed demo-1 >/dev/null 2>&1'
 check "state done"       'b mh-task.sh state demo-1 | grep -q done'
+# demo-1's task state is now `done` (landed above). Even with the backlog moved
+# back to inflight (NOT done), `ready` unblocks demo-2 from the reconciled task
+# state — the "landed but never marked done" case the old status-only check missed.
+b mh-backlog.sh move demo-1 inflight >/dev/null
+check "ready unblocks from real task state, not backlog status" 'b mh-backlog.sh ready | grep -q demo-2'
 check "teardown ok"      'b mh-worktree.sh remove demo-1 >/dev/null'
 check "origin has commit" 'git -C "$MH_HOME/repos/demo" log --oneline | grep -q "add multiply"'
 

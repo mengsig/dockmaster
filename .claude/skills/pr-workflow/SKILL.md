@@ -58,7 +58,10 @@ worktree/branch from meta, communicates only through the task record, and
   is the "merge gate."
 - **fix / tests** — resolve any merge-gate findings and re-confirm green.
 - **security** — optional. Run `security-review` on the diff only when the change
-  touches auth, input handling, secrets, crypto, or external I/O. Skip
+  touches auth, input handling, secrets, crypto, or external I/O. To make the
+  skip deliberate rather than silent, `bin/mh-pr.sh security-scan <id>` greps the
+  task's diff for those signals and prints whether a review is warranted (exit 0
+  = signals found, 1 = none); it is advisory only and never blocks. Skip
   explicitly when there is no security surface; do not stack it as a reflex.
 - **pr** — open the PR (below).
 
@@ -125,9 +128,18 @@ one of two paths — the operator's choice:
   `bin/mh-pr.sh merge <id> [--method squash] [--delete-branch]`, then syncs and
   tears down.
 
-**Never merge red** — `bin/mh-pr.sh merge` refuses a failing or pending PR, and
-you must also have the operator's actual approval. Destructive, irreversible, or
-security-sensitive merges always escalate, even under `yolo`.
+**Wait for CI, don't refuse it.** `bin/mh-pr.sh merge` checks CI exactly once and
+refuses a still-pending PR. When Actions is mid-run, first
+`bin/mh-pr.sh await-checks <id> [--timeout-secs N] [--interval-secs N]` — it polls
+`check` until the CI rollup is terminal (`passing`/`failing`/`none`) or it times
+out (defaults ~600s / ~15s), exiting 0 on passing/none and non-zero on failing or
+timeout. Run it before the merge gate so the gate acts on a settled result; on a
+non-zero exit, do not attempt the merge.
+
+**Never merge red** — `await-checks` is only a wait, never a relaxation:
+`bin/mh-pr.sh merge` still refuses a failing or pending PR, and you must also have
+the operator's actual approval. Destructive, irreversible, or security-sensitive
+merges always escalate, even under `yolo`.
 
 ## Optional: deterministic runner
 

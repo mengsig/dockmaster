@@ -46,7 +46,11 @@ deploy, a remote queue — do not busy-wait:
 
 - **Monitor** — poll an until-condition (e.g. `bin/mh-pr.sh check <id>` reporting
   `checks: passing`). Size the interval to how fast the state actually changes
-  (a ~8-minute CI run wants one ~480s check, not eight 60s ones).
+  (a ~8-minute CI run wants one ~480s check, not eight 60s ones). For the common
+  wait-for-CI case, `bin/mh-pr.sh await-checks <id> [--timeout-secs N]
+  [--interval-secs N]` is the packaged form of this loop: it polls `check` until
+  the rollup is terminal (`passing`/`failing`/`none`) or it times out, exiting 0
+  on passing/none and non-zero on failing/timeout.
 - **ScheduleWakeup / CronCreate** — schedule a periodic check-in for very
   long-running or recurring supervision, or a routine "babysit the PRs" sweep.
 
