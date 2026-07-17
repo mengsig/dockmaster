@@ -45,79 +45,61 @@ mh_need() { command -v "$1" >/dev/null 2>&1 || mh_die "required tool not found: 
 # inside the lock dir; a waiter reclaims the lock only on POSITIVE evidence of
 # abandonment — the recorded PID is not alive, or the lock is older than
 # MH_LOCK_STALE_SECS. Genuine LIVE contention still blocks, then fails visibly.
-MH_LOCK_STALE_SECS="${MH_LOCK_STALE_SECS:-300}"
-
 mh_lock() {
   # mh_lock <file>  -- acquire the advisory lock guarding <file>
-  local target="$1" lockdir stage waited=0 pid epoch now age stale sig prev_sig="" cur_pid
-  lockdir="$target.lock"
+  local target="$1" lockdir reclaim waited=0 pid rpid
+  lockdir="$target.lock"; reclaim="$lockdir.reclaim"
   while ! mkdir "$lockdir" 2>/dev/null; do
-    # Read the current holder's metadata. A partial/unreadable value is treated
-    # as "unknown" (empty), never trusted as evidence of a live holder.
+    # The lock is held. Self-heal ONLY a lock abandoned by a crashed holder,
+    # identified by concrete evidence: a recorded numeric PID that is not alive.
+    # This is unambiguous — owning the lock requires a successful `mkdir`, after
+    # which the holder writes its OWN (live) PID, so a dead PID in an existing
+    # lock dir can only belong to a crashed holder, never a live owner. An empty
+    # or partial PID (a live holder in the microsecond gap between its mkdir and
+    # its write) is NOT evidence and is never reclaimed; such a metadata-less
+    # crash (astronomically rare) falls through to the visible ~30s timeout.
+    # A stuck-but-alive holder is likewise never reclaimed — it fails visibly
+    # rather than risk tearing the lock from a process that may still resume.
     pid="$(cat "$lockdir/pid" 2>/dev/null || true)"
-    epoch="$(cat "$lockdir/epoch" 2>/dev/null || true)"
-    now="$(date +%s 2>/dev/null || echo 0)"
-    stale=0; age=""
-    # Abandonment is judged ONLY from CONCRETE evidence: (a) a recorded numeric
-    # PID that is not alive, or (b) a recorded numeric epoch older than the stale
-    # bound (also covers PID reuse). Empty/partial metadata is NEVER treated as
-    # stale: an empty signature aliases across distinct holders (each is briefly
-    # metadata-less in the microsecond gap between its mkdir and its writes), so
-    # reclaiming on it could tear a live holder's lock away. A lock that stays
-    # metadata-less (a crash in that gap — astronomically rare) instead falls
-    # through to the visible ~30s acquisition timeout below.
     case "$pid" in
       ''|*[!0-9]*) : ;;
-      *) kill -0 "$pid" 2>/dev/null || stale=1 ;;
-    esac
-    case "$epoch" in
-      ''|*[!0-9]*) : ;;
-      *) age=$((now - epoch)); [ "$age" -ge "$MH_LOCK_STALE_SECS" ] && stale=1 ;;
-    esac
-    # Reclaim ONLY a lock whose (concrete) identity was observed UNCHANGED across
-    # a poll interval AND looked abandoned both times. A live lock under genuine
-    # contention recycles fast — its (pid,epoch) changes on every acquisition — so
-    # a repeated-identical stale observation cannot be a live holder; it is a
-    # frozen (crashed) one. This is the load-bearing guard against reclaiming a
-    # lock out from under a live holder during normal parallel writes.
-    sig="$pid|$epoch"
-    if [ "$stale" -eq 1 ] && [ "$sig" = "$prev_sig" ]; then
-      # Claim the stale dir by an ATOMIC rename so two waiters cannot both reclaim
-      # and race a fresh holder in between: exactly one `mv` of a given directory
-      # instance wins. Re-verify the moved dir's FULL signature (pid AND epoch)
-      # still matches the instance we judged; if it does not, we moved a recycled
-      # (live) holder — restore it. Comparing the epoch too, not just the pid,
-      # closes a PID-reuse race: a recycled live holder always writes a fresh
-      # epoch, so it can never alias the frozen (pid,epoch) of the crashed one.
-      stage="$lockdir.stale.$$"
-      if mv "$lockdir" "$stage" 2>/dev/null; then
-        cur_pid="$(cat "$stage/pid" 2>/dev/null || true)"
-        cur_epoch="$(cat "$stage/epoch" 2>/dev/null || true)"
-        if [ "$cur_pid" = "$pid" ] && [ "$cur_epoch" = "$epoch" ]; then
-          mh_warn "reclaiming stale lock on $(basename "$target") (holder pid=${pid:-?}${age:+ age=${age}s}); previous holder likely crashed"
-          rm -rf "$stage" 2>/dev/null || true
-        else
-          mv "$stage" "$lockdir" 2>/dev/null || rm -rf "$stage" 2>/dev/null || true
+      *)
+        if ! kill -0 "$pid" 2>/dev/null; then
+          # Serialize reclaimers with a second lock so exactly one acts, and
+          # re-verify the dead PID still owns the dir immediately before removing
+          # it. While the lock dir exists holding a dead PID no live holder can
+          # own it (owning requires a fresh mkdir, which needs the dir absent),
+          # so removing it here cannot tear a live holder away. If another waiter
+          # already reclaimed and a live holder took over, the re-read PID is now
+          # live (or the dir is gone) and we leave it be.
+          if mkdir "$reclaim" 2>/dev/null; then
+            rpid="$(cat "$lockdir/pid" 2>/dev/null || true)"
+            if [ -d "$lockdir" ] && [ "$rpid" = "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+              mh_warn "reclaiming stale lock on $(basename "$target") (holder pid=$pid not alive; previous holder likely crashed)"
+              rm -rf "$lockdir" 2>/dev/null || true
+            fi
+            rmdir "$reclaim" 2>/dev/null || true
+            continue
+          fi
         fi
-      fi
-      prev_sig=""   # require a fresh two-observation cycle after any attempt
-      continue
-    fi
-    prev_sig="$sig"
+        ;;
+    esac
     waited=$((waited + 1))
     if [ "$waited" -ge 300 ]; then
       mh_die "could not acquire lock on $(basename "$target") after ~30s; if no mh-* process is running, remove the stale lock: rm -rf '$lockdir'"
     fi
     sleep 0.1
   done
-  # We hold the lock: record ownership so a future waiter can detect our crash.
-  # PID first (a single small write, effectively atomic) so liveness is knowable
-  # as early as possible; the epoch bounds a stuck-but-live holder.
+  # We hold the lock: record our PID so a future waiter can detect our crash.
   printf '%s\n' "$$" > "$lockdir/pid" 2>/dev/null || true
-  date +%s > "$lockdir/epoch" 2>/dev/null || true
-  # Expand the lock path into the trap string NOW so cleanup survives mh_die/exit,
-  # and cover signal deaths (INT/TERM) as well as a normal EXIT.
-  trap "rm -rf '$lockdir' 2>/dev/null || true" EXIT INT TERM
+  # Clean up on normal exit / mh_die (EXIT), and on signal death. A trapped
+  # INT/TERM handler must ALSO terminate: without the explicit exit, bash runs
+  # the handler and then RESUMES the (now unlocked) critical section — which
+  # would let a waiter acquire and write concurrently. So each signal handler
+  # cleans up and exits with the conventional 128+signo code.
+  trap "rm -rf '$lockdir' 2>/dev/null || true" EXIT
+  trap "rm -rf '$lockdir' 2>/dev/null || true; exit 130" INT
+  trap "rm -rf '$lockdir' 2>/dev/null || true; exit 143" TERM
 }
 
 mh_unlock() {
@@ -289,18 +271,20 @@ mh_refresh_pr_state() {
 # --- merge check-gate decision (never merge red) -----------------------------
 # Decide whether a CI rollup permits a merge, as a pure function so it is
 # testable offline. `none` (no checks reported) does NOT auto-pass: it is the
-# window after a PR opens but before CI registers, and treating it as green
-# would merge red. It passes only when the caller proved there is nothing to
-# wait for — an explicit --allow-no-checks (has_no_checks=1) or a repo with no
-# CI configured (has_ci=0). Prints one of:
+# window after a PR opens but before CI registers — and we cannot reliably tell
+# "no CI configured" from "CI not yet reported" (a repo's CI may be an external
+# provider that posts commit statuses, with no .github/workflows to detect). So
+# `none` passes ONLY on an explicit operator acknowledgement (--allow-no-checks);
+# merging a genuinely CI-less repo is thus a conscious, logged choice rather than
+# an inference that could silently merge red. Prints one of:
 #   allow | refuse-failing | refuse-pending | refuse-none | refuse-unknown
 mh_merge_gate() {
-  # mh_merge_gate <rollup> <allow_no_checks:0|1> <has_ci:0|1>
+  # mh_merge_gate <rollup> <allow_no_checks:0|1>
   case "$1" in
     passing) printf 'allow\n' ;;
     failing) printf 'refuse-failing\n' ;;
     pending) printf 'refuse-pending\n' ;;
-    none)    if [ "$2" = "1" ] || [ "$3" = "0" ]; then printf 'allow\n'; else printf 'refuse-none\n'; fi ;;
+    none)    if [ "$2" = "1" ]; then printf 'allow\n'; else printf 'refuse-none\n'; fi ;;
     *)       printf 'refuse-unknown\n' ;;
   esac
 }

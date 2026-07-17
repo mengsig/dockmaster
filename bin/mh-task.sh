@@ -62,6 +62,14 @@ case "$cmd" in
   set)
     id="${1:-}"; key="${2:-}"; value="${3:-}"
     [ -n "$id" ] && [ -n "$key" ] || mh_die "usage: mh-task.sh set <id> <key> <value>"
+    # The PR-tracking fields are DERIVED from GitHub by mh-pr.sh (check/open/
+    # merge) and are the trusted landing signal `mh-task.sh state` reads. Refuse
+    # to hand-set them here: `set pr_state MERGED` would otherwise forge a
+    # terminal landing over unlanded work (the same forge the `event merged`
+    # reservation blocks). The sanctioned writer uses mh_meta_set directly.
+    case "$key" in
+      pr|pr_state|merge_state) mh_die "'$key' is a PR-tracking field maintained by mh-pr.sh (check/open/merge); it must not be set by hand" ;;
+    esac
     mh_meta_set "$id" "$key" "$value"
     ;;
 
@@ -178,7 +186,11 @@ case "$cmd" in
     for m in "$MH_TASKS"/*.meta; do
       [ -f "$m" ] || continue
       id="$(basename "$m" .meta)"
-      printf '%s\t%s\t%s\t%s\n' "$id" "$(mh_meta_get "$id" kind)" "$(mh_meta_get "$id" repo)" "$("$0" state "$id" | sed 's/ · .*//; s/^state: //')"
+      # Bulk overview: reconcile each row OFFLINE (MH_NO_FETCH=1). A per-task live
+      # PR refresh here would turn `list` (and the session-start digest that calls
+      # it) into N sequential GitHub round-trips on the hottest command. A single
+      # `state <id>` still refreshes live; `list` favors a fast local snapshot.
+      printf '%s\t%s\t%s\t%s\n' "$id" "$(mh_meta_get "$id" kind)" "$(mh_meta_get "$id" repo)" "$(MH_NO_FETCH=1 "$0" state "$id" | sed 's/ · .*//; s/^state: //')"
     done | column -t -s$'\t' 2>/dev/null || cat
     ;;
 

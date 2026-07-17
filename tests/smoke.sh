@@ -583,22 +583,26 @@ SGINR="$(b mh-worktree.sh create sgi-norecord sgi 2>&1 || true)"
 check "worktree create points at mh-task.sh new"      'grep -q "mh-task.sh new" <<<"$SGINR"'
 
 echo "== state-gate-integrity: merge check-gate never merges red on 'none' (#21-a) =="
-gate() { ( . "$ROOT/bin/mh-lib.sh"; mh_merge_gate "$1" "$2" "$3" ); }
-check "gate refuses 'none' when CI exists and no flag"  '[ "$(gate none 0 1)" = "refuse-none" ]'
-check "gate allows 'none' with --allow-no-checks"       '[ "$(gate none 1 1)" = "allow" ]'
-check "gate allows 'none' when the repo has no CI"      '[ "$(gate none 0 0)" = "allow" ]'
-check "gate allows 'passing'"                           '[ "$(gate passing 0 1)" = "allow" ]'
-check "gate refuses 'failing'"                          '[ "$(gate failing 0 1)" = "refuse-failing" ]'
-check "gate refuses 'pending'"                          '[ "$(gate pending 0 1)" = "refuse-pending" ]'
-check "gate refuses an unknown rollup"                  '[ "$(gate bogus 0 1)" = "refuse-unknown" ]'
+gate() { ( . "$ROOT/bin/mh-lib.sh"; mh_merge_gate "$1" "$2" ); }
+check "gate refuses 'none' without --allow-no-checks"   '[ "$(gate none 0)" = "refuse-none" ]'
+check "gate allows 'none' only with --allow-no-checks"  '[ "$(gate none 1)" = "allow" ]'
+check "gate allows 'passing'"                           '[ "$(gate passing 0)" = "allow" ]'
+check "gate refuses 'failing'"                          '[ "$(gate failing 0)" = "refuse-failing" ]'
+check "gate refuses 'pending'"                          '[ "$(gate pending 0)" = "refuse-pending" ]'
+check "gate refuses an unknown rollup"                  '[ "$(gate bogus 0)" = "refuse-unknown" ]'
+
+echo "== state-gate-integrity: pr_state cannot be forged via 'set' (#20 F6) =="
+b mh-task.sh new sgi-forge --kind ship --repo sgi >/dev/null 2>&1 || true
+check "set refuses hand-writing pr_state" '! b mh-task.sh set sgi-forge pr_state MERGED >/dev/null 2>&1'
+check "set refuses hand-writing pr"       '! b mh-task.sh set sgi-forge pr "https://x/y/pull/1" >/dev/null 2>&1'
 
 echo "== state-gate-integrity: mutex reclaims a crashed holder (#21-b) =="
-# Pre-create a lock dir with a dead PID and an ancient timestamp; the next
-# mh_lock must reclaim it (with a loud warning) and succeed, while the primitive
-# stays mutually exclusive for a live holder.
+# Pre-create a lock dir owned by a dead PID; the next mh_lock must reclaim it
+# (with a loud warning) and succeed, while the primitive stays mutually
+# exclusive for a live holder. Reclaim is judged purely from the dead PID.
 ( . "$ROOT/bin/mh-lib.sh"
   LF="$TMP/reclaim-test"
-  mkdir -p "$LF.lock"; printf '999999\n' > "$LF.lock/pid"; printf '1\n' > "$LF.lock/epoch"
+  mkdir -p "$LF.lock"; printf '999999\n' > "$LF.lock/pid"
   mh_lock "$LF" 2>"$TMP/reclaim.warn"
   mkdir "$LF.lock" 2>/dev/null && exit 11   # a successful mkdir => lock not exclusive
   mh_unlock "$LF" )

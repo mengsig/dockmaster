@@ -240,15 +240,14 @@ case "$cmd" in
     [ "$state" = "MERGED" ] && mh_die "PR already merged: $url"
     [ "$state" = "CLOSED" ] && mh_die "PR is closed, refusing to merge: $url"
     # Never merge red. A `none` rollup (no checks reported) does NOT auto-pass:
-    # it is the race window after a PR opens but before CI registers. Allow it
-    # only when there is genuinely nothing to wait for — an explicit
-    # --allow-no-checks, or a repo with no CI config (no .github/workflows in the
-    # branch's worktree or the managed clone).
-    repo="$(mh_meta_get "$id" repo)"; wt="$(mh_meta_get "$id" worktree)"
+    # it is the race window after a PR opens but before CI registers. It passes
+    # only on an explicit --allow-no-checks: we cannot reliably distinguish "no
+    # CI configured" from "external CI (commit statuses) not yet reported", so
+    # inferring no-CI from a missing .github/workflows could merge red for any
+    # repo whose CI is external. Merging a CI-less repo is a conscious choice.
+    repo="$(mh_meta_get "$id" repo)"
     ci_dir="$(mh_repo_dir "$repo")"
-    has_ci=0
-    if { [ -n "$wt" ] && [ -d "$wt/.github/workflows" ]; } || [ -d "$ci_dir/.github/workflows" ]; then has_ci=1; fi
-    case "$(mh_merge_gate "$checks" "$allow_no_checks" "$has_ci")" in
+    case "$(mh_merge_gate "$checks" "$allow_no_checks")" in
       allow) : ;;
       refuse-failing) mh_die "REFUSED: PR has failing checks (never merge red): $url" ;;
       refuse-pending) mh_die "REFUSED: PR checks still running: $url — wait for them with: mh-pr.sh await-checks $id" ;;
