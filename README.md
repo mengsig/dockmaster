@@ -1,8 +1,15 @@
+<p align="center"><img src="assets/logo.png" alt="manhandler" width="720"></p>
+
 # manhandler
 
 **Talk to one agent. Ship across every repo.**
 
 > v0.2.0 · MIT licensed · built for [Claude Code](https://claude.com/claude-code)
+
+*The Dockyard.* You are the captain; the manhandler is your dockmaster — it never
+handles cargo itself, but directs a crew of dockhands working in the holds,
+hoisting cargo aboard the ships of your fleet, and reports back to you. See
+[the theme note](docs/architecture.md#the-dockyard) for the full mapping.
 
 manhandler is an *agent distro* for Claude Code: a portable directory of
 instructions, skills, and helper scripts that turns a Claude Code session into a
