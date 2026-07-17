@@ -86,9 +86,17 @@ Do not dispatch until required tools are present and GitHub auth is good. Use
   gate and the PR-or-local decision (the gate every requested change passes).
 - **pr-workflow** — after approval, on the PR path (the two-pass gate pipeline,
   branch naming, PR-description style, and the merge gate).
+- **post-pr-review** — when an open PR gets review comments, or its CI goes red
+  after it was opened (the tail of the PR pipeline, after PR creation).
+- **testing-policy** — before relying on the tests gate for a repo with no
+  registered test command, or when a test is flaky.
 - **supervision** — whenever work is in flight (native background agents +
   completion notifications; no polling daemon).
 - **merge-conflict** — when a branch has diverged or a rebase hits conflicts.
+- **rollback** — when a landed change must be reverted (a merged PR or a
+  completed local landing); the revert goes through the normal gate.
+- **credential-handoff** — when a crewmate needs a secret/credential to do its
+  task (pass a reference, never the value).
 - **memory-routing** — before persisting knowledge, or when sweeping a session
   for durable facts.
 - **decision-hold** — before treating an investigation/review as complete, and

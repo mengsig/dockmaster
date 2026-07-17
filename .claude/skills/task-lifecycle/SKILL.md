@@ -81,9 +81,13 @@ Every requested change goes through the same gated flow:
 4. **Merge gate.** After the PR is open, the operator either merges on GitHub
    (you watch for it and then sync + teardown) or you ask for approval and merge
    with `bin/mh-pr.sh merge`. Never merge red. Report the full `https://…` URL.
+   Review comments and post-open CI on an open PR are handled by `post-pr-review`.
 
 Do not stack an extra manual review on top of the pipeline — the two review
-passes in `pr-workflow` are the rigor.
+passes in `pr-workflow` are the rigor. The tests step in either path follows
+`testing-policy` — a repo with no test command is a declared soft skip (verify
+the change instead), never a fabricated pass. Undoing a change that already
+landed is a new task under `rollback`, not a teardown.
 
 ## 5. Teardown
 

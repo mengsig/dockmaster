@@ -99,6 +99,12 @@ Hard rules for the description:
 - No restating the diff line by line. Say what matters.
 - Link the issue with `Closes #<n>` when there is one.
 
+## After the PR is open
+
+Opening the PR is not the end. Review comments and post-open CI failures are the
+pipeline's tail — load `post-pr-review` to handle them on the same branch until
+reviewers are satisfied and checks are green, then apply the merge gate below.
+
 ## Merge authority (the final gate)
 
 Once the PR is open, report the full `https://…` URL and a plain outcome, then
