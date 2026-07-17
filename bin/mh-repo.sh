@@ -3,8 +3,8 @@
 #
 # The registry (state/repos.json) is the single source of truth for what is
 # managed. Each repo is cloned once under repos/<name> (read-only to the
-# manhandler; crewmates work in worktrees off that clone) and gets its own
-# per-repo memory via contextgraph init.
+# manhandler; crewmates work in worktrees off that clone) and gets its per-repo
+# memory scaffolded via mh-memory.sh seed (see that script for the model).
 #
 # Commands:
 #   add <name> <remote> [--mode M] [--test-cmd C] [--branch B] [--no-memory]
@@ -20,7 +20,7 @@
 #   set <name> <field> <value>
 #   remove <name>            (registry entry only; never deletes a clone with
 #                             uncommitted or unpushed work)
-#   init-memory <name>       (idempotent contextgraph init in the clone)
+#   seed <name>              (idempotent mh-memory scaffold in the clone)
 #
 # Modes: pipeline (default, full PR gate pipeline) | direct-pr | local-only.
 
@@ -54,51 +54,25 @@ register_repo() {
     --arg n "$1" --arg r "$2" --arg p "repos/$1" \
     --arg b "$3" --arg m "$4" --arg t "$5" \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.repos[$n] = {remote:$r, path:$p, default_branch:$b, mode:$m, yolo:false, test_cmd:$t, pipeline:"default", contextgraph:false, added:$ts}'
+    '.repos[$n] = {remote:$r, path:$p, default_branch:$b, mode:$m, yolo:false, test_cmd:$t, pipeline:"default", memory:false, added:$ts}'
 }
 
-# Deliver contextgraph memory INTO the repo as tracked content, through the
-# repo's normal delivery path, so it travels with the repo and every worktree.
-# For local-only repos it fast-forward-lands; otherwise it opens a PR to approve.
-init_memory() {
-  local name="$1" dir="$MH_REPOS/$1"
+# Scaffold the repo's mh-memory stores in the clone: the git-excluded private
+# store and the AGENTS.md mh:knowledge markers (see mh-memory.sh for the model).
+# SHARED knowledge itself is authored later by a crewmate in a worktree and
+# committed with its work — seed only guarantees the scaffold exists. Fail OPEN:
+# memory is optional, so a scaffold failure warns and leaves the repo registered
+# without it (retry with `mh-repo.sh seed <name>`), never blocking onboarding.
+seed_memory() {
+  local name="$1" dir="$MH_REPOS/$1" out
   [ -d "$dir/.git" ] || mh_die "no clone at $dir"
-  command -v contextgraph >/dev/null 2>&1 || { mh_warn "contextgraph not on PATH; skipping memory init for $name"; registry_write --arg n "$name" '.repos[$n].contextgraph = false'; return 0; }
-  if git -C "$dir" ls-files --error-unmatch .contextgraph/repo.md >/dev/null 2>&1; then
-    mh_info "contextgraph memory already tracked in $name"
-    registry_write --arg n "$name" '.repos[$n].contextgraph = true'
-    return 0
-  fi
-  local mode id wt br
-  mode="$(mh_registry_get "$name" mode)"; [ -n "$mode" ] || mode="pipeline"
-  id="$name-init-memory"
-  "$(dirname "$0")/mh-task.sh" new "$id" --kind ship --repo "$name" --mode "$mode" --title "initialize contextgraph memory" >/dev/null 2>&1 || true
-  wt="$("$(dirname "$0")/mh-worktree.sh" create "$id" "$name" 2>/dev/null | tail -n1)"
-  [ -d "$wt" ] || { mh_warn "could not create worktree to initialize memory for $name; skipping"; registry_write --arg n "$name" '.repos[$n].contextgraph = false'; return 0; }
-  br="chore/x/init-contextgraph-memory"
-  git -C "$wt" checkout -q -b "$br"
-  # Fail OPEN: memory is optional. If contextgraph is unavailable or broken,
-  # clean up and leave the repo registered without memory (retry later).
-  if ! ( cd "$wt" && contextgraph init >/dev/null 2>&1 ); then
-    mh_warn "contextgraph init failed for $name (contextgraph unavailable?); repo registered without memory. Retry later: mh-repo.sh init-memory $name"
-    "$(dirname "$0")/mh-worktree.sh" remove "$id" --force >/dev/null 2>&1 || true
-    "$(dirname "$0")/mh-task.sh" set "$id" kind scout >/dev/null 2>&1 || true
-    registry_write --arg n "$name" '.repos[$n].contextgraph = false'
-    return 0
-  fi
-  mh_cg_stage "$wt"
-  if git -C "$wt" diff --cached --quiet; then
-    mh_warn "contextgraph init produced no changes for $name"
+  if out="$("$(dirname "$0")/mh-memory.sh" seed "$name" 2>&1)"; then
+    registry_write --arg n "$name" '.repos[$n].memory = true'
+    mh_info "$out"
   else
-    git -C "$wt" -c commit.gpgsign=false commit -q -m "chore: initialize contextgraph memory" || mh_die "commit failed"
-  fi
-  registry_write --arg n "$name" '.repos[$n].contextgraph = true'
-  if [ "$mode" = "local-only" ]; then
-    "$(dirname "$0")/mh-merge.sh" local "$id" && "$(dirname "$0")/mh-worktree.sh" remove "$id"
-    mh_info "contextgraph memory landed locally in $name"
-  else
-    mh_info "contextgraph memory committed on branch '$br' for $name."
-    mh_info "Open a PR to track it: bin/mh-pr.sh open $id --title \"initialize contextgraph memory\" --body \"Adds contextgraph memory so per-repo context travels with the repo.\""
+    mh_warn "memory scaffold failed for $name; repo registered without it. Retry: mh-repo.sh seed $name
+$out"
+    registry_write --arg n "$name" '.repos[$n].memory = false'
   fi
 }
 
@@ -125,7 +99,7 @@ case "$cmd" in
     git clone "$remote" "$dir" || mh_die "clone failed"
     [ -n "$branch" ] || branch="$(mh_default_branch "$dir")"
     register_repo "$name" "$remote" "$branch" "$mode" "$test_cmd"
-    [ "$want_memory" -eq 1 ] && init_memory "$name" || true
+    [ "$want_memory" -eq 1 ] && seed_memory "$name" || true
     mh_info "registered '$name' (mode=$mode, default_branch=$branch)"
     ;;
 
@@ -191,7 +165,7 @@ $out"
     git -C "$dir" push -u origin "$branch" >/dev/null 2>&1 \
       || mh_die "push to origin failed (check auth; the remote must be empty). Local repo left at $dir"
     register_repo "$name" "$remote" "$branch" "$mode" "$test_cmd"
-    [ "$want_memory" -eq 1 ] && init_memory "$name" || true
+    [ "$want_memory" -eq 1 ] && seed_memory "$name" || true
     mh_info "created and registered '$name' (mode=$mode, default_branch=$branch, origin=$remote)"
     ;;
 
@@ -252,11 +226,11 @@ $out"
     mh_info "unregistered '$name' (clone left on disk at $dir; delete manually if intended)"
     ;;
 
-  init-memory)
-    name="${1:-}"; [ -n "$name" ] || mh_die "usage: mh-repo.sh init-memory <name>"
-    init_memory "$name"
+  seed)
+    name="${1:-}"; [ -n "$name" ] || mh_die "usage: mh-repo.sh seed <name>"
+    seed_memory "$name"
     ;;
 
   *)
-    echo "usage: mh-repo.sh {add|create|list|get|set|remove|init-memory} ..." >&2; exit 2 ;;
+    echo "usage: mh-repo.sh {add|create|list|get|set|remove|seed} ..." >&2; exit 2 ;;
 esac
