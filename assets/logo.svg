@@ -1,0 +1,58 @@
+<svg width="960" height="300" viewBox="0 0 960 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="manhandler">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#122a42"/>
+      <stop offset="1" stop-color="#0a1826"/>
+    </linearGradient>
+    <linearGradient id="amber" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0b350"/>
+      <stop offset="1" stop-color="#d8933a"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="960" height="300" rx="28" fill="url(#bg)"/>
+
+  <!-- ===== emblem (left): a gantry crane hoisting a container of changes ===== -->
+  <g transform="translate(60,44)">
+    <!-- gantry rail -->
+    <rect x="0" y="0" width="212" height="12" rx="6" fill="#31536f"/>
+    <!-- gantry legs -->
+    <rect x="10" y="10" width="9" height="196" rx="3" fill="#294863"/>
+    <rect x="193" y="10" width="9" height="196" rx="3" fill="#294863"/>
+    <!-- trolley + cable -->
+    <rect x="118" y="8" width="26" height="12" rx="3" fill="#3d6688"/>
+    <line x1="131" y1="18" x2="131" y2="60" stroke="#8aa7c0" stroke-width="3"/>
+    <!-- hook -->
+    <path d="M131 60 q0 12 -10 12 q-10 0 -10 -10" fill="none" stroke="url(#amber)" stroke-width="5" stroke-linecap="round"/>
+    <!-- container (the cargo: a change being hoisted) -->
+    <g transform="translate(70,92)">
+      <!-- bail / lift ring on top -->
+      <rect x="53" y="-8" width="16" height="10" rx="3" fill="#b9782c"/>
+      <rect x="0" y="0" width="122" height="86" rx="10" fill="url(#amber)"/>
+      <!-- ribs -->
+      <g stroke="#b9782c" stroke-width="3" opacity="0.5">
+        <line x1="18" y1="10" x2="18" y2="76"/>
+        <line x1="34" y1="10" x2="34" y2="76"/>
+        <line x1="88" y1="10" x2="88" y2="76"/>
+        <line x1="104" y1="10" x2="104" y2="76"/>
+      </g>
+      <!-- git-merge glyph stamped on the container -->
+      <g transform="translate(49,19)" stroke="#0a1826" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M2 6 V42"/>
+        <path d="M2 24 q0 -12 12 -12 h4"/>
+        <circle cx="2" cy="4" r="6.5" fill="#0a1826" stroke="none"/>
+        <circle cx="2" cy="44" r="6.5" fill="#0a1826" stroke="none"/>
+        <circle cx="26" cy="12" r="6.5" fill="#0a1826" stroke="none"/>
+      </g>
+    </g>
+    <!-- waterline -->
+    <path d="M-6 214 q28 -10 56 0 t56 0 t56 0 t56 0" fill="none" stroke="#31536f" stroke-width="4" opacity="0.7"/>
+  </g>
+
+  <!-- ===== wordmark (right) ===== -->
+  <g transform="translate(360,0)">
+    <text x="0" y="150" font-family="Menlo, 'SF Mono', Consolas, monospace" font-size="76" font-weight="700" fill="#f4f7fa">manhandler</text>
+    <text x="3" y="194" font-family="-apple-system, 'Segoe UI', Roboto, sans-serif" font-size="25" fill="#8aa7c0">talk to one &#8212; ship across every repo</text>
+    <rect x="3" y="216" width="430" height="3" rx="1.5" fill="url(#amber)" opacity="0.85"/>
+  </g>
+</svg>

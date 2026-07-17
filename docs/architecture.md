@@ -45,6 +45,16 @@ firstmate, spends **zero tokens while work is in flight**, and loses no accuracy
 versus driving a Claude Code / Codex agent by hand — because each worker *is* a
 full agent with the full tool surface, not a constrained pane.
 
+## The Dockyard
+
+The vocabulary below is framed as a working dockyard:
+
+> **The Dockyard.** You are the *captain*; the **manhandler** is your dockmaster —
+> it never handles cargo itself, it directs a crew of *dockhands* (crewmates)
+> working in the holds (worktrees), hoisting *cargo* (changes) aboard the *ships*
+> (repos) of your fleet, and reports back to you. One hand on the dock, a whole
+> crew on the water.
+
 ## Roles and vocabulary
 
 - **operator** — you. The only human. You state intent and make the decisions
