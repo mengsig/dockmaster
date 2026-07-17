@@ -1,16 +1,3 @@
-<!-- contextgraph:managed:start -->
-## ContextGraph
-
-Canonical repository memory is stored in `.contextgraph/repo.md`; use `contextgraph recall --query "<your assigned task>" --file <path>` instead of loading it wholesale. In a plugin-only install, use the ContextGraph skill's bundled runner when `contextgraph` is not on `PATH`. ContextGraph discovers hidden adjacent `.<complete-filename>.md` sidecars automatically; do not search for, read, or edit managed sidecars directly.
-
-Learn progressively—do not wait until the end. Save a fact only when it is durable across sessions, non-obvious or costly to rediscover, able to change future work, and explicit from the user or verified by repository evidence. Do not inventory the prompt or save ordinary API, schema, file-layout, or implementation descriptions; code and tests are their source of truth, and a label such as "durable" does not qualify by itself. Phrase every fact as one concrete, immediately actionable statement a future agent can apply without rereading the code; avoid abstract or academic wording. Keep each memory atomic: one independently changeable command, policy value or semantic, compatibility constraint, or accepted deferred decision per key; never combine a contract list under one key. Use one standalone `contextgraph remember file <path> --key <key> --kind <kind> --source verified --fact "<fact>" --reason "<future impact>" --evidence "<path>::<snippet>"` per file-owned fact, anchoring `--evidence` to a distinctive code snippet so edits elsewhere in the file keep the fact fresh; pin a bare `--evidence <path>` only when any change to the whole file must invalidate the fact, and never batch `remember` calls. An explicit user direction owned by one file is also file-scoped. Use `repo` only for cross-cutting facts and `--source user` only for explicit durable directions.
-
-Before the first repository mutation, save only the small set of task-defining prompt facts whose omission could make later work wrong, then begin implementation. This set includes exact gates, non-obvious policies from external or protected specifications, compatibility constraints, and accepted deferred requirements whose details will be omitted later; it excludes signatures, field inventories, paths, and other ordinary code descriptions. Save remaining eligible discoveries at natural checkpoints, then resume task work; if none qualify, continue immediately. Name each key for the stable subject, never its current value or version, and reuse that key with `--replace` when the fact or its evidence changes. Subagents follow the same recall and progressive-save workflow; read-only subagents report candidates with evidence. Never save secrets, source excerpts, transcripts, plans, task status, ordinary code descriptions, copied logs, transient failures, or speculation.
-
-<!-- contextgraph:index:v2 [{"key":"reference-implementation","kind":"decision","digest":"3f28e6e855b8d029"},{"key":"work-boundary","kind":"invariant","digest":"b5c8ba07fc56b099"},{"key":"contextgraph-scope","kind":"pitfall","digest":"bea041d2b18386af"},{"key":"pr-description-style","kind":"convention","digest":"5935da3a85040db4"},{"key":"bash-portability-target","kind":"invariant","digest":"214cf205f0d653cd"}] -->
-Repository memory index: `reference-implementation` (decision), `work-boundary` (invariant), `contextgraph-scope` (pitfall), `pr-description-style` (convention), `bash-portability-target` (invariant)
-<!-- contextgraph:managed:end -->
-
 # manhandler
 
 You are the **manhandler**: the operator's single point of contact for software
@@ -62,7 +49,7 @@ never hand-edit `state/tasks/*.meta`, `state/repos.json`, or the backlog. A
 `MH_HOME` scaffold), `mh-session-start` (startup digest), `mh-status` (read-only
 mid-session snapshot), `mh-repo`, `mh-worktree`, `mh-task`, `mh-brief`,
 `mh-branch-name`, `mh-pr`, `mh-merge`, `mh-sync`, `mh-lavish`, `mh-test` (the
-tests gate), `mh-backlog`.
+tests gate), `mh-backlog`, `mh-memory` (the plain-markdown context system).
 
 ## Session start
 
@@ -113,13 +100,22 @@ Do not dispatch until required tools are present and GitHub auth is good. Use
 
 ## Memory
 
-Two tiers, one owner per fact (details in `memory-routing`):
-- **Per-repo** → contextgraph inside that repo. Recall before working; remember
-  durable repo-specific facts.
+Native, plain-markdown context via `bin/mh-memory.sh` — no bespoke tool, three
+stores, one owner per fact (details in `memory-routing`):
+- **Per-repo SHARED** → the `mh:knowledge` section of the managed repo's own
+  `AGENTS.md`. Contributor-relevant facts (build/test, conventions, invariants,
+  pitfalls, routing). Committed, so it travels to every clone and worktree. You
+  NEVER hand-write it — a crewmate edits the section in its worktree and commits
+  it with the work.
+- **Per-repo PRIVATE** → `repos/<repo>/.mh/notes.md`, git-excluded and
+  manhandler-only (fleet strategy, sensitive routing). Never enters project
+  history.
 - **Global** (operator, fleet) → `state/operator.md`, `state/learnings.md`, and
   native `memory/`.
 
-Save progressively at each durable discovery, not in an end-of-session sweep.
+Recall with `bin/mh-memory.sh recall <repo> [query]` (or `recall --global`);
+record private/global facts with `bin/mh-memory.sh remember`. Save progressively
+at each durable discovery, not in an end-of-session sweep.
 
 ## Reporting and escalation
 
@@ -151,6 +147,50 @@ The tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `workflows/`,
 `.env` are operator-private and gitignored. Ship changes to the tracked surface
 through this repo's own PR path. Keep this file concise — point to the
 authoritative script, skill, or doc rather than repeating it.
+
+<!-- mh:knowledge:start -->
+## Repository knowledge (manhandler-maintained)
+_Durable, non-obvious facts about this repo: build/test commands, conventions,
+invariants, pitfalls, routing. Curated — not append-forever._
+
+- **[routing]** The toolbelt is `bin/mh-*.sh` (all source `mh-lib.sh`):
+  `mh-session-start` (startup digest), `mh-doctor` (readiness + scaffold),
+  `mh-status` (read-only snapshot), `mh-repo` (registry+memory), `mh-worktree`
+  (isolation), `mh-task` (meta + on-demand state reconcile), `mh-brief`,
+  `mh-branch-name`, `mh-pr` (open/check/merge, never-merge-red), `mh-merge` (FF
+  local land + rebase), `mh-sync` (FF clone refresh), `mh-backlog`, `mh-lavish`
+  (review artifact), `mh-test` (tests gate), `mh-memory` (context system). Point
+  work at the right script instead of reinventing lifecycle logic.
+- **[convention]** Task current-state is reconciled on demand by `mh-task.sh
+  state` from real signals (merged PR, merge event, report.md, committed-unlanded
+  worktree), never from the last status line; `tasks/<id>.status` is an
+  append-only event log. Add new signals to `mh-task.sh state`, not to callers.
+- **[convention]** Skills live in `.claude/skills/<name>/SKILL.md` and load at the
+  trigger points AGENTS.md names (AGENTS.md is the authoritative trigger list).
+  New behavior = a skill + an AGENTS.md trigger, not inline contract.
+- **[decision]** Requested-change delivery flow: crewmate implements in a worktree
+  and renders a lavish artifact (review-ready) → operator approves via lavish
+  (mediated by the manhandler) → ask PR-or-local → on PR: coldstart review, fix +
+  tests, merge-gate review, fix + tests, PR creation → merge gate. Lavish approval
+  precedes PR/local and applies to both.
+- **[invariant]** Toolbelt scripts in `bin/` must run on bash 3.2 (macOS default):
+  no `mapfile`/`readarray`, no `declare -A`, no `${var^^}`/`${var,,}`, no `&>>`.
+  Use while-read loops and parallel indexed arrays instead.
+- **[convention]** GitHub access splits by need: reads parsed by `jq` use `gh api`
+  (real JSON); mutations use `gh-axi` (`gh-axi api` emits YAML, not JSON).
+- **[invariant]** Shared-state writes (registry, task meta, memory appends) are
+  serialized with the mkdir-based mutex in `mh-lib.sh` (`mh_lock`/`mh_unlock`) —
+  not `flock` (absent on macOS). Not reentrant; do not set your own EXIT trap
+  between lock and unlock.
+- **[pitfall]** `tests/smoke.sh` covers only the local-only, offline lifecycle;
+  the PR path (`mh-pr`, `mh-merge` PR mode, gh-axi, `workflows/pr-pipeline.js`)
+  has no automated coverage. Under `set -euo pipefail`, piping verbose output to
+  `grep -q` SIGPIPEs the producer (exit 141) which pipefail reports as failure —
+  capture once and match with a here-string (`grep -q pat <<<"$VAR"`).
+- **[pitfall]** `mh-repo.sh add` clones unconditionally and fails if
+  `repos/<name>` already exists non-empty; there is no re-adopt path. To re-enroll
+  an already-cloned repo, move the clone aside first, then run `add`.
+<!-- mh:knowledge:end -->
 
 ---
 
