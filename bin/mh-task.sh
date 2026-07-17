@@ -20,6 +20,8 @@
 #   get <id> [<key>]
 #   event <id> <state> [<note>]
 #   state <id>            reconcile and print current state
+#   archive <id>          move a terminal-done task's records + artifacts to
+#                         state/archive/ (fails closed on a non-done or live task)
 #   list
 
 set -euo pipefail
@@ -93,7 +95,12 @@ case "$cmd" in
     fi
     # 3) Ship: done only on POSITIVE landing evidence (a merge event), never on
     #    the mere absence of unlanded commits (that also matches an unstarted task).
-    if [ "$kind" = "ship" ] && grep -qE ' merged: ' "$(mh_status_path "$id")" 2>/dev/null; then
+    #    Anchor to the VERB field: a status line is "TIMESTAMP verb: note" and the
+    #    timestamp has no spaces, so `^[^ ]+ merged: ` matches only a real `merged`
+    #    event — not a note whose text happens to contain "merged: " (e.g. a
+    #    crewmate note about an upstream PR), which would falsely flip a live,
+    #    unlanded task to done.
+    if [ "$kind" = "ship" ] && grep -qE '^[^ ]+ merged: ' "$(mh_status_path "$id")" 2>/dev/null; then
       echo "state: done · source: status-log · landed"; exit 0
     fi
     # 3b) Ship with committed work not yet landed is at least "working", even if
@@ -118,6 +125,41 @@ case "$cmd" in
     esac
     ;;
 
+  archive)
+    id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-task.sh archive <id>"
+    mh_require_id "$id"
+    meta="$(mh_meta_path "$id")"
+    [ -f "$meta" ] || mh_die "no such task: $id"
+    # Fail closed: only a task that reconciles to terminal 'done' may be archived.
+    # `state` derives 'done' solely from positive landing/report evidence, so a
+    # ship task with unlanded work reconciles to 'working' and is refused here —
+    # archival must never bury unfinished work.
+    st="$("$0" state "$id" | sed 's/ · .*//; s/^state: //')"
+    [ "$st" = "done" ] || mh_die "refusing to archive '$id': current state is '$st', not done"
+    # A worktree still on disk is a live local copy that teardown never removed.
+    # Its (possibly unlanded) work must not be swept away behind the operator's
+    # back — require teardown first.
+    wt="$(mh_meta_get "$id" worktree)"
+    if [ -n "$wt" ] && [ -d "$wt" ]; then
+      mh_die "refusing to archive '$id': local copy still present at $wt (tear it down first)"
+    fi
+    archdir="$MH_STATE/archive"
+    mkdir -p "$archdir"
+    status="$(mh_status_path "$id")"
+    # Lock the meta path so the move cannot race a concurrent meta writer.
+    mh_lock "$meta"
+    mv -f "$meta" "$archdir/$id.meta" || { mh_unlock "$meta"; mh_die "failed archiving meta for '$id'"; }
+    if [ -f "$status" ]; then
+      mv -f "$status" "$archdir/$id.status" || { mh_unlock "$meta"; mh_die "failed archiving status log for '$id'"; }
+    fi
+    mh_unlock "$meta"
+    if [ -d "$MH_DATA/$id" ]; then
+      rm -rf "$archdir/$id"   # replace any stale archive of a reused id
+      mv -f "$MH_DATA/$id" "$archdir/$id" || mh_die "failed archiving data dir for '$id'"
+    fi
+    mh_info "archived task $id -> state/archive/"
+    ;;
+
   list)
     printf 'ID\tKIND\tREPO\tSTATE\n'
     for m in "$MH_TASKS"/*.meta; do
@@ -128,5 +170,5 @@ case "$cmd" in
     ;;
 
   *)
-    echo "usage: mh-task.sh {new|set|get|event|state|list} ..." >&2; exit 2 ;;
+    echo "usage: mh-task.sh {new|set|get|event|state|archive|list} ..." >&2; exit 2 ;;
 esac

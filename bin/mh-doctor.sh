@@ -79,11 +79,40 @@ report_tools() {
 
 section() { printf '\n=== %s ===\n' "$1"; }
 
+# probe_state_json -> for each state file that exists but does not parse as JSON,
+# print a FAIL line with an actionable recovery hint; return the count of invalid
+# files. A corrupt registry or backlog silently breaks every jq-driven command,
+# so this must run early (session-start reaches it through `check`) — before any
+# repo/backlog section spews raw jq parse errors with no explanation. jq is a
+# required tool, so its absence is already a readiness failure reported above.
+probe_state_json() {
+  local bad=0 backlog
+  command -v jq >/dev/null 2>&1 || return 0
+  if [ -f "$MH_REGISTRY" ] && ! jq . "$MH_REGISTRY" >/dev/null 2>&1; then
+    printf '  FAIL state/repos.json is not valid JSON\n'
+    printf '       ^ restore from git or a backup, or reset to {"repos":{}}\n'
+    bad=$((bad + 1))
+  fi
+  backlog="$MH_STATE/backlog.json"
+  if [ -f "$backlog" ] && ! jq . "$backlog" >/dev/null 2>&1; then
+    printf '  FAIL state/backlog.json is not valid JSON\n'
+    printf '       ^ restore from git or a backup, or reset to {"items":[],"decisions":[]}\n'
+    bad=$((bad + 1))
+  fi
+  return "$bad"
+}
+
 mode="${1:-full}"
 case "$mode" in
   check)
     # Compact readiness probe for mh-session-start; no scaffold, no headings.
-    report_tools 1 || exit $?
+    # Tooling first, then state-JSON integrity so a corrupt registry surfaces its
+    # recovery hint here (session-start runs `check` before its repo/backlog
+    # sections) instead of as raw jq errors later.
+    miss=0; report_tools 1 || miss=$?
+    badjson=0; probe_state_json || badjson=$?
+    if [ "$miss" -gt 0 ]; then exit "$miss"; fi
+    if [ "$badjson" -gt 0 ]; then exit 1; fi
     ;;
 
   full|"")
@@ -98,23 +127,10 @@ case "$mode" in
     done
     if [ -f "$MH_REGISTRY" ]; then printf '  ok   state/repos.json\n'; else printf '  MISSING state/repos.json\n'; fi
 
-    # State JSON must PARSE, not just exist: a corrupt registry or backlog silently
-    # breaks every jq-driven command. Validate with jq (present as a required tool);
-    # a parse failure is a readiness failure with a recovery hint.
-    badjson=0
-    if command -v jq >/dev/null 2>&1; then
-      if [ -f "$MH_REGISTRY" ] && ! jq . "$MH_REGISTRY" >/dev/null 2>&1; then
-        printf '  FAIL state/repos.json is not valid JSON\n'
-        printf '       ^ restore from git or a backup, or reset to {"repos":{}}\n'
-        badjson=$((badjson + 1))
-      fi
-      backlog="$MH_STATE/backlog.json"
-      if [ -f "$backlog" ] && ! jq . "$backlog" >/dev/null 2>&1; then
-        printf '  FAIL state/backlog.json is not valid JSON\n'
-        printf '       ^ restore from git or a backup, or reset to {"items":{}}\n'
-        badjson=$((badjson + 1))
-      fi
-    fi
+    # State JSON must PARSE, not just exist (same probe session-start runs via
+    # `check`): a corrupt registry or backlog silently breaks every jq-driven
+    # command, so a parse failure is a readiness failure with a recovery hint.
+    badjson=0; probe_state_json || badjson=$?
     if [ -f "$MH_CONFIG/pr-pipeline.default.json" ]; then
       printf '  ok   config/pr-pipeline.default.json\n'
     else

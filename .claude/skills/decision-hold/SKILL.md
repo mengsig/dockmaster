@@ -8,6 +8,22 @@ description: Track an operator-owned decision surfaced during an investigation o
 An unresolved decision that only the operator can make must not vanish when the
 scout that found it finishes or is torn down. Capture it durably first.
 
+## When a task raises a decision event
+
+The moment a crewmate reconciles to `needs-decision` (or a `blocked`/
+`awaiting-review` state that turns on an operator choice), the choice lives only
+in the append-only status log — which teardown discards. **Open a backlog hold
+that references the task right then**, before you relay or supervise further:
+
+```
+bin/mh-backlog.sh hold <id>-decision-<key> "<the choice, in plain terms>" \
+  --options "<A> | <B>" --origin data/<id>/report.md
+```
+
+`bin/mh-status.sh` flags any task in `blocked`/`needs-decision`/`awaiting-review`
+with **no open hold referencing it** (the `UNTRACKED DECISIONS` section) — treat
+such a flag as a missing hold to open now, not noise.
+
 ## The gate
 
 Before treating any investigation or visual review as complete:
