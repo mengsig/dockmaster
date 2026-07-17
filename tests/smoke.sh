@@ -620,6 +620,20 @@ check "stale reclaim warns loudly"                          'grep -q "reclaiming
 LIVE_RC=$?
 check "a live lock is still mutually exclusive" '[ "$LIVE_RC" -eq 0 ]'
 
+# === fleet-campaign tests (#25) ===
+echo "== fleet campaign: grouping persists and rolls up =="
+b mh-backlog.sh add camp-web "web bump" --repo demo --campaign fleet-bump --status inflight >/dev/null
+b mh-backlog.sh add camp-api "api bump" --repo demo --campaign fleet-bump --status queued --blocked-by camp-web >/dev/null
+b mh-backlog.sh add camp-other "unrelated item" --repo demo --status queued >/dev/null
+check "campaign field persists on the item" 'jq -e ".items[]|select(.id==\"camp-web\")|.campaign==\"fleet-bump\"" "$MH_HOME/state/backlog.json" >/dev/null'
+ROLL="$(b mh-backlog.sh campaign fleet-bump)"   # capture once (grep -q + pipefail)
+check "campaign rollup lists a member"          'grep -q camp-web <<<"$ROLL"'
+check "campaign rollup lists the second member" 'grep -q camp-api <<<"$ROLL"'
+check "campaign rollup excludes non-members"    '! grep -q camp-other <<<"$ROLL"'
+check "campaign rollup shows member status"     'grep -E "camp-web +inflight" <<<"$ROLL" >/dev/null && grep -E "camp-api +queued" <<<"$ROLL" >/dev/null'
+check "campaign rejects an invalid id"          '! b mh-backlog.sh campaign ".bad" >/dev/null 2>&1'
+check "add rejects an invalid campaign id"       '! b mh-backlog.sh add camp-bad "x" --campaign ".bad" >/dev/null 2>&1'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
