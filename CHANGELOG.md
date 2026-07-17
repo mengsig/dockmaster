@@ -19,12 +19,44 @@ All notable changes to this project are documented here. The format follows
   "Getting started" first-run path, a supported-platforms note (macOS/Linux,
   bash 3.2+), and replaced the stale hand-maintained `bin/` list with a pointer
   to `bin/mh help`.
+- **Concise communication is now contract.** Reporting to the operator, and PR
+  descriptions/commits/review comments, sacrifice grammar for concision.
+- **Memory recall is bounded and curatable.** Briefs inject a soft-capped slice
+  (with a tail pointer) of per-repo knowledge plus a fleet-wide context slice;
+  recall supports multi-term OR queries; recall failures surface instead of being
+  swallowed. Private notes are honestly documented as relayed to crewmates.
 
 ### Added
 
 - **`CONTRIBUTING.md`** (how to test, the bash-3.2 portability invariant,
   branch/commit style) and **`SECURITY.md`** (trust model and private
   vulnerability reporting).
+- **Fleet campaigns** — one operator intent fanned out to one gated child task
+  per repo, grouped and rolled up via `mh-backlog --campaign` / `campaign` and the
+  `fleet-change` skill (no directive relaxed; each child is an ordinary task).
+- **Fleet PR/health sweep** — `mh-pr.sh sweep` (also a section in `mh-status`)
+  reports every open PR's CI rollup and whether a review requests changes;
+  read-only, offline under `MH_NO_FETCH`.
+- **Repo onboarding scout** — an optional read-only scout on `add` that proposes a
+  `test_cmd` and an initial `mh:knowledge` section, self-bootstrapping the tests
+  gate and memory.
+- **Memory curation** — a `forget` verb and a duplicate-fact warning, plus an
+  optional truly-manhandler-only per-repo store excluded from crewmate briefs.
+
+### Fixed
+
+- **Task-state and landing-signal integrity** — `merged` events and the
+  `pr`/`pr_state`/`merge_state` meta fields can no longer be forged via
+  `mh-task.sh event`/`set`; `state`/`landed` refresh from GitHub so an out-of-band
+  merge is seen.
+- **Never merge red** — `mh-pr.sh merge` no longer treats an unreported (`none`)
+  check rollup as green; it requires an explicit `--allow-no-checks`.
+- **Mutex crash-safety** — a lock abandoned by a killed holder self-heals
+  (dead-PID reclaim, serialized and re-verified); signal handlers clean up and
+  exit rather than resuming an unlocked critical section.
+- **Toolbelt hardening** — `mh-backlog` shares the single locked JSON writer,
+  `mh-repo create` uses a git-version-portable init, and the PR-pipeline runner
+  verifies a real PR URL before reporting success.
 
 ## [0.2.0] - 2026-07-18
 
