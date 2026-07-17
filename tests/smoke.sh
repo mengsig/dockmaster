@@ -63,6 +63,33 @@ STATUS="$(b mh-status.sh)"   # capture once (see doctor note on grep -q + pipefa
 check "status runs"                'b mh-status.sh >/dev/null'
 check "status shows managed repo"  'grep -q demo <<<"$STATUS"'
 check "status shows in-flight task" 'grep -q demo-1 <<<"$STATUS"'
+check "status shows task age"       'grep -E "age.*demo-1" <<<"$STATUS" >/dev/null'
+
+echo "== fast pipeline config =="
+FAST="$ROOT/config/pr-pipeline.fast.json"
+check "fast pipeline config exists"       '[ -f "$FAST" ]'
+check "fast pipeline is valid JSON"       'jq -e . "$FAST" >/dev/null'
+check "fast pipeline has one review pass" '[ "$(jq "[.gates[]|select(.gate==\"review\")]|length" "$FAST")" = "1" ]'
+check "fast pipeline keeps tests gate"    '[ "$(jq "[.gates[]|select(.gate==\"tests\")]|length" "$FAST")" -ge 1 ]'
+check "fast pipeline ends in pr gate"     '[ "$(jq -r ".gates[-1].gate" "$FAST")" = "pr" ]'
+
+echo "== lavish degradation (optional tool absent) =="
+# Simulate lavish-axi being absent: a PATH of symlinks to only the real tools
+# mh-lavish needs, deliberately excluding lavish-axi. This works whether or not
+# lavish-axi happens to be installed on the machine running the test.
+NB="$TMP/nolavish"; mkdir -p "$NB"
+for t in bash env dirname basename mkdir date sed awk jq git cat mv rm mktemp; do
+  p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$NB/$t"
+done
+lav() { PATH="$NB" "$ROOT/bin/mh-lavish.sh" "$@"; }
+check "lavish-axi absent from probe PATH"   '! PATH="$NB" command -v lavish-axi'
+check "lavish open fails on missing artifact (tool absent)" '! lav open demo-1 >/dev/null 2>&1'
+ART="$(b mh-lavish.sh path demo-1)"
+printf '<!doctype html><title>x</title>\n' > "$ART"
+check "lavish open degrades (exit 0, tool absent)" 'lav open demo-1 >/dev/null 2>&1'
+check "lavish poll degrades (exit 0, tool absent)" 'lav poll demo-1 >/dev/null 2>&1'
+OPENOUT="$(lav open demo-1 2>&1)"
+check "lavish open names the artifact path"        'grep -qF "$ART" <<<"$OPENOUT"'
 
 echo "== state reconciliation =="
 check "state pending pre-work" 'b mh-task.sh state demo-1 | grep -q pending'

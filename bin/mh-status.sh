@@ -23,7 +23,33 @@ export MH_NO_FETCH=1
 here="$(dirname "${BASH_SOURCE[0]}")"
 shopt -s nullglob
 
+# Long-runner threshold: an in-flight task older than this is flagged as
+# possibly stuck. One knob, overridable via env for a deliberately slow fleet.
+MH_STUCK_AGE_HOURS="${MH_STUCK_AGE_HOURS:-4}"
+
 section() { printf '\n=== %s ===\n' "$1"; }
+
+# iso_to_epoch <iso>  -> epoch seconds for an ISO-8601 UTC stamp
+# (YYYY-MM-DDTHH:MM:SSZ, the format mh-lib stamps), or empty if unparseable.
+# Tries GNU `date -d` then BSD `date -j -f`; never fails the caller — an
+# unparseable stamp degrades to "show the raw value" rather than crashing.
+iso_to_epoch() {
+  local iso="$1" e
+  [ -n "$iso" ] || return 0
+  e="$(date -u -d "$iso" +%s 2>/dev/null)" && { printf '%s' "$e"; return 0; }
+  e="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null)" && { printf '%s' "$e"; return 0; }
+  return 0
+}
+
+# human_age <seconds>  -> compact duration like "6h 12m", "3d 4h", "8m".
+human_age() {
+  local s="$1" d h m
+  [ "$s" -ge 0 ] 2>/dev/null || s=0
+  d=$((s / 86400)); h=$(((s % 86400) / 3600)); m=$(((s % 3600) / 60))
+  if [ "$d" -gt 0 ]; then printf '%dd %dh' "$d" "$h"
+  elif [ "$h" -gt 0 ]; then printf '%dh %dm' "$h" "$m"
+  else printf '%dm' "$m"; fi
+}
 
 section "MANAGED REPOS"
 "$here/mh-repo.sh" list 2>/dev/null || echo "  (none registered)"
@@ -41,6 +67,39 @@ if [ -n "$tasks" ]; then
   attention="$(printf '%s\n' "$tasks" | grep -Ec 'blocked|failed|awaiting-review|paused' || true)"
   [ "${attention:-0}" -gt 0 ] && \
     printf '  ATTENTION: %d task(s) need you (blocked/failed/awaiting-review/paused).\n' "$attention"
+
+  # Age of each non-terminal task, from its `created` stamp, so a silently-stuck
+  # task is visible. Tasks past MH_STUCK_AGE_HOURS are flagged; landed (done)
+  # tasks are skipped. Read-only and offline (MH_NO_FETCH is already exported).
+  now="$(date -u +%s)"
+  stuck_secs=$((MH_STUCK_AGE_HOURS * 3600))
+  agerows=""
+  for m in "$MH_TASKS"/*.meta; do
+    [ -f "$m" ] || continue
+    tid="$(basename "$m" .meta)"
+    # `state` exits non-zero on a worktree-only or malformed record (no kind);
+    # tolerate that here (|| true) — such a record has no start time to age and
+    # is skipped by the empty-state guard below. Without the guard, set -e +
+    # pipefail would abort the whole snapshot on one odd record.
+    short="$("$here/mh-task.sh" state "$tid" 2>/dev/null | sed 's/ · .*//; s/^state: //' || true)"
+    case "$short" in done|'') continue ;; esac
+    created="$(mh_meta_get "$tid" created)"
+    epoch="$(iso_to_epoch "$created")"
+    if [ -n "$epoch" ]; then
+      secs=$((now - epoch))
+      col="$(human_age "$secs")"
+      if [ "$secs" -ge "$stuck_secs" ]; then
+        col="$col  <- possibly stuck (>${MH_STUCK_AGE_HOURS}h); load stuck-worker"
+      fi
+    else
+      # Portable epoch conversion failed — degrade to the raw stamp, never crash.
+      col="since ${created:-unknown}"
+    fi
+    agerows+="  age"$'\t'"$tid"$'\t'"$short"$'\t'"$col"$'\n'
+  done
+  if [ -n "$agerows" ]; then
+    printf '%s' "$agerows" | column -t -s$'\t' 2>/dev/null || printf '%s' "$agerows"
+  fi
 else
   echo "  (no tasks)"
 fi
