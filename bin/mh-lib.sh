@@ -84,12 +84,16 @@ mh_lock() {
     if [ "$stale" -eq 1 ] && [ "$sig" = "$prev_sig" ]; then
       # Claim the stale dir by an ATOMIC rename so two waiters cannot both reclaim
       # and race a fresh holder in between: exactly one `mv` of a given directory
-      # instance wins. Re-verify the moved dir's PID still matches the one we
-      # judged; if it does not, we moved a recycled (live) instance — restore it.
+      # instance wins. Re-verify the moved dir's FULL signature (pid AND epoch)
+      # still matches the instance we judged; if it does not, we moved a recycled
+      # (live) holder — restore it. Comparing the epoch too, not just the pid,
+      # closes a PID-reuse race: a recycled live holder always writes a fresh
+      # epoch, so it can never alias the frozen (pid,epoch) of the crashed one.
       stage="$lockdir.stale.$$"
       if mv "$lockdir" "$stage" 2>/dev/null; then
         cur_pid="$(cat "$stage/pid" 2>/dev/null || true)"
-        if [ "$cur_pid" = "$pid" ]; then
+        cur_epoch="$(cat "$stage/epoch" 2>/dev/null || true)"
+        if [ "$cur_pid" = "$pid" ] && [ "$cur_epoch" = "$epoch" ]; then
           mh_warn "reclaiming stale lock on $(basename "$target") (holder pid=${pid:-?}${age:+ age=${age}s}); previous holder likely crashed"
           rm -rf "$stage" 2>/dev/null || true
         else
