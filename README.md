@@ -53,7 +53,7 @@ cron — which do the same job with less machinery and no polling. See
 ```
 AGENTS.md            the manhandler's operating contract (CLAUDE.md includes it)
 docs/architecture.md the design and the firstmate → manhandler mapping
-bin/                 the toolbelt (mh-repo, mh-worktree, mh-task, mh-pr, mh-merge, mh-sync, mh-brief, mh-branch-name)
+bin/                 the toolbelt (mh-repo, mh-worktree, mh-task, mh-pr, mh-merge, mh-sync, mh-brief, mh-branch-name); `bin/mh <sub>` dispatches to any of them
 .claude/skills/      skills loaded at their trigger points
 workflows/           optional deterministic PR-pipeline runner
 config/              PR-pipeline defaults and per-repo overrides
@@ -79,7 +79,9 @@ PR ready for review: https://github.com/me/app/pull/57
 
 Under the hood that is `bin/mh-repo.sh add`, `bin/mh-task.sh new`,
 `bin/mh-worktree.sh create`, the `pr-workflow` skill, and `bin/mh-pr.sh merge` —
-each usable directly. Run any script with no arguments for its usage.
+each usable directly, or through the `bin/mh` dispatcher (`mh <sub> ...` runs
+`bin/mh-<sub>.sh ...`; `mh help` lists the subcommands). Run any script with no
+arguments for its usage.
 
 ## Requirements
 

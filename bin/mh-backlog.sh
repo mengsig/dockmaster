@@ -106,11 +106,32 @@ case "$cmd" in
     render; mh_info "backlog: $id done"
     ;;
   ready)
-    # queued items whose blockers are all done or absent
-    jq -r '
-      (.items | map(select(.status=="done").id)) as $done |
+    # Queued items whose blockers are all COMPLETE (or absent). A blocker's true
+    # completion comes from `mh-task.sh state` (reconciled from real signals —
+    # merged PR, merge event, report), NOT the hand-set backlog status, which can
+    # lie both ways: a blocker that actually landed but was never marked `done`,
+    # or one marked `done` that never landed. Fall back to the backlog status
+    # only when the blocker id has no task record at all.
+    task_bin="$(dirname "${BASH_SOURCE[0]}")/mh-task.sh"
+    blockers="$(jq -r '[.items[] | select(.status=="queued") | .blocked_by[]] | unique | .[]' "$BJSON")"
+    complete_ids=""
+    while IFS= read -r b; do
+      [ -n "$b" ] || continue
+      if [ -f "$(mh_meta_path "$b")" ]; then
+        # Capture once and match with case (no `grep -q` in a pipe: it would
+        # SIGPIPE the producer, which pipefail reports as failure).
+        st="$("$task_bin" state "$b" 2>/dev/null || true)"
+        case "$st" in "state: done"*) complete_ids="${complete_ids}${b}"$'\n' ;; esac
+      elif jq -e --arg b "$b" 'any(.items[]; .id==$b and .status=="done")' "$BJSON" >/dev/null 2>&1; then
+        complete_ids="${complete_ids}${b}"$'\n'
+      fi
+    done <<EOF
+$blockers
+EOF
+    complete="$(printf '%s' "$complete_ids" | jq -R -s 'split("\n") | map(select(length>0))')"
+    jq -r --argjson complete "$complete" '
       .items[] | select(.status=="queued") |
-      select(all(.blocked_by[]; . as $b | ($done|index($b))!=null)) |
+      select(all(.blocked_by[]; . as $b | ($complete|index($b))!=null)) |
       "\(.id)\t\(.title)"' "$BJSON" | column -t -s$'\t' 2>/dev/null || true
     ;;
   decisions)

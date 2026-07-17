@@ -18,13 +18,25 @@
 # Commands:
 #   open  <id> --title T (--body-file F | --body B) [--base B] [--draft]
 #   check <id>                    refresh pr_state + checks into meta; print summary
+#   await-checks <id> [--timeout-secs N] [--interval-secs N]
+#                                 poll check until the CI rollup is terminal
 #   merge <id> [--method squash|merge|rebase] [--delete-branch]
+#   security-scan <id>            grep the diff for security-surface signals
 #   url   <id>                    print recorded PR url
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/mh-lib.sh"
-mh_need git; mh_need gh-axi; mh_need gh; mh_need jq
+# git+jq are needed by every command (registry, worktree, diffs). The GitHub
+# tools (gh-axi/gh) are checked per-command below, so the local-only commands
+# (security-scan, url) run without them.
+mh_need git; mh_need jq
 mh_ensure_dirs
+
+# await-checks polling defaults (named once): wait up to ~10 minutes, re-checking
+# every ~15s. GitHub Actions runs are minutes long, so a short interval mostly
+# sleeps; both are overridable per call.
+AWAIT_TIMEOUT_SECS=600
+AWAIT_INTERVAL_SECS=15
 
 repo_dir() { local d; d="$MH_HOME/$(mh_registry_get "$1" path)"; [ -d "$d/.git" ] || mh_die "no clone for repo '$1'"; printf '%s\n' "$d"; }
 
@@ -65,6 +77,7 @@ worst_rollup() {
 cmd="${1:-}"; shift || true
 case "$cmd" in
   open)
+    mh_need gh-axi
     id="${1:-}"; shift || true
     [ -n "$id" ] || mh_die "usage: mh-pr.sh open <id> --title T (--body-file F | --body B) [--base B] [--draft]"
     mh_require_id "$id"
@@ -104,6 +117,7 @@ case "$cmd" in
     ;;
 
   check)
+    mh_need gh
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-pr.sh check <id>"
     url="$(mh_meta_get "$id" pr)"; [ -n "$url" ] || mh_die "no PR recorded for $id"
     n="$(pr_number_from_url "$url")"; repo="$(mh_meta_get "$id" repo)"
@@ -145,7 +159,56 @@ case "$cmd" in
     echo "pr: $url · state: $state · checks: $rollup · merge_state: $merge_state"
     ;;
 
+  await-checks)
+    # Poll `check` until the CI rollup is terminal (passing/failing/none) or the
+    # timeout elapses, so a caller (the merge gate, a supervision Monitor) can
+    # WAIT for GitHub Actions rather than treating a still-pending PR as a
+    # refusal. This does NOT merge and does NOT relax "never merge red": it is a
+    # pre-step, and the outcome maps to an exit code the caller acts on.
+    mh_need gh
+    id="${1:-}"; shift || true
+    [ -n "$id" ] || mh_die "usage: mh-pr.sh await-checks <id> [--timeout-secs N] [--interval-secs N]"
+    timeout_secs="$AWAIT_TIMEOUT_SECS"; interval_secs="$AWAIT_INTERVAL_SECS"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --timeout-secs) timeout_secs="${2:-}"; shift 2 ;;
+        --interval-secs) interval_secs="${2:-}"; shift 2 ;;
+        *) mh_die "unknown flag: $1" ;;
+      esac
+    done
+    case "$timeout_secs" in ''|*[!0-9]*) mh_die "--timeout-secs must be a non-negative integer" ;; esac
+    case "$interval_secs" in ''|*[!0-9]*) mh_die "--interval-secs must be a non-negative integer" ;; esac
+    [ "$interval_secs" -ge 1 ] || mh_die "--interval-secs must be >= 1"
+    url="$(mh_meta_get "$id" pr)"; [ -n "$url" ] || mh_die "no PR recorded for $id"
+    waited=0
+    # Loop checks first, then tests the timeout, so timeout=0 still does exactly
+    # one check (a single-shot probe) rather than none.
+    while : ; do
+      # A transient check failure (a network blip) is non-terminal: keep polling
+      # within the timeout rather than aborting the wait. A persistent failure
+      # still surfaces — it never reaches a terminal rollup, so it times out
+      # (non-zero) with the last-seen rollup reported.
+      if "$0" check "$id" >/dev/null 2>&1; then
+        checks="$(mh_meta_get "$id" checks)"
+      else
+        checks="unknown"
+      fi
+      case "$checks" in
+        passing|none) mh_info "await-checks: $checks after ${waited}s: $url"; exit 0 ;;
+        failing)      mh_info "await-checks: FAILING after ${waited}s: $url"; exit 1 ;;
+        *) : ;;   # pending / unknown / empty: not terminal, keep waiting
+      esac
+      if [ "$waited" -ge "$timeout_secs" ]; then
+        mh_info "await-checks: TIMED OUT after ${waited}s (last rollup: ${checks:-unknown}): $url"
+        exit 1
+      fi
+      sleep "$interval_secs"
+      waited=$((waited + interval_secs))
+    done
+    ;;
+
   merge)
+    mh_need gh-axi; mh_need gh
     id="${1:-}"; shift || true
     [ -n "$id" ] || mh_die "usage: mh-pr.sh merge <id> [--method squash|merge|rebase] [--delete-branch]"
     method="squash"; delete=0
@@ -189,10 +252,45 @@ case "$cmd" in
     mh_info "merged: $url"
     ;;
 
+  security-scan)
+    # Advisory only: grep the task's diff for security-surface signals and print
+    # whether `security-review` should run, so the optional security gate is a
+    # deliberate skip rather than a silent one. It NEVER blocks and NEVER decides.
+    # Exit code follows grep's sense: 0 = signals found (review recommended),
+    # 1 = none found (skip is defensible); a real error (no worktree) dies via
+    # mh_die. Local-only: no GitHub tools required.
+    id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-pr.sh security-scan <id>"
+    mh_require_id "$id"
+    wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
+    [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
+    base="$(mh_default_branch "$(repo_dir "$repo")")"
+    # Diff the branch against the default branch when that ref is reachable from
+    # the worktree; otherwise fall back to the working diff against HEAD.
+    if git -C "$wt" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
+      diff="$(git -C "$wt" diff "$base"...HEAD 2>/dev/null || true)"
+    else
+      diff="$(git -C "$wt" diff HEAD 2>/dev/null || true)"
+    fi
+    # Match on a here-string, not a pipe: `grep -q` on a pipe would SIGPIPE the
+    # producer (exit 141), which pipefail reports as failure.
+    hits=""
+    grep -iEq -- 'auth|login|session|token|secret|password|passwd|credential|api[_-]?key' <<<"$diff" && hits="$hits auth/secrets" || true
+    grep -iEq -- 'crypt|encrypt|decrypt|cipher|hmac|\bhash\b|\brsa\b|\baes\b|sha[0-9]|jwt' <<<"$diff" && hits="$hits crypto" || true
+    grep -iEq -- 'parse|deserial|unmarshal|unpickle|yaml\.load|json\.load|eval\(|exec\(|subprocess|os\.system|shell=true|system\(' <<<"$diff" && hits="$hits input-parsing" || true
+    grep -iEq -- 'https?://|fetch\(|socket|urlopen|requests\.|\bcurl\b|\bsql\b|execute\(|redirect|open\(' <<<"$diff" && hits="$hits external-io" || true
+    hits="${hits# }"
+    if [ -n "$hits" ]; then
+      mh_info "security-scan: signals present ($hits) — run security-review on this diff before merge"
+      exit 0
+    fi
+    mh_info "security-scan: no security-surface signals — a security-review skip is defensible (record it)"
+    exit 1
+    ;;
+
   url)
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-pr.sh url <id>"
     mh_meta_get "$id" pr ;;
 
   *)
-    echo "usage: mh-pr.sh {open|check|merge|url} ..." >&2; exit 2 ;;
+    echo "usage: mh-pr.sh {open|check|await-checks|merge|security-scan|url} ..." >&2; exit 2 ;;
 esac

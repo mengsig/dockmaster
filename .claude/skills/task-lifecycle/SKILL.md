@@ -35,6 +35,10 @@ when several or no repos plausibly match.
 - Serialize (queue as blocked) when it touches the same repo subsystem as live
   work or depends on unlanded work. Record it durably:
   `bin/mh-backlog.sh add <id> "<title>" --repo <repo> --status queued --blocked-by <other-id>`.
+- Before spawning a queued item, consult `bin/mh-backlog.sh ready` — it lists
+  queued items whose blockers are all complete, judging each blocker by its real
+  reconciled task state (`bin/mh-task.sh state`), not a hand-set backlog status.
+  A queued item absent from `ready` is still genuinely blocked; do not dispatch it.
 
 ## 3. Dispatch
 

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# mh - convenience dispatcher for the manhandler toolbelt.
+#
+# `mh <subcommand> [args...]` runs `bin/mh-<subcommand>.sh [args...]`, e.g.
+# `mh task state x` -> `bin/mh-task.sh state x`, `mh status` -> `bin/mh-status.sh`.
+# This is ADDITIVE: the individual `bin/mh-*.sh` scripts remain the canonical
+# entrypoints referenced by skills and briefs; `mh` only saves typing and aids
+# discovery. Args and exit codes pass through unchanged (via exec).
+#
+# `mh` / `mh help` lists the subcommands with their one-line purpose (derived
+# from each script's header comment). Unknown subcommands fail with the list.
+
+set -euo pipefail
+
+# Resolve the toolbelt dir from this script's own location so it works from any
+# cwd (mirrors mh-lib's BASH_SOURCE-based resolution).
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+usage() {
+  echo "usage: mh <subcommand> [args...]"
+  echo
+  echo "Runs bin/mh-<subcommand>.sh. Subcommands:"
+  # One-line purpose comes from each script's header (line 2, format
+  # '# mh-<name>.sh - <purpose>'), truncated at the first sentence.
+  for f in "$BIN_DIR"/mh-*.sh; do
+    [ -f "$f" ] || continue
+    name="$(basename "$f" .sh)"; name="${name#mh-}"
+    [ "$name" = "lib" ] && continue  # mh-lib.sh is a sourced library, not a subcommand
+    purpose="$(sed -n '2s/^# mh-[a-z-]*\.sh - //p' "$f")"
+    purpose="${purpose%%. *}"
+    printf '  %-14s %s\n' "$name" "$purpose"
+  done
+}
+
+sub="${1:-}"; shift || true
+case "$sub" in
+  ''|help|-h|--help) usage; exit 0 ;;
+esac
+
+# Fail closed on anything that is not a plain lowercase/dash subcommand: this
+# both rejects typos and prevents a crafted argument from escaping the toolbelt
+# dir (path separators, '..') when interpolated into the target path.
+case "$sub" in
+  lib) echo "mh: 'lib' is a sourced library, not a subcommand" >&2; exit 2 ;;
+  *[!a-z-]*) echo "mh: invalid subcommand: '$sub'" >&2; usage >&2; exit 2 ;;
+esac
+
+target="$BIN_DIR/mh-$sub.sh"
+if [ ! -f "$target" ]; then
+  echo "mh: unknown subcommand: '$sub'" >&2
+  usage >&2
+  exit 2
+fi
+
+exec "$target" "$@"
