@@ -6,6 +6,8 @@
 
 > v0.2.0 · MIT licensed · built for [Claude Code](https://claude.com/claude-code)
 
+[![CI](https://github.com/mengsig/manhandler/actions/workflows/ci.yml/badge.svg)](https://github.com/mengsig/manhandler/actions/workflows/ci.yml)
+
 *The Dockyard.* You are the captain; the manhandler is your dockmaster — it never
 handles cargo itself, but directs a crew of dockhands (crewmates) working in the
 holds, hoisting cargo aboard the ships of your fleet, and reports back to you. See

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin a known node so the JS syntax check is reliable on both runner
+      # images instead of depending on whatever node happens to be preinstalled.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check jq is present
+        run: jq --version
+
+      # macOS runners default /bin/bash to the system bash (3.2), which is the
+      # exact shell the toolbelt's bash-3.2 portability invariant targets.
+      # Invoke it explicitly so a PATH-shadowing bash (e.g. a Homebrew bash 5)
+      # can never mask a 3.2 regression.
+      - name: Run smoke tests (system bash)
+        run: /bin/bash tests/smoke.sh
+
+      - name: Check workflows/pr-pipeline.js syntax
+        run: node --check workflows/pr-pipeline.js
+
+      - name: Check bin/*.sh syntax
+        run: |
+          for f in bin/*.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done
