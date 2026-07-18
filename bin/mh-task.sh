@@ -81,6 +81,7 @@ case "$cmd" in
   get)
     id="${1:-}"; key="${2:-}"
     [ -n "$id" ] || mh_die "usage: mh-task.sh get <id> [<key>]"
+    mh_require_id "$id"
     if [ -n "$key" ]; then mh_meta_get "$id" "$key"
     else cat "$(mh_meta_path "$id")" 2>/dev/null || mh_die "no such task: $id"; fi
     ;;
@@ -102,6 +103,7 @@ case "$cmd" in
 
   state)
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-task.sh state <id>"
+    mh_require_id "$id"
     [ -f "$(mh_meta_path "$id")" ] || { echo "state: unknown · source: none · no such task"; exit 0; }
     kind="$(mh_meta_get "$id" kind)"
     wt="$(mh_meta_get "$id" worktree)"
@@ -142,7 +144,11 @@ case "$cmd" in
     last="$(tail -n1 "$(mh_status_path "$id")" 2>/dev/null | sed -n 's/^[0-9TZ:-]* //p')"
     verb="${last%%:*}"
     case "$verb" in
-      blocked|needs-decision) echo "state: blocked · source: status-log · $last" ;;
+      blocked)                echo "state: blocked · source: status-log · $last" ;;
+      # A distinct token from 'blocked': an operator CHOICE is required, not just
+      # unblocking action. decision-hold/supervision key off this exact string to
+      # open a durable backlog hold before the task can be torn down.
+      needs-decision)         echo "state: needs-decision · source: status-log · $last" ;;
       paused)                 echo "state: paused · source: status-log · $last" ;;
       failed)                 echo "state: failed · source: status-log · $last" ;;
       review-ready)           echo "state: awaiting-review · source: status-log · lavish artifact ready for the operator: $last" ;;

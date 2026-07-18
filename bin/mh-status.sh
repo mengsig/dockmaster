@@ -10,8 +10,8 @@
 # in-flight tasks (with an attention summary), active worktrees (with disk use,
 # plus orphaned directories, dangling records, and orphaned data artifacts),
 # three-source state drift (task meta vs backlog vs reconciled state), untracked
-# operator decisions (blocked/awaiting-review tasks with no open hold), and the
-# ready backlog with open operator decisions.
+# operator decisions (blocked/needs-decision/awaiting-review tasks with no open
+# hold), and the ready backlog with open operator decisions.
 #
 # Usage: mh-status.sh
 
@@ -77,9 +77,9 @@ section "IN-FLIGHT WORK (reconciled; no sync)"
 tasks="$("$here/mh-task.sh" list 2>/dev/null || true)"
 if [ -n "$tasks" ]; then
   printf '%s\n' "$tasks"
-  attention="$(printf '%s\n' "$tasks" | grep -Ec 'blocked|failed|awaiting-review|paused' || true)"
+  attention="$(printf '%s\n' "$tasks" | grep -Ec 'blocked|needs-decision|failed|awaiting-review|paused' || true)"
   [ "${attention:-0}" -gt 0 ] && \
-    printf '  ATTENTION: %d task(s) need you (blocked/failed/awaiting-review/paused).\n' "$attention"
+    printf '  ATTENTION: %d task(s) need you (blocked/needs-decision/failed/awaiting-review/paused).\n' "$attention"
 
   # Age of each non-terminal task, from its `created` stamp, so a silently-stuck
   # task is visible. Tasks past MH_STUCK_AGE_HOURS are flagged; landed (done)
@@ -204,7 +204,7 @@ if [ -f "$backlog" ] && command -v jq >/dev/null 2>&1; then
 fi
 if [ "$drift" -eq 0 ]; then echo "  (no drift)"; fi
 
-section "UNTRACKED DECISIONS (blocked/awaiting-review with no open hold)"
+section "UNTRACKED DECISIONS (blocked/needs-decision/awaiting-review with no open hold)"
 # A task waiting on the operator (blocked/needs-decision/awaiting-review) whose
 # decision lives only in the append-only status log evaporates at teardown. A
 # durable backlog hold must reference it; flag the ones that have none so the
