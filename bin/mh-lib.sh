@@ -261,22 +261,83 @@ mh_repo_dir() {
   printf '%s\n' "$dir"
 }
 
+# mh_require_worktree <id>  -> print the task's recorded worktree path, or die
+# if none is recorded or the path no longer exists on disk (a stale/torn-down
+# record). Single owner of "resolve a task's worktree or refuse" so every
+# caller reports the same thing on a missing worktree, and so the `-d` check
+# cannot silently drop out of one call site (mh-worktree.sh remove used to
+# check only non-empty before this consolidation).
+mh_require_worktree() {
+  local wt; wt="$(mh_meta_get "$1" worktree)"
+  [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $1"
+  printf '%s\n' "$wt"
+}
+
+# --- FF-sync-with-fallback reaction: shared by callers that best-effort sync a
+# clone around a landing action -----------------------------------------------
+# mh_sync_reaction <repo> <sync_out> <die|warn>  -- given the STUCK/SKIP/OK line
+# `mh-sync.sh one <repo>` printed (or the synthetic "STUCK: sync failed
+# unexpectedly" line a caller substitutes when the sync command itself errors
+# under set -e), report it the way each current caller does:
+#   worktree create (die):  STUCK -> mh_die (refuses to cut a worktree off a
+#                            base that isn't fast-forwardable); SKIP -> mh_warn
+#                            "...; base may be stale"; OK -> silent.
+#   pr merge (warn):        STUCK -> mh_warn (the merge already landed and is
+#                            recorded; a can't-FF sync must not fail it, only
+#                            name the manual fallback); SKIP/OK -> mh_info the
+#                            raw line.
+# This function does NOT run the sync itself: mh-sync.sh also sources mh-lib.sh,
+# so mh-lib.sh invoking it would reintroduce the same upward dependency #56
+# removed for mh-pr.sh (mh-lib.sh has no outbound mh-*.sh call). Each caller
+# still runs `mh-sync.sh one <repo>` (with the STUCK fallback on an unexpected
+# failure) itself and passes the resulting line in here to interpret.
+mh_sync_reaction() {
+  local repo="$1" sync_out="$2" reaction="$3"
+  case "$sync_out" in
+    STUCK:*)
+      if [ "$reaction" = die ]; then
+        mh_die "clone $repo is not fast-forwardable to origin — resolve it, then retry ($sync_out)"
+      else
+        mh_warn "post-merge sync: $sync_out — sync $repo manually"
+      fi
+      ;;
+    SKIP:*)
+      if [ "$reaction" = die ]; then mh_warn "$sync_out; base may be stale"
+      else mh_info "$sync_out"; fi
+      ;;
+    *)
+      # A bare `[ ... ] && cmd` here would trip `set -e` when the test is false
+      # (this is the last statement of the arm, not part of a larger `&&`/`||`
+      # chain or an if-condition) — use `if` so a "die"-reaction no-op never
+      # aborts the caller.
+      if [ "$reaction" = warn ]; then mh_info "$sync_out"; fi
+      ;;
+  esac
+}
+
 # --- live PR-state refresh: the out-of-band-merge drift guard -----------------
 # The cached pr_state meta field goes stale when a PR is merged out of band
 # (the operator merges in the GitHub web UI — common), so state/landed decisions
-# that trust it report `working` forever. Refresh pr_state from GitHub via
-# `mh-pr.sh check` (which updates the meta) before such a decision, but only
-# when there is a PR to check and the task is not already MERGED. Offline mode
+# that trust it report `working` forever. `state` and `landed` refresh it live,
+# before their decision, by running `mh-pr.sh check` themselves — but only when
+# there is a PR to check and the task is not already MERGED. Offline mode
 # (MH_NO_FETCH=1, used by mh-status and the smoke tests) skips the network and
-# trusts the cached value. Best effort: a failed check must not abort the
-# caller's decision — it falls back to the cached pr_state. Single owner so
-# `state` and `landed` refresh identically.
-mh_refresh_pr_state() {
-  # mh_refresh_pr_state <id>
-  [ "${MH_NO_FETCH:-0}" = "1" ] && return 0
-  [ -n "$(mh_meta_get "$1" pr)" ] || return 0
-  [ "$(mh_meta_get "$1" pr_state)" = "MERGED" ] && return 0
-  "$(dirname "${BASH_SOURCE[0]}")/mh-pr.sh" check "$1" >/dev/null 2>&1 || true
+# trusts the cached value.
+#
+# This predicate decides WHETHER to refresh; it does not shell out to mh-pr.sh
+# itself. mh-pr.sh sources mh-lib.sh, so mh-lib.sh invoking mh-pr.sh would be a
+# module cycle (the foundation depending on one of its own consumers) —
+# mh-lib.sh has no outbound mh-*.sh call. Each caller (mh-task.sh state,
+# mh-worktree.sh landed) runs the check itself, best-effort, when this returns
+# true: a failed check must not abort the caller's decision, it just falls back
+# to the cached pr_state. Single owner of the predicate so `state` and `landed`
+# refresh under identical conditions.
+mh_should_refresh_pr_state() {
+  # mh_should_refresh_pr_state <id>  -- exit 0 (should refresh) / 1 (skip)
+  [ "${MH_NO_FETCH:-0}" = "1" ] && return 1
+  [ -n "$(mh_meta_get "$1" pr)" ] || return 1
+  [ "$(mh_meta_get "$1" pr_state)" = "MERGED" ] && return 1
+  return 0
 }
 
 # --- merge check-gate decision (never merge red) -----------------------------
@@ -305,21 +366,33 @@ mh_merge_gate() {
   esac
 }
 
+# --- all task ids: the "$MH_TASKS/*.meta glob -> id" idiom -------------------
+# Prints, one per line, every task id that has a meta file. Single owner of the
+# glob + existence-guard (protects against a literal no-match glob when
+# nullglob is unset, the case for every caller except mh-status.sh) so the
+# iteration idiom cannot drift between call sites. Ordering follows the shell
+# glob (task-id order).
+mh_all_task_ids() {
+  local m
+  for m in "$MH_TASKS"/*.meta; do
+    [ -f "$m" ] || continue
+    basename "$m" .meta
+  done
+}
+
 # --- open-PR task selector: which tasks the fleet PR sweep visits ------------
 # Prints, one id per line, every task meta that records an OPEN pull request: a
 # non-empty `pr` whose cached `pr_state` is neither MERGED nor CLOSED. Pure and
 # offline (reads only task meta, no network), so the sweep's SELECTION is
 # testable without GitHub. pr_state may be empty (a PR opened but never checked);
-# that still counts as open. Ordering follows the shell glob (task-id order).
+# that still counts as open.
 mh_open_pr_tasks() {
-  local m id pr st
-  for m in "$MH_TASKS"/*.meta; do
-    [ -f "$m" ] || continue
-    id="$(basename "$m" .meta)"
+  local id pr st
+  while IFS= read -r id; do
     pr="$(mh_meta_get "$id" pr)"
     [ -n "$pr" ] || continue
     st="$(mh_meta_get "$id" pr_state)"
     case "$st" in MERGED|CLOSED) continue ;; esac
     printf '%s\n' "$id"
-  done
+  done < <(mh_all_task_ids)
 }

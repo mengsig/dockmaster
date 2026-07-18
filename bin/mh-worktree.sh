@@ -108,14 +108,10 @@ case "$cmd" in
         # The `|| sync_out=...` guards against mh-sync itself exiting non-zero
         # unexpectedly (under set -e that would otherwise crash this command with
         # a raw git failure instead of failing closed through the STUCK path below).
+        # mh_sync_reaction (mh-lib.sh) turns STUCK into mh_die here and SKIP into
+        # "base may be stale" (a warn, not fail-closed — no divergence was found).
         sync_out="$("$(dirname "${BASH_SOURCE[0]}")/mh-sync.sh" one "$repo")" || sync_out="STUCK: sync failed unexpectedly"
-        case "$sync_out" in
-          STUCK:*) mh_die "clone $repo is not fast-forwardable to origin — resolve it, then retry ($sync_out)" ;;
-          # SKIP (e.g. fetch failed/offline) means the sync could not run at all -
-          # not a fail-closed case (no divergence was found), but the base may
-          # still be stale, so warn rather than proceed silently (prior behavior).
-          SKIP:*) mh_warn "$sync_out; base may be stale" ;;
-        esac
+        mh_sync_reaction "$repo" "$sync_out" die
       fi
       def="$(mh_default_branch "$dir")"
       # Branch from the LOCAL default: it holds local-only landings and is kept
@@ -151,11 +147,13 @@ case "$cmd" in
 
   landed)
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-worktree.sh landed <id>"
-    wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
-    [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree recorded for $id"
+    wt="$(mh_require_worktree "$id")"; repo="$(mh_meta_get "$id" repo)"
     # Refresh pr_state so an out-of-band merge is reflected in the pr_state
-    # fallback below. No-op offline (MH_NO_FETCH) or with no/already-merged PR.
-    mh_refresh_pr_state "$id"
+    # fallback below. Best-effort. No-op offline (MH_NO_FETCH) or with no/
+    # already-merged PR (mh_should_refresh_pr_state).
+    if mh_should_refresh_pr_state "$id"; then
+      "$(dirname "${BASH_SOURCE[0]}")/mh-pr.sh" check "$id" >/dev/null 2>&1 || true
+    fi
     # Uncommitted changes to tracked files mean work is not committed => not landed.
     # (Untracked files are handled separately at teardown, not here.)
     ! mh_tracked_dirty "$wt" || { echo "unlanded: uncommitted changes to tracked files"; exit 1; }
@@ -192,8 +190,7 @@ case "$cmd" in
       esac
     done
     [ -n "$id" ] || mh_die "usage: mh-worktree.sh remove <id> [--force]"
-    wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
-    [ -n "$wt" ] || mh_die "no worktree recorded for $id"
+    wt="$(mh_require_worktree "$id")"; repo="$(mh_meta_get "$id" repo)"
     kind="$(mh_meta_get "$id" kind)"
     if [ "$force" -eq 0 ]; then
       # Committed work must be landed (ship only; a scout worktree is scratch).
@@ -215,12 +212,10 @@ $untracked"
     ;;
 
   list)
-    for m in "$MH_TASKS"/*.meta; do
-      [ -f "$m" ] || continue
-      id="$(basename "$m" .meta)"
+    while IFS= read -r id; do
       wt="$(mh_meta_get "$id" worktree)"
       [ -n "$wt" ] && printf '%s\t%s\t%s\n' "$id" "$(mh_meta_get "$id" repo)" "$wt"
-    done
+    done < <(mh_all_task_ids)
     ;;
 
   *)

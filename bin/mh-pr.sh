@@ -53,6 +53,13 @@ owner_repo() {
   printf '%s\n' "$slug"
 }
 
+repo_slug() {
+  # repo_slug <repo>  -> owner/repo derived from the managed clone's origin
+  # remote. Single owner (file-local) of a pattern repeated at every call site
+  # that needs GitHub's owner/repo slug for a task's repo.
+  owner_repo "$(git -C "$(mh_repo_dir "$1")" remote get-url origin)"
+}
+
 pr_number_from_url() {
   # strict canonical parse: https://github.com/<owner>/<repo>/pull/<n>
   local url="$1"
@@ -99,12 +106,11 @@ case "$cmd" in
     done
     [ -n "$title" ] || mh_die "--title is required"
     mh_need gh-axi
-    wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
-    [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
+    wt="$(mh_require_worktree "$id")"; repo="$(mh_meta_get "$id" repo)"
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || mh_die "worktree is on a detached HEAD; crewmate must create a branch first"
     ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit before opening a PR"
-    dir="$(mh_repo_dir "$repo")"; slug="$(owner_repo "$(git -C "$dir" remote get-url origin)")"
+    dir="$(mh_repo_dir "$repo")"; slug="$(repo_slug "$repo")"
     # No explicit --base: default to the recorded parent (a stacked sub-PR
     # created via `mh-worktree.sh create --base`), else the default branch.
     base="$(mh_pr_base_for "$id" "$base" "$dir")"
@@ -137,7 +143,7 @@ case "$cmd" in
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-pr.sh check <id>"
     url="$(mh_meta_get "$id" pr)"; [ -n "$url" ] || mh_die "no PR recorded for $id"
     n="$(pr_number_from_url "$url")"; repo="$(mh_meta_get "$id" repo)"
-    slug="$(owner_repo "$(git -C "$(mh_repo_dir "$repo")" remote get-url origin)")"
+    slug="$(repo_slug "$repo")"
     json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" || mh_die "could not read PR $url"
     state="$(printf '%s' "$json" | jq -r '.state // "unknown" | ascii_upcase')"
     merged="$(printf '%s' "$json" | jq -r '.merged // false')"
@@ -285,7 +291,7 @@ case "$cmd" in
       *) : ;;
     esac
     n="$(pr_number_from_url "$url")"
-    slug="$(owner_repo "$(git -C "$ci_dir" remote get-url origin)")"
+    slug="$(repo_slug "$repo")"
     args=(pr merge "$n" -R "$slug" "--$method")
     [ "$delete" -eq 1 ] && args+=(--delete-branch)
     gh-axi "${args[@]}" || mh_die "merge failed"
@@ -300,10 +306,7 @@ case "$cmd" in
     # abort this command AFTER the merge was already recorded, misreporting a
     # completed merge as a failed one).
     sync_out="$("$(dirname "${BASH_SOURCE[0]}")/mh-sync.sh" one "$repo")" || sync_out="STUCK: sync failed unexpectedly"
-    case "$sync_out" in
-      STUCK:*) mh_warn "post-merge sync: $sync_out — sync $repo manually" ;;
-      *) mh_info "$sync_out" ;;
-    esac
+    mh_sync_reaction "$repo" "$sync_out" warn
     ;;
 
   security-scan)
@@ -315,8 +318,7 @@ case "$cmd" in
     # mh_die. Local-only: no GitHub tools required.
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-pr.sh security-scan <id>"
     mh_require_id "$id"
-    wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
-    [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
+    wt="$(mh_require_worktree "$id")"; repo="$(mh_meta_get "$id" repo)"
     base="$(mh_default_branch "$(mh_repo_dir "$repo")")"
     # Diff the branch against the default branch when that ref is reachable from
     # the worktree; otherwise fall back to the working diff against HEAD.
@@ -351,7 +353,7 @@ case "$cmd" in
     #
     # Offline (MH_NO_FETCH=1 — how mh-status invokes it): perform NO network. Show
     # the cached pr_state/checks and skip the review query, matching how
-    # mh_refresh_pr_state degrades offline.
+    # mh_should_refresh_pr_state degrades offline.
     offline=0
     [ "${MH_NO_FETCH:-0}" = "1" ] && offline=1
     [ "$offline" -eq 1 ] || mh_need gh
@@ -386,7 +388,7 @@ case "$cmd" in
       checks="$(mh_meta_get "$id" checks)"; [ -n "$checks" ] || checks="?"
       state="$(mh_meta_get "$id" pr_state)"; [ -n "$state" ] || state="?"
       n="$(pr_number_from_url "$url")"
-      slug="$(owner_repo "$(git -C "$dir" remote get-url origin)")"
+      slug="$(repo_slug "$repo")"
       # Unaddressed review = a reviewer whose LATEST actionable review (the last
       # APPROVED/CHANGES_REQUESTED per author) is CHANGES_REQUESTED. jq returns
       # true/false; a null/API error becomes "error" so it reads as unknown, never

@@ -87,9 +87,7 @@ if [ -n "$tasks" ]; then
   now="$(date -u +%s)"
   stuck_secs=$((MH_STUCK_AGE_HOURS * 3600))
   agerows=""
-  for m in "$MH_TASKS"/*.meta; do
-    [ -f "$m" ] || continue
-    tid="$(basename "$m" .meta)"
+  while IFS= read -r tid; do
     # `state` exits non-zero on a worktree-only or malformed record (no kind);
     # tolerate that here (|| true) — such a record has no start time to age and
     # is skipped by the empty-state guard below. Without the guard, set -e +
@@ -109,7 +107,7 @@ if [ -n "$tasks" ]; then
       col="since ${created:-unknown}"
     fi
     agerows+="  age"$'\t'"$tid"$'\t'"$short"$'\t'"$col"$'\n'
-  done
+  done < <(mh_all_task_ids)
   if [ -n "$agerows" ]; then
     printf '%s' "$agerows" | column -t -s$'\t' 2>/dev/null || printf '%s' "$agerows"
   fi
@@ -177,13 +175,11 @@ drift=0
 if [ -f "$backlog" ] && command -v jq >/dev/null 2>&1; then
   # (a) a task meta with no matching backlog item — dispatch always records a
   #     backlog item, so a meta without one is untracked work.
-  for m in "$MH_TASKS"/*.meta; do
-    [ -f "$m" ] || continue
-    tid="$(basename "$m" .meta)"
+  while IFS= read -r tid; do
     if ! jq -e --arg id "$tid" 'any(.items[]; .id==$id)' "$backlog" >/dev/null 2>&1; then
       printf '  DRIFT: task %s has no backlog item\n' "$tid"; drift=$((drift + 1))
     fi
-  done
+  done < <(mh_all_task_ids)
   # (b) a backlog item whose stored status disagrees with the reconciled state,
   #     and (c) a done backlog item whose worktree still holds unlanded work.
   while IFS=$'\t' read -r bid bstatus; do
@@ -216,15 +212,13 @@ section "UNTRACKED DECISIONS (blocked/awaiting-review with no open hold)"
 nohold=0
 if [ -f "$backlog" ] && command -v jq >/dev/null 2>&1; then
   holds="$(jq -r '.decisions[] | select(.status=="open") | "\(.key) \(.origin // "")"' "$backlog" 2>/dev/null || true)"
-  for m in "$MH_TASKS"/*.meta; do
-    [ -f "$m" ] || continue
-    tid="$(basename "$m" .meta)"
+  while IFS= read -r tid; do
     tstate="$("$here/mh-task.sh" state "$tid" 2>/dev/null | sed 's/ · .*//; s/^state: //' || true)"
     case "$tstate" in blocked|needs-decision|awaiting-review) ;; *) continue ;; esac
     if [ -n "$holds" ] && grep -qF "$tid" <<<"$holds"; then continue; fi
     printf '  NO-HOLD: task %s is %s but no open decision hold references it\n' "$tid" "$tstate"
     nohold=$((nohold + 1))
-  done
+  done < <(mh_all_task_ids)
 fi
 if [ "$nohold" -eq 0 ]; then echo "  (none)"; fi
 
