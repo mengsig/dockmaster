@@ -256,9 +256,36 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
               || git -C "$dir" rev-parse --verify --quiet "refs/remotes/origin/$value" >/dev/null 2>&1 \
               || dm_die "default_branch '$value' is not a branch in the clone '$name'; fetch or create it first"
             registry_write --arg n "$name" --arg v "$value" '.repos[$n].default_branch = $v' ;;
+      merge_allowed_bases)
+            # Operator-granted base branches a `never` repo's PRs may still be
+            # merged into (the integration-branch carve-out; enforcement is
+            # dm_merge_base_exception in dm-pr.sh merge). Comma-separated exact
+            # branch names; empty value clears the field entirely. Each name is
+            # validated here so a corrupt entry can never reach the gate: the
+            # default branch is refused at write time AND again at merge time.
+            if [ -z "$value" ]; then
+              registry_write --arg n "$name" 'del(.repos[$n].merge_allowed_bases)'
+              report_value="(cleared)"
+            else
+              def_branch="$(dm_registry_get "$name" default_branch)"
+              bases_json="[]"
+              rest="$value,"
+              while [ -n "$rest" ]; do
+                bname="${rest%%,*}"; rest="${rest#*,}"
+                [ -n "$bname" ] || dm_die "merge_allowed_bases: empty branch name in '$value'"
+                case "$bname" in
+                  *[[:space:]]*) dm_die "merge_allowed_bases: branch name '$bname' contains whitespace" ;;
+                  *[![:print:]]*) dm_die "merge_allowed_bases: branch name contains control characters" ;;
+                esac
+                [ "$bname" != "$def_branch" ] || dm_die "merge_allowed_bases: '$bname' is the default branch of '$name'; the default branch can never be an allowed merge base"
+                bases_json="$(printf '%s' "$bases_json" | jq -c --arg b "$bname" '. + [$b]')"
+              done
+              registry_write --arg n "$name" --argjson v "$bases_json" '.repos[$n].merge_allowed_bases = $v'
+              report_value="$bases_json"
+            fi ;;
       test_cmd|pipeline|remote)
             registry_write --arg n "$name" --arg f "$field" --arg v "$value" '.repos[$n][$f] = $v' ;;
-      *)    dm_die "unknown field '$field'; settable fields: mode, merge_authority, yolo (alias), test_cmd, pipeline, default_branch, remote" ;;
+      *)    dm_die "unknown field '$field'; settable fields: mode, merge_authority, yolo (alias), merge_allowed_bases, test_cmd, pipeline, default_branch, remote" ;;
     esac
     dm_info "set $name.$report_field = $report_value"
     ;;

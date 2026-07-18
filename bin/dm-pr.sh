@@ -11,6 +11,10 @@
 # Merge AUTHORITY is enforced here in two layers. The repo's merge_authority
 # (yolo|ask|never) is a HARD stop: `merge` refuses outright, before any GitHub
 # call, for a `never` repo (dm_merge_authority_gate) — no flag bypasses it. The
+# only carve-out is the operator-granted merge_allowed_bases list: a `never`
+# repo's PR proceeds iff its LIVE GitHub base branch exactly matches a listed
+# non-default branch (dm_merge_base_exception, fail closed on an unverifiable
+# base); a default-branch PR stays impossible to merge. The
 # operator-approval part of `ask` (vs. standing `yolo`) stays the dockmaster's
 # duty one layer up, per AGENTS.md; this script enforces the never-stop and the
 # CI mechanics.
@@ -314,12 +318,38 @@ case "$cmd" in
     # required and before any GitHub call: a `never` repo can never be merged by
     # the dockmaster — no flag, no --allow-no-checks, no CI state bypasses it.
     # Enforcing it here makes the refusal deterministic offline and independent of
-    # the never-merge-red gate that follows.
+    # the never-merge-red gate that follows. The single carve-out is the
+    # operator-granted merge_allowed_bases list (the integration-branch
+    # workflow): a `never` repo's PR may proceed ONLY when its live GitHub base
+    # branch exactly matches a listed non-default branch — a repo with no list
+    # keeps today's unconditional, offline refusal.
     repo="$(dm_meta_get "$id" repo)"
     [ -n "$repo" ] || dm_die "no such task: $id"
-    case "$(dm_merge_authority_gate "$(dm_merge_authority "$repo")")" in
+    authority="$(dm_merge_authority "$repo")"
+    case "$(dm_merge_authority_gate "$authority")" in
       allow) : ;;
-      refuse-never) dm_die "REFUSED: repo $repo is merge_authority=never: the dockmaster may not merge; the PR is merge-ready — the operator merges it on GitHub" ;;
+      refuse-never)
+        allowed_bases="$(dm_merge_allowed_bases "$repo")"
+        [ -n "$allowed_bases" ] || dm_die "REFUSED: repo $repo is merge_authority=never: the dockmaster may not merge; the PR is merge-ready — the operator merges it on GitHub"
+        # An exception is configured: verify the PR's ACTUAL current base branch
+        # live from GitHub — never from task meta, since a PR base can be
+        # retargeted on GitHub after `open`. Any fetch failure or empty result
+        # refuses (fail closed): an unverifiable base could be the default branch.
+        dm_need gh
+        url="$(dm_meta_get "$id" pr)"; [ -n "$url" ] || dm_die "no PR recorded for $id"
+        n="$(pr_number_from_url "$url")"
+        slug="$(repo_slug "$repo")"
+        base_ref="$(gh api "repos/$slug/pulls/$n" 2>/dev/null | jq -r '.base.ref // empty' 2>/dev/null)" || base_ref=""
+        [ -n "$base_ref" ] || dm_die "REFUSED: repo $repo is merge_authority=never and the PR's base branch could not be verified on GitHub — refusing (fail closed): $url"
+        # Belt-and-braces: the gate re-checks base != default_branch even if the
+        # default branch somehow got listed — it must NEVER be mergeable under
+        # `never`.
+        default_branch="$(dm_registry_get "$repo" default_branch)"
+        case "$(dm_merge_base_exception "$authority" "$base_ref" "$default_branch" "$allowed_bases")" in
+          allow) dm_info "merge-authority exception: repo $repo is merge_authority=never, but PR base '$base_ref' is an operator-granted merge base (merge_allowed_bases); proceeding to the normal merge gates" ;;
+          *) dm_die "REFUSED: repo $repo is merge_authority=never and PR base '$base_ref' is not an operator-granted merge base (merge_allowed_bases covers: $(printf '%s' "$allowed_bases" | tr '\n' ' ')); the operator merges it on GitHub" ;;
+        esac
+        ;;
       refuse-invalid) dm_die "REFUSED: repo $repo has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to merge. Set a valid one: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
       *) dm_die "REFUSED: repo $repo merge authority could not be resolved; refusing to merge" ;;
     esac

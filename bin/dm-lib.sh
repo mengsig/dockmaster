@@ -290,6 +290,21 @@ dm_merge_authority() {
   esac
 }
 
+# dm_merge_allowed_bases <name>  -> the repo's operator-granted merge-exception
+# base branches (registry field `merge_allowed_bases`, a JSON array of strings),
+# one per line; prints nothing when the field is absent/empty. Same snapshot
+# discipline as dm_merge_authority: ONE file read of the repo object, so a
+# concurrent `dm-repo.sh set` cannot interleave between reads. Non-string
+# entries in a hand-corrupted array are dropped (fail closed: a corrupt entry
+# grants nothing); a whitespace-containing entry survives here but can never
+# match in dm_merge_base_exception, which refuses whitespace bases.
+dm_merge_allowed_bases() {
+  dm_ensure_dirs
+  local obj
+  obj="$(jq -c --arg n "$1" '.repos[$n] // {}' "$DM_REGISTRY" 2>/dev/null)" || return 0
+  printf '%s' "$obj" | jq -r '.merge_allowed_bases // [] | if type == "array" then .[] else empty end | select(type == "string")' 2>/dev/null || true
+}
+
 # dm_repo_dir <name>  -> print the managed clone's directory, or die if absent.
 # Single owner of "resolve a registered repo's clone path"; every script that
 # needs a repo's working tree goes through here so the error is identical.
@@ -422,6 +437,36 @@ dm_merge_authority_gate() {
     never)    printf 'refuse-never\n' ;;
     *)        printf 'refuse-invalid\n' ;;
   esac
+}
+
+# --- merge-base exception: the branch-scoped carve-out for a `never` repo -----
+# Decide whether an operator-granted base-branch exception lets a PR merge
+# proceed past a `never` authority, as a pure function (offline, no side
+# effects, testable like dm_merge_gate). The exception exists for the
+# integration-branch workflow: sub-PRs targeting a long-lived feature branch may
+# be merged, while any PR targeting the default branch stays hard-refused.
+# Fail closed on every edge:
+#   - applies ONLY to authority `never` (ask/yolo/invalid/anything else print
+#     `refuse` — callers must not consult it for those; ask/yolo never reach it);
+#   - `allow` iff <base> is non-empty, whitespace-free, differs from
+#     <default_branch>, and EXACTLY (full-string) matches one allowed base;
+#   - an empty/unknown <default_branch> refuses (the default branch must NEVER
+#     be mergeable under `never`, so an unverifiable one cannot be ruled out).
+# Prints: allow | refuse.
+dm_merge_base_exception() {
+  # dm_merge_base_exception <authority> <base> <default_branch> <allowed_bases_newline_separated>
+  local authority="$1" base="$2" default_branch="$3" allowed="$4" line
+  [ "$authority" = "never" ] || { printf 'refuse\n'; return 0; }
+  [ -n "$base" ] || { printf 'refuse\n'; return 0; }
+  case "$base" in *[[:space:]]*) printf 'refuse\n'; return 0 ;; esac
+  [ -n "$default_branch" ] || { printf 'refuse\n'; return 0; }
+  [ "$base" != "$default_branch" ] || { printf 'refuse\n'; return 0; }
+  while IFS= read -r line; do
+    if [ "$line" = "$base" ]; then printf 'allow\n'; return 0; fi
+  done <<EOF
+$allowed
+EOF
+  printf 'refuse\n'
 }
 
 # --- all task ids: the "$DM_TASKS/*.meta glob -> id" idiom -------------------

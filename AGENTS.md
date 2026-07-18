@@ -232,6 +232,17 @@ invariants, pitfalls, routing. Curated — not append-forever._
   merge gate, not just prose. `never` HARD-refuses in `dm-pr.sh merge` and
   `dm-merge.sh local` (before any gh call, no flag bypasses) via the pure
   `dm_merge_authority_gate <authority>`; it runs BEFORE the never-merge-red gate.
+  The ONE carve-out: a `never` repo with operator-granted `merge_allowed_bases`
+  (registry array, `dm-repo.sh set <repo> merge_allowed_bases "<csv>"`, empty
+  clears; read via `dm_merge_allowed_bases`) lets `dm-pr.sh merge` proceed to
+  the normal downstream gates ONLY for a PR whose LIVE GitHub base branch
+  (fetched at merge time, never trusted from task meta) exactly full-string
+  matches a listed branch and is not the `default_branch` — decided by the pure
+  `dm_merge_base_exception <authority> <base> <default_branch> <allowed_bases>`,
+  which fails closed (non-never authority, empty/unverifiable base, empty list,
+  default-branch base even if listed, partial match, whitespace → refuse).
+  `dm-merge.sh local` has NO exception: it always lands on the default branch,
+  so `never` keeps hard-refusing there.
   `ask` (default for new repos) and `yolo` permit the mechanics (operator
   approval for `ask`, and for HIGH-risk work even under `yolo`, stays a skill
   duty — risk tiers live in the `pr-workflow` skill; the gate is risk-blind).

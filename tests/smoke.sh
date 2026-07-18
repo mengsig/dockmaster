@@ -1035,6 +1035,73 @@ check "local land refuses an embedded-tab \"yolo\\tx\" value" '! b dm-merge.sh l
 check "embedded-tab refusal did not advance the clone"        '[ "$(git -C "$DM_HOME/repos/mauth" rev-parse main)" = "$EMBED_BEFORE" ]'
 b dm-worktree.sh remove mauth-corrupt --force >/dev/null 2>&1
 
+echo "== merge-base exception: pure gate (never-repo branch carve-out) =="
+# Pure like dm_merge_gate: allow ONLY on never + a non-empty, whitespace-free,
+# non-default base that full-string matches a listed branch; everything else
+# refuses (fail closed).
+mbase() { ( . "$ROOT/bin/dm-lib.sh"; dm_merge_base_exception "$1" "$2" "$3" "$4" ); }
+MBALLOWED=$'feature/x/overhaul\nintegration'
+check "exception allows an exact match under never"   '[ "$(mbase never integration main "$MBALLOWED")" = "allow" ]'
+check "exception allows the other listed base"        '[ "$(mbase never feature/x/overhaul main "$MBALLOWED")" = "allow" ]'
+check "exception refuses under ask"                   '[ "$(mbase ask integration main "$MBALLOWED")" = "refuse" ]'
+check "exception refuses under yolo"                  '[ "$(mbase yolo integration main "$MBALLOWED")" = "refuse" ]'
+check "exception refuses under invalid"               '[ "$(mbase invalid integration main "$MBALLOWED")" = "refuse" ]'
+check "exception refuses the default branch even when listed" '[ "$(mbase never main main "$(printf "main\nintegration")")" = "refuse" ]'
+check "exception refuses an empty base"               '[ "$(mbase never "" main "$MBALLOWED")" = "refuse" ]'
+check "exception refuses an empty list"               '[ "$(mbase never integration main "")" = "refuse" ]'
+check "exception refuses a prefix of a listed base"   '[ "$(mbase never feature/x main "$MBALLOWED")" = "refuse" ]'
+check "exception refuses a superstring of a listed base" '[ "$(mbase never feature/x/overhaul-2 main "$MBALLOWED")" = "refuse" ]'
+check "exception refuses a whitespace base even when listed" '[ "$(mbase never "integration x" main "integration x")" = "refuse" ]'
+check "exception refuses an empty default branch"     '[ "$(mbase never integration "" "$MBALLOWED")" = "refuse" ]'
+
+echo "== merge-base exception: merge_allowed_bases registry field =="
+mbread() { ( . "$ROOT/bin/dm-lib.sh"; dm_merge_allowed_bases "$1" ); }
+b dm-repo.sh set mauth merge_authority never >/dev/null
+check "reader prints nothing when the field is absent" '[ -z "$(mbread mauth)" ]'
+check "set merge_allowed_bases stores a csv as an array" 'b dm-repo.sh set mauth merge_allowed_bases "integration,feature/x/overhaul" >/dev/null 2>&1'
+check "get prints the stored list" 'OUT="$(b dm-repo.sh get mauth merge_allowed_bases)"; grep -q "integration" <<<"$OUT" && grep -q "feature/x/overhaul" <<<"$OUT"'
+check "reader prints one branch per line" '[ "$(mbread mauth)" = "$(printf "integration\nfeature/x/overhaul")" ]'
+check "set rejects the default branch"           '! b dm-repo.sh set mauth merge_allowed_bases "main" >/dev/null 2>&1'
+check "set rejects the default branch in a list" '! b dm-repo.sh set mauth merge_allowed_bases "integration,main" >/dev/null 2>&1'
+check "set rejects a whitespace name"            '! b dm-repo.sh set mauth merge_allowed_bases "feature x" >/dev/null 2>&1'
+check "set rejects an empty element"             '! b dm-repo.sh set mauth merge_allowed_bases "integration,,x" >/dev/null 2>&1'
+check "a rejected set leaves the stored list intact" '[ "$(mbread mauth)" = "$(printf "integration\nfeature/x/overhaul")" ]'
+check "an empty value clears the field entirely" 'b dm-repo.sh set mauth merge_allowed_bases "" >/dev/null 2>&1 && jq -e ".repos[\"mauth\"] | has(\"merge_allowed_bases\") | not" "$REG" >/dev/null'
+check "reader prints nothing after the clear"    '[ -z "$(mbread mauth)" ]'
+
+echo "== merge-base exception: dm-pr.sh merge honors the LIVE PR base on a never repo =="
+# Stub gh so the live-base read is deterministic and offline: every `gh api`
+# call answers with a fixed PR JSON whose base.ref each case controls. gh-axi is
+# stubbed to fail loudly so the actual merge mutation is provably never reached.
+b dm-repo.sh set mauth merge_authority never >/dev/null
+b dm-repo.sh set mauth merge_allowed_bases "integration" >/dev/null
+b dm-task.sh new mauth-exc --kind ship --repo mauth >/dev/null
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set mauth-exc pr "https://github.com/o/r/pull/9" ) >/dev/null 2>&1
+GHSTUB="$TMP/ghstub"; mkdir -p "$GHSTUB"
+printf '#!/bin/sh\ncat "%s/pr.json"\n' "$GHSTUB" > "$GHSTUB/gh"
+printf '#!/bin/sh\nexit 1\n' > "$GHSTUB/gh-axi"
+chmod +x "$GHSTUB/gh" "$GHSTUB/gh-axi"
+printf '{"state":"open","merged":false,"base":{"ref":"integration"},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+EXCOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "a listed live base passes the authority gate"        'grep -q "operator-granted merge base" <<<"$EXCOUT"'
+check "downstream never-merge-red gate still applies"       'grep -qi "no checks reported" <<<"$EXCOUT"'
+printf '{"state":"open","merged":false,"base":{"ref":"main"},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+check "a default-branch live base still hard-refuses"       '! PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc >/dev/null 2>&1'
+DEFOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "the default-branch refusal names the unallowed base" 'grep -q "not an operator-granted merge base" <<<"$DEFOUT" && grep -q "main" <<<"$DEFOUT"'
+printf '{"state":"open","merged":false,"base":{"ref":"integration-2"},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+check "an unlisted live base still hard-refuses"            '! PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc >/dev/null 2>&1'
+printf 'not json\n' > "$GHSTUB/pr.json"
+UNVEROUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "an unverifiable live base fails closed"              'grep -q "could not be verified" <<<"$UNVEROUT"'
+# With NO merge_allowed_bases configured the refusal is unchanged from today:
+# offline, before any GitHub tool, naming merge_authority=never — no carve-out
+# mentioned.
+b dm-repo.sh set mauth merge_allowed_bases "" >/dev/null
+NOEXC="$(b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "the no-list never refusal is unchanged"              'grep -q "merge_authority=never" <<<"$NOEXC" && grep -qi "operator merges" <<<"$NOEXC"'
+check "the no-list refusal does not mention the carve-out"  '! grep -q "merge_allowed_bases" <<<"$NOEXC"'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
