@@ -89,6 +89,21 @@ from `mh-worktree.sh`, so pass the worktree path in the brief and let the agent
 Confirm the crewmate is processing the brief, then resume supervision
 (load `supervision`).
 
+**Stacked sub-PRs (dispatching off a parent branch, not the default branch).**
+When a task is a piece of a larger in-flight change, dispatch it as a child of
+the parent task's branch instead of the default branch:
+
+```
+bin/mh-worktree.sh create <child-id> <repo> <child-branch> --base <parent-branch>
+```
+
+This branches the child worktree off the parent ref (fetched fresh) and records
+it as the child's `base` meta; `bin/mh-pr.sh open` then defaults the child's PR
+base to that recorded parent when no explicit `--base` is passed, so the sub-PR
+targets the parent's "main PR" instead of the default branch. If the parent
+branch moves before the child lands, restack the child via the `merge-conflict`
+skill (rebase onto the new parent tip) — automating that restack is deferred.
+
 ## 4. Deliver — the canonical requested-change flow
 
 Every requested change goes through the same gated flow:

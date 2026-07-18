@@ -201,6 +201,17 @@ mh_default_branch() {
   printf 'main\n'
 }
 
+# Resolve the PR base for `mh-pr.sh open`: an explicit --base always wins; else
+# the parent ref recorded by `mh-worktree.sh create --base` (a stacked sub-PR
+# targets its parent, not the default branch); else the repo's default branch.
+mh_pr_base_for() {
+  local id="$1" explicit="$2" dir="$3" recorded
+  if [ -n "$explicit" ]; then printf '%s\n' "$explicit"; return 0; fi
+  recorded="$(mh_meta_get "$id" base)"
+  if [ -n "$recorded" ]; then printf '%s\n' "$recorded"; return 0; fi
+  mh_default_branch "$dir"
+}
+
 # --- per-repo memory: the mh-memory hybrid model -----------------------------
 # Repo knowledge lives in plain markdown, not a bespoke store (see mh-memory.sh):
 # SHARED facts in the repo's own committed AGENTS.md mh:knowledge section (travels

@@ -743,6 +743,64 @@ check "worktree create on an unborn clone never raw-crashes" '! grep -q "fatal:"
 check "worktree create on an unborn clone succeeds or fails closed with a clean message" \
   '[ "$UNBORN_RC" -eq 0 ] || grep -qi "not fast-forwardable" <<<"$UNBORN_OUT"'
 
+echo "== sub-PR stack: --base branches a child off a PARENT ref and records it (#45 phase 1) =="
+b mh-repo.sh add substack "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+git -C "$MH_HOME/repos/substack" checkout -q -b parent-feature
+printf 'parent v1\n' > "$MH_HOME/repos/substack/parent.txt"
+git -C "$MH_HOME/repos/substack" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$MH_HOME/repos/substack" -c user.email=c@c.co -c user.name=c commit -qm "parent feature v1" >/dev/null
+git -C "$MH_HOME/repos/substack" push -q origin parent-feature >/dev/null 2>&1
+git -C "$MH_HOME/repos/substack" checkout -q main
+MAIN_SHA="$(git -C "$MH_HOME/repos/substack" rev-parse main)"
+
+# Advance the parent branch on ORIGIN independently of the substack clone (as
+# another crewmate pushing to the parent PR would), so the clone's own view of
+# parent-feature is stale before --base fetches it fresh.
+git clone -q "$TMP/origin.git" "$TMP/substack-seed" >/dev/null 2>&1
+( cd "$TMP/substack-seed"; git config user.email t@t.co; git config user.name t
+  git checkout -q parent-feature
+  printf 'parent v2\n' >> parent.txt
+  git commit -qam "parent feature v2"
+  git push -q origin parent-feature ) >/dev/null 2>&1
+PARENT_SHA="$(git -C "$TMP/substack-seed" rev-parse parent-feature)"
+check "clone's local view of the parent starts stale" \
+  '[ "$(git -C "$MH_HOME/repos/substack" rev-parse origin/parent-feature 2>/dev/null || echo none)" != "'"$PARENT_SHA"'" ]'
+
+b mh-task.sh new sub-child --kind ship --repo substack >/dev/null
+SUBWT="$(b mh-worktree.sh create sub-child substack sub-branch --base parent-feature | tail -n1)"
+check "--base worktree created"             '[ -d "$SUBWT" ]'
+check "--base fetches the parent ref fresh (picks up v2)" '[ "$(git -C "$SUBWT" rev-parse HEAD)" = "'"$PARENT_SHA"'" ]'
+check "child sits on the parent, not main"  '[ "$(git -C "$SUBWT" rev-parse HEAD)" != "'"$MAIN_SHA"'" ]'
+check "child is on the requested branch"    '[ "$(git -C "$SUBWT" rev-parse --abbrev-ref HEAD)" = "sub-branch" ]'
+check "base is recorded in task meta"       '[ "$(b mh-task.sh get sub-child base)" = "parent-feature" ]'
+
+echo "== sub-PR stack: MH_NO_FETCH bypasses the parent fetch, same convention as the default path =="
+b mh-task.sh new sub-child-nf --kind ship --repo substack >/dev/null
+check "MH_NO_FETCH create with --base still succeeds" \
+  'MH_NO_FETCH=1 b mh-worktree.sh create sub-child-nf substack sub-branch-nf --base parent-feature >/dev/null 2>&1'
+
+echo "== sub-PR stack: default (no --base) path is unaffected (byte-identical behavior) =="
+b mh-task.sh new sub-default --kind ship --repo substack >/dev/null
+DEFWT="$(b mh-worktree.sh create sub-default substack | tail -n1)"
+check "default worktree still branches off main"  '[ "$(git -C "$DEFWT" rev-parse HEAD)" = "'"$MAIN_SHA"'" ]'
+check "default create records no base meta"       '[ -z "$(b mh-task.sh get sub-default base)" ]'
+
+echo "== sub-PR stack: --base flag order is independent of the positional args =="
+b mh-task.sh new sub-child-order --kind ship --repo substack >/dev/null
+ORDERWT="$(b mh-worktree.sh create --base parent-feature sub-child-order substack sub-branch-order | tail -n1)"
+check "--base before positional args still works" '[ "$(git -C "$ORDERWT" rev-parse HEAD)" = "'"$PARENT_SHA"'" ]'
+
+echo "== sub-PR stack: mh-pr.sh open's base resolution favors the recorded parent (#45 phase 1) =="
+# Pure-function check (mirrors the `gate()` merge-gate test above): exercises the
+# exact resolution mh-pr.sh open performs, without needing gh-axi/network.
+prbase() { ( . "$ROOT/bin/mh-lib.sh"; mh_pr_base_for "$1" "$2" "$3" ); }
+check "explicit --base always wins over the recorded parent" \
+  '[ "$(prbase sub-child other-explicit-base "$MH_HOME/repos/substack")" = "other-explicit-base" ]'
+check "no explicit --base falls back to the recorded parent" \
+  '[ "$(prbase sub-child "" "$MH_HOME/repos/substack")" = "parent-feature" ]'
+check "no --base and no recorded parent falls back to the default branch" \
+  '[ "$(prbase sub-default "" "$MH_HOME/repos/substack")" = "main" ]'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
