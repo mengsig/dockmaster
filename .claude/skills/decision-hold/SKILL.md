@@ -16,11 +16,11 @@ in the append-only status log — which teardown discards. **Open a backlog hold
 that references the task right then**, before you relay or supervise further:
 
 ```
-bin/mh-backlog.sh hold <id>-decision-<key> "<the choice, in plain terms>" \
+bin/dm-backlog.sh hold <id>-decision-<key> "<the choice, in plain terms>" \
   --options "<A> | <B>" --origin data/<id>/report.md
 ```
 
-`bin/mh-status.sh` flags any task in `blocked`/`needs-decision`/`awaiting-review`
+`bin/dm-status.sh` flags any task in `blocked`/`needs-decision`/`awaiting-review`
 with **no open hold referencing it** (the `UNTRACKED DECISIONS` section) — treat
 such a flag as a missing hold to open now, not noise.
 
@@ -33,7 +33,7 @@ Before treating any investigation or visual review as complete:
    script to infer decisions from prose.)
 2. For each, file a durable, operator-gated hold with a stable, privacy-safe key:
    ```
-   bin/mh-backlog.sh hold <origin-id>-decision-<key> "<the choice, in plain terms>" \
+   bin/dm-backlog.sh hold <origin-id>-decision-<key> "<the choice, in plain terms>" \
      --options "<A> | <B>" --origin data/<origin-id>/report.md
    ```
    Filing is idempotent on the key — re-running updates, never duplicates.
@@ -47,11 +47,11 @@ Before treating any investigation or visual review as complete:
   recommendation). Never use the word "hold" in operator chat.
 - When the operator decides, record it and, if it unblocks work, queue that work:
   ```
-  bin/mh-backlog.sh resolve <origin-id>-decision-<key> "<the operator's exact decision>"
-  bin/mh-backlog.sh add <new-id> "<dependent work>" --status queued   # if any
+  bin/dm-backlog.sh resolve <origin-id>-decision-<key> "<the operator's exact decision>"
+  bin/dm-backlog.sh add <new-id> "<dependent work>" --status queued   # if any
   ```
 - A hold stays open until resolved — tearing down the originating task never
-  closes it. Verify with `bin/mh-backlog.sh list` before treating the
+  closes it. Verify with `bin/dm-backlog.sh list` before treating the
   investigation as complete.
 
 ## Why

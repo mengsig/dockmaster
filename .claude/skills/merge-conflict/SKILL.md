@@ -6,19 +6,19 @@ description: Resolve merge/rebase conflicts safely by dispatching a crewmate to 
 # merge-conflict
 
 Conflicts are resolved by a crewmate that understands the code, in the worktree,
-with tests — never by the manhandler force-merging or discarding work.
+with tests — never by the dockmaster force-merging or discarding work.
 
 ## Detect
 
-When landing (`bin/mh-merge.sh local`) or opening/updating a PR reports the
+When landing (`bin/dm-merge.sh local`) or opening/updating a PR reports the
 branch has diverged from the default, bring it current:
 
 ```
-bin/mh-merge.sh rebase <id>
+bin/dm-merge.sh rebase <id>
 ```
 
 - Clean rebase → the branch is current; continue delivery.
-- Conflicts → `mh-merge.sh rebase` **aborts the rebase**, leaves the worktree
+- Conflicts → `dm-merge.sh rebase` **aborts the rebase**, leaves the worktree
   exactly as it was, and prints the conflicted files with exit 3. Nothing is
   lost. Now dispatch a crewmate to resolve.
 

@@ -2,7 +2,7 @@
 
 ## Trust model
 
-The manhandler is read-only over the repositories it manages except for a few
+The dockmaster is read-only over the repositories it manages except for a few
 narrow, guarded fast-forward paths (clone, sync, approved local landing); it
 never force-pushes, rewrites history, or discards unlanded work. Credentials a
 crewmate needs are passed **by reference, never by value** — the secret is never

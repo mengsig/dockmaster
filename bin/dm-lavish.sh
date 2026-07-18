@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# mh-lavish.sh - standard location and wrappers for a task's lavish review surface.
+# dm-lavish.sh - standard location and wrappers for a task's lavish review surface.
 #
 # A crewmate renders its change into a reviewable HTML artifact; the operator
 # reviews and annotates it in the browser; feedback returns through lavish-axi.
-# The artifact lives under data/<id>/lavish/ in the manhandler home (NOT in the
+# The artifact lives under data/<id>/lavish/ in the dockmaster home (NOT in the
 # worktree) so it survives teardown and never dirties the worktree.
 #
 # Commands:
@@ -20,12 +20,12 @@
 # genuine error and still fails, tool present or not.
 
 set -euo pipefail
-. "$(dirname "${BASH_SOURCE[0]}")/mh-lib.sh"
-mh_ensure_dirs
+. "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
+dm_ensure_dirs
 
-id="${2:-}"; [ -n "$id" ] || { echo "usage: mh-lavish.sh {path|open|poll|end} <id>" >&2; exit 2; }
-mh_require_id "$id"
-dir="$MH_DATA/$id/lavish"
+id="${2:-}"; [ -n "$id" ] || { echo "usage: dm-lavish.sh {path|open|poll|end} <id>" >&2; exit 2; }
+dm_require_id "$id"
+dir="$DM_DATA/$id/lavish"
 file="$dir/change.html"
 
 have_lavish() { command -v lavish-axi >/dev/null 2>&1; }
@@ -33,24 +33,24 @@ have_lavish() { command -v lavish-axi >/dev/null 2>&1; }
 case "${1:-}" in
   path) mkdir -p "$dir"; printf '%s\n' "$file" ;;
   open)
-    [ -f "$file" ] || mh_die "no artifact at $file (the crewmate writes it first)"
+    [ -f "$file" ] || dm_die "no artifact at $file (the crewmate writes it first)"
     if have_lavish; then
       lavish-axi "$file"
     else
-      mh_warn "lavish-axi not installed; the interactive review surface is unavailable."
-      mh_info "Open the review artifact directly in a browser: $file"
-      mh_info "Give feedback in chat; the manhandler relays it to the worker."
+      dm_warn "lavish-axi not installed; the interactive review surface is unavailable."
+      dm_info "Open the review artifact directly in a browser: $file"
+      dm_info "Give feedback in chat; the dockmaster relays it to the worker."
     fi
     ;;
   poll)
-    [ -f "$file" ] || mh_die "no artifact at $file"
+    [ -f "$file" ] || dm_die "no artifact at $file"
     if have_lavish; then
       lavish-axi poll "$file"
     else
-      mh_warn "lavish-axi not installed; live feedback polling is unavailable."
-      mh_info "Feedback should come directly in chat rather than through the lavish surface."
+      dm_warn "lavish-axi not installed; live feedback polling is unavailable."
+      dm_info "Feedback should come directly in chat rather than through the lavish surface."
     fi
     ;;
   end)  if have_lavish; then lavish-axi end "$file" 2>/dev/null || true; fi ;;
-  *)    echo "usage: mh-lavish.sh {path|open|poll|end} <id>" >&2; exit 2 ;;
+  *)    echo "usage: dm-lavish.sh {path|open|poll|end} <id>" >&2; exit 2 ;;
 esac

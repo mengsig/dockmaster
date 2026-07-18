@@ -19,9 +19,9 @@ Three shipped tiers share one gate schema; the tier is a per-task choice (see
   auto `security` → `pr`. (The CI-wait is not a config gate; it runs in the
   operator-mediated merge tail after the PR opens — see `pr-workflow`.)
 
-## The default executor: the manhandler (agent-driven)
+## The default executor: the dockmaster (agent-driven)
 
-By default the manhandler runs the pipeline itself, driving each gate with
+By default the dockmaster runs the pipeline itself, driving each gate with
 ordinary `Agent` calls while following `.claude/skills/pr-workflow/SKILL.md`. It
 reads:
 
@@ -30,7 +30,7 @@ reads:
   which of the two review passes it is.
 
 It also honors the `pr` gate's **`method`** at the merge-authority step, by
-passing it to `bin/mh-pr.sh merge --method <method>`.
+passing it to `bin/dm-pr.sh merge --method <method>`.
 
 ## The optional executor: `workflows/pr-pipeline.js`
 
@@ -49,22 +49,22 @@ Workflow tool — nothing auto-discovers it). It reads the rest:
 - **`optional`** on the `verify` gate (rigorous) — with a caller-declared
   `noRuntimeSurface` (docs/config-only diff), skips the behavioral gate. There is
   no automatic detector for this; whoever invokes the Workflow tool (the
-  manhandler/operator, per `pr-workflow`'s rigorous-tier criteria) must pass it
+  dockmaster/operator, per `pr-workflow`'s rigorous-tier criteria) must pass it
   explicitly in `args` when the diff is docs/config-only, else the behavioral
   gate always runs.
 - **`max_rounds`** on a `fix` gate — the fix→re-review loop cap.
 - **`optional`** on the `security` gate (default/fast) — the runner self-computes
-  this by running `bin/mh-pr.sh security-scan` itself (same as rigorous
+  this by running `bin/dm-pr.sh security-scan` itself (same as rigorous
   `method: "auto"` below) and only reviewing on a hit, so no caller wiring is
   required. A caller-declared `securitySurface` is an override: if set, the
   runner reviews directly without re-scanning. **`method: "auto"`** (rigorous)
-  runs `bin/mh-pr.sh security-scan` and escalates to `security-review` only on
+  runs `bin/dm-pr.sh security-scan` and escalates to `security-review` only on
   a hit.
 - **`method`** on the `pr` gate — surfaced in the runner's result so the
   operator-mediated merge step can honor it (the runner never merges).
 
 There is no CI-wait gate in the config. Because every executor opens the PR at
-the terminal `pr` gate and never merges, waiting for CI (`bin/mh-pr.sh
+the terminal `pr` gate and never merges, waiting for CI (`bin/dm-pr.sh
 await-checks`) belongs to the operator-mediated merge tail that runs after the
 PR is open — see `.claude/skills/pr-workflow` ("Merge authority"). The runner
 still recognizes a stray `await-checks` in a custom config and defers it there

@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
-# mh-doctor.sh - verify the manhandler is ready to run, and scaffold MH_HOME.
+# dm-doctor.sh - verify the dockmaster is ready to run, and scaffold DM_HOME.
 #
 # Two jobs, one place:
-#   1. Bootstrap: ensure the MH_HOME layout exists (state/, data/, repos/,
+#   1. Bootstrap: ensure the DM_HOME layout exists (state/, data/, repos/,
 #      config/, tasks/, worktrees/, the registry file). Idempotent — safe to
 #      run repeatedly; it only creates what is missing.
 #   2. Diagnose: check every tool the toolbelt depends on, GitHub auth, and the
 #      committed config defaults, with an actionable hint for anything missing.
 #
-# This is the single owner of the dependency contract: mh-session-start delegates
+# This is the single owner of the dependency contract: dm-session-start delegates
 # its tooling check here so "what the toolbelt needs" lives in exactly one place.
 #
 # Usage:
-#   mh-doctor.sh          full report + scaffold; exit 1 if a REQUIRED tool is missing
-#   mh-doctor.sh check    compact tooling + GitHub-auth check only (no scaffold)
+#   dm-doctor.sh          full report + scaffold; exit 1 if a REQUIRED tool is missing
+#   dm-doctor.sh check    compact tooling + GitHub-auth check only (no scaffold)
 #
 # Exit 0 = required tools present. Exit 1 = a required tool is missing. A missing
 # PR-flow or optional tool warns and degrades a feature, but never fails the
 # check — so a green verdict means exactly what the README promises.
 
 set -euo pipefail
-. "$(dirname "${BASH_SOURCE[0]}")/mh-lib.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 
 # Dependency contract, as (name, purpose) pairs, in three tiers:
 #   REQUIRED  — called directly by the toolbelt; without them nothing runs.
 #   PR-FLOW   — needed only for the PR delivery path; local-only mode works
 #               without them. gh (or the gh-axi wrapper) is the one tool here.
 #   OPTIONAL  — the operator's own axi tooling, NOT bundled with this distro.
-#               Absent, the manhandler degrades to a real, plainer mode (plain
+#               Absent, the dockmaster degrades to a real, plainer mode (plain
 #               gh for GitHub, operator-run review with no lavish artifact).
 # Only REQUIRED tools gate the verdict; the other two tiers only warn.
 REQUIRED_TOOLS=(
@@ -48,7 +48,7 @@ tool_hint() {
     git|jq)  printf 'install with your package manager (e.g. apt install %s / brew install %s)' "$1" "$1" ;;
     gh)      printf 'https://cli.github.com' ;;
     gh-axi|lavish-axi|chrome-devtools-axi)
-             printf 'operator tooling, not bundled — without it manhandler uses plain gh and operator-run review' ;;
+             printf 'operator tooling, not bundled — without it dockmaster uses plain gh and operator-run review' ;;
     *)       printf 'install %s and ensure it is on PATH' "$1" ;;
   esac
 }
@@ -108,12 +108,12 @@ section() { printf '\n=== %s ===\n' "$1"; }
 probe_state_json() {
   local bad=0 backlog
   command -v jq >/dev/null 2>&1 || return 0
-  if [ -f "$MH_REGISTRY" ] && ! jq . "$MH_REGISTRY" >/dev/null 2>&1; then
+  if [ -f "$DM_REGISTRY" ] && ! jq . "$DM_REGISTRY" >/dev/null 2>&1; then
     printf '  FAIL state/repos.json is not valid JSON\n'
     printf '       ^ restore from git or a backup, or reset to {"repos":{}}\n'
     bad=$((bad + 1))
   fi
-  backlog="$MH_STATE/backlog.json"
+  backlog="$DM_STATE/backlog.json"
   if [ -f "$backlog" ] && ! jq . "$backlog" >/dev/null 2>&1; then
     printf '  FAIL state/backlog.json is not valid JSON\n'
     printf '       ^ restore from git or a backup, or reset to {"items":[],"decisions":[]}\n'
@@ -125,7 +125,7 @@ probe_state_json() {
 mode="${1:-full}"
 case "$mode" in
   check)
-    # Compact readiness probe for mh-session-start; no scaffold, no headings.
+    # Compact readiness probe for dm-session-start; no scaffold, no headings.
     # Tooling first, then state-JSON integrity so a corrupt registry surfaces its
     # recovery hint here (session-start runs `check` before its repo/backlog
     # sections) instead of as raw jq errors later.
@@ -140,23 +140,23 @@ case "$mode" in
     miss=0; report_tools 0 || miss=$?
 
     section "HOME (scaffolded if missing)"
-    mh_ensure_dirs
-    mkdir -p "$MH_STATE/worktrees"
+    dm_ensure_dirs
+    mkdir -p "$DM_STATE/worktrees"
     for p in state state/tasks state/worktrees data repos config; do
-      if [ -d "$MH_HOME/$p" ]; then printf '  ok   %s/\n' "$p"; else printf '  MISSING %s/\n' "$p"; fi
+      if [ -d "$DM_HOME/$p" ]; then printf '  ok   %s/\n' "$p"; else printf '  MISSING %s/\n' "$p"; fi
     done
-    if [ -f "$MH_REGISTRY" ]; then printf '  ok   state/repos.json\n'; else printf '  MISSING state/repos.json\n'; fi
+    if [ -f "$DM_REGISTRY" ]; then printf '  ok   state/repos.json\n'; else printf '  MISSING state/repos.json\n'; fi
 
     # State JSON must PARSE, not just exist (same probe session-start runs via
     # `check`): a corrupt registry or backlog silently breaks every jq-driven
     # command, so a parse failure is a readiness failure with a recovery hint.
     badjson=0; probe_state_json || badjson=$?
-    if [ -f "$MH_CONFIG/pr-pipeline.default.json" ]; then
+    if [ -f "$DM_CONFIG/pr-pipeline.default.json" ]; then
       printf '  ok   config/pr-pipeline.default.json\n'
     else
       printf '  warn config/pr-pipeline.default.json absent (tracked default missing?)\n'
     fi
-    if [ -f "$MH_HOME/.env" ]; then printf '  ok   .env present\n'; else printf '  note .env absent (optional; operator-private secrets)\n'; fi
+    if [ -f "$DM_HOME/.env" ]; then printf '  ok   .env present\n'; else printf '  note .env absent (optional; operator-private secrets)\n'; fi
 
     section "VERDICT"
     if [ "$miss" -gt 0 ]; then
@@ -171,6 +171,6 @@ case "$mode" in
     ;;
 
   *)
-    mh_die "usage: mh-doctor.sh [check]"
+    dm_die "usage: dm-doctor.sh [check]"
     ;;
 esac

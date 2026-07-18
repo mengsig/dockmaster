@@ -1,14 +1,13 @@
 ---
 name: supervision
-description: How the manhandler supervises in-flight crew work using Claude Code native primitives — background agents, task-completion notifications, Monitor, and scheduled wakeups — at zero idle token cost. Load whenever work is in flight.
+description: How the dockmaster supervises in-flight crew work using Claude Code native primitives — background agents, task-completion notifications, Monitor, and scheduled wakeups — at zero idle token cost. Load whenever work is in flight.
 ---
 
 # supervision
 
-firstmate (the predecessor system manhandler re-implements — see README and
-`docs/architecture.md`) needed a bash watcher daemon, a wake queue, and turn-end
-guard hooks to fake asynchronous supervision on generic harnesses. Claude Code
-gives it to us natively. Use the primitive; do not rebuild the daemon.
+Simulating asynchronous supervision on a generic harness would need a bash watcher
+daemon, a wake queue, and turn-end guard hooks. Claude Code gives it to us
+natively. Use the primitive; do not rebuild the daemon.
 
 ## The model
 
@@ -19,7 +18,7 @@ nothing while it runs. When it finishes, Claude Code delivers a
 1. **Dispatch** a crewmate with `Agent(..., run in background)`; record its id.
 2. **Resume** the conversation and dispatch other independent work. Do not block.
 3. **On the completion notification**, reconcile and act:
-   - `bin/mh-task.sh state <id>` for authoritative current state.
+   - `bin/dm-task.sh state <id>` for authoritative current state.
    - Read the crewmate's status events (`state/tasks/<id>.status`) as a log of
      *what happened*, never as current truth.
    - Advance the pipeline, report an outcome, or handle a blocker/decision.
@@ -27,7 +26,7 @@ nothing while it runs. When it finishes, Claude Code delivers a
 ## Events vs current state
 
 A status line is a **wake event**, not current state. Always reconcile with
-`bin/mh-task.sh state <id>` before re-escalating an old blocker or decision — the
+`bin/dm-task.sh state <id>` before re-escalating an old blocker or decision — the
 task may have moved on. The state reconciler keys off real signals (merged PR,
 merge event, report existence, committed-unlanded worktree), not the last line.
 
@@ -38,7 +37,7 @@ Handle events by kind:
 - **needs-decision** — an operator choice. Open a durable backlog hold that
   references the task *first* (load `decision-hold`), then decide only under
   standing authority, otherwise escalate to the operator. The hold must exist
-  before teardown or the choice is lost — `bin/mh-status.sh` flags a
+  before teardown or the choice is lost — `bin/dm-status.sh` flags a
   `blocked`/`needs-decision`/`awaiting-review` task that has none.
 - **failed** — load `stuck-worker`; preserve work, never duplicate the crewmate.
 - **paused** — a bounded external wait expected to clear on its own; leave it,
@@ -49,10 +48,10 @@ Handle events by kind:
 For state changes with no completion notification — CI turning green, an external
 deploy, a remote queue — do not busy-wait:
 
-- **Monitor** — poll an until-condition (e.g. `bin/mh-pr.sh check <id>` reporting
+- **Monitor** — poll an until-condition (e.g. `bin/dm-pr.sh check <id>` reporting
   `checks: passing`). Size the interval to how fast the state actually changes
   (a ~8-minute CI run wants one ~480s check, not eight 60s ones). For the common
-  wait-for-CI case, `bin/mh-pr.sh await-checks <id> [--timeout-secs N]
+  wait-for-CI case, `bin/dm-pr.sh await-checks <id> [--timeout-secs N]
   [--interval-secs N]` is the packaged form of this loop: it polls `check` until
   the rollup is terminal (`passing`/`failing`/`none`) or it times out, exiting 0
   on passing/none and non-zero on failing/timeout.
@@ -63,11 +62,11 @@ deploy, a remote queue — do not busy-wait:
 
 ## Fleet PR sweep
 
-`bin/mh-pr.sh sweep` walks every task with an OPEN PR and reports, one line each,
+`bin/dm-pr.sh sweep` walks every task with an OPEN PR and reports, one line each,
 its CI rollup and whether a review requests changes — read-only, merges nothing.
 An open PR gets no completion notification when its CI later goes red or a
 reviewer requests changes, so run the sweep on a cadence (a `schedule`/`loop`
-"babysit the PRs" wakeup) or read it mid-session — `bin/mh-status.sh` folds the
+"babysit the PRs" wakeup) or read it mid-session — `bin/dm-status.sh` folds the
 same sweep into its snapshot. Escalate to the operator only the PRs needing a
 decision: red CI or an unaddressed review (changes requested); load
 `post-pr-review` to drive them. A green PR with no review action is supervised
@@ -75,7 +74,7 @@ silently.
 
 ## Checking up and reporting
 
-- "Check up on it" — `TaskList` / `bin/mh-task.sh state <id>`, or `SendMessage`
+- "Check up on it" — `TaskList` / `bin/dm-task.sh state <id>`, or `SendMessage`
   to a still-running agent.
 - "Report back" — surface outcomes, not mechanics (see AGENTS.md §Reporting):
   the PR with its full URL, the finding, the blocker, the decision. Never relay
@@ -86,7 +85,7 @@ silently.
 ## Session death / restart recovery
 
 Supervision state lives on disk, not in this conversation. On restart,
-`mh-session-start` reconciles it. For each in-flight task whose agent is gone but
+`dm-session-start` reconciles it. For each in-flight task whose agent is gone but
 whose worktree still holds unlanded work, load `stuck-worker`: re-attach by
 `agent_id` if the agent is resumable, else re-dispatch the same task into the
 same worktree with the same identity. Never spawn a duplicate — a second worktree

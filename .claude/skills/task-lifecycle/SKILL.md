@@ -5,7 +5,7 @@ description: The end-to-end contract for a delegated task — intake, classify (
 
 # task-lifecycle
 
-The manhandler never does project work itself. It delegates each task to a
+The dockmaster never does project work itself. It delegates each task to a
 crewmate (a subagent) in its own worktree, supervises to completion, and reports
 outcomes. This is that contract.
 
@@ -13,13 +13,13 @@ outcomes. This is that contract.
 
 Resolve which registered repo a request targets. An explicit repo wins; a clear
 follow-up inherits the previous one; otherwise match against the registry
-(`bin/mh-repo.sh list`), in-flight work, and the repo's code/README. Proceed on
+(`bin/dm-repo.sh list`), in-flight work, and the repo's code/README. Proceed on
 one confident match and name it in plain language. Ask one concise question only
 when several or no repos plausibly match.
 
 If the request targets a repo that does not exist yet (a brand-new project) or an
 un-enrolled remote, the first step is to create/enroll it via `project-management`
-(`mh-repo.sh create` for a new repo, `add` for an existing remote), then dispatch
+(`dm-repo.sh create` for a new repo, `add` for an existing remote), then dispatch
 against the enrolled repo — never build it outside the framework.
 
 ## 2. Classify — two independent axes
@@ -39,10 +39,10 @@ against the enrolled repo — never build it outside the framework.
   concurrency cap.
 - Serialize (queue as blocked) when it touches the same repo subsystem as live
   work or depends on unlanded work. Record it durably:
-  `bin/mh-backlog.sh add <id> "<title>" --repo <repo> --status queued --blocked-by <other-id>`.
-- Before spawning a queued item, consult `bin/mh-backlog.sh ready` — it lists
+  `bin/dm-backlog.sh add <id> "<title>" --repo <repo> --status queued --blocked-by <other-id>`.
+- Before spawning a queued item, consult `bin/dm-backlog.sh ready` — it lists
   queued items whose blockers are all complete, judging each blocker by its real
-  reconciled task state (`bin/mh-task.sh state`), not a hand-set backlog status.
+  reconciled task state (`bin/dm-task.sh state`), not a hand-set backlog status.
   A queued item absent from `ready` is still genuinely blocked; do not dispatch it.
 
 ## 3. Dispatch
@@ -50,10 +50,10 @@ against the enrolled repo — never build it outside the framework.
 Give the task an id (short kebab, e.g. `fix-login-412`), then:
 
 ```
-bin/mh-task.sh new <id> --kind ship|scout --repo <repo> --title "<title>"
-bin/mh-backlog.sh add <id> "<title>" --repo <repo> --status inflight
-bin/mh-worktree.sh create <id> <repo>
-bin/mh-brief.sh <id>              # scaffolds data/<id>/brief.md
+bin/dm-task.sh new <id> --kind ship|scout --repo <repo> --title "<title>"
+bin/dm-backlog.sh add <id> "<title>" --repo <repo> --status inflight
+bin/dm-worktree.sh create <id> <repo>
+bin/dm-brief.sh <id>              # scaffolds data/<id>/brief.md
 ```
 
 Open the brief, replace `{TASK}` with a concrete description, acceptance
@@ -65,7 +65,7 @@ Agent(prompt=<contents of data/<id>/brief.md>, run in background,
       subagent_type/model/effort per the resourcing policy below)
 ```
 
-**Right-size the dispatch — you decide the resources.** The manhandler runs on a
+**Right-size the dispatch — you decide the resources.** The dockmaster runs on a
 capable model precisely so it can judge how much power each unit of work needs;
 do NOT just inherit your own tier. For every spawn, set `model` and `effort` to
 the *least* that will still get an excellent result:
@@ -84,8 +84,8 @@ implementing crewmate.
 
 For work that mutates files where a plain subagent would collide with siblings,
 prefer `isolation: "worktree"`; here the crew already has a dedicated worktree
-from `mh-worktree.sh`, so pass the worktree path in the brief and let the agent
-`cd` into it. Record the returned agent id: `bin/mh-task.sh set <id> agent_id <id>`.
+from `dm-worktree.sh`, so pass the worktree path in the brief and let the agent
+`cd` into it. Record the returned agent id: `bin/dm-task.sh set <id> agent_id <id>`.
 Confirm the crewmate is processing the brief, then resume supervision
 (load `supervision`).
 
@@ -94,11 +94,11 @@ When a task is a piece of a larger in-flight change, dispatch it as a child of
 the parent task's branch instead of the default branch:
 
 ```
-bin/mh-worktree.sh create <child-id> <repo> <child-branch> --base <parent-branch>
+bin/dm-worktree.sh create <child-id> <repo> <child-branch> --base <parent-branch>
 ```
 
 This branches the child worktree off the parent ref (fetched fresh) and records
-it as the child's `base` meta; `bin/mh-pr.sh open` then defaults the child's PR
+it as the child's `base` meta; `bin/dm-pr.sh open` then defaults the child's PR
 base to that recorded parent when no explicit `--base` is passed, so the sub-PR
 targets the parent's "main PR" instead of the default branch. If the parent
 branch moves before the child lands, restack the child via the `merge-conflict`
@@ -116,16 +116,16 @@ Every requested change goes through the same gated flow:
    operator approves. Nothing lands before this approval.
 3. **Ask how it lands: PR or local?** Put the plain question to the operator.
    - **local** (or a `local-only` repo) → set the task to local mode, then land
-     after approval: `bin/mh-task.sh set <id> mode local-only` then
-     `bin/mh-merge.sh local <id>`. `mh-merge.sh local` refuses any task whose
+     after approval: `bin/dm-task.sh set <id> mode local-only` then
+     `bin/dm-merge.sh local <id>`. `dm-merge.sh local` refuses any task whose
      mode isn't `local-only`, and a task on a pipeline/direct-pr repo inherits
      that repo's mode — so set it explicitly here (or classify the task local at
-     dispatch with `mh-task.sh new --mode local-only`).
+     dispatch with `dm-task.sh new --mode local-only`).
    - **PR** → load `pr-workflow` and run the pipeline: coldstart review → fix +
      tests → merge-gate review → fix + tests → PR creation.
 4. **Merge gate.** After the PR is open, the operator either merges on GitHub
    (you watch for it and then sync + teardown) or you ask for approval and merge
-   with `bin/mh-pr.sh merge`. Never merge red. Report the full `https://…` URL.
+   with `bin/dm-pr.sh merge`. Never merge red. Report the full `https://…` URL.
    Review comments and post-open CI on an open PR are handled by `post-pr-review`.
 
 **Fast path for a trivial change.** When the change is *objectively trivial*
@@ -145,7 +145,7 @@ landed is a new task under `rollback`, not a teardown.
 Tear down a ship task only after landing is confirmed:
 
 ```
-bin/mh-worktree.sh remove <id>
+bin/dm-worktree.sh remove <id>
 ```
 
 A refusal ("unlanded work") is a **stop-and-investigate** signal, never an
@@ -156,9 +156,9 @@ operator decision it surfaced is recorded (load `decision-hold`).
 After teardown, record completion, archive the landed task's records, and
 re-evaluate the queue:
 ```
-bin/mh-backlog.sh done <id> --note "<PR url / landed / report>"
-bin/mh-task.sh archive <id>    # move <id>.meta/.status + data/<id>/ to state/archive/
-bin/mh-backlog.sh ready        # queued items whose blockers have now cleared
+bin/dm-backlog.sh done <id> --note "<PR url / landed / report>"
+bin/dm-task.sh archive <id>    # move <id>.meta/.status + data/<id>/ to state/archive/
+bin/dm-backlog.sh ready        # queued items whose blockers have now cleared
 ```
 Archival fails closed unless the task reconciles to terminal `done` with no live
 worktree, so run it only after landing is confirmed and teardown has removed the
@@ -173,8 +173,8 @@ Flip the kind and re-brief the same crewmate to carry over only the intended fix
 delivery mode:
 
 ```
-bin/mh-task.sh set <id> kind ship
-bin/mh-brief.sh <id>     # regenerate as a ship brief; fill {TASK} with the fix scope
+bin/dm-task.sh set <id> kind ship
+bin/dm-brief.sh <id>     # regenerate as a ship brief; fill {TASK} with the fix scope
 ```
 
 A reproduced bug becomes the regression test.
@@ -182,7 +182,7 @@ A reproduced bug becomes the regression test.
 ## Recovery
 
 State lives on disk, not in conversation memory. After any restart, reconcile
-each task with `bin/mh-task.sh state <id>` (authoritative current state) before
+each task with `bin/dm-task.sh state <id>` (authoritative current state) before
 acting. For a crewmate whose agent is gone but whose worktree holds unlanded
 work, load `stuck-worker` — preserve the worktree and identity; never spawn a
 duplicate.

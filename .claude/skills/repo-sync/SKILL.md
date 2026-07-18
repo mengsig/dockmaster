@@ -14,8 +14,8 @@ be caught up safely.
 ## The mechanic (already built — reuse it, never reimplement it)
 
 ```
-bin/mh-sync.sh one <name>     # sync a single registered repo
-bin/mh-sync.sh all            # sync every registered repo
+bin/dm-sync.sh one <name>     # sync a single registered repo
+bin/dm-sync.sh all            # sync every registered repo
 ```
 
 Fast-forward ONLY. A clone only ever moves if the move is provably lossless (a
@@ -26,18 +26,18 @@ report it and let a human resolve the clone; do not force past it.
 
 ## When sync happens
 
-- **Session start** — `mh-session-start.sh` already runs `mh-sync.sh all` and
+- **Session start** — `dm-session-start.sh` already runs `dm-sync.sh all` and
   surfaces `STUCK:` lines in the digest.
-- **Before dispatching a task / creating a worktree** — `mh-worktree.sh create`
+- **Before dispatching a task / creating a worktree** — `dm-worktree.sh create`
   now guards this automatically: it FF-syncs the repo's clone before cutting the
   worktree's base, and fails closed (never cuts a stale base) if the clone can't
-  fast-forward. Under `MH_NO_FETCH=1` (offline/smoke) it skips the sync and does
+  fast-forward. Under `DM_NO_FETCH=1` (offline/smoke) it skips the sync and does
   not block.
-- **After any merge** — `mh-pr.sh merge` now FF-syncs the clone automatically,
+- **After any merge** — `dm-pr.sh merge` now FF-syncs the clone automatically,
   best-effort, right after a successful merge. After an OUT-OF-BAND merge (the
   operator merged on GitHub directly, or a `local-only` landing happened outside
-  `mh-merge`), sync it by hand: `bin/mh-sync.sh one <name>`.
-- **On request** — "update my repos" (or similar) → `bin/mh-sync.sh all`;
+  `dm-merge`), sync it by hand: `bin/dm-sync.sh one <name>`.
+- **On request** — "update my repos" (or similar) → `bin/dm-sync.sh all`;
   reconcile any `STUCK:` lines before moving on.
 
 ## STUCK means stop, not force
