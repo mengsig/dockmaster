@@ -97,9 +97,8 @@ case "$cmd" in
     # unregistered over a live worktree).
     case "$st" in
       merged) dm_die "'merged' is a landing signal appended only by dm-merge/dm-pr; dm-task.sh event must not forge it" ;;
-      # 'discarded' records operator discard authority; only the sanctioned
-      # teardown path (dm-worktree.sh remove --force) appends it, so a crewmate
-      # cannot flip its own live task terminal.
+      # Appended only by dm-worktree.sh remove --force, so a crewmate cannot
+      # flip its own live task terminal.
       discarded) dm_die "'discarded' is appended only by dm-worktree.sh remove --force (operator discard); dm-task.sh event must not forge it" ;;
     esac
     dm_status_append "$id" "$st" "$note"
@@ -155,9 +154,8 @@ case "$cmd" in
       needs-decision)         echo "state: needs-decision · source: status-log · $last" ;;
       paused)                 echo "state: paused · source: status-log · $last" ;;
       failed)                 echo "state: failed · source: status-log · $last" ;;
-      # Terminal only when the worktree really is gone: a discard event with a
-      # local copy still on disk means teardown did not finish — keep it live so
-      # archive/remove stay refused.
+      # Terminal only once the worktree is gone; a lingering local copy keeps
+      # the task live so archive/remove stay refused.
       discarded)
         if [ -n "$wt" ] && [ -d "$wt" ]; then
           echo "state: working · source: worktree · discard recorded but local copy still present"
