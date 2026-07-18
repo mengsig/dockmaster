@@ -79,7 +79,8 @@ The file has a `gates` array. Run the gates top to bottom. A repo's delivery
   `bin/mh-pr.sh open <id>` so the URL is recorded to the task record (`check` and
   `merge` need it); you then enforce the merge gate with `bin/mh-pr.sh check`. If
   a PR was opened out of band, record its URL first with
-  `bin/mh-task.sh set <id> pr <url>`.
+  `bin/mh-pr.sh adopt <id> <url>` (validates the url is a canonical PR for the
+  task's own repo, then records it and queries its real state).
 - **local-only** — no PR; this skill does not apply. Land with
   `bin/mh-merge.sh local <id>` after approval (see `task-lifecycle`).
 
@@ -199,6 +200,20 @@ merges always escalate, even under `yolo`.
 `await-checks` after opening the PR and merge only once checks go green.
 `--allow-no-checks` bypasses `none` solely when the repo has no CI configured;
 it can never be used to skip real checks that just haven't registered yet.
+`await-checks` itself keeps polling on a `none` rollup while the repo has CI
+(that's the race window before Actions registers a check) and only treats
+`none` as terminal on a confirmed CI-less repo.
+
+**`mh-pr.sh merge` also refuses on `mergeable_state`**, independent of CI:
+`dirty` (merge conflicts), `draft` (still a draft PR), and `blocked` (required
+checks/reviews not satisfied) all refuse outright — resolve the conflict/draft/
+requirement, then retry. `unknown` does not refuse (GitHub often hasn't
+computed it yet on first fetch); `gh pr merge`'s own failure is the backstop.
+
+**Rebase a behind-main branch before merging.** If the branch has drifted
+behind the base, rebase it first so CI validates the actual combined state,
+not a stale diff against an older base (see `merge-conflict` if the rebase hits
+conflicts).
 
 ## Optional: deterministic runner
 

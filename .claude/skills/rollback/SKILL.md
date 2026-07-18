@@ -19,7 +19,7 @@ through the normal gate (change-review + merge authority).
   new task id:
   ```
   bin/mh-task.sh new <revert-id> --kind ship --repo <repo> --title "revert #<n>"
-  bin/mh-task.sh set <revert-id> pr <revert-pr-url>
+  bin/mh-pr.sh adopt <revert-id> <revert-pr-url>   # validates url + repo match, records pr, queries real state
   bin/mh-pr.sh check <revert-id>     # then the merge gate, as any PR
   ```
   A bare revert PR with no adopting task can still be merged on GitHub by the
