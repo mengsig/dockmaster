@@ -5,6 +5,11 @@ description: Add, initialize, configure, and remove the repositories the manhand
 
 # project-management
 
+A request to create or build a brand-new project is manhandler work: `create` it
+under `repos/` (below) and deliver it via `task-lifecycle`. Never build it as a
+standalone directory outside the framework, and never hand-edit its files — a new
+repo is enrolled here first, then every change goes through a crewmate worktree.
+
 The registry `state/repos.json` is the single source of truth for what is
 managed. Every managed repo is cloned once under `repos/<name>` (read-only to
 the manhandler; crews work in worktrees off it) and gets its per-repo memory

@@ -17,6 +17,11 @@ follow-up inherits the previous one; otherwise match against the registry
 one confident match and name it in plain language. Ask one concise question only
 when several or no repos plausibly match.
 
+If the request targets a repo that does not exist yet (a brand-new project) or an
+un-enrolled remote, the first step is to create/enroll it via `project-management`
+(`mh-repo.sh create` for a new repo, `add` for an existing remote), then dispatch
+against the enrolled repo — never build it outside the framework.
+
 ## 2. Classify — two independent axes
 
 **Deliverable — ship or scout:**
