@@ -13,8 +13,10 @@
 # call, for a `never` repo (dm_merge_authority_gate) — no flag bypasses it. The
 # only carve-out is the operator-granted merge_allowed_bases list: a `never`
 # repo's PR proceeds iff its LIVE GitHub base branch exactly matches a listed
-# non-default branch (dm_merge_base_exception, fail closed on an unverifiable
-# base); a default-branch PR stays impossible to merge. The
+# branch that is neither the LIVE default branch nor the registry default
+# (dm_merge_base_exception, fail closed on anything unverifiable), re-verified
+# immediately before the merge mutation (TOCTOU guard against a retarget);
+# a default-branch PR stays impossible to merge. The
 # operator-approval part of `ask` (vs. standing `yolo`) stays the dockmaster's
 # duty one layer up, per AGENTS.md; this script enforces the never-stop and the
 # CI mechanics.
@@ -104,6 +106,46 @@ task_has_ci() {
     return 0
   fi
   [ -d "$(dm_repo_dir "$repo")/.github/workflows" ]
+}
+
+# verify_never_exception <repo> <slug> <n> <url> — decide the never-repo
+# base-branch carve-out against the PR's LIVE state. Fetches the PR's current
+# base branch AND its repository's current default branch in ONE GitHub call —
+# a self-consistent snapshot: both values come from the same response, so a
+# concurrent retarget/rename cannot split them. The pure gate must then allow
+# against BOTH default-branch anchors:
+#   - the LIVE default (GitHub's truth — catches a registry default_branch that
+#     drifted after a rename or misconfiguration), and
+#   - the registry default (belt-and-braces — catches a stale/wrong GitHub
+#     response, and an empty/unset registry default refuses via the gate rather
+#     than comparing trivially).
+# Either anchor matching the base — or ANY value being unverifiable — refuses
+# (fail closed): the default branch must NEVER be mergeable under `never`.
+# Registry read ordering is load-bearing: the caller resolved authority first,
+# then this reads the allowed list, then the default — the registry advances
+# atomically (locked temp+mv in dm-repo.sh), so each read sees a complete
+# snapshot, and reading the default LAST means a concurrent default_branch
+# change is judged by the freshest value. Prints the verified base branch on
+# allow; dies on everything else.
+verify_never_exception() {
+  local repo="$1" slug="$2" n="$3" url="$4" json base_ref live_default reg_default allowed
+  allowed="$(dm_merge_allowed_bases "$repo")"
+  reg_default="$(dm_registry_get "$repo" default_branch)"
+  json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" \
+    || dm_die "REFUSED: repo $repo is merge_authority=never and the PR's base branch could not be verified on GitHub — refusing (fail closed): $url"
+  base_ref="$(printf '%s' "$json" | jq -r '.base.ref // empty' 2>/dev/null)" || base_ref=""
+  live_default="$(printf '%s' "$json" | jq -r '.base.repo.default_branch // empty' 2>/dev/null)" || live_default=""
+  [ -n "$base_ref" ] || dm_die "REFUSED: repo $repo is merge_authority=never and the PR's base branch could not be verified on GitHub — refusing (fail closed): $url"
+  [ -n "$live_default" ] || dm_die "REFUSED: repo $repo is merge_authority=never and the base repository's LIVE default branch could not be verified on GitHub — refusing (fail closed): $url"
+  case "$(dm_merge_base_exception never "$base_ref" "$live_default" "$allowed")" in
+    allow) : ;;
+    *) dm_die "REFUSED: repo $repo is merge_authority=never and PR base '$base_ref' is not an operator-granted merge base (merge_allowed_bases covers: $(printf '%s' "$allowed" | tr '\n' ' '); live default branch: $live_default); the operator merges it on GitHub" ;;
+  esac
+  case "$(dm_merge_base_exception never "$base_ref" "$reg_default" "$allowed")" in
+    allow) : ;;
+    *) dm_die "REFUSED: repo $repo is merge_authority=never and PR base '$base_ref' matches the registry default_branch ('$reg_default') or the registry default is unset — the default branch is never mergeable under never; the operator merges it on GitHub" ;;
+  esac
+  printf '%s\n' "$base_ref"
 }
 
 # Combine two CI rollups, worst-wins, in precedence:
@@ -325,6 +367,7 @@ case "$cmd" in
     # keeps today's unconditional, offline refusal.
     repo="$(dm_meta_get "$id" repo)"
     [ -n "$repo" ] || dm_die "no such task: $id"
+    never_exception=0; exception_base=""
     authority="$(dm_merge_authority "$repo")"
     case "$(dm_merge_authority_gate "$authority")" in
       allow) : ;;
@@ -333,22 +376,15 @@ case "$cmd" in
         [ -n "$allowed_bases" ] || dm_die "REFUSED: repo $repo is merge_authority=never: the dockmaster may not merge; the PR is merge-ready — the operator merges it on GitHub"
         # An exception is configured: verify the PR's ACTUAL current base branch
         # live from GitHub — never from task meta, since a PR base can be
-        # retargeted on GitHub after `open`. Any fetch failure or empty result
-        # refuses (fail closed): an unverifiable base could be the default branch.
+        # retargeted on GitHub after `open`. verify_never_exception fails closed
+        # on anything unverifiable and enforces both default-branch anchors.
         dm_need gh
         url="$(dm_meta_get "$id" pr)"; [ -n "$url" ] || dm_die "no PR recorded for $id"
         n="$(pr_number_from_url "$url")"
         slug="$(repo_slug "$repo")"
-        base_ref="$(gh api "repos/$slug/pulls/$n" 2>/dev/null | jq -r '.base.ref // empty' 2>/dev/null)" || base_ref=""
-        [ -n "$base_ref" ] || dm_die "REFUSED: repo $repo is merge_authority=never and the PR's base branch could not be verified on GitHub — refusing (fail closed): $url"
-        # Belt-and-braces: the gate re-checks base != default_branch even if the
-        # default branch somehow got listed — it must NEVER be mergeable under
-        # `never`.
-        default_branch="$(dm_registry_get "$repo" default_branch)"
-        case "$(dm_merge_base_exception "$authority" "$base_ref" "$default_branch" "$allowed_bases")" in
-          allow) dm_info "merge-authority exception: repo $repo is merge_authority=never, but PR base '$base_ref' is an operator-granted merge base (merge_allowed_bases); proceeding to the normal merge gates" ;;
-          *) dm_die "REFUSED: repo $repo is merge_authority=never and PR base '$base_ref' is not an operator-granted merge base (merge_allowed_bases covers: $(printf '%s' "$allowed_bases" | tr '\n' ' ')); the operator merges it on GitHub" ;;
-        esac
+        exception_base="$(verify_never_exception "$repo" "$slug" "$n" "$url")"
+        dm_info "merge-authority exception: repo $repo is merge_authority=never, but PR base '$exception_base' is an operator-granted merge base (merge_allowed_bases); proceeding to the normal merge gates"
+        never_exception=1
         ;;
       refuse-invalid) dm_die "REFUSED: repo $repo has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to merge. Set a valid one: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
       *) dm_die "REFUSED: repo $repo merge authority could not be resolved; refusing to merge" ;;
@@ -408,6 +444,19 @@ case "$cmd" in
     slug="$(repo_slug "$repo")"
     args=(pr merge "$n" -R "$slug" "--$method")
     [ "$delete" -eq 1 ] && args+=(--delete-branch)
+    if [ "$never_exception" -eq 1 ]; then
+      # TOCTOU guard: the base was verified before the CI/mergeable gates above,
+      # but `gh pr merge` merges into whatever the base is AT MERGE TIME and
+      # GitHub has no base-pinned merge — a retarget in that window would land
+      # into the new base. Minimize the window: re-run the FULL exception
+      # decision (fresh list, fresh live base + defaults, fail closed on any
+      # fetch failure) immediately before the mutation, and refuse if the base
+      # changed at all since the first check, even to another allowed branch.
+      # The residual instant between this re-check and the merge call is
+      # inherent to GitHub's API and cannot be closed further.
+      recheck_base="$(verify_never_exception "$repo" "$slug" "$n" "$url")"
+      [ "$recheck_base" = "$exception_base" ] || dm_die "REFUSED: PR base changed from '$exception_base' to '$recheck_base' between verification and merge (retargeted on GitHub); refusing: $url"
+    fi
     gh-axi "${args[@]}" || dm_die "merge failed"
     dm_meta_set "$id" pr_state MERGED
     dm_status_append "$id" merged "$url"

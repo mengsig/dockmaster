@@ -237,10 +237,17 @@ invariants, pitfalls, routing. Curated — not append-forever._
   clears; read via `dm_merge_allowed_bases`) lets `dm-pr.sh merge` proceed to
   the normal downstream gates ONLY for a PR whose LIVE GitHub base branch
   (fetched at merge time, never trusted from task meta) exactly full-string
-  matches a listed branch and is not the `default_branch` — decided by the pure
-  `dm_merge_base_exception <authority> <base> <default_branch> <allowed_bases>`,
-  which fails closed (non-never authority, empty/unverifiable base, empty list,
-  default-branch base even if listed, partial match, whitespace → refuse).
+  matches a listed branch and is neither the LIVE default branch (same-response
+  snapshot) nor the registry `default_branch` — decided by the pure
+  `dm_merge_base_exception <authority> <base> <default_branch> <allowed_bases>`
+  run against both anchors, which fails closed (non-never authority,
+  empty/unverifiable base or default, empty list, default-branch base even if
+  listed, partial match, whitespace → refuse), and re-verified immediately
+  before the merge mutation (TOCTOU guard: any base change since first
+  verification refuses; the residual instant is inherent to GitHub's API).
+  Write guards hold the invariant in both directions: `set merge_allowed_bases`
+  refuses the default branch and refuses entirely when `default_branch` is
+  unset; `set default_branch` refuses a currently-listed name.
   `dm-merge.sh local` has NO exception: it always lands on the default branch,
   so `never` keeps hard-refusing there.
   `ask` (default for new repos) and `yolo` permit the mechanics (operator

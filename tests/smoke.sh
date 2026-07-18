@@ -1065,35 +1065,136 @@ check "set rejects the default branch"           '! b dm-repo.sh set mauth merge
 check "set rejects the default branch in a list" '! b dm-repo.sh set mauth merge_allowed_bases "integration,main" >/dev/null 2>&1'
 check "set rejects a whitespace name"            '! b dm-repo.sh set mauth merge_allowed_bases "feature x" >/dev/null 2>&1'
 check "set rejects an empty element"             '! b dm-repo.sh set mauth merge_allowed_bases "integration,,x" >/dev/null 2>&1'
+# Pin the CSV space-after-comma behavior: " feature/x" is a whitespace-bearing
+# name and is refused as such (no silent trimming).
+check "csv space-after-comma is refused as whitespace" 'OUT="$(b dm-repo.sh set mauth merge_allowed_bases "integration, feature/x" 2>&1 || true)"; grep -q "whitespace" <<<"$OUT"'
 check "a rejected set leaves the stored list intact" '[ "$(mbread mauth)" = "$(printf "integration\nfeature/x/overhaul")" ]'
+# A hand-corrupted array grants nothing for its non-string entries: only the
+# string ones survive the reader.
+jq '.repos["mauth"].merge_allowed_bases = [123,"integration",null]' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "reader drops non-string entries in a corrupt array" '[ "$(mbread mauth)" = "integration" ]'
+b dm-repo.sh set mauth merge_allowed_bases "integration,feature/x/overhaul" >/dev/null
+# Reverse-direction write guard: a listed name can never become the default.
+check "set default_branch refuses a listed name" '! b dm-repo.sh set mauth default_branch integration >/dev/null 2>&1'
+MBDEFOUT="$(b dm-repo.sh set mauth default_branch integration 2>&1 || true)"
+check "the reverse-guard refusal names merge_allowed_bases" 'grep -q "merge_allowed_bases" <<<"$MBDEFOUT"'
+# An unset default_branch makes the default-exclusion guard a no-op, so the set
+# is refused entirely (fail closed) with a pointer to set default_branch first.
+cp "$REG" "$REG.bak"
+jq 'del(.repos["mauth"].default_branch)' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+MBNODEF="$(b dm-repo.sh set mauth merge_allowed_bases "anything" 2>&1 || true)"
+check "set refuses when default_branch is unset"            '! b dm-repo.sh set mauth merge_allowed_bases "anything" >/dev/null 2>&1'
+check "the unset-default refusal points at default_branch"  'grep -q "default_branch" <<<"$MBNODEF"'
+mv "$REG.bak" "$REG"
 check "an empty value clears the field entirely" 'b dm-repo.sh set mauth merge_allowed_bases "" >/dev/null 2>&1 && jq -e ".repos[\"mauth\"] | has(\"merge_allowed_bases\") | not" "$REG" >/dev/null'
 check "reader prints nothing after the clear"    '[ -z "$(mbread mauth)" ]'
 
 echo "== merge-base exception: dm-pr.sh merge honors the LIVE PR base on a never repo =="
-# Stub gh so the live-base read is deterministic and offline: every `gh api`
-# call answers with a fixed PR JSON whose base.ref each case controls. gh-axi is
-# stubbed to fail loudly so the actual merge mutation is provably never reached.
+# Stub gh so the live-base read is deterministic and offline: PR-detail calls
+# answer with pr.json (or pr2.json after the first read when "retarget" is
+# armed, simulating a mid-merge base retarget), check-runs/status calls answer
+# with runs.json/status.json, and a "fail" marker makes gh exit non-zero.
+# gh-axi records that it was invoked, then fails loudly, so reaching (or not
+# reaching) the actual merge mutation is observable.
 b dm-repo.sh set mauth merge_authority never >/dev/null
 b dm-repo.sh set mauth merge_allowed_bases "integration" >/dev/null
 b dm-task.sh new mauth-exc --kind ship --repo mauth >/dev/null
 ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set mauth-exc pr "https://github.com/o/r/pull/9" ) >/dev/null 2>&1
 GHSTUB="$TMP/ghstub"; mkdir -p "$GHSTUB"
-printf '#!/bin/sh\ncat "%s/pr.json"\n' "$GHSTUB" > "$GHSTUB/gh"
-printf '#!/bin/sh\nexit 1\n' > "$GHSTUB/gh-axi"
+cat > "$GHSTUB/gh" <<STUB
+#!/bin/sh
+D="$GHSTUB"
+case "\$*" in
+  *check-runs*) cat "\$D/runs.json"; exit 0 ;;
+  *commits*status*) cat "\$D/status.json"; exit 0 ;;
+esac
+[ -f "\$D/fail" ] && exit 1
+if [ -f "\$D/retarget" ]; then
+  if [ -f "\$D/seen" ]; then cat "\$D/pr2.json"; exit 0; fi
+  : > "\$D/seen"
+fi
+cat "\$D/pr.json"
+STUB
+printf '#!/bin/sh\n: > "%s/ghaxi-called"\nexit 1\n' "$GHSTUB" > "$GHSTUB/gh-axi"
 chmod +x "$GHSTUB/gh" "$GHSTUB/gh-axi"
-printf '{"state":"open","merged":false,"base":{"ref":"integration"},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+printf '{"check_runs":[]}\n' > "$GHSTUB/runs.json"
+printf '{"total_count":0}\n' > "$GHSTUB/status.json"
+printf '{"state":"open","merged":false,"base":{"ref":"integration","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
 EXCOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a listed live base passes the authority gate"        'grep -q "operator-granted merge base" <<<"$EXCOUT"'
 check "downstream never-merge-red gate still applies"       'grep -qi "no checks reported" <<<"$EXCOUT"'
-printf '{"state":"open","merged":false,"base":{"ref":"main"},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
 check "a default-branch live base still hard-refuses"       '! PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc >/dev/null 2>&1'
 DEFOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "the default-branch refusal names the unallowed base" 'grep -q "not an operator-granted merge base" <<<"$DEFOUT" && grep -q "main" <<<"$DEFOUT"'
-printf '{"state":"open","merged":false,"base":{"ref":"integration-2"},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"base":{"ref":"integration-2","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
 check "an unlisted live base still hard-refuses"            '! PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc >/dev/null 2>&1'
 printf 'not json\n' > "$GHSTUB/pr.json"
 UNVEROUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "an unverifiable live base fails closed"              'grep -q "could not be verified" <<<"$UNVEROUT"'
+# gh itself failing (non-zero exit, no output) is distinct from garbage output;
+# both refuse fail-closed.
+: > "$GHSTUB/fail"
+GHFAILOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "a failing gh call fails closed"                      'grep -q "could not be verified" <<<"$GHFAILOUT"'
+rm -f "$GHSTUB/fail"
+# A response missing the live default branch refuses fail-closed too.
+printf '{"state":"open","merged":false,"base":{"ref":"integration","repo":{}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+NOLIVEDEF="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "a missing live default branch fails closed"          'grep -qi "live default branch could not be verified" <<<"$NOLIVEDEF"'
+
+echo "== merge-base exception: live default anchor + pre-merge TOCTOU re-check =="
+# Live-anchor belt-and-braces: the registry default is main, so "trunk" is
+# listable — but when GitHub reports trunk as the repository's LIVE default, a
+# trunk-based PR must still refuse (the live anchor wins over a drifted
+# registry default).
+b dm-repo.sh set mauth merge_allowed_bases "integration,trunk" >/dev/null
+printf '{"state":"open","merged":false,"base":{"ref":"trunk","repo":{"default_branch":"trunk"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+LIVEDEF="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "a listed base that IS the live default still refuses" 'grep -q "not an operator-granted merge base" <<<"$LIVEDEF"'
+# Full green path: passing checks + clean mergeable_state. The merge must clear
+# every gate INCLUDING the pre-mutation re-verify, reach the gh-axi mutation
+# (observable via the stub's marker), and fail only on the stub's exit 1.
+b dm-repo.sh set mauth merge_allowed_bases "integration,integration2" >/dev/null
+printf '{"check_runs":[{"status":"completed","conclusion":"success"}]}\n' > "$GHSTUB/runs.json"
+printf '{"state":"open","merged":false,"head":{"sha":"abc123"},"base":{"ref":"integration","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr.json"
+rm -f "$GHSTUB/ghaxi-called" "$GHSTUB/seen"
+GREENOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "a green listed-base merge reaches the merge mutation" '[ -f "$GHSTUB/ghaxi-called" ] && grep -q "merge failed" <<<"$GREENOUT"'
+# TOCTOU: the base is retargeted to the DEFAULT after the first verification —
+# the pre-mutation re-check refuses and the mutation is never invoked.
+rm -f "$GHSTUB/ghaxi-called" "$GHSTUB/seen"
+printf '{"state":"open","merged":false,"head":{"sha":"abc123"},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr2.json"
+: > "$GHSTUB/retarget"
+TOCTOU1="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "a mid-merge retarget to the default refuses"           'grep -q "not an operator-granted merge base" <<<"$TOCTOU1"'
+check "the retargeted merge never reaches the mutation"       '[ ! -f "$GHSTUB/ghaxi-called" ]'
+# TOCTOU: retargeted to ANOTHER allowed branch — still refused (the base
+# changed since verification), mutation never invoked.
+rm -f "$GHSTUB/seen"
+printf '{"state":"open","merged":false,"head":{"sha":"abc123"},"base":{"ref":"integration2","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr2.json"
+TOCTOU2="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
+check "a retarget to another ALLOWED base still refuses"      'grep -q "base changed" <<<"$TOCTOU2"'
+check "the allowed-retarget merge never reaches the mutation" '[ ! -f "$GHSTUB/ghaxi-called" ]'
+rm -f "$GHSTUB/retarget" "$GHSTUB/seen"
+
+echo "== merge-base exception: dm-merge.sh local has NO exception =="
+# A never repo WITH allowed bases configured still hard-refuses a local land:
+# local always targets the clone's default branch.
+b dm-repo.sh set mauth merge_allowed_bases "integration" >/dev/null
+b dm-task.sh new mauth-exc-local --kind ship --repo mauth --mode local-only >/dev/null
+MELWT="$(b dm-worktree.sh create mauth-exc-local mauth | tail -n1)"
+git -C "$MELWT" checkout -q -b feat/x/mauth-exc-local
+printf 'z\n' > "$MELWT/excl.txt"
+git -C "$MELWT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$MELWT" -c user.email=c@c.co -c user.name=c commit -qm "excl work" >/dev/null
+MELBEFORE="$(git -C "$DM_HOME/repos/mauth" rev-parse main)"
+check "local land still refuses a never repo with allowed bases" '! b dm-merge.sh local mauth-exc-local >/dev/null 2>&1'
+MELOUT="$(b dm-merge.sh local mauth-exc-local 2>&1 || true)"
+check "the local refusal still names merge_authority=never"      'grep -q "merge_authority=never" <<<"$MELOUT"'
+check "the local refusal did not advance the clone"              '[ "$(git -C "$DM_HOME/repos/mauth" rev-parse main)" = "$MELBEFORE" ]'
+b dm-worktree.sh remove mauth-exc-local --force >/dev/null 2>&1
+
 # With NO merge_allowed_bases configured the refusal is unchanged from today:
 # offline, before any GitHub tool, naming merge_authority=never — no carve-out
 # mentioned.

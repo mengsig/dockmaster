@@ -248,6 +248,14 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
       mode) require_valid_mode "$value"
             registry_write --arg n "$name" --arg v "$value" '.repos[$n].mode = $v' ;;
       default_branch)
+            # Reverse direction of the merge_allowed_bases write guard: a name
+            # currently listed as an allowed merge base can never become the
+            # default, so the registry never holds list ∋ default from either
+            # write order (downstream merge gates still defend it at merge time).
+            listed="$(dm_merge_allowed_bases "$name")"
+            if grep -qxF "$value" <<<"$listed"; then
+              dm_die "default_branch: '$value' is listed in merge_allowed_bases of '$name'; remove it from the list first (the default branch can never be an allowed merge base)"
+            fi
             dir="$DM_REPOS/$name"
             [ -d "$dir/.git" ] || dm_die "cannot set default_branch: no clone at $dir"
             # It must actually resolve as a branch in the clone (local or on origin);
@@ -268,6 +276,13 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
               report_value="(cleared)"
             else
               def_branch="$(dm_registry_get "$name" default_branch)"
+              # Without a known default the default-branch exclusion below would
+              # pass trivially (any name != ""), so refuse the whole set: the
+              # guard must never be a silent no-op.
+              [ -n "$def_branch" ] || dm_die "merge_allowed_bases: repo '$name' has no default_branch set; set it first (dm-repo.sh set $name default_branch <branch>) so the default branch can be excluded from the list"
+              # CSV split limitation: a branch name containing a comma cannot be
+              # represented here — it splits into fragments that fail validation
+              # (fail closed), never into a silently-wrong entry.
               bases_json="[]"
               rest="$value,"
               while [ -n "$rest" ]; do
