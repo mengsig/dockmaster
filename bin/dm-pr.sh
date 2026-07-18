@@ -333,6 +333,26 @@ case "$cmd" in
       else
         checks="unknown"
       fi
+      # Two head-race guards (#75). A DIRTY (merge-conflicted) PR never gets
+      # checks — GitHub skips workflow runs when the merge commit cannot be
+      # built — so polling to timeout is futile: fail fast and name the fix.
+      merge_state="$(dm_meta_get "$id" merge_state)"
+      if [ "$merge_state" = "dirty" ]; then
+        dm_info "await-checks: DIRTY after ${waited}s (merge conflict — GitHub runs no checks on an unmergeable PR; rebase first): $url"
+        exit 1
+      fi
+      # And a terminal rollup is trusted only when the CURRENT head actually
+      # has check-runs: right after a push the rollup can still describe the
+      # previous head's finished run, turning stale green/red into a wrong
+      # terminal answer. Zero runs on a CI repo means "not started yet".
+      if [ "$has_ci" -eq 1 ] && { [ "$checks" = "passing" ] || [ "$checks" = "failing" ]; }; then
+        await_sha="$(dm_meta_get "$id" pr_head)"
+        if [ -n "$await_sha" ]; then
+          await_slug="$(repo_slug "$(dm_meta_get "$id" repo)")"
+          await_runs="$(gh api "repos/$await_slug/commits/$await_sha/check-runs" 2>/dev/null | jq -r '.total_count // 0' 2>/dev/null || echo 0)"
+          [ "$await_runs" = "0" ] && checks="pending"
+        fi
+      fi
       case "$checks" in
         passing) dm_info "await-checks: passing after ${waited}s: $url"; exit 0 ;;
         none)

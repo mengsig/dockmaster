@@ -1204,5 +1204,28 @@ check "the no-list never refusal is unchanged"              'grep -q "merge_auth
 check "the no-list refusal does not mention the carve-out"  '! grep -q "merge_allowed_bases" <<<"$NOEXC"'
 
 echo
+echo "== await-checks head-race guards (#75) =="
+# Reuse the GHSTUB harness: a task whose PR is merge-conflicted (dirty) gets no
+# checks from GitHub ever — await-checks must fail fast naming the conflict,
+# not poll to timeout.
+b dm-task.sh new await-75 --kind ship --repo mauth >/dev/null
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set await-75 pr "https://github.com/o/r/pull/75" ) >/dev/null 2>&1
+printf '{"state":"open","merged":false,"head":{"sha":"aaa111"},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"dirty"}\n' > "$GHSTUB/pr.json"
+printf '{"check_runs":[]}\n' > "$GHSTUB/runs.json"
+printf '{"total_count":0}\n' > "$GHSTUB/status.json"
+AWDIRTY="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 120 --interval-secs 1 2>&1 || true)"
+check "dirty PR fails fast, no timeout wait"   'grep -q "DIRTY" <<<"$AWDIRTY" && grep -q "after 0s" <<<"$AWDIRTY"'
+check "dirty fast-fail is non-zero"            '! PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 >/dev/null 2>&1'
+# Stale-rollup guard: check-runs says passing but the CURRENT head has zero
+# runs — a just-pushed branch whose rollup still describes the old head. A
+# single probe (timeout 0) must NOT report passing; it times out pending.
+mkdir -p "$DM_HOME/repos/mauth/.github/workflows"   # stale guard applies only to CI-configured repos
+printf '{"state":"open","merged":false,"head":{"sha":"bbb222"},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+printf '{"total_count":0,"check_runs":[{"status":"completed","conclusion":"success"}]}\n' > "$GHSTUB/runs.json"
+AWSTALE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
+check "stale green rollup is not trusted as terminal" '! grep -q "passing" <<<"$AWSTALE"'
+rm -rf "$DM_HOME/repos/mauth/.github"
+
+echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
