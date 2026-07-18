@@ -801,6 +801,20 @@ check "no explicit --base falls back to the recorded parent" \
 check "no --base and no recorded parent falls back to the default branch" \
   '[ "$(prbase sub-default "" "$MH_HOME/repos/substack")" = "main" ]'
 
+echo "== sub-PR stack: cold-review fixes (malformed flag + base meta forge guard) =="
+# `--base` as the last token (no value) must fail VISIBLY with a named message,
+# not a silent crash from `shift 2` running out of positional args under -u.
+b mh-task.sh new sub-badflag --kind ship --repo substack >/dev/null
+check "--base with no value fails (not a bare crash)" \
+  '! b mh-worktree.sh create sub-badflag substack sub-branch-bad --base >/dev/null 2>&1'
+BADFLAGOUT="$(b mh-worktree.sh create sub-badflag substack sub-branch-bad --base 2>&1 || true)"
+check "--base with no value names the requirement" 'grep -q -- "--base requires" <<<"$BADFLAGOUT"'
+check "--base with no value leaves no worktree behind" '[ ! -e "$MH_HOME/state/worktrees/sub-badflag" ]'
+# `base` feeds `gh pr create --base`; a hand-set value would silently retarget a
+# sub-PR, so `mh-task.sh set` must refuse it like pr/pr_state/merge_state.
+check "set refuses hand-writing base" '! b mh-task.sh set sub-child base evil-branch >/dev/null 2>&1'
+check "set base recorded by --base is untouched by the guard" '[ "$(b mh-task.sh get sub-child base)" = "parent-feature" ]'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

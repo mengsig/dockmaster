@@ -67,8 +67,13 @@ case "$cmd" in
     # to hand-set them here: `set pr_state MERGED` would otherwise forge a
     # terminal landing over unlanded work (the same forge the `event merged`
     # reservation blocks). The sanctioned writer uses mh_meta_set directly.
+    # `base` gets the same protection: it feeds `gh pr create --base` (via
+    # mh_pr_base_for), so a hand-forged value would silently retarget a sub-PR.
+    # It is recorded only by `mh-worktree.sh create --base`, which also writes
+    # directly via mh_meta_set and so is unaffected by this CLI-only guard.
     case "$key" in
       pr|pr_state|merge_state) mh_die "'$key' is a PR-tracking field maintained by mh-pr.sh (check/open/merge); it must not be set by hand" ;;
+      base) mh_die "'base' is recorded by mh-worktree.sh create --base; it must not be set by hand" ;;
     esac
     mh_meta_set "$id" "$key" "$value"
     ;;

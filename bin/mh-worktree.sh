@@ -65,7 +65,7 @@ case "$cmd" in
     id=""; repo=""; branch=""; base_ref=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        --base) base_ref="${2:-}"; shift 2 ;;
+        --base) [ "$#" -ge 2 ] || mh_die "--base requires a <ref>"; base_ref="$2"; shift 2 ;;
         -*) mh_die "unknown flag: $1" ;;
         *)
           if [ -z "$id" ]; then id="$1"
