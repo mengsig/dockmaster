@@ -57,8 +57,25 @@ the lifecycle. Then spawn the crewmate with the brief as its prompt:
 
 ```
 Agent(prompt=<contents of data/<id>/brief.md>, run in background,
-      subagent_type/model/effort per config/dispatch judgment)
+      subagent_type/model/effort per the resourcing policy below)
 ```
+
+**Right-size the dispatch — you decide the resources.** The manhandler runs on a
+capable model precisely so it can judge how much power each unit of work needs;
+do NOT just inherit your own tier. For every spawn, set `model` and `effort` to
+the *least* that will still get an excellent result:
+- trivial / mechanical (a doc or contract-text edit, a rename, a config value) →
+  a small fast model at low effort;
+- ordinary implementation → a mid tier;
+- hard reasoning, adversarial review, or subtle safety / concurrency / security
+  work → the top tier at high effort.
+
+Bias toward *sufficient* power: when unsure, size **up** — never trade
+correctness or quality for tokens. Optimize speed and cost only where they do not
+risk the result. This is the orchestrator's per-task judgment, not a fixed table,
+and it applies to **every** sub-unit you spawn downstream — review passes,
+verification, fix rounds, merge-gate reasoning (see `pr-workflow`) — not just the
+implementing crewmate.
 
 For work that mutates files where a plain subagent would collide with siblings,
 prefer `isolation: "worktree"`; here the crew already has a dedicated worktree

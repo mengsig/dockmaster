@@ -20,6 +20,14 @@ reorder, drop, or add gates by editing one array.
 Scale review rigor to stakes. The tier is a **per-task** choice (not a per-repo
 default); when in doubt, use `default`.
 
+**Right-size each pass, not just the tier.** Beyond picking the tier, set the
+`model` and `effort` of every reviewer, verifier, and fix agent you spawn to fit
+the diff's difficulty — the resourcing policy in `task-lifecycle` (§3 Dispatch).
+A low-stakes diff's cold review can run on a small fast model; a subtle
+safety / concurrency diff's review and adversarial verification get the top tier
+at high effort. Bias toward enough power to catch what matters — never under-power
+a review to save tokens.
+
 - **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial** changes
   only (see `change-review` for the criteria): one review pass instead of two,
   the lavish approval gate may be skipped. Tests still run; merge authority
