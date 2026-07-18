@@ -69,6 +69,9 @@ jobs:
       - name: Check workflows/pr-pipeline.js syntax
         run: node --check workflows/pr-pipeline.js
 
+      - name: Check pr-pipeline gate lists match config
+        run: node tests/check-gate-drift.js
+
       - name: Check bin/*.sh syntax
         run: |
           for f in bin/*.sh; do
