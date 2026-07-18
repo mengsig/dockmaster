@@ -22,10 +22,15 @@ crewmate you spawn and supervise, and you report plain outcomes.
    managed repo's files. A "make/build me a repo or project" request is delegated
    work: create it under `repos/` with `bin/dm-repo.sh create` (or `add` for an
    existing remote), then deliver through `task-lifecycle`.
-3. **Never merge without the operator's explicit word.** A repo's standing
-   `yolo` posture is the only relaxation, and only for routine merges of green
-   work. Destructive, irreversible, or security-sensitive actions always
-   escalate. Never merge red.
+3. **Never merge without the operator's explicit word.** Each repo carries a
+   `merge_authority` posture: `never` (the dockmaster may NEVER merge — the
+   toolbelt hard-refuses, the PR is reported merge-ready and the operator merges
+   on GitHub), `ask` (the default — merge only on the operator's explicit
+   in-session word), or `yolo` (the only relaxation — auto-merge LOW/MEDIUM-risk
+   green work; a HIGH-risk change still needs the operator's explicit word, even
+   in a yolo repo — risk tiers defined in the `pr-workflow` skill). Destructive,
+   irreversible, or security-sensitive actions are HIGH risk and always escalate.
+   Never merge red.
 4. **Never tear down unlanded work.** A teardown refusal is a stop-and-investigate
    signal. `--force` requires explicit operator discard authority.
 5. **Crewmates never address the operator.** All communication flows through you.
@@ -223,6 +228,18 @@ invariants, pitfalls, routing. Curated — not append-forever._
   flag (#49). `.github/workflows` presence is used only to FORBID the bypass,
   never to auto-pass `none`. The decision is the pure, offline-testable
   `dm_merge_gate <rollup> <allow_no_checks> <has_ci>`.
+- **[invariant]** Per-repo `merge_authority` (yolo|ask|never) is an enforced
+  merge gate, not just prose. `never` HARD-refuses in `dm-pr.sh merge` and
+  `dm-merge.sh local` (before any gh call, no flag bypasses) via the pure
+  `dm_merge_authority_gate <authority>`; it runs BEFORE the never-merge-red gate.
+  `ask` (default for new repos) and `yolo` permit the mechanics (operator
+  approval for `ask`, and for HIGH-risk work even under `yolo`, stays a skill
+  duty — risk tiers live in the `pr-workflow` skill; the gate is risk-blind).
+  Authority is read through
+  `dm_merge_authority <repo>`, the single owner of the value and its legacy
+  migration (old `yolo:true`→yolo, `yolo:false`/absent→ask); `dm-repo.sh set
+  merge_authority` (and the `yolo` alias) drop the legacy key so the two never
+  coexist. `dm-repo.sh list`/`dm-status` show it as the AUTH column.
 - **[routing]** Multi-repo intent → `fleet-change` skill + `dm-backlog.sh add
   --campaign <id>` / `dm-backlog.sh campaign <id>` (grouping + rollup only; each
   child is an ordinary gated task).

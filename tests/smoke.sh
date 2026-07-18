@@ -907,6 +907,134 @@ check "worst_rollup: none can never mask a failing rollup"    \
 check "worst_rollup: passing can never mask a failing rollup" \
   '[ "$(prfn worst_rollup passing failing)" = failing ] && [ "$(prfn worst_rollup failing passing)" = failing ]'
 
+echo "== merge-authority: pure gate, field validation, legacy yolo mapping =="
+# The gate is a pure function (like dm_merge_gate): never is an absolute refusal,
+# ask/yolo allow the mechanics, and an unrecognized authority fails closed.
+mauth()  { ( . "$ROOT/bin/dm-lib.sh"; dm_merge_authority_gate "$1" ); }
+mauthr() { ( . "$ROOT/bin/dm-lib.sh"; dm_merge_authority "$1" ); }
+check "authority gate allows yolo"             '[ "$(mauth yolo)"    = "allow" ]'
+check "authority gate allows ask"              '[ "$(mauth ask)"     = "allow" ]'
+check "authority gate refuses never"           '[ "$(mauth never)"   = "refuse-never" ]'
+check "authority gate fails closed on invalid" '[ "$(mauth invalid)" = "refuse-invalid" ]'
+check "authority gate fails closed on garbage" '[ "$(mauth bogus)"   = "refuse-invalid" ]'
+
+# New repos default to ask; the settable field validates and rejects garbage.
+b dm-repo.sh add mauth "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+check "new repo defaults to merge_authority=ask" '[ "$(b dm-repo.sh get mauth merge_authority)" = "ask" ]'
+check "set merge_authority never works"          'b dm-repo.sh set mauth merge_authority never >/dev/null 2>&1'
+check "get reflects merge_authority never"       '[ "$(b dm-repo.sh get mauth merge_authority)" = "never" ]'
+check "set merge_authority rejects garbage"      '! b dm-repo.sh set mauth merge_authority bogus >/dev/null 2>&1'
+# list surfaces the AUTH column so the operator can audit merge authority at a glance.
+MAUTHLIST="$(b dm-repo.sh list)"
+check "list shows the AUTH column header"     'grep -q "AUTH" <<<"$MAUTHLIST"'
+check "list shows the repo's never authority" 'grep -E "mauth +never" <<<"$MAUTHLIST" >/dev/null'
+
+# The yolo alias maps to merge_authority (single source of truth) and retires the
+# legacy boolean in the same write, so the two representations never drift.
+b dm-repo.sh set mauth yolo true >/dev/null
+check "yolo=true alias maps to merge_authority yolo" '[ "$(b dm-repo.sh get mauth merge_authority)" = "yolo" ]'
+check "yolo alias drops the legacy yolo key"         '[ -z "$(b dm-repo.sh get mauth yolo)" ]'
+b dm-repo.sh set mauth yolo false >/dev/null
+check "yolo=false alias maps to merge_authority ask" '[ "$(b dm-repo.sh get mauth merge_authority)" = "ask" ]'
+check "yolo alias rejects a non-bool value"          '! b dm-repo.sh set mauth yolo maybe >/dev/null 2>&1'
+
+# Legacy registry (a yolo bool, no merge_authority) maps on read: true->yolo,
+# false/absent->ask. Simulate one by rewriting the throwaway registry directly.
+# The list AUTH column must show the DERIVED authority for such an entry, not
+# just after an explicit set (the display path goes through the same resolver).
+REG="$DM_HOME/state/repos.json"
+jq '.repos["mauth"] |= (del(.merge_authority) + {yolo:true})'  "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "legacy yolo:true reads as yolo"       '[ "$(mauthr mauth)" = "yolo" ]'
+check "list shows legacy yolo:true as yolo"  'grep -E "mauth +yolo" <<<"$(b dm-repo.sh list)" >/dev/null'
+jq '.repos["mauth"] |= (del(.merge_authority) + {yolo:false})' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "legacy yolo:false reads as ask"       '[ "$(mauthr mauth)" = "ask" ]'
+jq '.repos["mauth"] |= (del(.yolo) | del(.merge_authority))'   "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "absent authority reads as ask"        '[ "$(mauthr mauth)" = "ask" ]'
+check "list shows a legacy absent entry as ask" 'grep -E "mauth +ask" <<<"$(b dm-repo.sh list)" >/dev/null'
+
+# A corrupt/hand-broken merge_authority must FAIL CLOSED, not silently downgrade
+# to a permissive posture: the resolver returns `invalid` and list renders it
+# visibly (one bad row must not kill the whole listing).
+jq '.repos["mauth"] |= (.merge_authority = "nevr")' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "corrupt merge_authority resolves to invalid" '[ "$(mauthr mauth)" = "invalid" ]'
+MAUTHINV="$(b dm-repo.sh list)"
+check "list renders a corrupt entry as invalid, not fatal" 'grep -E "mauth +invalid" <<<"$MAUTHINV" >/dev/null'
+check "list still shows other repos alongside a corrupt row" 'grep -q "demo" <<<"$MAUTHINV"'
+# The WHOLE stored value is validated: a value that merely STARTS with a valid
+# token but embeds a delimiter (tab/newline) must not truncate to a passing
+# prefix — it resolves to invalid and fails closed.
+jq '.repos["mauth"] |= (.merge_authority = "yolo\tx")' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "embedded-tab \"yolo\\tx\" resolves to invalid" '[ "$(mauthr mauth)" = "invalid" ]'
+jq '.repos["mauth"] |= (.merge_authority = "ask\tx")'  "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "embedded-tab \"ask\\tx\" resolves to invalid"  '[ "$(mauthr mauth)" = "invalid" ]'
+jq '.repos["mauth"] |= (.merge_authority = "yolo\nx")' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "embedded-newline \"yolo\\nx\" resolves to invalid" '[ "$(mauthr mauth)" = "invalid" ]'
+jq '.repos["mauth"] |= (del(.merge_authority) | del(.yolo))' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+
+echo "== merge-authority: dm-merge.sh local hard-refuses a never repo =="
+b dm-repo.sh set mauth merge_authority never >/dev/null
+b dm-task.sh new mauth-land --kind ship --repo mauth --mode local-only >/dev/null
+MAWT="$(b dm-worktree.sh create mauth-land mauth | tail -n1)"
+git -C "$MAWT" checkout -q -b feat/x/mauth-land
+printf 'x\n' > "$MAWT/mauth.txt"
+git -C "$MAWT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$MAWT" -c user.email=c@c.co -c user.name=c commit -qm "mauth work" >/dev/null
+DEFBEFORE="$(git -C "$DM_HOME/repos/mauth" rev-parse main)"
+check "local land refuses a never repo"           '! b dm-merge.sh local mauth-land >/dev/null 2>&1'
+LANDOUT="$(b dm-merge.sh local mauth-land 2>&1 || true)"
+check "local refusal names merge_authority=never" 'grep -q "merge_authority=never" <<<"$LANDOUT"'
+check "local refusal did not advance the clone"   '[ "$(git -C "$DM_HOME/repos/mauth" rev-parse main)" = "$DEFBEFORE" ]'
+# Flipping authority to ask (the only change) lets the very same land succeed AND
+# actually advance the clone past where it was before the refusal.
+b dm-repo.sh set mauth merge_authority ask >/dev/null
+check "local land proceeds once authority is ask" 'b dm-merge.sh local mauth-land >/dev/null 2>&1'
+check "ask-path land actually advanced the clone"  '[ "$(git -C "$DM_HOME/repos/mauth" rev-parse main)" != "$DEFBEFORE" ]'
+b dm-worktree.sh remove mauth-land >/dev/null 2>&1
+
+echo "== merge-authority: dm-pr.sh merge hard-refuses a never repo before any GitHub call =="
+# The authority gate runs before `dm_need gh` and before any gh call, so this is
+# deterministic offline (no network, no gh required). Seed a PR via the same
+# owner path dm-pr.sh check uses (`set` refuses to hand-write pr).
+b dm-repo.sh set mauth merge_authority never >/dev/null
+b dm-task.sh new mauth-pr --kind ship --repo mauth >/dev/null
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set mauth-pr pr "https://github.com/o/r/pull/1" ) >/dev/null 2>&1
+check "pr merge refuses a never repo"                '! b dm-pr.sh merge mauth-pr >/dev/null 2>&1'
+PRMERGEOUT="$(b dm-pr.sh merge mauth-pr 2>&1 || true)"
+check "pr merge refusal names merge_authority=never" 'grep -q "merge_authority=never" <<<"$PRMERGEOUT"'
+check "pr merge refusal points at operator merging"  'grep -qi "operator merges" <<<"$PRMERGEOUT"'
+
+echo "== merge-authority: a corrupt stored value fails closed on both landing paths (composed) =="
+# Hand-break the stored value directly in the throwaway registry (as a bad edit
+# would), then drive both landing paths offline. Each must refuse — naming the
+# bad value — and the clone must not advance. The pure-gate tests above cover
+# this in isolation; this exercises the composed script path end to end.
+b dm-repo.sh set mauth merge_authority ask >/dev/null   # valid posture for the setup below
+b dm-task.sh new mauth-corrupt --kind ship --repo mauth --mode local-only >/dev/null
+MCWT="$(b dm-worktree.sh create mauth-corrupt mauth | tail -n1)"
+git -C "$MCWT" checkout -q -b feat/x/mauth-corrupt
+printf 'y\n' > "$MCWT/corrupt.txt"
+git -C "$MCWT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$MCWT" -c user.email=c@c.co -c user.name=c commit -qm "corrupt-path work" >/dev/null
+# Break the value only AFTER the worktree/commit setup (which needs a valid one).
+jq '.repos["mauth"] |= (.merge_authority = "nevr")' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+CORRUPT_BEFORE="$(git -C "$DM_HOME/repos/mauth" rev-parse main)"
+check "local land refuses a corrupt authority"           '! b dm-merge.sh local mauth-corrupt >/dev/null 2>&1'
+CORRUPTLAND="$(b dm-merge.sh local mauth-corrupt 2>&1 || true)"
+check "local corrupt refusal names the bad value"        'grep -q "nevr" <<<"$CORRUPTLAND" && grep -qi "invalid merge_authority" <<<"$CORRUPTLAND"'
+check "local corrupt refusal did not advance the clone"  '[ "$(git -C "$DM_HOME/repos/mauth" rev-parse main)" = "$CORRUPT_BEFORE" ]'
+b dm-task.sh new mauth-corrupt-pr --kind ship --repo mauth >/dev/null
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set mauth-corrupt-pr pr "https://github.com/o/r/pull/2" ) >/dev/null 2>&1
+check "pr merge refuses a corrupt authority"             '! b dm-pr.sh merge mauth-corrupt-pr >/dev/null 2>&1'
+CORRUPTPR="$(b dm-pr.sh merge mauth-corrupt-pr 2>&1 || true)"
+check "pr corrupt refusal names the bad value"           'grep -q "nevr" <<<"$CORRUPTPR" && grep -qi "invalid merge_authority" <<<"$CORRUPTPR"'
+# A value starting with a valid token but embedding a tab must also refuse on a
+# real landing path (not just the resolver) — the whole value is validated.
+jq '.repos["mauth"] |= (.merge_authority = "yolo\tx")' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+EMBED_BEFORE="$(git -C "$DM_HOME/repos/mauth" rev-parse main)"
+check "local land refuses an embedded-tab \"yolo\\tx\" value" '! b dm-merge.sh local mauth-corrupt >/dev/null 2>&1'
+check "embedded-tab refusal did not advance the clone"        '[ "$(git -C "$DM_HOME/repos/mauth" rev-parse main)" = "$EMBED_BEFORE" ]'
+b dm-worktree.sh remove mauth-corrupt --force >/dev/null 2>&1
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

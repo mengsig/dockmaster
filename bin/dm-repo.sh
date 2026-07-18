@@ -67,7 +67,7 @@ register_repo() {
     --arg n "$1" --arg r "$2" --arg p "repos/$1" \
     --arg b "$3" --arg m "$4" --arg t "$5" \
     --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    '.repos[$n] = {remote:$r, path:$p, default_branch:$b, mode:$m, yolo:false, test_cmd:$t, pipeline:"default", memory:false, added:$ts}'
+    '.repos[$n] = {remote:$r, path:$p, default_branch:$b, mode:$m, merge_authority:"ask", test_cmd:$t, pipeline:"default", memory:false, added:$ts}'
 }
 
 # Scaffold the repo's private memory store in the clone: git-excluded
@@ -198,8 +198,18 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     ;;
 
   list)
-    jq -r '.repos | to_entries[] | "\(.key)\t\(.value.mode)\t\(.value.default_branch)\t\(.value.remote)"' "$DM_REGISTRY" \
-      | { printf 'NAME\tMODE\tBRANCH\tREMOTE\n'; cat; } | column -t -s$'\t' 2>/dev/null || cat
+    # AUTH (merge authority) is resolved through dm_merge_authority per repo so
+    # the display and the enforcement paths share one migration rule (a legacy
+    # yolo-only entry still shows the derived authority), rather than duplicating
+    # the yolo->authority mapping inline in jq.
+    { printf 'NAME\tAUTH\tMODE\tBRANCH\tREMOTE\n'
+      while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$(dm_merge_authority "$name")" \
+          "$(dm_registry_get "$name" mode)" "$(dm_registry_get "$name" default_branch)" \
+          "$(dm_registry_get "$name" remote)"
+      done < <(jq -r '.repos | keys[]' "$DM_REGISTRY")
+    } | column -t -s$'\t' 2>/dev/null || cat
     ;;
 
   get)
@@ -215,9 +225,26 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     jq -e --arg n "$name" '.repos[$n]' "$DM_REGISTRY" >/dev/null 2>&1 || dm_die "no such repo: $name"
     # Whitelist the settable fields. A free-form setter let a bad default_branch or
     # path silently misroute sync/merge; only known fields, validated, may change.
+    # report_field/report_value default to what the caller named; the yolo alias
+    # overrides them so the confirmation line names the field actually written.
+    report_field="$field"; report_value="$value"
     case "$field" in
-      yolo) case "$value" in true|false) ;; *) dm_die "yolo must be true|false" ;; esac
-            registry_write --arg n "$name" --argjson v "$value" '.repos[$n].yolo = $v' ;;
+      merge_authority)
+            case "$value" in yolo|ask|never) ;; *) dm_die "merge_authority must be yolo|ask|never" ;; esac
+            # Writing merge_authority retires any legacy yolo boolean in the same
+            # update so the two representations never coexist as live state.
+            registry_write --arg n "$name" --arg v "$value" '.repos[$n].merge_authority = $v | del(.repos[$n].yolo)' ;;
+      yolo) # Back-compat alias for the retired boolean: true -> yolo, false -> ask.
+            # It resolves to merge_authority (the single source of truth) and drops
+            # the old key, so a script still calling `set yolo` cannot reintroduce
+            # a divergent field.
+            case "$value" in
+              true)  mapped="yolo" ;;
+              false) mapped="ask" ;;
+              *)     dm_die "yolo must be true|false (or set merge_authority yolo|ask|never directly)" ;;
+            esac
+            registry_write --arg n "$name" --arg v "$mapped" '.repos[$n].merge_authority = $v | del(.repos[$n].yolo)'
+            report_field="merge_authority"; report_value="$mapped" ;;
       mode) require_valid_mode "$value"
             registry_write --arg n "$name" --arg v "$value" '.repos[$n].mode = $v' ;;
       default_branch)
@@ -231,9 +258,9 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
             registry_write --arg n "$name" --arg v "$value" '.repos[$n].default_branch = $v' ;;
       test_cmd|pipeline|remote)
             registry_write --arg n "$name" --arg f "$field" --arg v "$value" '.repos[$n][$f] = $v' ;;
-      *)    dm_die "unknown field '$field'; settable fields: mode, yolo, test_cmd, pipeline, default_branch, remote" ;;
+      *)    dm_die "unknown field '$field'; settable fields: mode, merge_authority, yolo (alias), test_cmd, pipeline, default_branch, remote" ;;
     esac
-    dm_info "set $name.$field = $value"
+    dm_info "set $name.$report_field = $report_value"
     ;;
 
   remove)

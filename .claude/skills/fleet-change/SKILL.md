@@ -17,8 +17,10 @@ PR, and `--blocked-by` machinery.
 
 - Read-only over `repos/`; every change lands from a crewmate's worktree.
 - Each child passes the lavish approval gate and the PR-or-local decision.
-- Never merge red; never merge without the operator's word (a repo's standing
-  `yolo` posture is the only relaxation, per repo, not "the whole campaign").
+- Never merge red; never merge without the operator's word (a repo's
+  `merge_authority`: `never` forbids merging outright, `ask` is the default, and
+  a standing `yolo` is the only relaxation — and only for LOW/MEDIUM-risk green
+  work, never a HIGH-risk change; per repo, not "the whole campaign").
 - Never tear down unlanded work.
 
 ## 1. Classify and resolve the target repo set

@@ -26,6 +26,15 @@ case "$cmd" in
     mode="$(dm_meta_get "$id" mode)"
     [ "$mode" = "local-only" ] || dm_die "task $id is mode '$mode', not local-only; use dm-pr.sh for PR-based landing"
     repo="$(dm_meta_get "$id" repo)"; wt="$(dm_require_worktree "$id")"
+    # A local fast-forward land IS a merge, so the merge-authority `never` hard
+    # stop applies here too (same gate dm-pr.sh merge uses). Refuse before touching
+    # the clone; no flag can bypass it.
+    case "$(dm_merge_authority_gate "$(dm_merge_authority "$repo")")" in
+      allow) : ;;
+      refuse-never) dm_die "REFUSED: repo $repo is merge_authority=never: the dockmaster may not land work; deliver it as a PR and the operator merges it on GitHub" ;;
+      refuse-invalid) dm_die "REFUSED: repo $repo has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to land. Set a valid one: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
+      *) dm_die "REFUSED: repo $repo merge authority could not be resolved; refusing to land" ;;
+    esac
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || dm_die "worktree on detached HEAD; nothing to land"
     ! dm_tracked_dirty "$wt" || dm_die "worktree has uncommitted changes to tracked files; commit before landing"

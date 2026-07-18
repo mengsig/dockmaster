@@ -35,9 +35,10 @@ Sort each comment into one of:
    (`bin/dm-pr.sh check <id>`).
 4. Repeat until reviewers are satisfied and checks are green.
 
-Then the merge gate in `pr-workflow` applies as before: never merge red, and
-merge only on the operator's word (or a repo's standing `yolo` for routine green
-work).
+Then the merge gate in `pr-workflow` applies as before: never merge red, respect
+the repo's `merge_authority` (`never` is operator-merge-only), and merge only on
+the operator's word — or, under a standing `yolo`, for LOW/MEDIUM-risk green work
+(a HIGH-risk change always needs the explicit word; risk tiers in `pr-workflow`).
 
 ## Rules
 

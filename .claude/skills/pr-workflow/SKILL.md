@@ -177,10 +177,17 @@ one of two paths — the operator's choice:
   `bin/dm-pr.sh check <id>` via `Monitor`, or on a merged-PR wake) and, once it
   reports `state: MERGED`, refreshes the clone (`bin/dm-sync.sh one <repo>`) and
   tears down.
-- **Dockmaster merges after approval.** The dockmaster asks "approve merge?"; on
-  an explicit yes (or a repo's standing `yolo` for routine work) it runs
+- **Dockmaster merges after approval.** Only when the repo's `merge_authority`
+  allows it (`ask` or `yolo`; a `never` repo is operator-merge-only — see below).
+  The dockmaster asks "approve merge?"; on an explicit yes — or, under a standing
+  `yolo`, for a LOW/MEDIUM-risk green change (see **Risk tiers** below; a
+  HIGH-risk change always needs the explicit yes even under `yolo`) — it runs
   `bin/dm-pr.sh merge <id> [--method squash] [--delete-branch]`, then syncs and
   tears down.
+- **`merge_authority=never` — operator merges on GitHub, always.** The pipeline
+  runs to completion and the PR is reported merge-ready; `bin/dm-pr.sh merge`
+  hard-refuses (before any GitHub call, no flag bypasses). Report the PR URL and
+  let the operator merge.
 
 **Wait for CI, don't refuse it.** `bin/dm-pr.sh merge` checks CI exactly once and
 refuses a still-pending PR. When Actions is mid-run, first
@@ -192,8 +199,27 @@ non-zero exit, do not attempt the merge.
 
 **Never merge red** — `await-checks` is only a wait, never a relaxation:
 `bin/dm-pr.sh merge` still refuses a failing or pending PR, and you must also have
-the operator's actual approval. Destructive, irreversible, or security-sensitive
-merges always escalate, even under `yolo`.
+the operator's actual approval (and a repo whose `merge_authority` is not
+`never`). Destructive, irreversible, or security-sensitive merges are HIGH risk
+and always escalate, even under `yolo`.
+
+### Risk tiers (canonical — what a standing `yolo` may auto-merge)
+
+`merge_authority` is enforced in the toolbelt, but the risk tier is a **judgment
+the supervising dockmaster makes** — the bash gate is risk-blind (it only knows
+`yolo|ask|never`). Under a standing `yolo`, the dockmaster may auto-merge a green
+**LOW or MEDIUM** risk change without asking; a **HIGH-risk** change behaves like
+`ask` everywhere — it always needs the operator's explicit word, even in a `yolo`
+repo. `never` stays absolute (mechanically refused) regardless of tier.
+
+- **HIGH** — security/auth changes; destructive or irreversible effects; data
+  migrations or schema changes; secrets handling; public API/contract breaks;
+  safety-critical toolbelt / merge-gate / state logic; or anything the reviewer
+  flags as risky. Always needs the operator's explicit yes.
+- **MEDIUM** — ordinary logic changes covered by tests.
+- **LOW** — docs/copy, config values, trivial diffs.
+
+When unsure which tier applies, treat the change as the **higher** tier.
 
 **`--allow-no-checks` is for CI-less repos only.** On a repo with
 `.github/workflows`, the merge gate refuses a `none` rollup outright — always
