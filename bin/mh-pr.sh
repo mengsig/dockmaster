@@ -274,6 +274,15 @@ case "$cmd" in
     mh_meta_set "$id" pr_state MERGED
     mh_status_append "$id" merged "$url"
     mh_info "merged: $url"
+    # Best-effort: FF-sync the clone's default branch so it is never left behind
+    # by the PR it just merged (reuses mh-sync's FF-only logic). The merge above
+    # already completed and is recorded; a can't-FF sync must not fail it - just
+    # name the manual fallback.
+    sync_out="$("$(dirname "${BASH_SOURCE[0]}")/mh-sync.sh" one "$repo")"
+    case "$sync_out" in
+      STUCK:*) mh_warn "post-merge sync: $sync_out — sync $repo manually" ;;
+      *) mh_info "$sync_out" ;;
+    esac
     ;;
 
   security-scan)
