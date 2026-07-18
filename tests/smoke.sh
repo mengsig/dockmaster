@@ -214,6 +214,20 @@ b mh-backlog.sh hold needdec-decision-opt "ship option a or b?" --options "a | b
 NODEC2="$(b mh-status.sh)"
 check "an open hold clears the missing-hold flag" '! grep -q "NO-HOLD.*needdec" <<<"$NODEC2"'
 
+echo "== needs-decision is its own reconciled state, distinct from blocked =="
+# A needs-decision event must surface as its own token, not collapse into
+# 'blocked' — decision-hold/supervision key off the exact string to gate
+# teardown on a durable hold, and mh-status's UNTRACKED DECISIONS arm for
+# needs-decision would otherwise be dead code.
+check "state reconciles needs-decision, not blocked" \
+  '[ "$(b mh-task.sh state needdec | sed "s/ · .*//; s/^state: //")" = "needs-decision" ]'
+b mh-task.sh new blkonly --kind scout --repo demo >/dev/null
+b mh-task.sh event blkonly blocked "waiting on ci creds" >/dev/null
+check "a plain blocked event still reconciles to blocked" \
+  '[ "$(b mh-task.sh state blkonly | sed "s/ · .*//; s/^state: //")" = "blocked" ]'
+check "status attention count includes a needs-decision task" \
+  'OUT="$(b mh-status.sh)"; grep -qE "ATTENTION.*needs-decision" <<<"$OUT"'
+
 echo "== status tolerates a non-integer stuck-age (fix 6) =="
 check "non-integer MH_STUCK_AGE_HOURS does not crash status" 'MH_STUCK_AGE_HOURS=4.5 b mh-status.sh >/dev/null 2>&1'
 
@@ -230,6 +244,17 @@ b mh-task.sh set keytest abc WRONG >/dev/null
 b mh-task.sh set keytest a.c RIGHT >/dev/null
 check "meta get matches key literally"    '[ "$(b mh-task.sh get keytest a.c)" = "RIGHT" ]'
 check "meta set does not clobber sibling" '[ "$(b mh-task.sh get keytest abc)" = "WRONG" ]'
+
+echo "== read-path id validation (get/state reject a path-escaping id) =="
+# get/state used to pass a raw <id> straight into mh_meta_path with no
+# mh_require_id, unlike every write path (set/event/new/archive), which could
+# let a crafted id (e.g. containing ../) read a *.meta file outside
+# state/tasks/. Plant a decoy one directory above MH_TASKS and confirm a
+# traversal id is refused rather than reading it.
+: > "$MH_HOME/state/secret.meta"
+check "get refuses a path-escaping id"   '! b mh-task.sh get "../secret" >/dev/null 2>&1'
+check "state refuses a path-escaping id" '! b mh-task.sh state "../secret" >/dev/null 2>&1'
+rm -f "$MH_HOME/state/secret.meta"
 
 echo "== concurrent meta writes (locking; no lost update) =="
 b mh-task.sh new conc --kind ship --repo demo >/dev/null
