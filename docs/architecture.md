@@ -51,7 +51,7 @@ full tool surface, not a constrained pane.
 
 The vocabulary below is framed as a working dockyard:
 
-> **The Dockyard.** You are the *captain*; the **dockmaster** is your dockmaster —
+> **The Dockyard.** You are the *captain*; the **dockmaster** runs your dockyard —
 > it never handles cargo itself, it directs a crew of *dockhands* (crewmates)
 > working in the holds (worktrees), hoisting *cargo* (changes) aboard the *ships*
 > (repos) of your fleet, and reports back to you. One hand on the dock, a whole

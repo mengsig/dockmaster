@@ -556,11 +556,11 @@ DUPERR="$(b dm-memory.sh remember memctx --private --kind routing "alpha lions r
 check "remember warns on a duplicate fact body" 'grep -qi "already exists" <<<"$DUPERR"'
 
 echo "== memory-context: dockmaster-only store shown to dockmaster, hidden from crew (F5) =="
-b dm-memory.sh remember memctx --dockmaster-only --kind routing "MHONLY-crew-must-not-see" >/dev/null
+b dm-memory.sh remember memctx --dockmaster-only --kind routing "DMONLY-crew-must-not-see" >/dev/null
 MREC="$(b dm-memory.sh recall memctx)"
 CREC="$(b dm-memory.sh recall memctx --crew)"
-check "dockmaster recall includes the dockmaster-only store" 'grep -q "MHONLY-crew-must-not-see" <<<"$MREC"'
-check "crew recall excludes the dockmaster-only store"       '! grep -q "MHONLY-crew-must-not-see" <<<"$CREC"'
+check "dockmaster recall includes the dockmaster-only store" 'grep -q "DMONLY-crew-must-not-see" <<<"$MREC"'
+check "crew recall excludes the dockmaster-only store"       '! grep -q "DMONLY-crew-must-not-see" <<<"$CREC"'
 
 echo "== memory-context: brief relays private + fleet, excludes dockmaster-only (F3/F5) =="
 b dm-task.sh new memctx-1 --kind ship --repo memctx >/dev/null
@@ -570,7 +570,7 @@ BR="$DM_HOME/data/memctx-1/brief.md"
 check "brief injects the Fleet-wide context heading" 'grep -q "Fleet-wide context" "$BR"'
 check "brief relays a fleet learning"                'grep -q "fleet gotcha alpha" "$BR"'
 check "brief relays a private note"                  'grep -q "alpha lions" "$BR"'
-check "brief excludes the dockmaster-only note"      '! grep -q "MHONLY-crew-must-not-see" "$BR"'
+check "brief excludes the dockmaster-only note"      '! grep -q "DMONLY-crew-must-not-see" "$BR"'
 
 echo "== memory-context: marker recognized only as a whole line (F7) =="
 # An AGENTS.md that only MENTIONS the marker in prose (as a substring) must not

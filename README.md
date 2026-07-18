@@ -8,9 +8,9 @@
 
 [![CI](https://github.com/mengsig/dockmaster/actions/workflows/ci.yml/badge.svg)](https://github.com/mengsig/dockmaster/actions/workflows/ci.yml)
 
-*The Dockyard.* You are the captain; the dockmaster is your dockmaster — it never
-handles cargo itself, but directs a crew of dockhands (crewmates) working in the
-holds, hoisting cargo aboard the ships of your fleet, and reports back to you. See
+*The Dockyard.* You are the captain; the **dockmaster** runs your dockyard — it
+never handles cargo itself, but directs a crew of dockhands (crewmates) working in
+the holds, hoisting cargo aboard the ships of your fleet, and reports back to you. See
 [the theme note](docs/architecture.md#the-dockyard) for the full mapping.
 
 dockmaster is an *agent distro* for Claude Code: a portable directory of

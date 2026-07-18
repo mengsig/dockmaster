@@ -416,22 +416,22 @@ case "$cmd" in
       fact="${1:-}"; [ -n "$fact" ] || dm_die "remember --global requires a \"<fact>\""
       remember_global "$kind" "$fact"
     else
-      repo="$target"; private=0; mhonly=0; kind=""
+      repo="$target"; private=0; dmonly=0; kind=""
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --private) private=1; shift ;;
-          --dockmaster-only) mhonly=1; shift ;;
+          --dockmaster-only) dmonly=1; shift ;;
           --kind) kind="${2:-}"; shift 2 ;;
           --) shift; break ;;
           -*) dm_die "unknown flag: $1" ;;
           *) break ;;
         esac
       done
-      [ "$private" = 1 ] || [ "$mhonly" = 1 ] || dm_die "repo-scoped remember must use --private or --dockmaster-only; SHARED knowledge is authored by a crewmate in the repo's AGENTS.md dm:knowledge section, not appended here"
-      if [ "$private" = 1 ] && [ "$mhonly" = 1 ]; then dm_die "use only one of --private / --dockmaster-only"; fi
+      [ "$private" = 1 ] || [ "$dmonly" = 1 ] || dm_die "repo-scoped remember must use --private or --dockmaster-only; SHARED knowledge is authored by a crewmate in the repo's AGENTS.md dm:knowledge section, not appended here"
+      if [ "$private" = 1 ] && [ "$dmonly" = 1 ]; then dm_die "use only one of --private / --dockmaster-only"; fi
       [ -n "$kind" ] || dm_die "remember <repo> requires --kind <kind>"
       fact="${1:-}"; [ -n "$fact" ] || dm_die "remember <repo> requires a \"<fact>\""
-      if [ "$mhonly" = 1 ]; then
+      if [ "$dmonly" = 1 ]; then
         remember_dockmaster "$repo" "$kind" "$fact"
       else
         remember_private "$repo" "$kind" "$fact"
@@ -446,20 +446,20 @@ case "$cmd" in
       substr="${1:-}"; [ -n "$substr" ] || dm_die "forget --global requires a <substring>"
       forget_global "$substr"
     else
-      repo="$target"; private=0; mhonly=0
+      repo="$target"; private=0; dmonly=0
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --private) private=1; shift ;;
-          --dockmaster-only) mhonly=1; shift ;;
+          --dockmaster-only) dmonly=1; shift ;;
           --) shift; break ;;
           -*) dm_die "unknown flag: $1" ;;
           *) break ;;
         esac
       done
-      [ "$private" = 1 ] || [ "$mhonly" = 1 ] || dm_die "repo-scoped forget must use --private or --dockmaster-only"
-      if [ "$private" = 1 ] && [ "$mhonly" = 1 ]; then dm_die "use only one of --private / --dockmaster-only"; fi
+      [ "$private" = 1 ] || [ "$dmonly" = 1 ] || dm_die "repo-scoped forget must use --private or --dockmaster-only"
+      if [ "$private" = 1 ] && [ "$dmonly" = 1 ]; then dm_die "use only one of --private / --dockmaster-only"; fi
       substr="${1:-}"; [ -n "$substr" ] || dm_die "forget <repo> requires a <substring>"
-      if [ "$mhonly" = 1 ]; then
+      if [ "$dmonly" = 1 ]; then
         forget_repo "$repo" private.md "$substr" "dockmaster-only note(s)"
       else
         forget_repo "$repo" notes.md "$substr" "private note(s)"
