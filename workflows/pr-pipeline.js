@@ -121,6 +121,14 @@ const PR_SCHEMA = {
 }
 const PR_URL_PATTERN = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/[0-9]+$/
 
+// A plain, mechanical git query (not a judgment call), used to verify what the
+// fix agent actually did to the worktree rather than trusting its own summary.
+const HEAD_STATUS_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: { head: { type: 'string' }, dirty: { type: 'boolean' } },
+  required: ['head', 'dirty'],
+}
+
 async function runTests(label) {
   if (!t.testCmd) {
     log(`tests: no test command registered for ${t.repo} — soft skip (not a pass)`)
@@ -204,6 +212,20 @@ async function applyFixes(findings) {
   )
 }
 
+// Independent check of the worktree's git state (never trusts applyFixes'
+// own report): the fix agent could summarize a change it forgot to commit, so
+// this is a separate, mechanical query used by the fix loop to verify a commit
+// actually happened before the next review diffs base...HEAD against it.
+async function gitHeadStatus() {
+  return agent(
+    `In the git worktree at ${t.worktree}, run exactly:\n\n` +
+    `    git -C ${t.worktree} rev-parse HEAD\n    git -C ${t.worktree} status --porcelain --untracked-files=no\n\n` +
+    `Report the full commit SHA printed by the first command as "head". Report "dirty": true if the second command ` +
+    `printed any output (uncommitted changes to tracked files), false if it printed nothing. Do not change any files.`,
+    { label: 'fix:head-status', phase: 'Fix', effort: 'low', schema: HEAD_STATUS_SCHEMA },
+  )
+}
+
 async function openPR() {
   const title = t.prTitle || t.title || `${t.type || 'change'}: ${t.taskId}`
   return agent(
@@ -243,13 +265,29 @@ for (const g of gates) {
   } else if (g.gate === 'fix') {
     const max = g.max_rounds || 2
     let round = 0
+    let prevHead = null // captured lazily, once, before the first round
     // Apply fixes and re-review until findings clear or the cap is hit. Tests are
     // NOT run here: the dedicated `tests` gate that follows validates the tree, so
     // tests run once per stage (never doubled) and still at least once even when a
     // review found nothing to fix.
     while (lastReview && lastReview.findings.length && round < max) {
       round++
+      if (prevHead === null) prevHead = (await gitHeadStatus()).head
       await applyFixes(lastReview.findings)
+      const after = await gitHeadStatus()
+      // The next review() diffs base...HEAD, which only sees committed history.
+      // If HEAD did not move AND tracked changes are sitting uncommitted, the fix
+      // agent produced edits invisible to that diff — the loop would otherwise
+      // silently re-review the unchanged base and re-report the same findings
+      // round after round until max_rounds, with no signal of what went wrong.
+      // Fail immediately and distinctly instead. (HEAD unchanged with a CLEAN
+      // tree is not this failure: it means the agent made no edits at all, e.g.
+      // it judged the finding not actionable — the next review will accurately
+      // re-report that, which is a true signal, not a stale one.)
+      if (after.head === prevHead && after.dirty) {
+        return { ok: false, stage: 'fix', detail: `fix agent produced no commit in round ${round} (tracked changes remain uncommitted)` }
+      }
+      prevHead = after.head
       // Intentional asymmetry: the adversarial skeptic filter (verify-findings)
       // runs once, before the first fix round. This in-loop re-review is NOT
       // re-filtered through skeptics, so a false positive here can only
@@ -272,9 +310,16 @@ for (const g of gates) {
     )
     if (!v.passed) return { ok: false, stage: 'verify', detail: v.summary }
   } else if (g.gate === 'security') {
-    if (g.method === 'auto') {
-      // Auto-triggered: scan the diff, escalate to a full review only on a hit,
-      // and otherwise skip explicitly — never a silent forget.
+    // Self-compute whenever nothing has already decided the question: an
+    // explicit `auto` method (rigorous) or an `optional` gate with no
+    // caller-declared surface (default/fast). t.securitySurface has no producer
+    // of its own in default/fast configs, so without this the optional gate
+    // always skipped; self-computing mirrors what the rigorous `auto` path (and
+    // the manhandler's own agent-driven default execution, see the pr-workflow
+    // skill) already does, rather than requiring every caller to wire the flag.
+    if (g.method === 'auto' || (g.optional && !t.securitySurface)) {
+      // Scan the diff, escalate to a full review only on a hit, and otherwise
+      // skip explicitly — never a silent forget.
       await agent(
         `Security gate for task ${t.taskId}. In ${t.worktree}, run the security-surface scan exactly:\n\n` +
         `    ${t.binDir}/mh-pr.sh security-scan ${t.taskId}\n\n` +
@@ -284,8 +329,8 @@ for (const g of gates) {
         { label: 'security', phase: 'Review', effort: g.effort || 'high' })
       continue
     }
-    // optional; skipped here unless a security surface is declared by the caller
-    if (g.optional && !t.securitySurface) { log('security: no declared surface — skipped'); continue }
+    // Caller explicitly declared a security surface (or a mandatory, non-auto
+    // gate): review directly without re-scanning.
     await agent(
       `Security review of the diff ${base}...HEAD in ${t.worktree}: auth, input handling, secrets, crypto, external I/O. ` +
       `Report concrete issues only.`, { label: 'security', phase: 'Review', effort: g.effort || 'high' })

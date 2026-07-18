@@ -47,11 +47,19 @@ Workflow tool — nothing auto-discovers it). It reads the rest:
   independently try to refute each finding (default 3); a finding survives only
   if it is not refuted by a majority. Only survivors reach `fix`.
 - **`optional`** on the `verify` gate (rigorous) — with a caller-declared
-  `noRuntimeSurface` (docs/config-only diff), skips the behavioral gate.
+  `noRuntimeSurface` (docs/config-only diff), skips the behavioral gate. There is
+  no automatic detector for this; whoever invokes the Workflow tool (the
+  manhandler/operator, per `pr-workflow`'s rigorous-tier criteria) must pass it
+  explicitly in `args` when the diff is docs/config-only, else the behavioral
+  gate always runs.
 - **`max_rounds`** on a `fix` gate — the fix→re-review loop cap.
-- **`optional`** on the `security` gate — skip it unless the caller declares a
-  security surface. **`method: "auto"`** (rigorous) instead runs
-  `bin/mh-pr.sh security-scan` and escalates to `security-review` only on a hit.
+- **`optional`** on the `security` gate (default/fast) — the runner self-computes
+  this by running `bin/mh-pr.sh security-scan` itself (same as rigorous
+  `method: "auto"` below) and only reviewing on a hit, so no caller wiring is
+  required. A caller-declared `securitySurface` is an override: if set, the
+  runner reviews directly without re-scanning. **`method: "auto"`** (rigorous)
+  runs `bin/mh-pr.sh security-scan` and escalates to `security-review` only on
+  a hit.
 - **`method`** on the `pr` gate — surfaced in the runner's result so the
   operator-mediated merge step can honor it (the runner never merges).
 
@@ -69,3 +77,8 @@ this file. Nothing executes it.
 
 Adding a gate: document its contract in the pr-workflow skill, then add its name
 (and any fields above) to the `gates` array here.
+
+`workflows/pr-pipeline.js`'s built-in `FAST_GATES`/`DEFAULT_GATES`/`RIGOROUS_GATES`
+constants (the fallback used only when a caller passes no `args.gates`) are meant
+to mirror the gate order of the three files above. `node tests/check-gate-drift.js`
+(run in CI) checks the gate-name sequence stays in sync — update both together.
