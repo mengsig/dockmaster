@@ -53,7 +53,7 @@ b mh-repo.sh create fresh "$TMP/new.git" --mode local-only --test-cmd "true" --n
 check "create registers repo"        '[ "$(b mh-repo.sh get fresh mode)" = "local-only" ]'
 check "create initializes clone"     '[ -d "$MH_HOME/repos/fresh/.git" ]'
 check "create sets origin upstream"  '[ "$(git -C "$MH_HOME/repos/fresh" remote get-url origin)" = "$TMP/new.git" ]'
-check "create publishes first commit" 'git -C "$TMP/new.git" log --oneline -1 2>/dev/null | grep -q "initialize repository"'
+check "create publishes first commit" 'OUT="$(git -C "$TMP/new.git" log --oneline -1 2>/dev/null)"; grep -q "initialize repository" <<<"$OUT"'
 # A worktree needs a task record with a kind first (mh-worktree.sh create fails
 # closed without one, so `state` can always classify the task).
 b mh-task.sh new fresh-wt --kind ship --repo fresh >/dev/null
@@ -118,11 +118,11 @@ OPENOUT="$(lav open demo-1 2>&1)"
 check "lavish open names the artifact path"        'grep -qF "$ART" <<<"$OPENOUT"'
 
 echo "== state reconciliation =="
-check "state pending pre-work" 'b mh-task.sh state demo-1 | grep -q pending'
+check "state pending pre-work" 'OUT="$(b mh-task.sh state demo-1)"; grep -q pending <<<"$OUT"'
 git -C "$WT" checkout -q -b feat/x/add-multiply
 printf 'def multiply(a,b):\n    return a*b\n' >> "$WT/src/calc.py"
 git -C "$WT" -c user.email=c@c.co -c user.name=c commit -qam "add multiply" >/dev/null
-check "state working post-commit" 'b mh-task.sh state demo-1 | grep -q working'
+check "state working post-commit" 'OUT="$(b mh-task.sh state demo-1)"; grep -q working <<<"$OUT"'
 # MH_NO_FETCH (used by mh-status) must reconcile from local refs only and still
 # report the committed-but-unlanded case correctly.
 check "no-fetch landed: reports unlanded" '! MH_NO_FETCH=1 b mh-worktree.sh landed demo-1 >/dev/null 2>&1'
@@ -130,13 +130,13 @@ check "no-fetch landed: reports unlanded" '! MH_NO_FETCH=1 b mh-worktree.sh land
 echo "== state reconcile: 'merged:' in a note must not fake done (anchored verb) =="
 b mh-task.sh new fix1 --kind ship --repo demo >/dev/null
 b mh-task.sh event fix1 note "waiting on upstream PR merged: #123" >/dev/null
-check "note text 'merged:' does not reconcile to done" '! b mh-task.sh state fix1 | grep -q done'
+check "note text 'merged:' does not reconcile to done" 'OUT="$(b mh-task.sh state fix1)"; ! grep -q done <<<"$OUT"'
 # The sanctioned landing paths (mh-merge/mh-pr) append the 'merged' event
 # directly via the status-append helper; `mh-task.sh event` can no longer forge
 # it (see the state-gate-integrity block at the end). Simulate the sanctioned
 # append through the same helper those paths use.
 ( . "$ROOT/bin/mh-lib.sh"; mh_status_append fix1 merged "landed via local ff" ) >/dev/null
-check "a real merge event reconciles to done"          'b mh-task.sh state fix1 | grep -q done'
+check "a real merge event reconciles to done"          'OUT="$(b mh-task.sh state fix1)"; grep -q done <<<"$OUT"'
 
 echo "== test gate =="
 check "tests pass (registered cmd)" 'b mh-test.sh demo-1 >/dev/null'
@@ -145,20 +145,20 @@ check "tests recorded pass"         '[ "$(b mh-task.sh get demo-1 tests)" = "pas
 echo "== backlog (dependency completion from real task state) =="
 b mh-backlog.sh add demo-1 "add multiply" --repo demo --status inflight >/dev/null
 b mh-backlog.sh add demo-2 "docs" --status queued --blocked-by demo-1 >/dev/null
-check "ready hides blocked item"  '! b mh-backlog.sh ready | grep -q demo-2'
+check "ready hides blocked item"  'OUT="$(b mh-backlog.sh ready)"; ! grep -q demo-2 <<<"$OUT"'
 # demo-1 is a real task, committed but NOT yet landed (state: working). Marking
 # it done in the backlog is a lie `ready` must not believe: it consults real
 # task state, so demo-2 stays blocked despite the hand-set done.
 b mh-backlog.sh done demo-1 --note "claimed landed" >/dev/null
-check "ready ignores hand-set done until the task has landed" '! b mh-backlog.sh ready | grep -q demo-2'
+check "ready ignores hand-set done until the task has landed" 'OUT="$(b mh-backlog.sh ready)"; ! grep -q demo-2 <<<"$OUT"'
 # A blocker id with NO task record falls back to its hand-set backlog status.
 b mh-backlog.sh add blk-untracked "no task record" --status done >/dev/null
 b mh-backlog.sh add dep-untracked "needs blk-untracked" --status queued --blocked-by blk-untracked >/dev/null
-check "ready falls back to backlog status without a task record" 'b mh-backlog.sh ready | grep -q dep-untracked'
+check "ready falls back to backlog status without a task record" 'OUT="$(b mh-backlog.sh ready)"; grep -q dep-untracked <<<"$OUT"'
 b mh-backlog.sh hold demo-1-decision-scope "ship v1 or v2?" --options "v1 | v2" >/dev/null
-check "hold is open"     'b mh-backlog.sh list | grep -q "demo-1-decision-scope"'
+check "hold is open"     'OUT="$(b mh-backlog.sh list)"; grep -q "demo-1-decision-scope" <<<"$OUT"'
 b mh-backlog.sh resolve demo-1-decision-scope "v1" >/dev/null
-check "hold resolved"    'b mh-backlog.sh list | grep -A2 "demo-1-decision-scope" | grep -q "answer: v1"'
+check "hold resolved"    'OUT="$(b mh-backlog.sh list)"; CTX="$(grep -A2 "demo-1-decision-scope" <<<"$OUT")"; grep -q "answer: v1" <<<"$CTX"'
 
 echo "== mh dispatcher (additive convenience entrypoint) =="
 MH="$ROOT/bin/mh"
@@ -245,14 +245,14 @@ check "gitignore ignores settings.local.json" 'git -C "$ROOT" check-ignore .clau
 echo "== guarded land + teardown =="
 check "local land ff"    'b mh-merge.sh local demo-1 >/dev/null'
 check "no-fetch landed: reports landed" 'MH_NO_FETCH=1 b mh-worktree.sh landed demo-1 >/dev/null 2>&1'
-check "state done"       'b mh-task.sh state demo-1 | grep -q done'
+check "state done"       'OUT="$(b mh-task.sh state demo-1)"; grep -q done <<<"$OUT"'
 # demo-1's task state is now `done` (landed above). Even with the backlog moved
 # back to inflight (NOT done), `ready` unblocks demo-2 from the reconciled task
 # state — the "landed but never marked done" case the old status-only check missed.
 b mh-backlog.sh move demo-1 inflight >/dev/null
-check "ready unblocks from real task state, not backlog status" 'b mh-backlog.sh ready | grep -q demo-2'
+check "ready unblocks from real task state, not backlog status" 'OUT="$(b mh-backlog.sh ready)"; grep -q demo-2 <<<"$OUT"'
 check "teardown ok"      'b mh-worktree.sh remove demo-1 >/dev/null'
-check "origin has commit" 'git -C "$MH_HOME/repos/demo" log --oneline | grep -q "add multiply"'
+check "origin has commit" 'OUT="$(git -C "$MH_HOME/repos/demo" log --oneline)"; grep -q "add multiply" <<<"$OUT"'
 
 echo "== archive (prune a landed, torn-down task) =="
 # fail closed: a task that has not reached terminal done cannot be archived.
@@ -309,11 +309,11 @@ check "branch name drops trailing hyphen"  'case "$BN" in *-) false;; *) true;; 
 
 echo "== backlog move =="
 b mh-backlog.sh add mv-1 "movable item" --status queued >/dev/null
-check "queued item shows in ready"         'b mh-backlog.sh ready | grep -q mv-1'
+check "queued item shows in ready"         'OUT="$(b mh-backlog.sh ready)"; grep -q mv-1 <<<"$OUT"'
 b mh-backlog.sh move mv-1 inflight >/dev/null
-check "moved-to-inflight leaves ready"     '! b mh-backlog.sh ready | grep -q mv-1'
+check "moved-to-inflight leaves ready"     'OUT="$(b mh-backlog.sh ready)"; ! grep -q mv-1 <<<"$OUT"'
 b mh-backlog.sh move mv-1 queued >/dev/null
-check "moved-back-to-queued rejoins ready" 'b mh-backlog.sh ready | grep -q mv-1'
+check "moved-back-to-queued rejoins ready" 'OUT="$(b mh-backlog.sh ready)"; grep -q mv-1 <<<"$OUT"'
 check "move rejects invalid status"        '! b mh-backlog.sh move mv-1 bogus >/dev/null 2>&1'
 check "move rejects unknown id"            '! b mh-backlog.sh move no-such queued >/dev/null 2>&1'
 
@@ -331,12 +331,12 @@ echo "== scout lifecycle =="
 b mh-task.sh new sc-1 --kind scout --repo demo >/dev/null
 b mh-worktree.sh create sc-1 demo >/dev/null
 b mh-brief.sh sc-1 >/dev/null
-check "scout state pending before report"   'b mh-task.sh state sc-1 | grep -q pending'
+check "scout state pending before report"   'OUT="$(b mh-task.sh state sc-1)"; grep -q pending <<<"$OUT"'
 check "scout brief is scout-flavored"       'grep -q "Definition of done (scout)" "$MH_HOME/data/sc-1/brief.md"'
 check "scout brief names the report path"   'grep -q "data/sc-1/report.md" "$MH_HOME/data/sc-1/brief.md"'
 check "scout brief omits the ship branch flow" '! grep -q "Create a branch" "$MH_HOME/data/sc-1/brief.md"'
 printf '# findings\n' > "$MH_HOME/data/sc-1/report.md"
-check "scout state done once report exists"  'b mh-task.sh state sc-1 | grep -q done'
+check "scout state done once report exists"  'OUT="$(b mh-task.sh state sc-1)"; grep -q done <<<"$OUT"'
 
 echo "== repo remove guards =="
 b mh-repo.sh add rmtest "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
@@ -437,7 +437,7 @@ check "recall matches a literal substring query"       'grep -q "pytest -q" <<<"
 echo "== mh-memory: -- ends flag parsing so a fact can start with a dash (fix 3) =="
 b mh-memory.sh remember demo --private --kind command -- "-Wall enables all warnings" >/dev/null
 check "-- lets a fact begin with a dash"  'grep -q -- "-Wall enables all warnings" "$MH_HOME/repos/demo/.mh/notes.md"'
-check "usage documents the -- terminator" 'b mh-memory.sh --help | grep -q -- "-- to end flag parsing"'
+check "usage documents the -- terminator" 'OUT="$(b mh-memory.sh --help)"; grep -q -- "-- to end flag parsing" <<<"$OUT"'
 
 echo "== mh-memory: a start marker with no end must not leak the file tail (fix 1) =="
 # A truncated/mis-edited AGENTS.md (start marker, no matching end) must yield an
@@ -469,11 +469,11 @@ echo "== toolbelt debt: backlog write via delegated bwrite =="
 # bwrite now delegates to mh_json_update; the full add/list/close cycle must still
 # work (the read-modify-write behaves identically through the shared owner).
 b mh-backlog.sh add td-1 "delegated write" --status queued >/dev/null
-check "backlog add persists via delegated bwrite" 'b mh-backlog.sh list | grep -q "delegated write"'
-check "queued item shows in ready (delegated)"    'b mh-backlog.sh ready | grep -q td-1'
+check "backlog add persists via delegated bwrite" 'OUT="$(b mh-backlog.sh list)"; grep -q "delegated write" <<<"$OUT"'
+check "queued item shows in ready (delegated)"    'OUT="$(b mh-backlog.sh ready)"; grep -q td-1 <<<"$OUT"'
 b mh-backlog.sh done td-1 --note "closed" >/dev/null
-check "backlog close persists via delegated bwrite" 'b mh-backlog.sh list | grep -A2 "td-1" | grep -q "note: closed"'
-check "closed item drops out of ready (delegated)"  '! b mh-backlog.sh ready | grep -q td-1'
+check "backlog close persists via delegated bwrite" 'OUT="$(b mh-backlog.sh list)"; CTX="$(grep -A2 "td-1" <<<"$OUT")"; grep -q "note: closed" <<<"$CTX"'
+check "closed item drops out of ready (delegated)"  'OUT="$(b mh-backlog.sh ready)"; ! grep -q td-1 <<<"$OUT"'
 
 echo "== toolbelt debt: create yields the requested initial branch (portable init) =="
 # Portable git init (no `-b`): the initial branch must be exactly the requested
@@ -573,7 +573,7 @@ b mh-task.sh new sgi-land --kind ship --repo sgi >/dev/null
 check "event rejects the reserved 'merged' landing verb" '! b mh-task.sh event sgi-land merged "forged" >/dev/null 2>&1'
 SGIERR="$(b mh-task.sh event sgi-land merged "forged" 2>&1 || true)"
 check "event names the landing-signal reason"            'grep -q "landing signal" <<<"$SGIERR"'
-check "a forged merged event does not reconcile to done" '! b mh-task.sh state sgi-land | grep -q done'
+check "a forged merged event does not reconcile to done" 'OUT="$(b mh-task.sh state sgi-land)"; ! grep -q done <<<"$OUT"'
 # The sanctioned local-land path (mh-merge.sh local) still records the landing
 # under the reservation (it appends 'merged' directly via the status helper).
 SGIWT="$(b mh-worktree.sh create sgi-land sgi | tail -n1)"
@@ -582,7 +582,7 @@ printf 'sgi\n' > "$SGIWT/sgi.txt"
 git -C "$SGIWT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
 git -C "$SGIWT" -c user.email=c@c.co -c user.name=c commit -qm "sgi work" >/dev/null
 check "sanctioned merge path records the landing"        'b mh-merge.sh local sgi-land >/dev/null 2>&1'
-check "a real landing reconciles to done"                'b mh-task.sh state sgi-land | grep -q done'
+check "a real landing reconciles to done"                'OUT="$(b mh-task.sh state sgi-land)"; grep -q done <<<"$OUT"'
 b mh-worktree.sh remove sgi-land >/dev/null 2>&1
 
 echo "== state-gate-integrity: kind-less worktree create (#20-c) =="
