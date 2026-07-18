@@ -105,7 +105,9 @@ case "$cmd" in
     [ "$branch" != "HEAD" ] || mh_die "worktree is on a detached HEAD; crewmate must create a branch first"
     ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit before opening a PR"
     dir="$(mh_repo_dir "$repo")"; slug="$(owner_repo "$(git -C "$dir" remote get-url origin)")"
-    [ -n "$base" ] || base="$(mh_default_branch "$dir")"
+    # No explicit --base: default to the recorded parent (a stacked sub-PR
+    # created via `mh-worktree.sh create --base`), else the default branch.
+    base="$(mh_pr_base_for "$id" "$base" "$dir")"
     mh_info "pushing $branch -> origin"
     # The first push (-u) can fail for benign reasons (upstream already set), so
     # retry a plain push. If THAT is rejected — typically a non-fast-forward

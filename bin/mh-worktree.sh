@@ -7,9 +7,15 @@
 # or their report exists (scout).
 #
 # Commands:
-#   create <id> <repo> [<branch>]   create worktree for task <id> off <repo>'s clone
+#   create <id> <repo> [<branch>] [--base <ref>]
+#                                    create worktree for task <id> off <repo>'s clone
 #                                    (branch defaults to a detached checkout of the
-#                                    default branch; crewmate creates its own branch)
+#                                    default branch; crewmate creates its own branch).
+#                                    --base <ref> branches off a PARENT ref instead
+#                                    (a stacked sub-PR child): the parent ref itself
+#                                    is fetched fresh and recorded as the task's
+#                                    `base` meta, in place of the default-branch
+#                                    freshness guard used when --base is omitted.
 #   assert <path> <repo>            verify <path> is a real worktree root distinct
 #                                    from the primary clone (isolation invariant)
 #   landed <id>                     is the worktree's committed work landed? (exit 0/1)
@@ -54,8 +60,23 @@ tangle_check() {
 cmd="${1:-}"; shift || true
 case "$cmd" in
   create)
-    id="${1:-}"; repo="${2:-}"; branch="${3:-}"
-    [ -n "$id" ] && [ -n "$repo" ] || mh_die "usage: mh-worktree.sh create <id> <repo> [<branch>]"
+    # Flags parsed in a loop (mirrors `remove`) so `--base` can appear anywhere
+    # relative to the positional <id> <repo> [<branch>].
+    id=""; repo=""; branch=""; base_ref=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --base) [ "$#" -ge 2 ] || mh_die "--base requires a <ref>"; base_ref="$2"; shift 2 ;;
+        -*) mh_die "unknown flag: $1" ;;
+        *)
+          if [ -z "$id" ]; then id="$1"
+          elif [ -z "$repo" ]; then repo="$1"
+          elif [ -z "$branch" ]; then branch="$1"
+          else mh_die "unexpected extra argument: $1"
+          fi
+          shift ;;
+      esac
+    done
+    [ -n "$id" ] && [ -n "$repo" ] || mh_die "usage: mh-worktree.sh create <id> <repo> [<branch>] [--base <ref>]"
     mh_require_id "$id"
     # Require an existing task record with a kind. Without it, create would write
     # a kind-less meta that `mh-task.sh state` cannot classify (it reconciles by
@@ -64,28 +85,43 @@ case "$cmd" in
     dir="$(mh_repo_dir "$repo")"
     wt="$MH_WT/$id"
     [ -e "$wt" ] && mh_die "worktree already exists: $wt"
-    if [ "${MH_NO_FETCH:-0}" != "1" ]; then
-      # Bring the clone's default branch current BEFORE cutting a worktree base
-      # off it (we hit a 9-behind base once). Reuse mh-sync's FF-only logic
-      # rather than reimplementing it here. A STUCK result (diverged or dirty
-      # clone) fails closed instead of cutting a worktree off a stale base.
-      # MH_NO_FETCH=1 (offline / smoke) skips this entirely: no sync, no block.
-      # The `|| sync_out=...` guards against mh-sync itself exiting non-zero
-      # unexpectedly (under set -e that would otherwise crash this command with
-      # a raw git failure instead of failing closed through the STUCK path below).
-      sync_out="$("$(dirname "${BASH_SOURCE[0]}")/mh-sync.sh" one "$repo")" || sync_out="STUCK: sync failed unexpectedly"
-      case "$sync_out" in
-        STUCK:*) mh_die "clone $repo is not fast-forwardable to origin — resolve it, then retry ($sync_out)" ;;
-        # SKIP (e.g. fetch failed/offline) means the sync could not run at all -
-        # not a fail-closed case (no divergence was found), but the base may
-        # still be stale, so warn rather than proceed silently (prior behavior).
-        SKIP:*) mh_warn "$sync_out; base may be stale" ;;
-      esac
+    if [ -n "$base_ref" ]; then
+      # PARENT-AWARE freshness: a sub-PR child branches off a PARENT branch, not
+      # the clone's default branch, so the base that must be current is the
+      # parent ref itself -- fetch it directly instead of running the (unrelated)
+      # default-branch FF-sync guard below. MH_NO_FETCH=1 skips the fetch, same
+      # convention as the default path.
+      if [ "${MH_NO_FETCH:-0}" != "1" ]; then
+        git -C "$dir" fetch --quiet origin "$base_ref" 2>/dev/null || mh_warn "$repo: fetch of parent ref '$base_ref' failed; base may be stale"
+      fi
+      # Prefer the freshly-fetched remote-tracking ref; fall back to a local-only
+      # branch (a parent not yet pushed).
+      base="$(git -C "$dir" rev-parse --verify --quiet "origin/$base_ref" 2>/dev/null || git -C "$dir" rev-parse --verify --quiet "$base_ref" 2>/dev/null)" \
+        || mh_die "parent ref not found (checked origin/$base_ref and $base_ref): $base_ref"
+    else
+      if [ "${MH_NO_FETCH:-0}" != "1" ]; then
+        # Bring the clone's default branch current BEFORE cutting a worktree base
+        # off it (we hit a 9-behind base once). Reuse mh-sync's FF-only logic
+        # rather than reimplementing it here. A STUCK result (diverged or dirty
+        # clone) fails closed instead of cutting a worktree off a stale base.
+        # MH_NO_FETCH=1 (offline / smoke) skips this entirely: no sync, no block.
+        # The `|| sync_out=...` guards against mh-sync itself exiting non-zero
+        # unexpectedly (under set -e that would otherwise crash this command with
+        # a raw git failure instead of failing closed through the STUCK path below).
+        sync_out="$("$(dirname "${BASH_SOURCE[0]}")/mh-sync.sh" one "$repo")" || sync_out="STUCK: sync failed unexpectedly"
+        case "$sync_out" in
+          STUCK:*) mh_die "clone $repo is not fast-forwardable to origin — resolve it, then retry ($sync_out)" ;;
+          # SKIP (e.g. fetch failed/offline) means the sync could not run at all -
+          # not a fail-closed case (no divergence was found), but the base may
+          # still be stale, so warn rather than proceed silently (prior behavior).
+          SKIP:*) mh_warn "$sync_out; base may be stale" ;;
+        esac
+      fi
+      def="$(mh_default_branch "$dir")"
+      # Branch from the LOCAL default: it holds local-only landings and is kept
+      # fast-forwarded to origin for PR repos by mh-sync. Fall back to origin.
+      base="$(git -C "$dir" rev-parse --verify --quiet "$def" 2>/dev/null || git -C "$dir" rev-parse "origin/$def")"
     fi
-    def="$(mh_default_branch "$dir")"
-    # Branch from the LOCAL default: it holds local-only landings and is kept
-    # fast-forwarded to origin for PR repos by mh-sync. Fall back to origin.
-    base="$(git -C "$dir" rev-parse --verify --quiet "$def" 2>/dev/null || git -C "$dir" rev-parse "origin/$def")"
     if [ -n "$branch" ]; then
       git -C "$dir" worktree add -b "$branch" "$wt" "$base" >/dev/null
     else
@@ -95,6 +131,10 @@ case "$cmd" in
     assert_isolated "$wt" "$repo" >/dev/null
     mh_meta_set "$id" worktree "$wt"
     mh_meta_set "$id" repo "$repo"
+    # Record the parent ref so mh-pr.sh open can default the sub-PR's --base to
+    # it (the "main PR" this child stacks on). Not a landing field: it carries
+    # no forge risk analogous to pr/pr_state/merge_state.
+    [ -n "$base_ref" ] && mh_meta_set "$id" base "$base_ref"
     mh_info "$wt"
     ;;
 
