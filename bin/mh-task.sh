@@ -106,9 +106,12 @@ case "$cmd" in
     kind="$(mh_meta_get "$id" kind)"
     wt="$(mh_meta_get "$id" worktree)"
     # Refresh pr_state from GitHub first so an out-of-band merge (operator merged
-    # in the web UI) is seen, not reported as `working` forever. No-op offline
-    # or when there is no PR / it is already MERGED.
-    mh_refresh_pr_state "$id"
+    # in the web UI) is seen, not reported as `working` forever. Best-effort: a
+    # failed check must not abort this decision. No-op offline or when there is
+    # no PR / it is already MERGED (mh_should_refresh_pr_state).
+    if mh_should_refresh_pr_state "$id"; then
+      "$(dirname "${BASH_SOURCE[0]}")/mh-pr.sh" check "$id" >/dev/null 2>&1 || true
+    fi
     pr="$(mh_meta_get "$id" pr)"
     # 1) PR merged is terminal-done for a ship task.
     if [ -n "$pr" ]; then
@@ -188,15 +191,13 @@ case "$cmd" in
 
   list)
     printf 'ID\tKIND\tREPO\tSTATE\n'
-    for m in "$MH_TASKS"/*.meta; do
-      [ -f "$m" ] || continue
-      id="$(basename "$m" .meta)"
+    while IFS= read -r id; do
       # Bulk overview: reconcile each row OFFLINE (MH_NO_FETCH=1). A per-task live
       # PR refresh here would turn `list` (and the session-start digest that calls
       # it) into N sequential GitHub round-trips on the hottest command. A single
       # `state <id>` still refreshes live; `list` favors a fast local snapshot.
       printf '%s\t%s\t%s\t%s\n' "$id" "$(mh_meta_get "$id" kind)" "$(mh_meta_get "$id" repo)" "$(MH_NO_FETCH=1 "$0" state "$id" | sed 's/ · .*//; s/^state: //')"
-    done | column -t -s$'\t' 2>/dev/null || cat
+    done < <(mh_all_task_ids) | column -t -s$'\t' 2>/dev/null || cat
     ;;
 
   *)

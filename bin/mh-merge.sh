@@ -25,8 +25,7 @@ case "$cmd" in
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-merge.sh local <id>"
     mode="$(mh_meta_get "$id" mode)"
     [ "$mode" = "local-only" ] || mh_die "task $id is mode '$mode', not local-only; use mh-pr.sh for PR-based landing"
-    repo="$(mh_meta_get "$id" repo)"; wt="$(mh_meta_get "$id" worktree)"
-    [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
+    repo="$(mh_meta_get "$id" repo)"; wt="$(mh_require_worktree "$id")"
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || mh_die "worktree on detached HEAD; nothing to land"
     ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit before landing"
@@ -48,8 +47,7 @@ case "$cmd" in
 
   rebase)
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-merge.sh rebase <id>"
-    repo="$(mh_meta_get "$id" repo)"; wt="$(mh_meta_get "$id" worktree)"
-    [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
+    repo="$(mh_meta_get "$id" repo)"; wt="$(mh_require_worktree "$id")"
     ! mh_tracked_dirty "$wt" || mh_die "worktree has uncommitted changes to tracked files; commit or stash before rebasing"
     dir="$(mh_repo_dir "$repo")"; def="$(mh_default_branch "$dir")"
     git -C "$dir" fetch --quiet origin "$def" 2>/dev/null || mh_warn "$repo: fetch failed; base may be stale"

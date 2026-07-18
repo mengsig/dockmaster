@@ -18,8 +18,7 @@ mh_ensure_dirs
 
 id="${1:-}"; [ -n "$id" ] || { echo "usage: mh-test.sh <id>" >&2; exit 2; }
 mh_require_id "$id"
-wt="$(mh_meta_get "$id" worktree)"; repo="$(mh_meta_get "$id" repo)"
-[ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $id"
+wt="$(mh_require_worktree "$id")"; repo="$(mh_meta_get "$id" repo)"
 cmd="$(mh_registry_get "$repo" test_cmd)"
 
 if [ -z "$cmd" ]; then

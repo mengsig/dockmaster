@@ -36,6 +36,29 @@ cmd="${1:-}"; shift || true
 # state use one audited read-modify-write path (lock, atomic temp->mv, cleanup).
 registry_write() { mh_json_update "$MH_REGISTRY" "$@"; }
 
+# require_valid_mode <mode> - single owner of the mode enum, checked by add,
+# create, and set so the three cannot drift on what a valid mode is.
+require_valid_mode() {
+  case "$1" in
+    pipeline|direct-pr|local-only) ;;
+    *) mh_die "mode must be pipeline|direct-pr|local-only" ;;
+  esac
+}
+
+# guard_new_repo_slot <name> <orphan-hint> -> print the clone directory this
+# name would use, or die if <name> is already registered or its clone
+# directory exists unregistered (an orphan left by a partial add/create).
+# <orphan-hint> names what the caller does before registering (clone vs.
+# local init) so the recovery message matches what actually happened.
+guard_new_repo_slot() {
+  local name="$1" hint="$2" dir
+  jq -e --arg n "$name" '.repos[$n]' "$MH_REGISTRY" >/dev/null 2>&1 && mh_die "repo '$name' already registered"
+  dir="$MH_REPOS/$name"
+  [ -e "$dir" ] && mh_die "path already exists but '$name' is not registered: $dir
+This is an orphaned clone from a partial add/create ($hint). Recover, then re-run: remove it (rm -rf '$dir') or move it aside."
+  printf '%s\n' "$dir"
+}
+
 # register_repo <name> <remote> <branch> <mode> <test_cmd> - write the canonical
 # registry entry for a managed repo. Single owner of the entry shape, shared by
 # `add` (clone existing) and `create` (make new) so the two cannot drift.
@@ -82,11 +105,8 @@ case "$cmd" in
         *) mh_die "unknown flag: $1" ;;
       esac
     done
-    case "$mode" in pipeline|direct-pr|local-only) ;; *) mh_die "mode must be pipeline|direct-pr|local-only" ;; esac
-    jq -e --arg n "$name" '.repos[$n]' "$MH_REGISTRY" >/dev/null 2>&1 && mh_die "repo '$name' already registered"
-    dir="$MH_REPOS/$name"
-    [ -e "$dir" ] && mh_die "path already exists but '$name' is not registered: $dir
-This is an orphaned clone from a partial add/create (the clone succeeded but registration did not). Recover, then re-run: remove it (rm -rf '$dir') or move it aside."
+    require_valid_mode "$mode"
+    dir="$(guard_new_repo_slot "$name" "the clone succeeded but registration did not")"
     mh_info "cloning $remote -> $dir"
     git clone "$remote" "$dir" || mh_die "clone failed"
     [ -n "$branch" ] || branch="$(mh_default_branch "$dir")"
@@ -122,11 +142,8 @@ This is an orphaned clone from a partial add/create (the clone succeeded but reg
         *) mh_die "unknown flag: $1" ;;
       esac
     done
-    case "$mode" in pipeline|direct-pr|local-only) ;; *) mh_die "mode must be pipeline|direct-pr|local-only" ;; esac
-    jq -e --arg n "$name" '.repos[$n]' "$MH_REGISTRY" >/dev/null 2>&1 && mh_die "repo '$name' already registered"
-    dir="$MH_REPOS/$name"
-    [ -e "$dir" ] && mh_die "path already exists but '$name' is not registered: $dir
-This is an orphaned clone from a partial add/create (the local repo was initialized but registration did not complete). Recover, then re-run: remove it (rm -rf '$dir') or move it aside."
+    require_valid_mode "$mode"
+    dir="$(guard_new_repo_slot "$name" "the local repo was initialized but registration did not complete")"
 
     # Resolve the remote. Either the operator supplies an EMPTY remote they made,
     # or (no remote given) we create the GitHub repo ourselves.
@@ -201,7 +218,7 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     case "$field" in
       yolo) case "$value" in true|false) ;; *) mh_die "yolo must be true|false" ;; esac
             registry_write --arg n "$name" --argjson v "$value" '.repos[$n].yolo = $v' ;;
-      mode) case "$value" in pipeline|direct-pr|local-only) ;; *) mh_die "mode must be pipeline|direct-pr|local-only" ;; esac
+      mode) require_valid_mode "$value"
             registry_write --arg n "$name" --arg v "$value" '.repos[$n].mode = $v' ;;
       default_branch)
             dir="$MH_REPOS/$name"
@@ -242,14 +259,12 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     # present here, so `mh-task.sh state` can resolve each referencing task.
     live=""
     task_sh="$(dirname "$0")/mh-task.sh"
-    for m in "$MH_TASKS"/*.meta; do
-      [ -f "$m" ] || continue
-      tid="$(basename "$m" .meta)"
+    while IFS= read -r tid; do
       [ "$(mh_meta_get "$tid" repo)" = "$name" ] || continue
       st="$("$task_sh" state "$tid" 2>/dev/null | sed -n 's/^state: \([^ ]*\).*/\1/p')"
       [ "$st" = "done" ] && continue
       live="$live $tid($st)"
-    done
+    done < <(mh_all_task_ids)
     [ -z "$live" ] || mh_die "repo $name is referenced by live task(s):$live — finish or tear them down before unregistering the repo"
     registry_write --arg n "$name" 'del(.repos[$n])'
     mh_info "unregistered '$name' (clone left on disk at $dir; delete manually if intended)"
