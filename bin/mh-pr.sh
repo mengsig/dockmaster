@@ -56,7 +56,7 @@ owner_repo() {
 pr_number_from_url() {
   # strict canonical parse: https://github.com/<owner>/<repo>/pull/<n>
   local url="$1"
-  printf '%s' "$url" | grep -qE '^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$' \
+  grep -qE '^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$' <<<"$url" \
     || mh_die "not a canonical PR url: $url"
   printf '%s' "$url" | sed -E 's#.*/pull/##'
 }

@@ -817,6 +817,49 @@ check "--base with no value leaves no worktree behind" '[ ! -e "$MH_HOME/state/w
 check "set refuses hand-writing base" '! b mh-task.sh set sub-child base evil-branch >/dev/null 2>&1'
 check "set base recorded by --base is untouched by the guard" '[ "$(b mh-task.sh get sub-child base)" = "parent-feature" ]'
 
+echo "== never-merge-red: pure-function coverage for mh-pr.sh's url/rollup helpers (#53) =="
+# mh-pr.sh is a script with a dispatch `case` at the bottom, not a pure library
+# like mh-lib.sh, so sourcing it runs that case. An empty $1 falls to the usage
+# branch and exits before any function below could be called. `url` with a
+# harmless task id resolves through mh_meta_get, which returns cleanly (empty)
+# for a nonexistent task and never exits, so sourcing completes and the
+# functions become callable in the same subshell — same technique as `gate()`
+# above, adapted because mh-pr.sh (unlike mh-lib.sh) always dispatches.
+prfn() { ( . "$ROOT/bin/mh-pr.sh" url _smoke_helper_probe_ >/dev/null 2>&1; "$@" ); }
+
+check "owner_repo parses an scp-style ssh remote"      '[ "$(prfn owner_repo "git@github.com:owner/repo.git")" = "owner/repo" ]'
+check "owner_repo parses an https remote with .git"    '[ "$(prfn owner_repo "https://github.com/owner/repo.git")" = "owner/repo" ]'
+check "owner_repo parses an https remote without .git" '[ "$(prfn owner_repo "https://github.com/owner/repo")" = "owner/repo" ]'
+# Only a `.git` suffix is trimmed; a trailing slash is NOT stripped, so a
+# caller passing a remote URL ending in "/" gets a slug that does too.
+check "owner_repo does not strip a trailing slash (documents the edge case)" \
+  '[ "$(prfn owner_repo "https://github.com/owner/repo/")" = "owner/repo/" ]'
+check "owner_repo refuses a url with no owner/repo slash" '! prfn owner_repo "not-a-remote" >/dev/null 2>&1'
+
+check "pr_number_from_url parses a canonical pull url" '[ "$(prfn pr_number_from_url "https://github.com/owner/repo/pull/42")" = "42" ]'
+check "pr_number_from_url refuses a non-canonical url"  '! prfn pr_number_from_url "https://github.com/owner/repo/pulls/42" >/dev/null 2>&1'
+
+# rollup_rank / worst_rollup worst-wins precedence, confirmed from the source:
+# failing(4) > unknown(3) > pending(2) > passing(1) > none(0). `unknown`
+# outranks `pending` so an API error is never silently treated as more
+# mergeable than an in-flight check; `none` (no signal at all) ranks lowest.
+check "rollup_rank: failing outranks unknown" '[ "$(prfn rollup_rank failing)" -gt "$(prfn rollup_rank unknown)" ]'
+check "rollup_rank: unknown outranks pending" '[ "$(prfn rollup_rank unknown)" -gt "$(prfn rollup_rank pending)" ]'
+check "rollup_rank: pending outranks passing" '[ "$(prfn rollup_rank pending)" -gt "$(prfn rollup_rank passing)" ]'
+check "rollup_rank: passing outranks none"    '[ "$(prfn rollup_rank passing)" -gt "$(prfn rollup_rank none)" ]'
+
+check "worst_rollup: failing beats passing regardless of arg order" \
+  '[ "$(prfn worst_rollup failing passing)" = failing ] && [ "$(prfn worst_rollup passing failing)" = failing ]'
+check "worst_rollup: unknown beats pending regardless of arg order" \
+  '[ "$(prfn worst_rollup unknown pending)" = unknown ] && [ "$(prfn worst_rollup pending unknown)" = unknown ]'
+check "worst_rollup: pending beats passing regardless of arg order" \
+  '[ "$(prfn worst_rollup pending passing)" = pending ] && [ "$(prfn worst_rollup passing pending)" = pending ]'
+# The worst-wins rollup must never let a bad state be masked by a good one.
+check "worst_rollup: none can never mask a failing rollup"    \
+  '[ "$(prfn worst_rollup none failing)" = failing ] && [ "$(prfn worst_rollup failing none)" = failing ]'
+check "worst_rollup: passing can never mask a failing rollup" \
+  '[ "$(prfn worst_rollup passing failing)" = failing ] && [ "$(prfn worst_rollup failing passing)" = failing ]'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
