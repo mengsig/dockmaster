@@ -52,11 +52,10 @@ never hand-edit `state/tasks/*.meta`, `state/repos.json`, or the backlog. A
 `state/tasks/<id>.status` line is a wake **event**; current state is
 `bin/mh-task.sh state <id>`. The toolbelt (each reachable directly or via the
 `bin/mh` dispatcher — `mh <sub> ...` runs `bin/mh-<sub>.sh ...`, and `mh help`
-lists them): `mh-doctor` (readiness check +
-`MH_HOME` scaffold), `mh-session-start` (startup digest), `mh-status` (read-only
-mid-session snapshot), `mh-repo`, `mh-worktree`, `mh-task`, `mh-brief`,
-`mh-branch-name`, `mh-pr`, `mh-merge`, `mh-sync`, `mh-lavish`, `mh-test` (the
-tests gate), `mh-backlog`, `mh-memory` (the plain-markdown context system).
+lists them): `mh-doctor`, `mh-session-start`, `mh-status`, `mh-repo`,
+`mh-worktree`, `mh-task`, `mh-brief`, `mh-branch-name`, `mh-pr`, `mh-merge`,
+`mh-sync`, `mh-lavish`, `mh-test`, `mh-backlog`, `mh-memory` — what each does is
+the `[routing]` bullet in `mh:knowledge` below (the authoritative inventory).
 
 ## Session start
 
@@ -224,8 +223,9 @@ invariants, pitfalls, routing. Curated — not append-forever._
   flag (#49). `.github/workflows` presence is used only to FORBID the bypass,
   never to auto-pass `none`. The decision is the pure, offline-testable
   `mh_merge_gate <rollup> <allow_no_checks> <has_ci>`.
-- **[routing]** Multi-repo intent → `fleet-change` skill + `mh-backlog --campaign`
-  / `campaign` (grouping + rollup only; each child is an ordinary gated task).
+- **[routing]** Multi-repo intent → `fleet-change` skill + `mh-backlog.sh add
+  --campaign <id>` / `mh-backlog.sh campaign <id>` (grouping + rollup only; each
+  child is an ordinary gated task).
   Open-PR fleet health → `mh-pr.sh sweep` (read-only; surfaced in `mh-status`).
   A new repo with no test command → the onboarding scout (project-management skill)
   proposes a `test_cmd` and initial `mh:knowledge`.

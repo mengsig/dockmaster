@@ -129,9 +129,7 @@ Every requested change goes through the same gated flow:
    Review comments and post-open CI on an open PR are handled by `post-pr-review`.
 
 **Fast path for a trivial change.** When the change is *objectively trivial*
-(docs/comments/config-value/string-copy only, or a very small diff with no logic,
-control-flow, dependency, schema, auth, security, or externally-visible-contract
-change — see `change-review` for the exact criteria), the lavish approval gate
+(see `change-review` for the canonical criteria), the lavish approval gate
 (step 2) MAY be skipped and the PR path uses the single-pass `fast` pipeline
 (`config/pr-pipeline.fast.json`). Tests still run, one cold review still happens,
 and merge authority is unchanged. When unsure, use the full path above.
