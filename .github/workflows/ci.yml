@@ -5,8 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   checks:
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +27,32 @@ jobs:
 
       - name: Check jq is present
         run: jq --version
+
+      # Enforce the bash-3.2 portability invariant (see mh:knowledge) before
+      # anything else runs: a bash-4-only construct in bin/*.sh would only
+      # blow up at runtime on a macOS 3.2 shell, so catch it here for both
+      # runner images. The comment-stripping grep excludes lines that are
+      # pure comments (e.g. a note explaining why a construct is avoided)
+      # so it doesn't flag itself.
+      - name: Check for banned bash-4 constructs in bin/*.sh
+        run: |
+          if grep -REn 'mapfile|readarray|declare -A|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|&>>' bin/*.sh \
+              | grep -vE ':[0-9]+:[[:space:]]*#'; then
+            echo "banned bash-4 construct found in bin/*.sh (see above)"
+            exit 1
+          fi
+
+      # Guard against the macOS runner image quietly switching its default
+      # /bin/bash to a non-3.2 version, which would make the "system bash"
+      # smoke run below stop actually testing the 3.2 portability invariant.
+      - name: Assert macOS system bash is v3
+        if: matrix.os == 'macos-latest'
+        run: |
+          /bin/bash --version | head -1
+          /bin/bash --version | head -1 | grep -q "version 3" || {
+            echo "macOS system /bin/bash is no longer version 3; bash-3.2 leg is no longer testing what it claims"
+            exit 1
+          }
 
       # macOS runners default /bin/bash to the system bash (3.2), which is the
       # exact shell the toolbelt's bash-3.2 portability invariant targets.
