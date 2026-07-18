@@ -10,7 +10,8 @@
 #   one <name>     sync a single registered repo
 #   all            sync every registered repo
 #
-# Exit is always 0; unsafe repos are reported on stdout as "STUCK: ..." lines.
+# sync_one always returns 0; unsafe/unready repos are reported on stdout as
+# "STUCK: ..." / "SKIP: ..." lines, never left to a raw git failure.
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/mh-lib.sh"
@@ -28,7 +29,15 @@ sync_one() {
     echo "STUCK: $name has uncommitted changes to tracked files; left untouched"; return 0
   fi
   def="$(mh_default_branch "$dir")"
-  cur="$(git -C "$dir" rev-parse --abbrev-ref HEAD)"
+  # Guarded like mh_default_branch's identical call: an unborn default branch
+  # (a repo cloned from an empty upstream, never committed to) makes
+  # `rev-parse --abbrev-ref HEAD` exit 128 under this script's own
+  # `set -euo pipefail`, which would otherwise crash sync_one instead of
+  # reporting a clean, always-0-exit SKIP.
+  cur="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [ -z "$cur" ]; then
+    echo "SKIP: $name (no commits yet / unborn default branch; left untouched)"; return 0
+  fi
   if [ "$cur" != "$def" ]; then
     echo "STUCK: $name is on '$cur', not default '$def'; left untouched"; return 0
   fi

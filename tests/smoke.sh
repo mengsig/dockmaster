@@ -718,6 +718,23 @@ check "no worktree left behind by the failed create" '[ ! -e "$MH_HOME/state/wor
 check "MH_NO_FETCH bypasses the stale-base guard" 'MH_NO_FETCH=1 b mh-worktree.sh create div-1 divtest >/dev/null 2>&1'
 check "MH_NO_FETCH create actually produced a worktree" '[ -d "$MH_HOME/state/worktrees/div-1" ]'
 
+echo "== cold-review fix: an unborn default branch never crashes mh-sync or its callers =="
+# A clone of a never-committed-to bare remote has an unborn HEAD: `git rev-parse
+# --abbrev-ref HEAD` exits 128 there (sync_one's own rev-parse was unguarded -
+# the root-cause bug). sync_one must still return 0 and report SKIP/STUCK, never
+# a raw git fatal, and its two new callers must not crash either.
+git init -q --bare -b main "$TMP/unborn-origin.git"   # never gets a commit
+b mh-repo.sh add unborntest "$TMP/unborn-origin.git" --mode local-only --no-memory >/dev/null 2>&1
+if SYNC_UNBORN="$(b mh-sync.sh one unborntest 2>&1)"; then SYNC_RC=0; else SYNC_RC=$?; fi
+check "sync on an unborn clone still exits 0" '[ "$SYNC_RC" -eq 0 ]'
+check "sync on an unborn clone reports SKIP/STUCK, not a raw git fatal" \
+  'grep -qE "^(SKIP|STUCK):" <<<"$SYNC_UNBORN" && ! grep -q "fatal:" <<<"$SYNC_UNBORN"'
+b mh-task.sh new unborn-1 --kind ship --repo unborntest >/dev/null
+if UNBORN_OUT="$(b mh-worktree.sh create unborn-1 unborntest 2>&1)"; then UNBORN_RC=0; else UNBORN_RC=$?; fi
+check "worktree create on an unborn clone never raw-crashes" '! grep -q "fatal:" <<<"$UNBORN_OUT"'
+check "worktree create on an unborn clone succeeds or fails closed with a clean message" \
+  '[ "$UNBORN_RC" -eq 0 ] || grep -qi "not fast-forwardable" <<<"$UNBORN_OUT"'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

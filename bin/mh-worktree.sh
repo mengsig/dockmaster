@@ -70,7 +70,10 @@ case "$cmd" in
       # rather than reimplementing it here. A STUCK result (diverged or dirty
       # clone) fails closed instead of cutting a worktree off a stale base.
       # MH_NO_FETCH=1 (offline / smoke) skips this entirely: no sync, no block.
-      sync_out="$("$(dirname "${BASH_SOURCE[0]}")/mh-sync.sh" one "$repo")"
+      # The `|| sync_out=...` guards against mh-sync itself exiting non-zero
+      # unexpectedly (under set -e that would otherwise crash this command with
+      # a raw git failure instead of failing closed through the STUCK path below).
+      sync_out="$("$(dirname "${BASH_SOURCE[0]}")/mh-sync.sh" one "$repo")" || sync_out="STUCK: sync failed unexpectedly"
       case "$sync_out" in
         STUCK:*) mh_die "clone $repo is not fast-forwardable to origin — resolve it, then retry ($sync_out)" ;;
         # SKIP (e.g. fetch failed/offline) means the sync could not run at all -
