@@ -56,6 +56,15 @@ cron — which do the same job with less machinery and no polling. See
 - **Guarded by construction.** The manhandler is read-only over your repos except
   for narrow, guarded fast-forward paths. Teardown refuses to discard unlanded
   work. Nothing merges red or without your word.
+- **Fleet campaigns.** One intent that spans many repos ("bump this dependency
+  everywhere") fans out to one ordinary, gated child task per repo, tracked and
+  reported as a single campaign.
+- **Fleet PR/health sweep.** A read-only sweep across every open PR reports its
+  CI rollup and whether a reviewer requested changes, surfaced in the status
+  snapshot — no per-repo polling.
+- **CI on every push and PR.** This distro's own smoke suite and syntax/lint
+  checks run on GitHub Actions across ubuntu and macOS on every push to main and
+  every pull request.
 - **Persistent domain supervisors.** For large domains, delegate to a long-lived
   agent that owns a scope, keeps its own memory, and runs its own crew.
 
@@ -68,6 +77,12 @@ bin/                 the toolbelt; run `bin/mh help` for the full list (`bin/mh 
 .claude/skills/      skills loaded at their trigger points
 workflows/           optional deterministic PR-pipeline runner
 config/              PR-pipeline defaults and per-repo overrides
+tests/               tests/smoke.sh, the end-to-end regression check
+.github/             CI workflow (smoke + syntax on ubuntu + macos)
+CONTRIBUTING.md      how to test, portability rules, branch/commit style
+SECURITY.md          trust model and private vulnerability reporting
+LICENSE              MIT
+assets/              logo and theme assets
 state/ repos/ data/  operator-private runtime, clones, and artifacts (gitignored)
 ```
 
@@ -99,11 +114,12 @@ PR ready for review: https://github.com/me/app/pull/57
 > merge it
 ```
 
-Under the hood that is `bin/mh-repo.sh add`, `bin/mh-task.sh new`,
-`bin/mh-worktree.sh create`, the `pr-workflow` skill, and `bin/mh-pr.sh merge` —
-each usable directly, or through the `bin/mh` dispatcher (`mh <sub> ...` runs
-`bin/mh-<sub>.sh ...`; `mh help` lists the subcommands). Run any script with no
-arguments for its usage.
+Under the hood that is `bin/mh-repo.sh add` (running the onboarding scout to
+propose a test command and starter knowledge for a repo new to the fleet),
+`bin/mh-task.sh new`, `bin/mh-worktree.sh create`, the `pr-workflow` skill, and
+`bin/mh-pr.sh merge` — each usable directly, or through the `bin/mh` dispatcher
+(`mh <sub> ...` runs `bin/mh-<sub>.sh ...`; `mh help` lists the subcommands).
+Run any script with no arguments for its usage.
 
 ## Requirements
 

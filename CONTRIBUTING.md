@@ -17,6 +17,9 @@ covers the local-only lifecycle; the PR path has no automated coverage. Run it
 before every change to `bin/`, and add an assertion when you change a script's
 behavior.
 
+CI (`.github/workflows/ci.yml`) runs the smoke suite plus bash/JS syntax and
+bash-3.2 lint checks on `ubuntu-latest` and `macos-latest` on every push and PR.
+
 ## Portability
 
 The `bin/` scripts must run on **bash 3.2** (the default `/bin/bash` on macOS).

@@ -42,6 +42,28 @@ All notable changes to this project are documented here. The format follows
   gate and memory.
 - **Memory curation** — a `forget` verb and a duplicate-fact warning, plus an
   optional truly-manhandler-only per-repo store excluded from crewmate briefs.
+- **Resourcing policy** — the orchestrator right-sizes `model`/`effort` for every
+  spawned unit (dispatch, review, verify, fix, merge-gate reasoning): the least
+  power that still gets an excellent result, biased toward sufficient power when
+  unsure. Not a fixed table — the orchestrator's per-task judgment, documented in
+  `task-lifecycle` §3.
+- **New-repo requests route through the framework** — a "make/build me a repo or
+  project" request is delegated work: create/enroll it under `repos/` first
+  (`mh-repo.sh create`/`add`), then dispatch normally against the enrolled repo;
+  never scaffolded standalone outside the framework.
+- **`repo-sync` skill + clone-freshness guards** — `mh-worktree.sh create`
+  fast-forward-syncs the repo's clone before cutting a worktree's base and fails
+  closed on a diverged/dirty clone instead of branching off a stale one;
+  `mh-pr.sh merge` best-effort syncs the clone after a successful merge. Never
+  branch off a stale base again.
+- **GitHub Actions CI** — the smoke suite plus bash/JS syntax checks run on
+  every push to main and every PR, matrixed across `ubuntu-latest` and
+  `macos-latest` to exercise the bash-3.2 portability invariant.
+- **Stacked sub-PRs (Phase 1)** — `mh-worktree.sh create --base <ref>` branches
+  a child task off a parent ref instead of the default branch and records it as
+  the task's `base`; `mh-pr.sh open` then defaults the child's PR base to that
+  recorded parent, so a sub-PR auto-targets the parent's PR instead of main.
+  Restacking after the parent moves is a manual `merge-conflict` rebase for now.
 
 ### Fixed
 
@@ -57,6 +79,9 @@ All notable changes to this project are documented here. The format follows
 - **Toolbelt hardening** — `mh-backlog` shares the single locked JSON writer,
   `mh-repo create` uses a git-version-portable init, and the PR-pipeline runner
   verifies a real PR URL before reporting success.
+- **Merge-gate CI-aware loophole closed** — `--allow-no-checks` now bypasses a
+  `none` (unreported) check rollup only on a repo with no CI configured; once
+  `.github/workflows` exists, an unreported rollup always refuses the merge.
 
 ## [0.2.0] - 2026-07-18
 
