@@ -218,9 +218,12 @@ invariants, pitfalls, routing. Curated — not append-forever._
   `pr_state` live (skipped under `MH_NO_FETCH=1`) so an out-of-band merge is seen;
   bulk `list` and `mh-status` run offline.
 - **[invariant]** Never merge red: `mh-pr.sh merge` refuses `failing`/`pending`/
-  `unknown`, and refuses `none` (no checks reported) unless `--allow-no-checks` —
-  CI absence is never inferred from a missing `.github/workflows`. The decision is
-  the pure, offline-testable `mh_merge_gate`.
+  `unknown`, and refuses `none` (no checks reported) unless `--allow-no-checks`
+  AND the repo has no CI (`has_ci=0`, from `.github/workflows` absence in the
+  worktree/clone) — once a repo has CI, `none` always refuses regardless of the
+  flag (#49). `.github/workflows` presence is used only to FORBID the bypass,
+  never to auto-pass `none`. The decision is the pure, offline-testable
+  `mh_merge_gate <rollup> <allow_no_checks> <has_ci>`.
 - **[routing]** Multi-repo intent → `fleet-change` skill + `mh-backlog --campaign`
   / `campaign` (grouping + rollup only; each child is an ordinary gated task).
   Open-PR fleet health → `mh-pr.sh sweep` (read-only; surfaced in `mh-status`).

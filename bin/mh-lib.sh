@@ -283,19 +283,24 @@ mh_refresh_pr_state() {
 # Decide whether a CI rollup permits a merge, as a pure function so it is
 # testable offline. `none` (no checks reported) does NOT auto-pass: it is the
 # window after a PR opens but before CI registers — and we cannot reliably tell
-# "no CI configured" from "CI not yet reported" (a repo's CI may be an external
-# provider that posts commit statuses, with no .github/workflows to detect). So
-# `none` passes ONLY on an explicit operator acknowledgement (--allow-no-checks);
-# merging a genuinely CI-less repo is thus a conscious, logged choice rather than
-# an inference that could silently merge red. Prints one of:
+# "no CI configured" from "CI not yet reported" from the rollup alone. So `none`
+# passes ONLY when the operator has explicitly acknowledged a CI-less repo
+# (--allow-no-checks) AND the caller confirms no CI is configured (has_ci=0);
+# merging a genuinely CI-less repo is thus a conscious, logged choice rather
+# than an inference that could silently merge red. `has_ci` (derived from
+# `.github/workflows` presence) is used ONLY in this safe direction — to FORBID
+# the --allow-no-checks bypass once CI exists — NEVER to auto-pass `none`: a
+# repo can run external CI (commit statuses) with no .github/workflows, so a
+# missing directory never implies "safe to skip checks" on its own, only
+# `has_ci=0` narrows what --allow-no-checks may bypass. Prints one of:
 #   allow | refuse-failing | refuse-pending | refuse-none | refuse-unknown
 mh_merge_gate() {
-  # mh_merge_gate <rollup> <allow_no_checks:0|1>
+  # mh_merge_gate <rollup> <allow_no_checks:0|1> <has_ci:0|1>
   case "$1" in
     passing) printf 'allow\n' ;;
     failing) printf 'refuse-failing\n' ;;
     pending) printf 'refuse-pending\n' ;;
-    none)    if [ "$2" = "1" ]; then printf 'allow\n'; else printf 'refuse-none\n'; fi ;;
+    none)    if [ "$2" = "1" ] && [ "$3" = "0" ]; then printf 'allow\n'; else printf 'refuse-none\n'; fi ;;
     *)       printf 'refuse-unknown\n' ;;
   esac
 }

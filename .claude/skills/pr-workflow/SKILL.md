@@ -194,6 +194,12 @@ non-zero exit, do not attempt the merge.
 the operator's actual approval. Destructive, irreversible, or security-sensitive
 merges always escalate, even under `yolo`.
 
+**`--allow-no-checks` is for CI-less repos only.** On a repo with
+`.github/workflows`, the merge gate refuses a `none` rollup outright — always
+`await-checks` after opening the PR and merge only once checks go green.
+`--allow-no-checks` bypasses `none` solely when the repo has no CI configured;
+it can never be used to skip real checks that just haven't registered yet.
+
 ## Optional: deterministic runner
 
 The default is to drive the gates above with ordinary `Agent` calls. For a

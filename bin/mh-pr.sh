@@ -246,17 +246,33 @@ case "$cmd" in
     [ "$state" = "CLOSED" ] && mh_die "PR is closed, refusing to merge: $url"
     # Never merge red. A `none` rollup (no checks reported) does NOT auto-pass:
     # it is the race window after a PR opens but before CI registers. It passes
-    # only on an explicit --allow-no-checks: we cannot reliably distinguish "no
-    # CI configured" from "external CI (commit statuses) not yet reported", so
-    # inferring no-CI from a missing .github/workflows could merge red for any
-    # repo whose CI is external. Merging a CI-less repo is a conscious choice.
+    # only on an explicit --allow-no-checks AND a confirmed CI-less repo
+    # (has_ci=0): once .github/workflows exists, --allow-no-checks can no
+    # longer bypass `none` (closes #49) — a repo that gained CI must wait for
+    # it, never merge on a rollup that just hasn't registered yet.
     repo="$(mh_meta_get "$id" repo)"
     ci_dir="$(mh_repo_dir "$repo")"
-    case "$(mh_merge_gate "$checks" "$allow_no_checks")" in
+    # has_ci is checked in the worktree first (if still recorded), so a
+    # workflow file added on the crewmate's branch but not yet in the managed
+    # clone still counts; falls back to the clone otherwise.
+    wt="$(mh_meta_get "$id" worktree)"
+    has_ci=0
+    if [ -n "$wt" ] && [ -d "$wt/.github/workflows" ]; then
+      has_ci=1
+    elif [ -d "$ci_dir/.github/workflows" ]; then
+      has_ci=1
+    fi
+    case "$(mh_merge_gate "$checks" "$allow_no_checks" "$has_ci")" in
       allow) : ;;
       refuse-failing) mh_die "REFUSED: PR has failing checks (never merge red): $url" ;;
       refuse-pending) mh_die "REFUSED: PR checks still running: $url — wait for them with: mh-pr.sh await-checks $id" ;;
-      refuse-none)    mh_die "REFUSED: no checks reported yet for $url — CI may not have registered. Wait with: mh-pr.sh await-checks $id, or pass --allow-no-checks if this repo has no required CI." ;;
+      refuse-none)
+        if [ "$has_ci" -eq 1 ]; then
+          mh_die "REFUSED: no checks reported yet for $url — this repo has CI configured. Wait with: mh-pr.sh await-checks $id"
+        else
+          mh_die "REFUSED: no checks reported yet for $url — pass --allow-no-checks if this repo has no CI, or wait with: mh-pr.sh await-checks $id"
+        fi
+        ;;
       *)              mh_die "REFUSED: could not confirm check status ($checks): $url" ;;
     esac
     # mergeable_state gate. Refuse a conflicted, draft, or branch-protection-
