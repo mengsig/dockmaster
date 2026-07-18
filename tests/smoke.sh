@@ -6,6 +6,14 @@
 # Run: tests/smoke.sh   (exit 0 = all passed)
 
 set -euo pipefail
+
+# Hermetic git identity: the toolbelt shells out to `git commit`, which needs
+# an author identity. A fresh machine/CI runner has no global user.name/email
+# configured, so export throwaway values git honors for commits rather than
+# depending on (or mutating) the caller's global git config.
+export GIT_AUTHOR_NAME="manhandler smoke" GIT_AUTHOR_EMAIL="smoke@manhandler.test"
+export GIT_COMMITTER_NAME="manhandler smoke" GIT_COMMITTER_EMAIL="smoke@manhandler.test"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/mh-smoke.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
