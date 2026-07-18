@@ -73,6 +73,10 @@ case "$cmd" in
       sync_out="$("$(dirname "${BASH_SOURCE[0]}")/mh-sync.sh" one "$repo")"
       case "$sync_out" in
         STUCK:*) mh_die "clone $repo is not fast-forwardable to origin — resolve it, then retry ($sync_out)" ;;
+        # SKIP (e.g. fetch failed/offline) means the sync could not run at all -
+        # not a fail-closed case (no divergence was found), but the base may
+        # still be stale, so warn rather than proceed silently (prior behavior).
+        SKIP:*) mh_warn "$sync_out; base may be stale" ;;
       esac
     fi
     def="$(mh_default_branch "$dir")"
