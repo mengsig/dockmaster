@@ -76,6 +76,9 @@ Do not dispatch until required tools are present and GitHub auth is good. Use
   managed repo. Any "make/build me a repo or project" request fires this first,
   before scaffolding anything: the new project is created under `repos/`
   (`mh-repo.sh create`, or `add` for an existing remote), never built standalone.
+- **repo-sync** — before dispatching a task / creating a worktree (now guarded
+  automatically), after an out-of-band merge, and whenever the operator asks to
+  "update my repos" — the fast-forward-only freshness contract for managed clones.
 - **task-lifecycle** — before taking on any delegated task (intake → classify →
   dispatch → deliver → teardown → promote).
 - **fleet-change** — before dispatching a multi-repo change (one intent fanned

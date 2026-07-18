@@ -64,7 +64,24 @@ case "$cmd" in
     dir="$(mh_repo_dir "$repo")"
     wt="$MH_WT/$id"
     [ -e "$wt" ] && mh_die "worktree already exists: $wt"
-    git -C "$dir" fetch --quiet origin 2>/dev/null || mh_warn "$repo: fetch failed; base may be stale"
+    if [ "${MH_NO_FETCH:-0}" != "1" ]; then
+      # Bring the clone's default branch current BEFORE cutting a worktree base
+      # off it (we hit a 9-behind base once). Reuse mh-sync's FF-only logic
+      # rather than reimplementing it here. A STUCK result (diverged or dirty
+      # clone) fails closed instead of cutting a worktree off a stale base.
+      # MH_NO_FETCH=1 (offline / smoke) skips this entirely: no sync, no block.
+      # The `|| sync_out=...` guards against mh-sync itself exiting non-zero
+      # unexpectedly (under set -e that would otherwise crash this command with
+      # a raw git failure instead of failing closed through the STUCK path below).
+      sync_out="$("$(dirname "${BASH_SOURCE[0]}")/mh-sync.sh" one "$repo")" || sync_out="STUCK: sync failed unexpectedly"
+      case "$sync_out" in
+        STUCK:*) mh_die "clone $repo is not fast-forwardable to origin — resolve it, then retry ($sync_out)" ;;
+        # SKIP (e.g. fetch failed/offline) means the sync could not run at all -
+        # not a fail-closed case (no divergence was found), but the base may
+        # still be stale, so warn rather than proceed silently (prior behavior).
+        SKIP:*) mh_warn "$sync_out; base may be stale" ;;
+      esac
+    fi
     def="$(mh_default_branch "$dir")"
     # Branch from the LOCAL default: it holds local-only landings and is kept
     # fast-forwarded to origin for PR repos by mh-sync. Fall back to origin.

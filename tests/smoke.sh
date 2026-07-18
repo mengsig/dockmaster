@@ -683,6 +683,58 @@ STATUS_PR="$(b mh-status.sh 2>&1 || true)"
 check "status shows the open-PRs section"  'grep -q "OPEN PRs" <<<"$STATUS_PR"'
 check "status open-PRs lists the open PR"  'grep -q "sweep-open" <<<"$STATUS_PR"'
 
+echo "== stale-base guard: mh-worktree create FF-syncs a behind clone (#44/#40) =="
+git init -q --bare -b main "$TMP/stale-origin.git"
+git init -q -b main "$TMP/stale-seed"
+( cd "$TMP/stale-seed"; git config user.email t@t.co; git config user.name t
+  printf 'v1\n' > f.txt; git add .; git commit -qm init
+  git remote add origin "$TMP/stale-origin.git"; git push -q origin main ) >/dev/null 2>&1
+b mh-repo.sh add staletest "$TMP/stale-origin.git" --mode local-only --no-memory >/dev/null 2>&1
+# Advance origin independently of the clone, as an out-of-band merge would.
+( cd "$TMP/stale-seed"; printf 'v2\n' >> f.txt; git commit -qam advance; git push -q origin main ) >/dev/null 2>&1
+ADV_SHA="$(git -C "$TMP/stale-seed" rev-parse HEAD)"
+check "clone starts behind the advanced origin" '[ "$(git -C "$MH_HOME/repos/staletest" rev-parse main)" != "'"$ADV_SHA"'" ]'
+b mh-task.sh new stale-1 --kind ship --repo staletest >/dev/null
+STALEWT="$(b mh-worktree.sh create stale-1 staletest | tail -n1)"
+check "create FF-syncs the clone to the advanced origin" '[ "$(git -C "$MH_HOME/repos/staletest" rev-parse main)" = "'"$ADV_SHA"'" ]'
+check "worktree base includes the synced commit" 'grep -q v2 "$STALEWT/f.txt"'
+
+echo "== stale-base guard: a clone that cannot fast-forward fails closed (#44/#40) =="
+git init -q --bare -b main "$TMP/div-origin.git"
+git init -q -b main "$TMP/div-seed"
+( cd "$TMP/div-seed"; git config user.email t@t.co; git config user.name t
+  printf 'base\n' > g.txt; git add .; git commit -qm init
+  git remote add origin "$TMP/div-origin.git"; git push -q origin main ) >/dev/null 2>&1
+b mh-repo.sh add divtest "$TMP/div-origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b mh-task.sh new div-1 --kind ship --repo divtest >/dev/null
+# Diverge: origin advances one way, the clone's main advances another -> no FF
+# is possible in either direction.
+( cd "$TMP/div-seed"; printf 'remote-side\n' >> g.txt; git commit -qam "remote advance"; git push -q origin main ) >/dev/null 2>&1
+git -C "$MH_HOME/repos/divtest" -c user.email=c@c.co -c user.name=c commit --allow-empty -qm "local-only commit on main" >/dev/null 2>&1
+check "create fails closed on a diverged clone" '! b mh-worktree.sh create div-1 divtest >/dev/null 2>&1'
+DIVOUT="$(b mh-worktree.sh create div-1 divtest 2>&1 || true)"
+check "guard message names the repo and says resolve" 'grep -q divtest <<<"$DIVOUT" && grep -qi resolve <<<"$DIVOUT"'
+check "no worktree left behind by the failed create" '[ ! -e "$MH_HOME/state/worktrees/div-1" ]'
+check "MH_NO_FETCH bypasses the stale-base guard" 'MH_NO_FETCH=1 b mh-worktree.sh create div-1 divtest >/dev/null 2>&1'
+check "MH_NO_FETCH create actually produced a worktree" '[ -d "$MH_HOME/state/worktrees/div-1" ]'
+
+echo "== cold-review fix: an unborn default branch never crashes mh-sync or its callers =="
+# A clone of a never-committed-to bare remote has an unborn HEAD: `git rev-parse
+# --abbrev-ref HEAD` exits 128 there (sync_one's own rev-parse was unguarded -
+# the root-cause bug). sync_one must still return 0 and report SKIP/STUCK, never
+# a raw git fatal, and its two new callers must not crash either.
+git init -q --bare -b main "$TMP/unborn-origin.git"   # never gets a commit
+b mh-repo.sh add unborntest "$TMP/unborn-origin.git" --mode local-only --no-memory >/dev/null 2>&1
+if SYNC_UNBORN="$(b mh-sync.sh one unborntest 2>&1)"; then SYNC_RC=0; else SYNC_RC=$?; fi
+check "sync on an unborn clone still exits 0" '[ "$SYNC_RC" -eq 0 ]'
+check "sync on an unborn clone reports SKIP/STUCK, not a raw git fatal" \
+  'grep -qE "^(SKIP|STUCK):" <<<"$SYNC_UNBORN" && ! grep -q "fatal:" <<<"$SYNC_UNBORN"'
+b mh-task.sh new unborn-1 --kind ship --repo unborntest >/dev/null
+if UNBORN_OUT="$(b mh-worktree.sh create unborn-1 unborntest 2>&1)"; then UNBORN_RC=0; else UNBORN_RC=$?; fi
+check "worktree create on an unborn clone never raw-crashes" '! grep -q "fatal:" <<<"$UNBORN_OUT"'
+check "worktree create on an unborn clone succeeds or fails closed with a clean message" \
+  '[ "$UNBORN_RC" -eq 0 ] || grep -qi "not fast-forwardable" <<<"$UNBORN_OUT"'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

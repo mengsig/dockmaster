@@ -114,9 +114,10 @@ private store, never in the committed section.
 
 ## Keep clones fresh
 
-`bin/mh-sync.sh all` fast-forwards every clean clone on its default branch and
-reports anything unsafe as `STUCK:` (left untouched — never merged, rebased, or
-reset). Run it at session start and after a PR merges.
+A managed clone must stay fast-forwarded to origin so every worktree branches
+off fresh `main` — see the `repo-sync` skill for the freshness contract (the
+`bin/mh-sync.sh` mechanic, when it runs automatically, and when to run it by
+hand).
 
 ## Remove a repo
 
