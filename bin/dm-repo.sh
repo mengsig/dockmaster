@@ -331,7 +331,7 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     while IFS= read -r tid; do
       [ "$(dm_meta_get "$tid" repo)" = "$name" ] || continue
       st="$("$task_sh" state "$tid" 2>/dev/null | sed -n 's/^state: \([^ ]*\).*/\1/p')"
-      [ "$st" = "done" ] && continue
+      case "$st" in done|discarded) continue ;; esac
       live="$live $tid($st)"
     done < <(dm_all_task_ids)
     [ -z "$live" ] || dm_die "repo $name is referenced by live task(s):$live — finish or tear them down before unregistering the repo"

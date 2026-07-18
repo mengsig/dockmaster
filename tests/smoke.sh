@@ -1203,6 +1203,27 @@ NOEXC="$(b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "the no-list never refusal is unchanged"              'grep -q "merge_authority=never" <<<"$NOEXC" && grep -qi "operator merges" <<<"$NOEXC"'
 check "the no-list refusal does not mention the carve-out"  '! grep -q "merge_allowed_bases" <<<"$NOEXC"'
 
+echo "== discarded terminal state (operator discard, issue #69) =="
+b dm-repo.sh add disctest "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-task.sh new disc-1 --kind ship --repo disctest >/dev/null
+DWT="$(b dm-worktree.sh create disc-1 disctest | tail -n1)"
+git -C "$DWT" checkout -q -b feat/x/disc-1
+printf 'w\n' > "$DWT/disc.txt"
+git -C "$DWT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$DWT" -c user.email=c@c.co -c user.name=c commit -qm "disc work" >/dev/null
+check "event refuses to forge 'discarded'"       '! b dm-task.sh event disc-1 discarded x >/dev/null 2>&1'
+check "plain remove still refuses unlanded"      '! b dm-worktree.sh remove disc-1 >/dev/null 2>&1'
+check "archive refuses while work is live"       '! b dm-task.sh archive disc-1 >/dev/null 2>&1'
+b dm-worktree.sh remove disc-1 --force >/dev/null 2>&1
+check "force-remove records terminal discarded"  'OUT="$(b dm-task.sh state disc-1)"; grep -q "^state: discarded" <<<"$OUT"'
+check "archive accepts a discarded task"         'b dm-task.sh archive disc-1 >/dev/null'
+check "repo remove passes over a discarded task" 'b dm-repo.sh remove disctest >/dev/null 2>&1'
+# A scout worktree is scratch: force-removing it must NOT brand the task discarded.
+b dm-task.sh new disc-sc --kind scout --repo demo >/dev/null
+b dm-worktree.sh create disc-sc demo >/dev/null
+b dm-worktree.sh remove disc-sc --force >/dev/null 2>&1
+check "scout force-remove records no discard"    'OUT="$(b dm-task.sh state disc-sc)"; ! grep -q discarded <<<"$OUT"'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
