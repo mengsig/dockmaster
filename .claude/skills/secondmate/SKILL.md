@@ -5,10 +5,10 @@ description: Stand up a persistent domain supervisor — a long-lived background
 
 # secondmate (domain supervisor)
 
-For a large or long-running domain, the manhandler can delegate to a
+For a large or long-running domain, the dockmaster can delegate to a
 **persistent domain supervisor**: a long-lived background agent that owns a
 scope, keeps its own memory, and runs its own crew. It is an ordinary direct
-report of the manhandler — a second *level*, not a second architecture.
+report of the dockmaster — a second *level*, not a second architecture.
 
 ## When to create one
 
@@ -30,9 +30,9 @@ Give it, in its spawn brief:
 - its **scope** in plain language (what work routes to it);
 - the repos it owns (registry names) and the fact that it works only in
   worktrees off those clones, never their primary checkout;
-- the same lifecycle, memory-routing, and PR conventions the manhandler follows
+- the same lifecycle, memory-routing, and PR conventions the dockmaster follows
   (point it at these skills);
-- its **return channel**: it reports outcomes back to the manhandler via
+- its **return channel**: it reports outcomes back to the dockmaster via
   `SendMessage`, never to the operator directly.
 
 Record the supervisor in `state/secondmates.md`: its agent id, scope, and repo
@@ -50,7 +50,7 @@ the answer.
 ## Memory
 
 A domain supervisor keeps domain-local memory: per-repo facts in each repo's
-`AGENTS.md` `mh:knowledge` section and private `.mh/` notes (shared, since it uses
+`AGENTS.md` `dm:knowledge` section and private `.dm/` notes (shared, since it uses
 the same clones), and domain-level operating notes in its own working notes.
 Operator preferences that should reach every domain live in the main home's global
 memory and are conveyed to the supervisor when it is created or when they change.

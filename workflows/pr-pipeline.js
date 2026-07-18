@@ -13,10 +13,10 @@ export const meta = {
 // OPTIONAL, opt-in runner for the modular PR pipeline described in
 // .claude/skills/pr-workflow/SKILL.md. It is NOT the default executor and NOT
 // wired to anything: nothing auto-discovers it, no bin/ script invokes it. The
-// manhandler's default path is to drive the gates with ordinary Agent calls
+// dockmaster's default path is to drive the gates with ordinary Agent calls
 // following the pr-workflow skill. Run this only via the Workflow tool, and only
 // when the operator has opted into hands-off multi-agent orchestration. A live
-// rigorous run is a manhandler/operator action — this file has been verified for
+// rigorous run is a dockmaster/operator action — this file has been verified for
 // structural/syntactic conformance (`node --check`) only, never executed here.
 //
 // args = {
@@ -113,7 +113,7 @@ const REFUTE_SCHEMA = {
 // The PR gate must return proof the PR actually opened, not a free-form claim: a
 // canonical PR URL. The schema forces a `url` field; PR_URL_PATTERN then verifies
 // it is a real github.com pull URL before the stage reports ok, so a failed
-// `mh-pr.sh open` (push rejected, auth, no PR created) cannot pass as success.
+// `dm-pr.sh open` (push rejected, auth, no PR created) cannot pass as success.
 const PR_SCHEMA = {
   type: 'object', additionalProperties: false,
   properties: { url: { type: 'string' } },
@@ -233,7 +233,7 @@ async function openPR() {
     `imperative summary, brief context only if not obvious, key changes as bullets, and a final ` +
     `"Risk: ... Verified: ..." line. No machine-authored phrasing, no agent attribution` +
     `${t.issue && t.issue !== 'x' ? `, and include "Closes #${t.issue}"` : ''}. ` +
-    `Then run:\n\n    ${t.binDir}/mh-pr.sh open ${t.taskId} --title ${JSON.stringify(title)} --body-file <that file>\n\n` +
+    `Then run:\n\n    ${t.binDir}/dm-pr.sh open ${t.taskId} --title ${JSON.stringify(title)} --body-file <that file>\n\n` +
     `Report the canonical PR URL it produced (https://github.com/<owner>/<repo>/pull/<n>). If the command did not open a PR, report the URL as empty.`,
     { label: 'pr', phase: 'PR', schema: PR_SCHEMA },
   )
@@ -315,14 +315,14 @@ for (const g of gates) {
     // caller-declared surface (default/fast). t.securitySurface has no producer
     // of its own in default/fast configs, so without this the optional gate
     // always skipped; self-computing mirrors what the rigorous `auto` path (and
-    // the manhandler's own agent-driven default execution, see the pr-workflow
+    // the dockmaster's own agent-driven default execution, see the pr-workflow
     // skill) already does, rather than requiring every caller to wire the flag.
     if (g.method === 'auto' || (g.optional && !t.securitySurface)) {
       // Scan the diff, escalate to a full review only on a hit, and otherwise
       // skip explicitly — never a silent forget.
       await agent(
         `Security gate for task ${t.taskId}. In ${t.worktree}, run the security-surface scan exactly:\n\n` +
-        `    ${t.binDir}/mh-pr.sh security-scan ${t.taskId}\n\n` +
+        `    ${t.binDir}/dm-pr.sh security-scan ${t.taskId}\n\n` +
         `If it reports signals present (exit 0), perform a security-review of the diff ${base}...HEAD (auth, input handling, secrets, ` +
         `crypto, external I/O) and report concrete issues only. If it reports no signals (non-zero exit), state explicitly that a ` +
         `security review was skipped because the diff has no security surface. Do not change any files.`,
@@ -348,10 +348,10 @@ for (const g of gates) {
     // canonical github.com pull pattern, else the open failed (push rejected, auth,
     // no PR) and the stage fails loudly rather than returning a false ok.
     if (!PR_URL_PATTERN.test(url)) {
-      return { ok: false, stage: 'pr', detail: `mh-pr.sh open did not yield a canonical PR URL (got ${JSON.stringify((out && out.url) || '')}); the PR likely did not open` }
+      return { ok: false, stage: 'pr', detail: `dm-pr.sh open did not yield a canonical PR URL (got ${JSON.stringify((out && out.url) || '')}); the PR likely did not open` }
     }
     // Surface the configured merge method so the operator-mediated merge gate can
-    // honor it (bin/mh-pr.sh merge --method <method>); this runner never merges.
+    // honor it (bin/dm-pr.sh merge --method <method>); this runner never merges.
     return { ok: true, stage: 'pr', pr: url, method: g.method || 'squash' }
   } else {
     log(`unknown gate '${g.gate}' — skipped`)

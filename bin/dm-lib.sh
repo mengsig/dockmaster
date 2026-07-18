@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# mh-lib.sh - shared helpers for the manhandler toolbelt.
-# Source this from other mh-*.sh scripts: . "$(dirname "$0")/mh-lib.sh"
+# dm-lib.sh - shared helpers for the dockmaster toolbelt.
+# Source this from other dm-*.sh scripts: . "$(dirname "$0")/dm-lib.sh"
 #
-# Conventions every mh-* script follows:
+# Conventions every dm-* script follows:
 #   - Fail closed. Validate inputs before any side effect. A refusal is a
 #     signal, never an obstacle to force past.
 #   - One owner per format. Task meta and the repo registry each have exactly
@@ -12,41 +12,41 @@
 
 set -euo pipefail
 
-# MH_HOME is the manhandler distro root (this repo). Resolve from this file's
+# DM_HOME is the dockmaster distro root (this repo). Resolve from this file's
 # location so scripts work regardless of the caller's cwd.
-MH_HOME="${MH_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
-export MH_HOME
+DM_HOME="${DM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
+export DM_HOME
 
-MH_STATE="$MH_HOME/state"
-MH_DATA="$MH_HOME/data"
-MH_REPOS="$MH_HOME/repos"
-MH_CONFIG="$MH_HOME/config"
-MH_REGISTRY="$MH_STATE/repos.json"
-MH_TASKS="$MH_STATE/tasks"
+DM_STATE="$DM_HOME/state"
+DM_DATA="$DM_HOME/data"
+DM_REPOS="$DM_HOME/repos"
+DM_CONFIG="$DM_HOME/config"
+DM_REGISTRY="$DM_STATE/repos.json"
+DM_TASKS="$DM_STATE/tasks"
 
-mh_die() { printf 'error: %s\n' "$*" >&2; exit 1; }
-mh_warn() { printf 'warning: %s\n' "$*" >&2; }
-mh_info() { printf '%s\n' "$*"; }
+dm_die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+dm_warn() { printf 'warning: %s\n' "$*" >&2; }
+dm_info() { printf '%s\n' "$*"; }
 
-mh_need() { command -v "$1" >/dev/null 2>&1 || mh_die "required tool not found: $1"; }
+dm_need() { command -v "$1" >/dev/null 2>&1 || dm_die "required tool not found: $1"; }
 
 # --- portable advisory lock: mkdir-based mutex -------------------------------
 # Serializes the read-modify-write of a shared-state file across concurrent
-# mh-* invocations (parallel crew is the design premise, so unlocked RMW loses
+# dm-* invocations (parallel crew is the design premise, so unlocked RMW loses
 # updates). We use an atomic `mkdir` as the primitive, NOT flock — macOS has no
-# flock. THIS HELPER OWNS THE EXIT TRAP: mh_lock arms a trap that removes the
-# lock dir so an mh_die/exit inside the critical section cannot leak it, and
-# mh_unlock clears it. It is not reentrant: do not nest mh_lock calls in one
-# process, and do not set your own EXIT/INT/TERM trap between mh_lock/mh_unlock.
+# flock. THIS HELPER OWNS THE EXIT TRAP: dm_lock arms a trap that removes the
+# lock dir so an dm_die/exit inside the critical section cannot leak it, and
+# dm_unlock clears it. It is not reentrant: do not nest dm_lock calls in one
+# process, and do not set your own EXIT/INT/TERM trap between dm_lock/dm_unlock.
 #
 # Crash-safety: a holder killed with SIGKILL cannot run its trap, so the lock
 # dir survives and would otherwise wedge every future write (~30s spin, then
 # hard death). To self-heal, the holder records its PID and an epoch timestamp
 # inside the lock dir; a waiter reclaims the lock only on POSITIVE evidence of
 # abandonment — the recorded PID is not alive, or the lock is older than
-# MH_LOCK_STALE_SECS. Genuine LIVE contention still blocks, then fails visibly.
-mh_lock() {
-  # mh_lock <file>  -- acquire the advisory lock guarding <file>
+# DM_LOCK_STALE_SECS. Genuine LIVE contention still blocks, then fails visibly.
+dm_lock() {
+  # dm_lock <file>  -- acquire the advisory lock guarding <file>
   local target="$1" lockdir reclaim waited=0 pid rpid
   lockdir="$target.lock"; reclaim="$lockdir.reclaim"
   while ! mkdir "$lockdir" 2>/dev/null; do
@@ -75,7 +75,7 @@ mh_lock() {
           if mkdir "$reclaim" 2>/dev/null; then
             rpid="$(cat "$lockdir/pid" 2>/dev/null || true)"
             if [ -d "$lockdir" ] && [ "$rpid" = "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-              mh_warn "reclaiming stale lock on $(basename "$target") (holder pid=$pid not alive; previous holder likely crashed)"
+              dm_warn "reclaiming stale lock on $(basename "$target") (holder pid=$pid not alive; previous holder likely crashed)"
               rm -rf "$lockdir" 2>/dev/null || true
             fi
             rmdir "$reclaim" 2>/dev/null || true
@@ -86,13 +86,13 @@ mh_lock() {
     esac
     waited=$((waited + 1))
     if [ "$waited" -ge 300 ]; then
-      mh_die "could not acquire lock on $(basename "$target") after ~30s; if no mh-* process is running, remove the stale lock: rm -rf '$lockdir'"
+      dm_die "could not acquire lock on $(basename "$target") after ~30s; if no dm-* process is running, remove the stale lock: rm -rf '$lockdir'"
     fi
     sleep 0.1
   done
   # We hold the lock: record our PID so a future waiter can detect our crash.
   printf '%s\n' "$$" > "$lockdir/pid" 2>/dev/null || true
-  # Clean up on normal exit / mh_die (EXIT), and on signal death. A trapped
+  # Clean up on normal exit / dm_die (EXIT), and on signal death. A trapped
   # INT/TERM handler must ALSO terminate: without the explicit exit, bash runs
   # the handler and then RESUMES the (now unlocked) critical section — which
   # would let a waiter acquire and write concurrently. So each signal handler
@@ -102,21 +102,21 @@ mh_lock() {
   trap "rm -rf '$lockdir' 2>/dev/null || true; exit 143" TERM
 }
 
-mh_unlock() {
-  # mh_unlock <file>  -- release the lock and clear the traps
+dm_unlock() {
+  # dm_unlock <file>  -- release the lock and clear the traps
   local lockdir="$1.lock"
   rm -rf "$lockdir" 2>/dev/null || true
   trap - EXIT INT TERM
 }
 
-mh_ensure_dirs() {
-  mkdir -p "$MH_STATE" "$MH_DATA" "$MH_REPOS" "$MH_CONFIG" "$MH_TASKS"
-  [ -f "$MH_REGISTRY" ] || printf '{"repos":{}}\n' > "$MH_REGISTRY"
+dm_ensure_dirs() {
+  mkdir -p "$DM_STATE" "$DM_DATA" "$DM_REPOS" "$DM_CONFIG" "$DM_TASKS"
+  [ -f "$DM_REGISTRY" ] || printf '{"repos":{}}\n' > "$DM_REGISTRY"
 }
 
 # --- task id validation ------------------------------------------------------
 # Path-safe slug, no leading dot, <= 64 chars. Rejected ids never touch disk.
-mh_valid_id() {
+dm_valid_id() {
   case "$1" in
     ''|.*) return 1 ;;
     *[!A-Za-z0-9._-]*) return 1 ;;
@@ -124,68 +124,68 @@ mh_valid_id() {
   [ "${#1}" -le 64 ]
 }
 
-mh_require_id() {
-  mh_valid_id "$1" || mh_die "invalid task/repo id: '$1' (use [A-Za-z0-9._-], no leading dot, <= 64 chars)"
+dm_require_id() {
+  dm_valid_id "$1" || dm_die "invalid task/repo id: '$1' (use [A-Za-z0-9._-], no leading dot, <= 64 chars)"
 }
 
 # --- task meta: single owner of state/tasks/<id>.meta ------------------------
 # Format is one key=value per line. Values are single-line only.
-mh_meta_path() { printf '%s/%s.meta\n' "$MH_TASKS" "$1"; }
-mh_status_path() { printf '%s/%s.status\n' "$MH_TASKS" "$1"; }
+dm_meta_path() { printf '%s/%s.meta\n' "$DM_TASKS" "$1"; }
+dm_status_path() { printf '%s/%s.status\n' "$DM_TASKS" "$1"; }
 
-mh_meta_get() {
-  # mh_meta_get <id> <key>  -> prints value or empty. The key is matched as a
+dm_meta_get() {
+  # dm_meta_get <id> <key>  -> prints value or empty. The key is matched as a
   # FIXED string (not a regex); value may itself contain '='; last line wins.
-  local f; f="$(mh_meta_path "$1")"
+  local f; f="$(dm_meta_path "$1")"
   [ -f "$f" ] || return 0
   awk -v k="$2" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) } END { print v }' "$f"
 }
 
-mh_meta_set() {
-  # mh_meta_set <id> <key> <value>  (value must be single-line). The key is
+dm_meta_set() {
+  # dm_meta_set <id> <key> <value>  (value must be single-line). The key is
   # matched as a FIXED string (not a regex) when dropping the old line.
-  mh_require_id "$1"
-  mh_ensure_dirs
-  local f tmp; f="$(mh_meta_path "$1")"
-  case "$3" in *$'\n'*) mh_die "meta value for '$2' must be single-line" ;; esac
-  mh_lock "$f"
-  tmp="$(mktemp "$MH_TASKS/.meta.XXXXXX")" || { mh_unlock "$f"; mh_die "mktemp failed for meta '$1'"; }
+  dm_require_id "$1"
+  dm_ensure_dirs
+  local f tmp; f="$(dm_meta_path "$1")"
+  case "$3" in *$'\n'*) dm_die "meta value for '$2' must be single-line" ;; esac
+  dm_lock "$f"
+  tmp="$(mktemp "$DM_TASKS/.meta.XXXXXX")" || { dm_unlock "$f"; dm_die "mktemp failed for meta '$1'"; }
   # Build into $tmp; on any write failure remove the temp (no orphan) and fail
   # loudly. `|| true` on the read keeps a missing file from tripping set -e.
   {
     [ -f "$f" ] && awk -v k="$2" 'index($0, k "=") != 1' "$f" || true
     printf '%s=%s\n' "$2" "$3"
-  } > "$tmp" || { rm -f "$tmp"; mh_unlock "$f"; mh_die "failed writing meta for '$1'"; }
-  mv -f "$tmp" "$f" || { rm -f "$tmp"; mh_unlock "$f"; mh_die "failed committing meta for '$1'"; }
-  mh_unlock "$f"
+  } > "$tmp" || { rm -f "$tmp"; dm_unlock "$f"; dm_die "failed writing meta for '$1'"; }
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; dm_unlock "$f"; dm_die "failed committing meta for '$1'"; }
+  dm_unlock "$f"
 }
 
 # --- status event log: append-only, best effort ------------------------------
 # A status line is a WAKE EVENT, not current-state truth. Current state is
-# reconciled on demand (mh-task.sh state), never stored as a mutable field.
-mh_status_append() {
-  # mh_status_append <id> <state> <note>
-  mh_require_id "$1"
-  mh_ensure_dirs
-  printf '%s %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "${3:-}" >> "$(mh_status_path "$1")"
+# reconciled on demand (dm-task.sh state), never stored as a mutable field.
+dm_status_append() {
+  # dm_status_append <id> <state> <note>
+  dm_require_id "$1"
+  dm_ensure_dirs
+  printf '%s %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "${3:-}" >> "$(dm_status_path "$1")"
 }
 
 # --- git cleanliness ---------------------------------------------------------
 # Uncommitted changes to TRACKED files (staged or unstaged). This is what blocks
 # operations that act on the committed head (land, PR push): untracked files do
 # not participate in those and must not block them.
-mh_tracked_dirty() {
+dm_tracked_dirty() {
   ! git -C "$1" diff --quiet 2>/dev/null || ! git -C "$1" diff --cached --quiet 2>/dev/null
 }
 
 # Untracked, non-ignored files. These are ambiguous (forgotten source vs build
 # cruft), so operations that DISCARD a worktree (teardown) fail closed on them.
-mh_untracked() { git -C "$1" ls-files --others --exclude-standard 2>/dev/null; }
+dm_untracked() { git -C "$1" ls-files --others --exclude-standard 2>/dev/null; }
 
 # --- git helpers -------------------------------------------------------------
 # Resolve a repo's default branch: origin/HEAD -> main/master (local or remote)
 # -> current branch -> "main". Always prints exactly one line.
-mh_default_branch() {
+dm_default_branch() {
   local dir="$1" ref b
   ref="$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
   ref="${ref#origin/}"
@@ -201,116 +201,116 @@ mh_default_branch() {
   printf 'main\n'
 }
 
-# Resolve the PR base for `mh-pr.sh open`: an explicit --base always wins; else
-# the parent ref recorded by `mh-worktree.sh create --base` (a stacked sub-PR
+# Resolve the PR base for `dm-pr.sh open`: an explicit --base always wins; else
+# the parent ref recorded by `dm-worktree.sh create --base` (a stacked sub-PR
 # targets its parent, not the default branch); else the repo's default branch.
-mh_pr_base_for() {
+dm_pr_base_for() {
   local id="$1" explicit="$2" dir="$3" recorded
   if [ -n "$explicit" ]; then printf '%s\n' "$explicit"; return 0; fi
-  recorded="$(mh_meta_get "$id" base)"
+  recorded="$(dm_meta_get "$id" base)"
   if [ -n "$recorded" ]; then printf '%s\n' "$recorded"; return 0; fi
-  mh_default_branch "$dir"
+  dm_default_branch "$dir"
 }
 
-# --- per-repo memory: the mh-memory hybrid model -----------------------------
-# Repo knowledge lives in plain markdown, not a bespoke store (see mh-memory.sh):
-# SHARED facts in the repo's own committed AGENTS.md mh:knowledge section (travels
+# --- per-repo memory: the dm-memory hybrid model -----------------------------
+# Repo knowledge lives in plain markdown, not a bespoke store (see dm-memory.sh):
+# SHARED facts in the repo's own committed AGENTS.md dm:knowledge section (travels
 # with every clone/worktree, authored by a crewmate in a worktree), and PRIVATE
-# manhandler notes in git-excluded repos/<repo>/.mh/. The manhandler never
+# dockmaster notes in git-excluded repos/<repo>/.dm/. The dockmaster never
 # force-commits shared knowledge onto a clone's default branch; it lands through
 # the normal PR/local flow like any other change.
 
 # --- locked, atomic JSON update ----------------------------------------------
-# mh_json_update <file> <jq-args...>  -- apply a jq filter to a JSON file in
+# dm_json_update <file> <jq-args...>  -- apply a jq filter to a JSON file in
 # place, serialized by the advisory lock and committed atomically. The temp is
 # created in the target's own directory so the final `mv` is a same-filesystem
 # rename (atomic); on any failure the temp is removed (no orphan) and we fail
 # loudly. Single owner of the "locked read-modify-write of a JSON file" pattern.
-mh_json_update() {
+dm_json_update() {
   local file="$1"; shift
   local tmp dir base
   dir="$(dirname "$file")"; base="$(basename "$file")"
-  mh_lock "$file"
-  tmp="$(mktemp "$dir/.$base.XXXXXX")" || { mh_unlock "$file"; mh_die "mktemp failed for $base"; }
+  dm_lock "$file"
+  tmp="$(mktemp "$dir/.$base.XXXXXX")" || { dm_unlock "$file"; dm_die "mktemp failed for $base"; }
   if jq "$@" "$file" > "$tmp"; then
-    mv -f "$tmp" "$file" || { rm -f "$tmp"; mh_unlock "$file"; mh_die "failed committing $base"; }
+    mv -f "$tmp" "$file" || { rm -f "$tmp"; dm_unlock "$file"; dm_die "failed committing $base"; }
   else
-    rm -f "$tmp"; mh_unlock "$file"; mh_die "update (jq) of $base failed"
+    rm -f "$tmp"; dm_unlock "$file"; dm_die "update (jq) of $base failed"
   fi
-  mh_unlock "$file"
+  dm_unlock "$file"
 }
 
 # --- registry (repos.json): single owner path via jq ------------------------
-mh_registry_get() {
-  # mh_registry_get <name> [<field>]  -> prints repo object or a field
-  mh_ensure_dirs
+dm_registry_get() {
+  # dm_registry_get <name> [<field>]  -> prints repo object or a field
+  dm_ensure_dirs
   if [ -n "${2:-}" ]; then
-    jq -r --arg n "$1" --arg f "$2" '.repos[$n][$f] // empty' "$MH_REGISTRY"
+    jq -r --arg n "$1" --arg f "$2" '.repos[$n][$f] // empty' "$DM_REGISTRY"
   else
-    jq -e --arg n "$1" '.repos[$n]' "$MH_REGISTRY" 2>/dev/null
+    jq -e --arg n "$1" '.repos[$n]' "$DM_REGISTRY" 2>/dev/null
   fi
 }
 
-# mh_repo_dir <name>  -> print the managed clone's directory, or die if absent.
+# dm_repo_dir <name>  -> print the managed clone's directory, or die if absent.
 # Single owner of "resolve a registered repo's clone path"; every script that
 # needs a repo's working tree goes through here so the error is identical.
-mh_repo_dir() {
+dm_repo_dir() {
   local name="$1" dir
-  dir="$MH_HOME/$(mh_registry_get "$name" path)"
-  [ -d "$dir/.git" ] || mh_die "no clone for repo '$name' (expected $dir); add it with mh-repo.sh add"
+  dir="$DM_HOME/$(dm_registry_get "$name" path)"
+  [ -d "$dir/.git" ] || dm_die "no clone for repo '$name' (expected $dir); add it with dm-repo.sh add"
   printf '%s\n' "$dir"
 }
 
-# mh_require_worktree <id>  -> print the task's recorded worktree path, or die
+# dm_require_worktree <id>  -> print the task's recorded worktree path, or die
 # if none is recorded or the path no longer exists on disk (a stale/torn-down
 # record). Single owner of "resolve a task's worktree or refuse" so every
 # caller reports the same thing on a missing worktree, and so the `-d` check
-# cannot silently drop out of one call site (mh-worktree.sh remove used to
+# cannot silently drop out of one call site (dm-worktree.sh remove used to
 # check only non-empty before this consolidation).
-mh_require_worktree() {
-  local wt; wt="$(mh_meta_get "$1" worktree)"
-  [ -n "$wt" ] && [ -d "$wt" ] || mh_die "no worktree for $1"
+dm_require_worktree() {
+  local wt; wt="$(dm_meta_get "$1" worktree)"
+  [ -n "$wt" ] && [ -d "$wt" ] || dm_die "no worktree for $1"
   printf '%s\n' "$wt"
 }
 
 # --- FF-sync-with-fallback reaction: shared by callers that best-effort sync a
 # clone around a landing action -----------------------------------------------
-# mh_sync_reaction <repo> <sync_out> <die|warn>  -- given the STUCK/SKIP/OK line
-# `mh-sync.sh one <repo>` printed (or the synthetic "STUCK: sync failed
+# dm_sync_reaction <repo> <sync_out> <die|warn>  -- given the STUCK/SKIP/OK line
+# `dm-sync.sh one <repo>` printed (or the synthetic "STUCK: sync failed
 # unexpectedly" line a caller substitutes when the sync command itself errors
 # under set -e), report it the way each current caller does:
-#   worktree create (die):  STUCK -> mh_die (refuses to cut a worktree off a
-#                            base that isn't fast-forwardable); SKIP -> mh_warn
+#   worktree create (die):  STUCK -> dm_die (refuses to cut a worktree off a
+#                            base that isn't fast-forwardable); SKIP -> dm_warn
 #                            "...; base may be stale"; OK -> silent.
-#   pr merge (warn):        STUCK -> mh_warn (the merge already landed and is
+#   pr merge (warn):        STUCK -> dm_warn (the merge already landed and is
 #                            recorded; a can't-FF sync must not fail it, only
-#                            name the manual fallback); SKIP/OK -> mh_info the
+#                            name the manual fallback); SKIP/OK -> dm_info the
 #                            raw line.
-# This function does NOT run the sync itself: mh-sync.sh also sources mh-lib.sh,
-# so mh-lib.sh invoking it would reintroduce the same upward dependency #56
-# removed for mh-pr.sh (mh-lib.sh has no outbound mh-*.sh call). Each caller
-# still runs `mh-sync.sh one <repo>` (with the STUCK fallback on an unexpected
+# This function does NOT run the sync itself: dm-sync.sh also sources dm-lib.sh,
+# so dm-lib.sh invoking it would reintroduce the same upward dependency #56
+# removed for dm-pr.sh (dm-lib.sh has no outbound dm-*.sh call). Each caller
+# still runs `dm-sync.sh one <repo>` (with the STUCK fallback on an unexpected
 # failure) itself and passes the resulting line in here to interpret.
-mh_sync_reaction() {
+dm_sync_reaction() {
   local repo="$1" sync_out="$2" reaction="$3"
   case "$sync_out" in
     STUCK:*)
       if [ "$reaction" = die ]; then
-        mh_die "clone $repo is not fast-forwardable to origin — resolve it, then retry ($sync_out)"
+        dm_die "clone $repo is not fast-forwardable to origin — resolve it, then retry ($sync_out)"
       else
-        mh_warn "post-merge sync: $sync_out — sync $repo manually"
+        dm_warn "post-merge sync: $sync_out — sync $repo manually"
       fi
       ;;
     SKIP:*)
-      if [ "$reaction" = die ]; then mh_warn "$sync_out; base may be stale"
-      else mh_info "$sync_out"; fi
+      if [ "$reaction" = die ]; then dm_warn "$sync_out; base may be stale"
+      else dm_info "$sync_out"; fi
       ;;
     *)
       # A bare `[ ... ] && cmd` here would trip `set -e` when the test is false
       # (this is the last statement of the arm, not part of a larger `&&`/`||`
       # chain or an if-condition) — use `if` so a "die"-reaction no-op never
       # aborts the caller.
-      if [ "$reaction" = warn ]; then mh_info "$sync_out"; fi
+      if [ "$reaction" = warn ]; then dm_info "$sync_out"; fi
       ;;
   esac
 }
@@ -319,24 +319,24 @@ mh_sync_reaction() {
 # The cached pr_state meta field goes stale when a PR is merged out of band
 # (the operator merges in the GitHub web UI — common), so state/landed decisions
 # that trust it report `working` forever. `state` and `landed` refresh it live,
-# before their decision, by running `mh-pr.sh check` themselves — but only when
+# before their decision, by running `dm-pr.sh check` themselves — but only when
 # there is a PR to check and the task is not already MERGED. Offline mode
-# (MH_NO_FETCH=1, used by mh-status and the smoke tests) skips the network and
+# (DM_NO_FETCH=1, used by dm-status and the smoke tests) skips the network and
 # trusts the cached value.
 #
-# This predicate decides WHETHER to refresh; it does not shell out to mh-pr.sh
-# itself. mh-pr.sh sources mh-lib.sh, so mh-lib.sh invoking mh-pr.sh would be a
+# This predicate decides WHETHER to refresh; it does not shell out to dm-pr.sh
+# itself. dm-pr.sh sources dm-lib.sh, so dm-lib.sh invoking dm-pr.sh would be a
 # module cycle (the foundation depending on one of its own consumers) —
-# mh-lib.sh has no outbound mh-*.sh call. Each caller (mh-task.sh state,
-# mh-worktree.sh landed) runs the check itself, best-effort, when this returns
+# dm-lib.sh has no outbound dm-*.sh call. Each caller (dm-task.sh state,
+# dm-worktree.sh landed) runs the check itself, best-effort, when this returns
 # true: a failed check must not abort the caller's decision, it just falls back
 # to the cached pr_state. Single owner of the predicate so `state` and `landed`
 # refresh under identical conditions.
-mh_should_refresh_pr_state() {
-  # mh_should_refresh_pr_state <id>  -- exit 0 (should refresh) / 1 (skip)
-  [ "${MH_NO_FETCH:-0}" = "1" ] && return 1
-  [ -n "$(mh_meta_get "$1" pr)" ] || return 1
-  [ "$(mh_meta_get "$1" pr_state)" = "MERGED" ] && return 1
+dm_should_refresh_pr_state() {
+  # dm_should_refresh_pr_state <id>  -- exit 0 (should refresh) / 1 (skip)
+  [ "${DM_NO_FETCH:-0}" = "1" ] && return 1
+  [ -n "$(dm_meta_get "$1" pr)" ] || return 1
+  [ "$(dm_meta_get "$1" pr_state)" = "MERGED" ] && return 1
   return 0
 }
 
@@ -355,8 +355,8 @@ mh_should_refresh_pr_state() {
 # missing directory never implies "safe to skip checks" on its own, only
 # `has_ci=0` narrows what --allow-no-checks may bypass. Prints one of:
 #   allow | refuse-failing | refuse-pending | refuse-none | refuse-unknown
-mh_merge_gate() {
-  # mh_merge_gate <rollup> <allow_no_checks:0|1> <has_ci:0|1>
+dm_merge_gate() {
+  # dm_merge_gate <rollup> <allow_no_checks:0|1> <has_ci:0|1>
   case "$1" in
     passing) printf 'allow\n' ;;
     failing) printf 'refuse-failing\n' ;;
@@ -366,15 +366,15 @@ mh_merge_gate() {
   esac
 }
 
-# --- all task ids: the "$MH_TASKS/*.meta glob -> id" idiom -------------------
+# --- all task ids: the "$DM_TASKS/*.meta glob -> id" idiom -------------------
 # Prints, one per line, every task id that has a meta file. Single owner of the
 # glob + existence-guard (protects against a literal no-match glob when
-# nullglob is unset, the case for every caller except mh-status.sh) so the
+# nullglob is unset, the case for every caller except dm-status.sh) so the
 # iteration idiom cannot drift between call sites. Ordering follows the shell
 # glob (task-id order).
-mh_all_task_ids() {
+dm_all_task_ids() {
   local m
-  for m in "$MH_TASKS"/*.meta; do
+  for m in "$DM_TASKS"/*.meta; do
     [ -f "$m" ] || continue
     basename "$m" .meta
   done
@@ -386,13 +386,13 @@ mh_all_task_ids() {
 # offline (reads only task meta, no network), so the sweep's SELECTION is
 # testable without GitHub. pr_state may be empty (a PR opened but never checked);
 # that still counts as open.
-mh_open_pr_tasks() {
+dm_open_pr_tasks() {
   local id pr st
   while IFS= read -r id; do
-    pr="$(mh_meta_get "$id" pr)"
+    pr="$(dm_meta_get "$id" pr)"
     [ -n "$pr" ] || continue
-    st="$(mh_meta_get "$id" pr_state)"
+    st="$(dm_meta_get "$id" pr_state)"
     case "$st" in MERGED|CLOSED) continue ;; esac
     printf '%s\n' "$id"
-  done < <(mh_all_task_ids)
+  done < <(dm_all_task_ids)
 }

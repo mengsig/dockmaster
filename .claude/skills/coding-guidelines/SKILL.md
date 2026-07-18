@@ -1,6 +1,6 @@
 ---
 name: coding-guidelines
-description: The maintainable-code commandments every crewmate follows when writing or changing code. The canonical copy — crewmate briefs bake this in verbatim, and the manhandler loads it before editing this distro's own code. Keep it in sync with the mirror in AGENTS.md.
+description: The maintainable-code commandments every crewmate follows when writing or changing code. The canonical copy — crewmate briefs bake this in verbatim, and the dockmaster loads it before editing this distro's own code. Keep it in sync with the mirror in AGENTS.md.
 ---
 
 # Maintainable Code Commandments for Coding Agents

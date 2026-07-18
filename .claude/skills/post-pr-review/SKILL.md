@@ -15,7 +15,7 @@ on push). Never merge red.
 - **Review comments** — `gh-axi pr view <n> --comments` for the human-readable
   thread. If you must parse fields (comment ids, paths, resolved state), use
   `gh api` — `gh-axi`'s wrapper output is for humans, not JSON.
-- **CI status** — `bin/mh-pr.sh check <id>` for the recorded checks state.
+- **CI status** — `bin/dm-pr.sh check <id>` for the recorded checks state.
 
 ## Triage
 
@@ -31,8 +31,8 @@ Sort each comment into one of:
 1. Relay each actionable item to the implementing crewmate as one clear
    instruction, on the **same branch** (do not open a second branch or task).
 2. The crewmate fixes, commits, and the branch pushes — the PR updates itself.
-3. Re-run the tests gate (`bin/mh-test.sh <id>`) and re-check the PR
-   (`bin/mh-pr.sh check <id>`).
+3. Re-run the tests gate (`bin/dm-test.sh <id>`) and re-check the PR
+   (`bin/dm-pr.sh check <id>`).
 4. Repeat until reviewers are satisfied and checks are green.
 
 Then the merge gate in `pr-workflow` applies as before: never merge red, and

@@ -12,8 +12,8 @@ renders — only a **reference** to it travels.
 
 ## Where a secret may never go
 
-Never write a secret value into: any memory store (a repo's `mh:knowledge`
-section, `.mh/` private notes, or global memory), a brief, a commit, task meta,
+Never write a secret value into: any memory store (a repo's `dm:knowledge`
+section, `.dm/` private notes, or global memory), a brief, a commit, task meta,
 the backlog, a log, or a lavish artifact. (`memory-routing` already forbids
 storing secrets — this is the same rule at the boundary.)
 
@@ -22,7 +22,7 @@ storing secrets — this is the same rule at the boundary.)
 1. The operator supplies the secret **out-of-band** — an env var in the
    operator's shell, or a file outside version control (e.g. `.env`, which is
    gitignored; verify it is before relying on it).
-2. The manhandler passes a **reference** into the brief — the env var name or the
+2. The dockmaster passes a **reference** into the brief — the env var name or the
    file path — never the value.
 3. The crewmate reads it at runtime from that reference and uses it; it does not
    echo, log, or persist it.

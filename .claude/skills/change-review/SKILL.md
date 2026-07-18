@@ -14,44 +14,44 @@ change; the PR-or-local decision and any pipeline come *after* approval.
 1. **Crewmate renders the change.** In its worktree, the crewmate implements the
    change, commits it, then writes a review artifact to the standard path:
    ```
-   bin/mh-lavish.sh path <id>     # -> data/<id>/lavish/change.html
+   bin/dm-lavish.sh path <id>     # -> data/<id>/lavish/change.html
    ```
    The artifact shows, at a glance: what changed and why, the diff (or the
    meaningful parts), before/after where it helps, and the risk. It uses the
    `code` and `comparison`/`plan` lavish playbooks as fits. The crewmate then
    signals:
    ```
-   bin/mh-task.sh event <id> review-ready "lavish artifact ready"
+   bin/dm-task.sh event <id> review-ready "lavish artifact ready"
    ```
 
-2. **Manhandler presents it.** On the `review-ready` wake, the manhandler opens
+2. **Dockmaster presents it.** On the `review-ready` wake, the dockmaster opens
    the surface and tells the operator it is ready to review, with a one-line plain
    summary of the change:
    ```
-   bin/mh-lavish.sh open <id>
+   bin/dm-lavish.sh open <id>
    ```
    Then it collects feedback — run the poll as a **background task** so the wait
    costs nothing and wakes you on feedback:
    ```
-   bin/mh-lavish.sh poll <id>     # run in background; a notification returns feedback
+   bin/dm-lavish.sh poll <id>     # run in background; a notification returns feedback
    ```
 
-3. **Back-and-forth.** Feedback from the poll is relayed by the manhandler to the
+3. **Back-and-forth.** Feedback from the poll is relayed by the dockmaster to the
    crewmate as one clear instruction. The crewmate revises the code, updates the
    artifact, and signals `review-ready` again. Repeat until the operator
-   approves. (Crewmates never talk to the operator directly; the manhandler
+   approves. (Crewmates never talk to the operator directly; the dockmaster
    mediates — but the operator's annotations on the lavish surface are
    authoritative input.)
 
 4. **Approval → decide how it lands.** Once the operator approves, end the
-   session (`bin/mh-lavish.sh end <id>`) and ask the operator one plain question:
+   session (`bin/dm-lavish.sh end <id>`) and ask the operator one plain question:
    **create a PR, or keep it local?**
-   - **local** → set the task to local mode first — `bin/mh-merge.sh local`
+   - **local** → set the task to local mode first — `bin/dm-merge.sh local`
      refuses any task whose mode isn't `local-only` — then land with the guarded
      fast-forward after approval:
      ```
-     bin/mh-task.sh set <id> mode local-only
-     bin/mh-merge.sh local <id>
+     bin/dm-task.sh set <id> mode local-only
+     bin/dm-merge.sh local <id>
      ```
      See `task-lifecycle`.
    - **PR** → run the PR pipeline (load `pr-workflow`).

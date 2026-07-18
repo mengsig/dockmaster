@@ -1,5 +1,5 @@
 {
-  "version": "manhandler-pr-pipeline/2",
+  "version": "dockmaster-pr-pipeline/2",
   "description": "Fast PR pipeline for OBJECTIVELY TRIVIAL changes only (docs/comments/config-value/string-copy, or a very small diff with no logic, control-flow, dependency, schema, auth, security, or externally-visible-contract change). One review pass instead of two, and the lavish approval gate may be skipped — see .claude/skills/change-review for the trivial criteria. Tests still run and merge authority is unchanged (never merge red). Select per task, not per repo; when in doubt use pr-pipeline.default.json.",
   "gates": [
     { "gate": "review", "pass": "coldstart", "effort": "high", "note": "the single independent read of the diff against base" },

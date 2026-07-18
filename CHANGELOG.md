@@ -9,16 +9,16 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - **Honest onboarding docs and one dependency contract.** The README and
-  `mh-doctor` now state the tool contract identically in three tiers: `git`/`jq`
+  `dm-doctor` now state the tool contract identically in three tiers: `git`/`jq`
   required for anything, `gh` (or `gh-axi`) required for the PR flow, and the
   `gh-axi`/`lavish-axi`/`chrome-devtools-axi` axi wrappers as optional
   enhancements — the operator's own tooling, not bundled with this distro.
-  Without them the manhandler runs in a real, plainer mode (plain `gh` for
+  Without them the dockmaster runs in a real, plainer mode (plain `gh` for
   GitHub, operator-run review with no lavish artifact); a green doctor verdict
   now needs only `git`+`jq`, matching what the README promises. Added a numbered
   "Getting started" first-run path, a supported-platforms note (macOS/Linux,
   bash 3.2+), and replaced the stale hand-maintained `bin/` list with a pointer
-  to `bin/mh help`.
+  to `bin/dm help`.
 - **Concise communication is now contract.** Reporting to the operator, and PR
   descriptions/commits/review comments, sacrifice grammar for concision.
 - **Memory recall is bounded and curatable.** Briefs inject a soft-capped slice
@@ -32,16 +32,16 @@ All notable changes to this project are documented here. The format follows
   branch/commit style) and **`SECURITY.md`** (trust model and private
   vulnerability reporting).
 - **Fleet campaigns** — one operator intent fanned out to one gated child task
-  per repo, grouped and rolled up via `mh-backlog --campaign` / `campaign` and the
+  per repo, grouped and rolled up via `dm-backlog --campaign` / `campaign` and the
   `fleet-change` skill (no directive relaxed; each child is an ordinary task).
-- **Fleet PR/health sweep** — `mh-pr.sh sweep` (also a section in `mh-status`)
+- **Fleet PR/health sweep** — `dm-pr.sh sweep` (also a section in `dm-status`)
   reports every open PR's CI rollup and whether a review requests changes;
-  read-only, offline under `MH_NO_FETCH`.
+  read-only, offline under `DM_NO_FETCH`.
 - **Repo onboarding scout** — an optional read-only scout on `add` that proposes a
-  `test_cmd` and an initial `mh:knowledge` section, self-bootstrapping the tests
+  `test_cmd` and an initial `dm:knowledge` section, self-bootstrapping the tests
   gate and memory.
 - **Memory curation** — a `forget` verb and a duplicate-fact warning, plus an
-  optional truly-manhandler-only per-repo store excluded from crewmate briefs.
+  optional truly-dockmaster-only per-repo store excluded from crewmate briefs.
 - **Resourcing policy** — the orchestrator right-sizes `model`/`effort` for every
   spawned unit (dispatch, review, verify, fix, merge-gate reasoning): the least
   power that still gets an excellent result, biased toward sufficient power when
@@ -49,19 +49,19 @@ All notable changes to this project are documented here. The format follows
   `task-lifecycle` §3.
 - **New-repo requests route through the framework** — a "make/build me a repo or
   project" request is delegated work: create/enroll it under `repos/` first
-  (`mh-repo.sh create`/`add`), then dispatch normally against the enrolled repo;
+  (`dm-repo.sh create`/`add`), then dispatch normally against the enrolled repo;
   never scaffolded standalone outside the framework.
-- **`repo-sync` skill + clone-freshness guards** — `mh-worktree.sh create`
+- **`repo-sync` skill + clone-freshness guards** — `dm-worktree.sh create`
   fast-forward-syncs the repo's clone before cutting a worktree's base and fails
   closed on a diverged/dirty clone instead of branching off a stale one;
-  `mh-pr.sh merge` best-effort syncs the clone after a successful merge. Never
+  `dm-pr.sh merge` best-effort syncs the clone after a successful merge. Never
   branch off a stale base again.
 - **GitHub Actions CI** — the smoke suite plus bash/JS syntax checks run on
   every push to main and every PR, matrixed across `ubuntu-latest` and
   `macos-latest` to exercise the bash-3.2 portability invariant.
-- **Stacked sub-PRs (Phase 1)** — `mh-worktree.sh create --base <ref>` branches
+- **Stacked sub-PRs (Phase 1)** — `dm-worktree.sh create --base <ref>` branches
   a child task off a parent ref instead of the default branch and records it as
-  the task's `base`; `mh-pr.sh open` then defaults the child's PR base to that
+  the task's `base`; `dm-pr.sh open` then defaults the child's PR base to that
   recorded parent, so a sub-PR auto-targets the parent's PR instead of main.
   Restacking after the parent moves is a manual `merge-conflict` rebase for now.
 
@@ -69,15 +69,15 @@ All notable changes to this project are documented here. The format follows
 
 - **Task-state and landing-signal integrity** — `merged` events and the
   `pr`/`pr_state`/`merge_state` meta fields can no longer be forged via
-  `mh-task.sh event`/`set`; `state`/`landed` refresh from GitHub so an out-of-band
+  `dm-task.sh event`/`set`; `state`/`landed` refresh from GitHub so an out-of-band
   merge is seen.
-- **Never merge red** — `mh-pr.sh merge` no longer treats an unreported (`none`)
+- **Never merge red** — `dm-pr.sh merge` no longer treats an unreported (`none`)
   check rollup as green; it requires an explicit `--allow-no-checks`.
 - **Mutex crash-safety** — a lock abandoned by a killed holder self-heals
   (dead-PID reclaim, serialized and re-verified); signal handlers clean up and
   exit rather than resuming an unlocked critical section.
-- **Toolbelt hardening** — `mh-backlog` shares the single locked JSON writer,
-  `mh-repo create` uses a git-version-portable init, and the PR-pipeline runner
+- **Toolbelt hardening** — `dm-backlog` shares the single locked JSON writer,
+  `dm-repo create` uses a git-version-portable init, and the PR-pipeline runner
   verifies a real PR URL before reporting success.
 - **Merge-gate CI-aware loophole closed** — `--allow-no-checks` now bypasses a
   `none` (unreported) check rollup only on a repo with no CI configured; once
@@ -87,12 +87,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- **Per-repo memory is now native plain markdown** (`bin/mh-memory.sh`),
+- **Per-repo memory is now native plain markdown** (`bin/dm-memory.sh`),
   replacing the third-party `contextgraph` dependency. Shared, contributor-facing
-  facts live in an `mh:knowledge` section of each repo's own `AGENTS.md`
-  (committed, so it travels); manhandler-private notes live in a git-excluded
-  `repos/<repo>/.mh/`; global facts stay in `state/learnings.md` and
-  `state/operator.md`. `mh-repo` now `seed`s this scaffold (the old `init-memory`
+  facts live in an `dm:knowledge` section of each repo's own `AGENTS.md`
+  (committed, so it travels); dockmaster-private notes live in a git-excluded
+  `repos/<repo>/.dm/`; global facts stay in `state/learnings.md` and
+  `state/operator.md`. `dm-repo` now `seed`s this scaffold (the old `init-memory`
   subcommand and contextgraph install requirement are gone), and briefs inject the
   recalled knowledge directly. No external memory tool is required anymore.
 
@@ -109,7 +109,7 @@ All notable changes to this project are documented here. The format follows
   via `parallel()`. Complements the existing `fast` and `default` tiers; the
   never-merge-red merge gate and lavish-approval-first ordering are unchanged.
 
-- **`mh-repo create`**: stand up a brand-new repo. With no remote it creates the
+- **`dm-repo create`**: stand up a brand-new repo. With no remote it creates the
   GitHub repo via `gh-axi` (private by default; `--public` to publish, `--https`
   for an HTTPS origin); with an empty remote you supply it wires that up instead
   (and refuses a populated remote, pointing at `add`). Either way it initializes
@@ -117,38 +117,38 @@ All notable changes to this project are documented here. The format follows
   repo, and seeds per-repo memory. Complements `add`, which clones an existing
   populated remote.
 
-- **`mh-doctor`**: readiness check + `MH_HOME` scaffold. Owns the toolbelt's
+- **`dm-doctor`**: readiness check + `DM_HOME` scaffold. Owns the toolbelt's
   dependency contract (required vs recommended tools, GitHub auth) with
   actionable hints, and creates any missing home directories idempotently.
-  `mh-session-start` now delegates its tooling check here so the list lives in
+  `dm-session-start` now delegates its tooling check here so the list lives in
   one place.
-- **`mh-status`**: a read-only, no-sync mid-session snapshot — managed repos
+- **`dm-status`**: a read-only, no-sync mid-session snapshot — managed repos
   (flagging tangled clones), in-flight tasks with an attention summary, active
   worktrees with disk use plus orphaned directories and dangling records, and
   the ready backlog with open operator decisions.
-- **`mh-backlog decisions`**: lists open operator decisions (key + question) as
+- **`dm-backlog decisions`**: lists open operator decisions (key + question) as
   a machine-readable interface for status views.
 
 ## [0.1.0] - 2026-07-17
 
-Initial release. manhandler is an agent distro for Claude Code that runs a crew
+Initial release. dockmaster is an agent distro for Claude Code that runs a crew
 of autonomous subagents across many repositories from a single liaison agent.
 
 ### Added
 
 - **Operating contract** (`AGENTS.md`) turning a Claude Code session into the
-  manhandler: read-only over managed repos, delegates all project work, reports
+  dockmaster: read-only over managed repos, delegates all project work, reports
   outcomes.
-- **Toolbelt** (`bin/`): a composed startup/recovery digest (`mh-session-start`),
-  repo registry + memory onboarding (`mh-repo`), isolated worktrees with
-  isolation/tangle/landed checks (`mh-worktree`), durable task records with
-  on-demand state reconciliation (`mh-task`), a durable cross-session backlog and
-  operator-decision log (`mh-backlog`), the tests gate runner (`mh-test`), strict
-  PR open/check/merge that never merges red (`mh-pr`), guarded fast-forward local
-  landing and conflict-aware rebase (`mh-merge`), fast-forward-only clone sync
-  (`mh-sync`), the crewmate brief contract (`mh-brief`), the lavish review
-  surface (`mh-lavish`), and branch naming `<type>/<issue>/<slug>`
-  (`mh-branch-name`).
+- **Toolbelt** (`bin/`): a composed startup/recovery digest (`dm-session-start`),
+  repo registry + memory onboarding (`dm-repo`), isolated worktrees with
+  isolation/tangle/landed checks (`dm-worktree`), durable task records with
+  on-demand state reconciliation (`dm-task`), a durable cross-session backlog and
+  operator-decision log (`dm-backlog`), the tests gate runner (`dm-test`), strict
+  PR open/check/merge that never merges red (`dm-pr`), guarded fast-forward local
+  landing and conflict-aware rebase (`dm-merge`), fast-forward-only clone sync
+  (`dm-sync`), the crewmate brief contract (`dm-brief`), the lavish review
+  surface (`dm-lavish`), and branch naming `<type>/<issue>/<slug>`
+  (`dm-branch-name`).
 - **Skills** (`.claude/skills/`): task-lifecycle, change-review (lavish approval
   gate), pr-workflow (two-pass gate pipeline), supervision (zero-token
   background-agent supervision), memory-routing, project-management,
@@ -164,10 +164,10 @@ of autonomous subagents across many repositories from a single liaison agent.
   → fix + tests → PR creation → merge gate.
 - **Per-repo memory**, tracked in each managed repo so it travels with the repo
   and reaches crewmates in every worktree; global (operator/fleet) memory in the
-  manhandler home.
+  dockmaster home.
 - **Modular PR pipeline** declared as an ordered gate array
   (`config/pr-pipeline.default.json`), with an optional deterministic runner
   (`workflows/pr-pipeline.js`).
 
-[0.2.0]: https://github.com/mengsig/manhandler/releases/tag/v0.2.0
-[0.1.0]: https://github.com/mengsig/manhandler/releases/tag/v0.1.0
+[0.2.0]: https://github.com/mengsig/dockmaster/releases/tag/v0.2.0
+[0.1.0]: https://github.com/mengsig/dockmaster/releases/tag/v0.1.0

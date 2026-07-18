@@ -44,7 +44,7 @@ a review to save tokens.
 
 The tiers share one gate schema, so a tier is just a different ordered `gates`
 array. The two new mechanics the rigorous tier introduces are executable
-procedure the manhandler drives agent-style (and the optional runner drives the
+procedure the dockmaster drives agent-style (and the optional runner drives the
 same way):
 
 - **dimension-parallel review** — instead of one generalist read, spawn one
@@ -64,7 +64,7 @@ The rigorous gate order is
 → pr`. The behavioral `verify` gate drives the changed behavior
 end to end (via the `verify` skill) and reports what was actually exercised — not
 just that tests pass; it is skippable only when the diff has no runtime surface
-(docs/config-only). `security` is auto-triggered (`bin/mh-pr.sh security-scan`,
+(docs/config-only). `security` is auto-triggered (`bin/dm-pr.sh security-scan`,
 then `security-review` only on a hit, else an explicit skip), and `pr` opens the
 PR. Waiting for CI is **not** a pipeline gate — it runs in the operator-mediated
 merge tail after the PR opens (see "Merge authority" below). The never-merge-red
@@ -76,13 +76,13 @@ The file has a `gates` array. Run the gates top to bottom. A repo's delivery
 
 - **pipeline** — run the full two-pass gate list below, ending in a PR.
 - **direct-pr** — skip the review/fix passes; the crewmate opens the PR through
-  `bin/mh-pr.sh open <id>` so the URL is recorded to the task record (`check` and
-  `merge` need it); you then enforce the merge gate with `bin/mh-pr.sh check`. If
+  `bin/dm-pr.sh open <id>` so the URL is recorded to the task record (`check` and
+  `merge` need it); you then enforce the merge gate with `bin/dm-pr.sh check`. If
   a PR was opened out of band, record its URL first with
-  `bin/mh-pr.sh adopt <id> <url>` (validates the url is a canonical PR for the
+  `bin/dm-pr.sh adopt <id> <url>` (validates the url is a canonical PR for the
   task's own repo, then records it and queries its real state).
 - **local-only** — no PR; this skill does not apply. Land with
-  `bin/mh-merge.sh local <id>` after approval (see `task-lifecycle`).
+  `bin/dm-merge.sh local <id>` after approval (see `task-lifecycle`).
 
 ## The canonical pipeline (two review passes)
 
@@ -104,7 +104,7 @@ worktree/branch from meta, communicates only through the task record, and
 - **fix** — hand the findings to the implementing crewmate as one exact
   instruction; it fixes on the same branch and commits. Loop up to `max_rounds`;
   escalate if findings persist past the cap.
-- **tests** — `bin/mh-test.sh <id>` runs the repo's registered test command in
+- **tests** — `bin/dm-test.sh <id>` runs the repo's registered test command in
   the worktree and records the result. Non-zero fails the gate. No registered
   command → it reports a soft skip (never a fabricated pass).
 - **review (merge-gate)** — a second, independent reviewer pass acting as the
@@ -113,7 +113,7 @@ worktree/branch from meta, communicates only through the task record, and
 - **fix / tests** — resolve any merge-gate findings and re-confirm green.
 - **security** — optional. Run `security-review` on the diff only when the change
   touches auth, input handling, secrets, crypto, or external I/O. To make the
-  skip deliberate rather than silent, `bin/mh-pr.sh security-scan <id>` greps the
+  skip deliberate rather than silent, `bin/dm-pr.sh security-scan <id>` greps the
   task's diff for those signals and prints whether a review is warranted (exit 0
   = signals found, 1 = none); it is advisory only and never blocks. Skip
   explicitly when there is no security surface; do not stack it as a reflex.
@@ -126,17 +126,17 @@ reads meta, fails closed, machine-readable pass/fail), then add its name to the
 
 ## Branch naming
 
-`<type>/<issue>/<slug>` computed by `bin/mh-branch-name.sh <type> <issue|x> "<summary>"`.
+`<type>/<issue>/<slug>` computed by `bin/dm-branch-name.sh <type> <issue|x> "<summary>"`.
 
 - `type` ∈ `feat fix bug chore refactor docs perf test build ci`
 - `issue` = the issue/ticket number, or `x` when there is none
 - `slug` = short kebab summary
 
-Example: `bin/mh-branch-name.sh fix 412 "flaky login test"` → `fix/412/flaky-login-test`.
+Example: `bin/dm-branch-name.sh fix 412 "flaky login test"` → `fix/412/flaky-login-test`.
 
 ## Opening the PR
 
-Always through `bin/mh-pr.sh open <id> --title "<title>" --body-file <file>`.
+Always through `bin/dm-pr.sh open <id> --title "<title>" --body-file <file>`.
 It pushes the branch, opens the PR against the repo default, and records the URL.
 
 **Title**: imperative, specific, lowercase-first is fine. e.g. `fix flaky login test`.
@@ -173,25 +173,25 @@ reviewers are satisfied and checks are green, then apply the merge gate below.
 Once the PR is open, report the full `https://…` URL and a plain outcome, then
 one of two paths — the operator's choice:
 
-- **Operator merges on GitHub.** The manhandler watches for it (poll
-  `bin/mh-pr.sh check <id>` via `Monitor`, or on a merged-PR wake) and, once it
-  reports `state: MERGED`, refreshes the clone (`bin/mh-sync.sh one <repo>`) and
+- **Operator merges on GitHub.** The dockmaster watches for it (poll
+  `bin/dm-pr.sh check <id>` via `Monitor`, or on a merged-PR wake) and, once it
+  reports `state: MERGED`, refreshes the clone (`bin/dm-sync.sh one <repo>`) and
   tears down.
-- **Manhandler merges after approval.** The manhandler asks "approve merge?"; on
+- **Dockmaster merges after approval.** The dockmaster asks "approve merge?"; on
   an explicit yes (or a repo's standing `yolo` for routine work) it runs
-  `bin/mh-pr.sh merge <id> [--method squash] [--delete-branch]`, then syncs and
+  `bin/dm-pr.sh merge <id> [--method squash] [--delete-branch]`, then syncs and
   tears down.
 
-**Wait for CI, don't refuse it.** `bin/mh-pr.sh merge` checks CI exactly once and
+**Wait for CI, don't refuse it.** `bin/dm-pr.sh merge` checks CI exactly once and
 refuses a still-pending PR. When Actions is mid-run, first
-`bin/mh-pr.sh await-checks <id> [--timeout-secs N] [--interval-secs N]` — it polls
+`bin/dm-pr.sh await-checks <id> [--timeout-secs N] [--interval-secs N]` — it polls
 `check` until the CI rollup is terminal (`passing`/`failing`/`none`) or it times
 out (defaults ~600s / ~15s), exiting 0 on passing/none and non-zero on failing or
 timeout. Run it before the merge gate so the gate acts on a settled result; on a
 non-zero exit, do not attempt the merge.
 
 **Never merge red** — `await-checks` is only a wait, never a relaxation:
-`bin/mh-pr.sh merge` still refuses a failing or pending PR, and you must also have
+`bin/dm-pr.sh merge` still refuses a failing or pending PR, and you must also have
 the operator's actual approval. Destructive, irreversible, or security-sensitive
 merges always escalate, even under `yolo`.
 
@@ -204,7 +204,7 @@ it can never be used to skip real checks that just haven't registered yet.
 (that's the race window before Actions registers a check) and only treats
 `none` as terminal on a confirmed CI-less repo.
 
-**`mh-pr.sh merge` also refuses on `mergeable_state`**, independent of CI:
+**`dm-pr.sh merge` also refuses on `mergeable_state`**, independent of CI:
 `dirty` (merge conflicts), `draft` (still a draft PR), and `blocked` (required
 checks/reviews not satisfied) all refuse outright — resolve the conflict/draft/
 requirement, then retry. `unknown` does not refuse (GitHub often hasn't
@@ -225,5 +225,5 @@ built-in gate list for each tier (`fast` | `default` | `rigorous`), selected by
 (dimension-parallel review via `parallel()`, adversarial `verify-findings`, then
 fix → tests → verify → security → pr). It is opt-in and not wired to anything — invoke it via the
 Workflow tool only when the operator has asked for multi-agent orchestration, and
-a live **rigorous** run is a manhandler/operator action. See `config/README.md`
+a live **rigorous** run is a dockmaster/operator action. See `config/README.md`
 for which config fields it reads versus the agent-driven path.

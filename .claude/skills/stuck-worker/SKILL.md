@@ -12,7 +12,7 @@ splits one task across two copies.
 ## First: reconcile, don't assume
 
 "The agent is gone" is a presence signal, not proof the work is lost. Start with
-`bin/mh-task.sh state <id>`:
+`bin/dm-task.sh state <id>`:
 
 - A merged PR or landed work → the task is actually done; finish the paperwork.
 - Committed, unlanded work in the worktree → the work survives; recover the
@@ -51,5 +51,5 @@ report `blocked`/`failed` with evidence — do not risk a split-brain duplicate.
 - Never `--force` a teardown to "clean up" a stuck task's worktree unless the
   operator explicitly authorized discarding that work.
 - Never broadly kill background agents; stop the specific one by id.
-- A refusal from any `mh-*` script during recovery is a signal to stop and
+- A refusal from any `dm-*` script during recovery is a signal to stop and
   investigate, not to work around.

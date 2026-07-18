@@ -15,18 +15,18 @@ through the normal gate (change-review + merge authority).
 - **Merged PR** — prefer a **revert PR**: `gh-axi pr revert <n>`. This is the
   sanctioned path: it opens a clean PR that reverses the merge commit. To run it
   through the normal gate tooling, **adopt the revert PR into a fresh task** — the
-  gates (`mh-pr check`, merge) read `meta.pr`, so record the revert PR's URL on a
+  gates (`dm-pr check`, merge) read `meta.pr`, so record the revert PR's URL on a
   new task id:
   ```
-  bin/mh-task.sh new <revert-id> --kind ship --repo <repo> --title "revert #<n>"
-  bin/mh-pr.sh adopt <revert-id> <revert-pr-url>   # validates url + repo match, records pr, queries real state
-  bin/mh-pr.sh check <revert-id>     # then the merge gate, as any PR
+  bin/dm-task.sh new <revert-id> --kind ship --repo <repo> --title "revert #<n>"
+  bin/dm-pr.sh adopt <revert-id> <revert-pr-url>   # validates url + repo match, records pr, queries real state
+  bin/dm-pr.sh check <revert-id>     # then the merge gate, as any PR
   ```
   A bare revert PR with no adopting task can still be merged on GitHub by the
   operator, but then the gates are applied by hand, not by the tooling.
 - **local-only landing** — `git revert <sha>` in a **fresh worktree** (dispatch a
-  crewmate; the manhandler stays read-only over `repos/`), then land it the same
-  way the original did (`bin/mh-merge.sh local <id>` after approval).
+  crewmate; the dockmaster stays read-only over `repos/`), then land it the same
+  way the original did (`bin/dm-merge.sh local <id>` after approval).
 
 ## Rules
 

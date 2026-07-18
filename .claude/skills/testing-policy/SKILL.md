@@ -5,13 +5,13 @@ description: What the tests gate means when a repo has no registered test comman
 
 # testing-policy
 
-The tests gate (`bin/mh-test.sh <id>`) is only as strong as what it can run. Two
+The tests gate (`bin/dm-test.sh <id>`) is only as strong as what it can run. Two
 situations where it cannot simply return green, and what to do instead.
 
 ## No registered test command
 
 A repo with no `test_cmd` makes the gate a **declared soft skip**, never a
-fabricated pass — `mh-test` and `pr-workflow` already state this. A soft skip is
+fabricated pass — `dm-test` and `pr-workflow` already state this. A soft skip is
 not verification, so do not report the change as tested on the strength of it.
 Instead, load the `verify` skill and drive the change end-to-end, then report
 **what was actually exercised** (the flow you ran, what you observed). Honest

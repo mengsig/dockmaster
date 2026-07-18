@@ -28,7 +28,7 @@ jobs:
       - name: Check jq is present
         run: jq --version
 
-      # Enforce the bash-3.2 portability invariant (see mh:knowledge) before
+      # Enforce the bash-3.2 portability invariant (see dm:knowledge) before
       # anything else runs: a bash-4-only construct in bin/*.sh would only
       # blow up at runtime on a macOS 3.2 shell, so catch it here for both
       # runner images. The comment-stripping grep excludes lines that are

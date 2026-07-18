@@ -1,49 +1,49 @@
 #!/usr/bin/env bash
-# mh-brief.sh - scaffold a crewmate brief. The brief is the CONTRACT with the
+# dm-brief.sh - scaffold a crewmate brief. The brief is the CONTRACT with the
 # subagent: isolation, memory, status protocol, and definition of done.
 #
-# Usage: mh-brief.sh <id>
-#   Requires the task to exist (mh-task.sh new ...) with kind/repo/mode set and a
-#   worktree created (mh-worktree.sh create ...). Writes data/<id>/brief.md with a
-#   {TASK} placeholder the manhandler MUST replace with the concrete task
+# Usage: dm-brief.sh <id>
+#   Requires the task to exist (dm-task.sh new ...) with kind/repo/mode set and a
+#   worktree created (dm-worktree.sh create ...). Writes data/<id>/brief.md with a
+#   {TASK} placeholder the dockmaster MUST replace with the concrete task
 #   description, acceptance criteria, constraints, and context before dispatch.
 #
 # The scaffold is a safety contract, not a suggestion. Fill {TASK}; do not strip
 # the isolation, memory, or status sections.
 
 set -euo pipefail
-. "$(dirname "${BASH_SOURCE[0]}")/mh-lib.sh"
-mh_ensure_dirs
+. "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
+dm_ensure_dirs
 
-id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-brief.sh <id>"
-mh_require_id "$id"
-kind="$(mh_meta_get "$id" kind)"; repo="$(mh_meta_get "$id" repo)"
-mode="$(mh_meta_get "$id" mode)"; wt="$(mh_meta_get "$id" worktree)"
-[ -n "$kind" ] || mh_die "task $id has no kind; run mh-task.sh new first"
-[ -n "$wt" ] || mh_die "task $id has no worktree; run mh-worktree.sh create first"
+id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-brief.sh <id>"
+dm_require_id "$id"
+kind="$(dm_meta_get "$id" kind)"; repo="$(dm_meta_get "$id" repo)"
+mode="$(dm_meta_get "$id" mode)"; wt="$(dm_meta_get "$id" worktree)"
+[ -n "$kind" ] || dm_die "task $id has no kind; run dm-task.sh new first"
+[ -n "$wt" ] || dm_die "task $id has no worktree; run dm-worktree.sh create first"
 
-out="$MH_DATA/$id"; mkdir -p "$out"
+out="$DM_DATA/$id"; mkdir -p "$out"
 brief="$out/brief.md"
 
-# Inject the repo's known context (shared AGENTS.md mh:knowledge + private notes)
+# Inject the repo's known context (shared AGENTS.md dm:knowledge + private notes)
 # plus a bounded fleet-wide slice so the crewmate has it without a tool call.
 # Best-effort on CONTENT (an unregistered repo or empty store must not fail brief
 # generation), but recall's STDERR is surfaced, not swallowed: a truncated
-# knowledge-block warning must reach the manhandler, or a crewmate is dispatched
-# context-blind. The manhandler-only store is excluded from the brief via --crew.
-memtool="$(dirname "${BASH_SOURCE[0]}")/mh-memory.sh"
+# knowledge-block warning must reach the dockmaster, or a crewmate is dispatched
+# context-blind. The dockmaster-only store is excluded from the brief via --crew.
+memtool="$(dirname "${BASH_SOURCE[0]}")/dm-memory.sh"
 
 # recall_block <warn-tag> <friendly-empty-line> <recall-args...>  -- run recall,
-# re-emit any stderr via mh_warn (to the manhandler, NOT into the brief), and
+# re-emit any stderr via dm_warn (to the dockmaster, NOT into the brief), and
 # collapse a genuinely-empty result (only section scaffolds) to the friendly line
 # instead of injecting empty scaffolds.
 recall_block() {
   local warn_tag="$1" empty_line="$2"; shift 2
   local errf res body line
-  errf="$(mktemp "$out/.recall.XXXXXX")" || mh_die "mktemp failed generating brief $id"
+  errf="$(mktemp "$out/.recall.XXXXXX")" || dm_die "mktemp failed generating brief $id"
   res="$("$memtool" recall "$@" 2>"$errf" || true)"
   if [ -s "$errf" ]; then
-    while IFS= read -r line; do mh_warn "$warn_tag: $line"; done < "$errf"
+    while IFS= read -r line; do dm_warn "$warn_tag: $line"; done < "$errf"
   fi
   rm -f "$errf"
   # Emptiness from CONTENT, not the labeled output: strip section headers, the
@@ -66,7 +66,7 @@ cat <<EOF
 # Task $id ($kind) - repo: $repo
 
 You are a crewmate working one task to completion. You report only to the
-manhandler through short status lines, never to a human. Work only inside your
+dockmaster through short status lines, never to a human. Work only inside your
 assigned worktree.
 
 ## Working directory (isolation - verify first, stop if wrong)
@@ -81,14 +81,14 @@ Before doing anything else, confirm you are isolated:
 The toplevel MUST equal your worktree path above and MUST NOT be the repo's
 primary clone. If it is not, do nothing else - append a blocked status and stop:
 
-    $MH_HOME/bin/mh-task.sh event $id blocked "not in isolated worktree"
+    $DM_HOME/bin/dm-task.sh event $id blocked "not in isolated worktree"
 
 ## Memory (per-repo, plain markdown - no bespoke tool)
 
 What this repo already knows that bears on your task is injected below. SHARED
-knowledge lives in this repo's own \`AGENTS.md\` \`mh:knowledge\` section (committed,
+knowledge lives in this repo's own \`AGENTS.md\` \`dm:knowledge\` section (committed,
 so it travels to every clone and worktree). PRIVATE notes (the \`private notes\`
-section) are manhandler orchestration context relayed to you for your awareness
+section) are dockmaster orchestration context relayed to you for your awareness
 ONLY: use them to inform your work, but never copy or paraphrase them into
 commits, PR descriptions, code comments, or the repo's \`AGENTS.md\` — they must
 not enter the project's history. Read it all before you start.
@@ -97,18 +97,18 @@ $mem
 
 ## Fleet-wide context (operator preferences + fleet learnings)
 
-Cross-repo context from the manhandler's global memory. Same rule as private
+Cross-repo context from the dockmaster's global memory. Same rule as private
 notes: for your awareness, never copied into this repo's history.
 
 $fleet
 
 When you learn something durable, non-obvious, and repo-specific, record it:
 - A SHARED, contributor-relevant fact (a build/test command, an invariant, a
-  pitfall, a convention, a routing hint) → edit the \`mh:knowledge\` section of
+  pitfall, a convention, a routing hint) → edit the \`dm:knowledge\` section of
   this repo's \`AGENTS.md\` IN YOUR WORKTREE and commit it with your change, as one
   curated \`- **[<kind>]** <fact>\` bullet. Rewrite a superseded fact; do not append
   forever.
-- A private/orchestration fact → \`$MH_HOME/bin/mh-memory.sh remember $repo --private --kind <kind> "<fact>"\`.
+- A private/orchestration fact → \`$DM_HOME/bin/dm-memory.sh remember $repo --private --kind <kind> "<fact>"\`.
 
 Do not store secrets, transient failures, task status, or code excerpts.
 
@@ -137,12 +137,12 @@ in the report so it is not lost.
 
 When the report is written, signal done:
 
-    $MH_HOME/bin/mh-task.sh event $id done "report at data/$id/report.md"
+    $DM_HOME/bin/dm-task.sh event $id done "report at data/$id/report.md"
 EOF
 else
   # ship
   branch_hint="Create a branch with a name of the form <type>/<issue>/<slug>. Compute it with:
-    $MH_HOME/bin/mh-branch-name.sh <type> <issue-or-x> \"<short summary>\"
+    $DM_HOME/bin/dm-branch-name.sh <type> <issue-or-x> \"<short summary>\"
   types: feat fix bug chore refactor docs perf test build ci"
 cat <<EOF
 ## Definition of done (ship, mode: $mode)
@@ -163,21 +163,21 @@ stray untracked files will block landing.
 When the change is implemented and committed, render it as a review page for the
 operator. Write a self-contained HTML page to:
 
-    $MH_DATA/$id/lavish/change.html
+    $DM_DATA/$id/lavish/change.html
 
-(get this path with \`$MH_HOME/bin/mh-lavish.sh path $id\`). Show, at a glance:
+(get this path with \`$DM_HOME/bin/dm-lavish.sh path $id\`). Show, at a glance:
 what changed and why, the meaningful diff, before/after where it helps, and the
 risk. Then signal:
 
-    $MH_HOME/bin/mh-task.sh event $id review-ready "lavish artifact ready"
+    $DM_HOME/bin/dm-task.sh event $id review-ready "lavish artifact ready"
 
-The operator reviews it. If the manhandler relays feedback, revise BOTH the code
+The operator reviews it. If the dockmaster relays feedback, revise BOTH the code
 and the page, then signal \`review-ready\` again. Repeat until approved.
 
-After approval the manhandler decides with the operator how the change lands (a
+After approval the dockmaster decides with the operator how the change lands (a
 PR, or local) and steers you from there: for a PR it drives the review/fix/test
 gates - apply fixes on this same branch when asked; for local it lands your
-branch. Do NOT push or open a PR yourself unless the manhandler tells you to.
+branch. Do NOT push or open a PR yourself unless the dockmaster tells you to.
 EOF
 fi
 
@@ -191,7 +191,7 @@ else
   # The coding standards are a safety contract baked into every brief. If the
   # skill file is missing or renamed, warn loudly (to stderr, not the brief) so
   # the dropped standard is visible rather than silently omitted.
-  mh_warn "coding-guidelines skill not found at $cg_skill; brief $id omits the baked-in coding standards"
+  dm_warn "coding-guidelines skill not found at $cg_skill; brief $id omits the baked-in coding standards"
 fi
 
 # status protocol (shared) -----------------------------------------------------
@@ -202,16 +202,16 @@ cat <<EOF
 Append a status line only at meaningful, supervisor-actionable transitions -
 not routine progress. Use:
 
-    $MH_HOME/bin/mh-task.sh event $id <state> "<one line>"
+    $DM_HOME/bin/dm-task.sh event $id <state> "<one line>"
 
 States: working (starting), review-ready (lavish artifact ready for the operator
 to review - the main ship signal), ready / done (see above), blocked (you need
-the manhandler to act - name exactly what), needs-decision (an operator choice
+the dockmaster to act - name exactly what), needs-decision (an operator choice
 is required - name the options), failed (you could not complete it - say why),
 paused (a bounded external wait you expect to clear on its own).
 
-Never bypass a refusal from any mh-* script; a refusal means stop and report.
+Never bypass a refusal from any dm-* script; a refusal means stop and report.
 EOF
 } > "$brief"
 
-mh_info "$brief"
+dm_info "$brief"

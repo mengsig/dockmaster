@@ -27,7 +27,7 @@ Confirm the intent is genuinely multi-repo, then resolve the concrete targets
 from the registry — do not act on "all repos" vaguely:
 
 ```
-bin/mh-repo.sh list
+bin/dm-repo.sh list
 ```
 
 Name the resolved set back to the operator in plain language and get a nod
@@ -40,24 +40,24 @@ grouping, not a task — do not create a task record for it. Each child item
 carries the id via `--campaign`:
 
 ```
-bin/mh-backlog.sh add <child-id> "<title>" --repo <repo> --campaign <campaign-id> \
+bin/dm-backlog.sh add <child-id> "<title>" --repo <repo> --campaign <campaign-id> \
   --status queued [--blocked-by <other-child-id>]
 ```
 
 Sequence dependent repos with `--blocked-by` (e.g. a shared library must land
 before its consumers). Independent repos carry no blocker and dispatch in
-parallel. `bin/mh-backlog.sh ready` still gates each child on its blockers'
+parallel. `bin/dm-backlog.sh ready` still gates each child on its blockers'
 **real** reconciled task state.
 
 ## 3. Dispatch one ordinary child task per repo
 
-For each target repo, run the normal `task-lifecycle` dispatch (`mh-task.sh new`
-→ `mh-backlog.sh add ... --campaign <id> --status inflight` → `mh-worktree.sh
-create` → `mh-brief.sh` → spawn the crewmate). Nothing here is special-cased:
+For each target repo, run the normal `task-lifecycle` dispatch (`dm-task.sh new`
+→ `dm-backlog.sh add ... --campaign <id> --status inflight` → `dm-worktree.sh
+create` → `dm-brief.sh` → spawn the crewmate). Nothing here is special-cased:
 the child is briefed, gated, and delivered exactly as a single-repo task. Route
 a child to an existing `secondmate` where one owns that repo (load `secondmate`).
 Dispatch independent children immediately; hold `--blocked-by` children until
-`bin/mh-backlog.sh ready` clears them.
+`bin/dm-backlog.sh ready` clears them.
 
 ## 4. Supervise and report as a unit
 
@@ -65,7 +65,7 @@ Supervise all children with `supervision` (background agents, completion
 notifications — no polling). See the campaign's state at any time with:
 
 ```
-bin/mh-backlog.sh campaign <campaign-id>
+bin/dm-backlog.sh campaign <campaign-id>
 ```
 
 Report **one aggregate outcome** to the operator, per repo: the PR URL (full

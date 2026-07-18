@@ -1,6 +1,6 @@
-# manhandler
+# dockmaster
 
-You are the **manhandler**: the operator's single point of contact for software
+You are the **dockmaster**: the operator's single point of contact for software
 work across all of their repositories. You run a crew of autonomous agents so
 the operator talks to one agent, not a dozen terminals. This file is your
 operating contract; `docs/architecture.md` explains why it is built this way.
@@ -14,13 +14,13 @@ crewmate you spawn and supervise, and you report plain outcomes.
 1. **Never write to a managed repo directly.** You are read-only over `repos/`.
    Crewmates make every project change in isolated worktrees. The only guarded
    exceptions, each owned by its script/skill, are: repo initialization
-   (`bin/mh-repo.sh`), fast-forward clone sync (`bin/mh-sync.sh`), and approved
-   `local-only` fast-forward landing (`bin/mh-merge.sh local`). None of those
+   (`bin/dm-repo.sh`), fast-forward clone sync (`bin/dm-sync.sh`), and approved
+   `local-only` fast-forward landing (`bin/dm-merge.sh local`). None of those
    may force, stash, discard unlanded work, or hand-write a repo's `AGENTS.md`.
 2. **Never build project work outside the framework.** You never scaffold a new
    project as a standalone directory outside `repos/`, and never hand-edit a
    managed repo's files. A "make/build me a repo or project" request is delegated
-   work: create it under `repos/` with `bin/mh-repo.sh create` (or `add` for an
+   work: create it under `repos/` with `bin/dm-repo.sh create` (or `add` for an
    existing remote), then deliver through `task-lifecycle`.
 3. **Never merge without the operator's explicit word.** A repo's standing
    `yolo` posture is the only relaxation, and only for routine merges of green
@@ -35,7 +35,7 @@ crewmate you spawn and supervise, and you report plain outcomes.
 
 ```
 AGENTS.md            this contract (CLAUDE.md includes it)
-docs/architecture.md the design and the firstmate→manhandler mapping
+docs/architecture.md the design and why it is built this way
 bin/                 the toolbelt (read a script's header before first use)
 .claude/skills/      skills, loaded at the trigger points named below
 workflows/           the optional deterministic PR-pipeline runner
@@ -46,20 +46,20 @@ repos/               managed clones, gitignored, READ-ONLY to you
 data/                per-task artifacts (briefs, scout reports), gitignored
 ```
 
-`bin/mh-lib.sh` is the single owner of the task-meta and registry formats, and
-`bin/mh-backlog.sh` owns `state/backlog.json` — go through the `mh-*` scripts,
+`bin/dm-lib.sh` is the single owner of the task-meta and registry formats, and
+`bin/dm-backlog.sh` owns `state/backlog.json` — go through the `dm-*` scripts,
 never hand-edit `state/tasks/*.meta`, `state/repos.json`, or the backlog. A
 `state/tasks/<id>.status` line is a wake **event**; current state is
-`bin/mh-task.sh state <id>`. The toolbelt (each reachable directly or via the
-`bin/mh` dispatcher — `mh <sub> ...` runs `bin/mh-<sub>.sh ...`, and `mh help`
-lists them): `mh-doctor`, `mh-session-start`, `mh-status`, `mh-repo`,
-`mh-worktree`, `mh-task`, `mh-brief`, `mh-branch-name`, `mh-pr`, `mh-merge`,
-`mh-sync`, `mh-lavish`, `mh-test`, `mh-backlog`, `mh-memory` — what each does is
-the `[routing]` bullet in `mh:knowledge` below (the authoritative inventory).
+`bin/dm-task.sh state <id>`. The toolbelt (each reachable directly or via the
+`bin/dm` dispatcher — `dm <sub> ...` runs `bin/dm-<sub>.sh ...`, and `dm help`
+lists them): `dm-doctor`, `dm-session-start`, `dm-status`, `dm-repo`,
+`dm-worktree`, `dm-task`, `dm-brief`, `dm-branch-name`, `dm-pr`, `dm-merge`,
+`dm-sync`, `dm-lavish`, `dm-test`, `dm-backlog`, `dm-memory` — what each does is
+the `[routing]` bullet in `dm:knowledge` below (the authoritative inventory).
 
 ## Session start
 
-Run `bin/mh-session-start.sh` once — it composes the whole startup/recovery
+Run `bin/dm-session-start.sh` once — it composes the whole startup/recovery
 digest: tooling + GitHub auth check, managed repos, fast-forward clone sync
 (report any `STUCK:` lines), reconciled in-flight work, the backlog, and the
 operator/fleet memory. Reconcile any STUCK clones and non-pending tasks before
@@ -74,7 +74,7 @@ Do not dispatch until required tools are present and GitHub auth is good. Use
 - **project-management** — before creating, adding, configuring, or removing a
   managed repo. Any "make/build me a repo or project" request fires this first,
   before scaffolding anything: the new project is created under `repos/`
-  (`mh-repo.sh create`, or `add` for an existing remote), never built standalone.
+  (`dm-repo.sh create`, or `add` for an existing remote), never built standalone.
 - **repo-sync** — before dispatching a task / creating a worktree (now guarded
   automatically), after an out-of-band merge, and whenever the operator asks to
   "update my repos" — the fast-forward-only freshness contract for managed clones.
@@ -116,26 +116,26 @@ Do not dispatch until required tools are present and GitHub auth is good. Use
 
 ## Memory
 
-Native, plain-markdown context via `bin/mh-memory.sh` — no bespoke tool, three
+Native, plain-markdown context via `bin/dm-memory.sh` — no bespoke tool, three
 stores, one owner per fact (details in `memory-routing`):
-- **Per-repo SHARED** → the `mh:knowledge` section of the managed repo's own
+- **Per-repo SHARED** → the `dm:knowledge` section of the managed repo's own
   `AGENTS.md`. Contributor-relevant facts (build/test, conventions, invariants,
   pitfalls, routing). Committed, so it travels to every clone and worktree. You
   NEVER hand-write it — a crewmate edits the section in its worktree and commits
   it with the work.
-- **Per-repo PRIVATE** → `repos/<repo>/.mh/notes.md`, git-excluded (routing,
+- **Per-repo PRIVATE** → `repos/<repo>/.dm/notes.md`, git-excluded (routing,
   per-repo operator prefs, strategy). Never enters project history, but it IS
   relayed into every crewmate brief for the worker's awareness — do not put
   anything a worker must never see here.
-- **Per-repo MANHANDLER-ONLY** → `repos/<repo>/.mh/private.md`, git-excluded and
+- **Per-repo DOCKMASTER-ONLY** → `repos/<repo>/.dm/private.md`, git-excluded and
   never relayed: `recall` shows it to you, but a brief excludes it (`recall
   --crew`). Sensitive routing the crew must not see lives here.
 - **Global** (operator, fleet) → `state/operator.md`, `state/learnings.md`, and
   native `memory/`.
 
-Recall with `bin/mh-memory.sh recall <repo> [query]` (or `recall --global`);
-record with `bin/mh-memory.sh remember` (`--private` / `--manhandler-only` /
-`--global`) and curate with `bin/mh-memory.sh forget`. Recall is soft-capped per
+Recall with `bin/dm-memory.sh recall <repo> [query]` (or `recall --global`);
+record with `bin/dm-memory.sh remember` (`--private` / `--dockmaster-only` /
+`--global`) and curate with `bin/dm-memory.sh forget`. Recall is soft-capped per
 store (a tail pointer names how to see the rest with a query). Save
 progressively at each durable discovery, not in an end-of-session sweep.
 
@@ -173,29 +173,29 @@ The tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `workflows/`,
 through this repo's own PR path. Keep this file concise — point to the
 authoritative script, skill, or doc rather than repeating it.
 
-<!-- mh:knowledge:start -->
-## Repository knowledge (manhandler-maintained)
+<!-- dm:knowledge:start -->
+## Repository knowledge (dockmaster-maintained)
 _Durable, non-obvious facts about this repo: build/test commands, conventions,
 invariants, pitfalls, routing. Curated — not append-forever._
 
-- **[routing]** The toolbelt is `bin/mh-*.sh` (all source `mh-lib.sh`):
-  `mh-session-start` (startup digest), `mh-doctor` (readiness + scaffold),
-  `mh-status` (read-only snapshot), `mh-repo` (registry+memory), `mh-worktree`
-  (isolation), `mh-task` (meta + on-demand state reconcile), `mh-brief`,
-  `mh-branch-name`, `mh-pr` (open/check/merge, never-merge-red), `mh-merge` (FF
-  local land + rebase), `mh-sync` (FF clone refresh), `mh-backlog`, `mh-lavish`
-  (review artifact), `mh-test` (tests gate), `mh-memory` (context system). Point
+- **[routing]** The toolbelt is `bin/dm-*.sh` (all source `dm-lib.sh`):
+  `dm-session-start` (startup digest), `dm-doctor` (readiness + scaffold),
+  `dm-status` (read-only snapshot), `dm-repo` (registry+memory), `dm-worktree`
+  (isolation), `dm-task` (meta + on-demand state reconcile), `dm-brief`,
+  `dm-branch-name`, `dm-pr` (open/check/merge, never-merge-red), `dm-merge` (FF
+  local land + rebase), `dm-sync` (FF clone refresh), `dm-backlog`, `dm-lavish`
+  (review artifact), `dm-test` (tests gate), `dm-memory` (context system). Point
   work at the right script instead of reinventing lifecycle logic.
-- **[convention]** Task current-state is reconciled on demand by `mh-task.sh
+- **[convention]** Task current-state is reconciled on demand by `dm-task.sh
   state` from real signals (merged PR, merge event, report.md, committed-unlanded
   worktree), never from the last status line; `tasks/<id>.status` is an
-  append-only event log. Add new signals to `mh-task.sh state`, not to callers.
+  append-only event log. Add new signals to `dm-task.sh state`, not to callers.
 - **[convention]** Skills live in `.claude/skills/<name>/SKILL.md` and load at the
   trigger points AGENTS.md names (AGENTS.md is the authoritative trigger list).
   New behavior = a skill + an AGENTS.md trigger, not inline contract.
 - **[decision]** Requested-change delivery flow: crewmate implements in a worktree
   and renders a lavish artifact (review-ready) → operator approves via lavish
-  (mediated by the manhandler) → ask PR-or-local → on PR: coldstart review, fix +
+  (mediated by the dockmaster) → ask PR-or-local → on PR: coldstart review, fix +
   tests, merge-gate review, fix + tests, PR creation → merge gate. Lavish approval
   precedes PR/local and applies to both.
 - **[invariant]** Toolbelt scripts in `bin/` must run on bash 3.2 (macOS default):
@@ -204,45 +204,45 @@ invariants, pitfalls, routing. Curated — not append-forever._
 - **[convention]** GitHub access splits by need: reads parsed by `jq` use `gh api`
   (real JSON); mutations use `gh-axi` (`gh-axi api` emits YAML, not JSON).
 - **[invariant]** Shared-state writes (registry, task meta, memory appends) are
-  serialized with the mkdir-based mutex in `mh-lib.sh` (`mh_lock`/`mh_unlock`) —
+  serialized with the mkdir-based mutex in `dm-lib.sh` (`dm_lock`/`dm_unlock`) —
   not `flock` (absent on macOS). Not reentrant; do not set your own EXIT/INT/TERM
   trap between lock and unlock (the lock owns them, and its signal handlers clean
   up AND exit — a trapped signal must not resume the unlocked section). It
   self-heals only a DEAD-PID lock (reclaim serialized by a second lock, re-verified
   before removal); a stuck-but-alive or metadata-less lock fails visibly at ~30s.
 - **[invariant]** Landing/PR fields (`pr`, `pr_state`, `merge_state`, and the
-  `merged` status event) are written ONLY by `mh-pr`/`mh-merge` (directly via
-  `mh_meta_set`/`mh_status_append`); `mh-task.sh set`/`event` reject them so a
-  crewmate cannot forge a landed signal. `mh-task.sh state`/`landed` refresh
-  `pr_state` live (skipped under `MH_NO_FETCH=1`) so an out-of-band merge is seen;
-  bulk `list` and `mh-status` run offline.
-- **[invariant]** Never merge red: `mh-pr.sh merge` refuses `failing`/`pending`/
+  `merged` status event) are written ONLY by `dm-pr`/`dm-merge` (directly via
+  `dm_meta_set`/`dm_status_append`); `dm-task.sh set`/`event` reject them so a
+  crewmate cannot forge a landed signal. `dm-task.sh state`/`landed` refresh
+  `pr_state` live (skipped under `DM_NO_FETCH=1`) so an out-of-band merge is seen;
+  bulk `list` and `dm-status` run offline.
+- **[invariant]** Never merge red: `dm-pr.sh merge` refuses `failing`/`pending`/
   `unknown`, and refuses `none` (no checks reported) unless `--allow-no-checks`
   AND the repo has no CI (`has_ci=0`, from `.github/workflows` absence in the
   worktree/clone) — once a repo has CI, `none` always refuses regardless of the
   flag (#49). `.github/workflows` presence is used only to FORBID the bypass,
   never to auto-pass `none`. The decision is the pure, offline-testable
-  `mh_merge_gate <rollup> <allow_no_checks> <has_ci>`.
-- **[routing]** Multi-repo intent → `fleet-change` skill + `mh-backlog.sh add
-  --campaign <id>` / `mh-backlog.sh campaign <id>` (grouping + rollup only; each
+  `dm_merge_gate <rollup> <allow_no_checks> <has_ci>`.
+- **[routing]** Multi-repo intent → `fleet-change` skill + `dm-backlog.sh add
+  --campaign <id>` / `dm-backlog.sh campaign <id>` (grouping + rollup only; each
   child is an ordinary gated task).
-  Open-PR fleet health → `mh-pr.sh sweep` (read-only; surfaced in `mh-status`).
+  Open-PR fleet health → `dm-pr.sh sweep` (read-only; surfaced in `dm-status`).
   A new repo with no test command → the onboarding scout (project-management skill)
-  proposes a `test_cmd` and initial `mh:knowledge`.
+  proposes a `test_cmd` and initial `dm:knowledge`.
 - **[pitfall]** `tests/smoke.sh` covers only the local-only, offline lifecycle;
-  the PR path (`mh-pr`, `mh-merge` PR mode, gh-axi, `workflows/pr-pipeline.js`)
+  the PR path (`dm-pr`, `dm-merge` PR mode, gh-axi, `workflows/pr-pipeline.js`)
   has no automated coverage. Under `set -euo pipefail`, piping verbose output to
   `grep -q` SIGPIPEs the producer (exit 141) which pipefail reports as failure —
   capture once and match with a here-string (`grep -q pat <<<"$VAR"`).
-- **[pitfall]** `mh-repo.sh add` clones unconditionally and fails if
+- **[pitfall]** `dm-repo.sh add` clones unconditionally and fails if
   `repos/<name>` already exists non-empty; there is no re-adopt path. To re-enroll
   an already-cloned repo, move the clone aside first, then run `add`.
 - **[convention]** A "create/build me a new repo or project" request is framework
-  work, not standalone building: enroll it under `repos/` first (`mh-repo.sh
+  work, not standalone building: enroll it under `repos/` first (`dm-repo.sh
   create` for a brand-new repo, `add` for an existing remote), then deliver via
   `task-lifecycle`. Never scaffold a project as a directory outside `repos/` or
   hand-edit a managed repo's files.
-<!-- mh:knowledge:end -->
+<!-- dm:knowledge:end -->
 
 ---
 

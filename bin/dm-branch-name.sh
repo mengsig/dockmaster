@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mh-branch-name.sh - compute a branch name from a type, an issue, and a summary.
+# dm-branch-name.sh - compute a branch name from a type, an issue, and a summary.
 #
 # Convention:  <type>/<issue>/<slug>
 #   type   one of: feat fix bug chore refactor docs perf test build ci
@@ -7,15 +7,15 @@
 #   slug   a short kebab-case summary (<= 6 words is plenty)
 #
 # Examples:
-#   mh-branch-name.sh fix 412 "flaky login test"      -> fix/412/flaky-login-test
-#   mh-branch-name.sh feat x "dark mode toggle"       -> feat/x/dark-mode-toggle
+#   dm-branch-name.sh fix 412 "flaky login test"      -> fix/412/flaky-login-test
+#   dm-branch-name.sh feat x "dark mode toggle"       -> feat/x/dark-mode-toggle
 #
 # The slug is lowercased, non-alphanumerics collapse to single hyphens, and the
 # whole name is capped so it stays a valid, readable git ref.
 
 set -euo pipefail
 
-usage() { echo "usage: mh-branch-name.sh <type> <issue|x> <summary...>" >&2; exit 2; }
+usage() { echo "usage: dm-branch-name.sh <type> <issue|x> <summary...>" >&2; exit 2; }
 [ "$#" -ge 3 ] || usage
 
 type="$1"; issue="$2"; shift 2

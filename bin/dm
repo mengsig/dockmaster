@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# dm - convenience dispatcher for the dockmaster toolbelt.
+#
+# `dm <subcommand> [args...]` runs `bin/dm-<subcommand>.sh [args...]`, e.g.
+# `dm task state x` -> `bin/dm-task.sh state x`, `dm status` -> `bin/dm-status.sh`.
+# This is ADDITIVE: the individual `bin/dm-*.sh` scripts remain the canonical
+# entrypoints referenced by skills and briefs; `dm` only saves typing and aids
+# discovery. Args and exit codes pass through unchanged (via exec).
+#
+# `dm` / `dm help` lists the subcommands with their one-line purpose (derived
+# from each script's header comment). Unknown subcommands fail with the list.
+
+set -euo pipefail
+
+# Resolve the toolbelt dir from this script's own location so it works from any
+# cwd (mirrors dm-lib's BASH_SOURCE-based resolution).
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+usage() {
+  echo "usage: dm <subcommand> [args...]"
+  echo
+  echo "Runs bin/dm-<subcommand>.sh. Subcommands:"
+  # One-line purpose comes from each script's header (line 2, format
+  # '# dm-<name>.sh - <purpose>'), truncated at the first sentence.
+  for f in "$BIN_DIR"/dm-*.sh; do
+    [ -f "$f" ] || continue
+    name="$(basename "$f" .sh)"; name="${name#dm-}"
+    [ "$name" = "lib" ] && continue  # dm-lib.sh is a sourced library, not a subcommand
+    purpose="$(sed -n '2s/^# dm-[a-z-]*\.sh - //p' "$f")"
+    purpose="${purpose%%. *}"
+    printf '  %-14s %s\n' "$name" "$purpose"
+  done
+}
+
+sub="${1:-}"; shift || true
+case "$sub" in
+  ''|help|-h|--help) usage; exit 0 ;;
+esac
+
+# Fail closed on anything that is not a plain lowercase/dash subcommand: this
+# both rejects typos and prevents a crafted argument from escaping the toolbelt
+# dir (path separators, '..') when interpolated into the target path.
+case "$sub" in
+  lib) echo "dm: 'lib' is a sourced library, not a subcommand" >&2; exit 2 ;;
+  *[!a-z-]*) echo "dm: invalid subcommand: '$sub'" >&2; usage >&2; exit 2 ;;
+esac
+
+target="$BIN_DIR/dm-$sub.sh"
+if [ ! -f "$target" ]; then
+  echo "dm: unknown subcommand: '$sub'" >&2
+  usage >&2
+  exit 2
+fi
+
+exec "$target" "$@"
