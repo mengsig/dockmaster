@@ -864,6 +864,28 @@ check "owner_repo refuses a url with no owner/repo slash" '! prfn owner_repo "no
 check "pr_number_from_url parses a canonical pull url" '[ "$(prfn pr_number_from_url "https://github.com/owner/repo/pull/42")" = "42" ]'
 check "pr_number_from_url refuses a non-canonical url"  '! prfn pr_number_from_url "https://github.com/owner/repo/pulls/42" >/dev/null 2>&1'
 
+check "pr_repo_slug_from_url strips /pull/<n> down to owner/repo" \
+  '[ "$(prfn pr_repo_slug_from_url "https://github.com/owner/repo/pull/42")" = "owner/repo" ]'
+
+echo "== pr-adopt: url/repo validation fails closed before any GitHub tool is needed (#52) =="
+# All three checks below (url format, task existence, repo-match) run BEFORE
+# `mh_need gh` in `adopt`, so they are deterministic offline even with `gh`
+# installed (no network call is ever reached).
+b mh-task.sh new adopt-probe --kind ship --repo demo >/dev/null 2>&1 || true
+check "adopt refuses a non-canonical PR url"     '! b mh-pr.sh adopt adopt-probe "not-a-url" >/dev/null 2>&1'
+ADOPTBAD="$(b mh-pr.sh adopt adopt-probe "not-a-url" 2>&1 || true)"
+check "adopt names the canonical-url reason"     'grep -q "canonical PR url" <<<"$ADOPTBAD"'
+check "adopt refuses an unrecorded task id"       '! b mh-pr.sh adopt no-such-adopt-task "https://github.com/owner/repo/pull/1" >/dev/null 2>&1'
+ADOPTNOTASK="$(b mh-pr.sh adopt no-such-adopt-task "https://github.com/owner/repo/pull/1" 2>&1 || true)"
+check "adopt names the no-such-task reason"       'grep -q "no such task" <<<"$ADOPTNOTASK"'
+# demo's origin is a local fixture path, not github.com/owner/repo, so ANY
+# canonical PR url mismatches it — exercising the cross-repo refusal.
+check "adopt refuses a PR that does not belong to the task's repo" \
+  '! b mh-pr.sh adopt adopt-probe "https://github.com/someone/other-repo/pull/7" >/dev/null 2>&1'
+ADOPTMISMATCH="$(b mh-pr.sh adopt adopt-probe "https://github.com/someone/other-repo/pull/7" 2>&1 || true)"
+check "adopt names the repo-mismatch reason" \
+  'grep -q "refusing to adopt a PR from a different repo" <<<"$ADOPTMISMATCH"'
+
 # rollup_rank / worst_rollup worst-wins precedence, confirmed from the source:
 # failing(4) > unknown(3) > pending(2) > passing(1) > none(0). `unknown`
 # outranks `pending` so an API error is never silently treated as more

@@ -17,9 +17,15 @@
 #
 # Commands:
 #   open  <id> --title T (--body-file F | --body B) [--base B] [--draft]
+#   adopt <id> <url>              record a PR opened out of band (e.g. direct-pr
+#                                 mode, a revert PR): validates the url is a
+#                                 canonical GitHub PR url for the task's own
+#                                 repo, then records it and queries real state
 #   check <id>                    refresh pr_state + checks into meta; print summary
 #   await-checks <id> [--timeout-secs N] [--interval-secs N]
 #                                 poll check until the CI rollup is terminal
+#                                 (a `none` rollup keeps polling, not terminal,
+#                                 when the repo has CI configured)
 #   merge <id> [--method squash|merge|rebase] [--delete-branch]
 #   sweep                         read-only fleet sweep: every task with an open
 #                                 PR, its CI rollup + whether a review requests
@@ -66,6 +72,30 @@ pr_number_from_url() {
   grep -qE '^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[1-9][0-9]*$' <<<"$url" \
     || mh_die "not a canonical PR url: $url"
   printf '%s' "$url" | sed -E 's#.*/pull/##'
+}
+
+pr_repo_slug_from_url() {
+  # owner/repo a (already-canonical) PR url belongs to, reusing owner_repo by
+  # stripping the "/pull/<n>" suffix down to a plain repo url first.
+  owner_repo "$(printf '%s' "$1" | sed -E 's#/pull/[0-9]+$##')"
+}
+
+task_has_ci() {
+  # task_has_ci <id>  -> exit 0 if the task's repo has CI configured
+  # (.github/workflows present), checked in the worktree first so a workflow
+  # file added on the crewmate's branch but not yet in the managed clone still
+  # counts, else the clone. Single owner of this detection so merge and
+  # await-checks cannot drift apart on what "has CI" means.
+  local id="$1" repo wt
+  repo="$(mh_meta_get "$id" repo)"
+  wt="$(mh_meta_get "$id" worktree)"
+  # `if`, not a bare `[ ... ] && [ ... ] && return 0`: under set -e a false
+  # first test would abort this function's CALLER outright (a standalone list
+  # whose exit status is nonzero), not just fall through to the next line.
+  if [ -n "$wt" ] && [ -d "$wt/.github/workflows" ]; then
+    return 0
+  fi
+  [ -d "$(mh_repo_dir "$repo")/.github/workflows" ]
 }
 
 # Combine two CI rollups, worst-wins, in precedence:
@@ -138,6 +168,37 @@ case "$cmd" in
     mh_info "$url"
     ;;
 
+  adopt)
+    # Record a PR that was opened OUTSIDE mh-pr.sh open (a direct-pr-mode task,
+    # or a revert PR per the rollback skill) so the merge gate has something
+    # real to check. `pr`/`pr_state`/`merge_state` are write-protected on
+    # mh-task.sh set (they're the trusted landing signal); this is the
+    # sanctioned writer — validate first, then record via mh_meta_set directly,
+    # matching how `open` records `pr` after a real push+create.
+    id="${1:-}"; url="${2:-}"
+    [ -n "$id" ] && [ -n "$url" ] || mh_die "usage: mh-pr.sh adopt <id> <url>"
+    mh_require_id "$id"
+    n="$(pr_number_from_url "$url")"
+    repo="$(mh_meta_get "$id" repo)"
+    [ -n "$repo" ] || mh_die "no such task: $id"
+    slug="$(repo_slug "$repo")"
+    url_slug="$(pr_repo_slug_from_url "$url")"
+    # Refuse a PR that belongs to a different repo than the task's — comparing
+    # case-insensitively since GitHub owner/repo names are case-insensitive.
+    if [ "$(printf '%s' "$slug" | tr 'A-Z' 'a-z')" != "$(printf '%s' "$url_slug" | tr 'A-Z' 'a-z')" ]; then
+      mh_die "PR $url belongs to $url_slug, not this task's repo ($slug) — refusing to adopt a PR from a different repo"
+    fi
+    existing="$(mh_meta_get "$id" pr)"
+    if [ -n "$existing" ] && [ "$existing" != "$url" ]; then
+      mh_die "task $id already has a different PR recorded ($existing); adopt onto a fresh task id instead"
+    fi
+    mh_need gh
+    mh_meta_set "$id" pr "$url"
+    "$0" check "$id"
+    mh_status_append "$id" done "adopted PR $url"
+    mh_info "adopted $url for task $id"
+    ;;
+
   check)
     mh_need gh
     id="${1:-}"; [ -n "$id" ] || mh_die "usage: mh-pr.sh check <id>"
@@ -182,11 +243,12 @@ case "$cmd" in
     ;;
 
   await-checks)
-    # Poll `check` until the CI rollup is terminal (passing/failing/none) or the
-    # timeout elapses, so a caller (the merge gate, a supervision Monitor) can
-    # WAIT for GitHub Actions rather than treating a still-pending PR as a
-    # refusal. This does NOT merge and does NOT relax "never merge red": it is a
-    # pre-step, and the outcome maps to an exit code the caller acts on.
+    # Poll `check` until the CI rollup is terminal (passing/failing, or none on
+    # a confirmed CI-less repo) or the timeout elapses, so a caller (the merge
+    # gate, a supervision Monitor) can WAIT for GitHub Actions rather than
+    # treating a still-pending PR as a refusal. This does NOT merge and does
+    # NOT relax "never merge red": it is a pre-step, and the outcome maps to an
+    # exit code the caller acts on.
     mh_need gh
     id="${1:-}"; shift || true
     [ -n "$id" ] || mh_die "usage: mh-pr.sh await-checks <id> [--timeout-secs N] [--interval-secs N]"
@@ -202,6 +264,12 @@ case "$cmd" in
     case "$interval_secs" in ''|*[!0-9]*) mh_die "--interval-secs must be a non-negative integer" ;; esac
     [ "$interval_secs" -ge 1 ] || mh_die "--interval-secs must be >= 1"
     url="$(mh_meta_get "$id" pr)"; [ -n "$url" ] || mh_die "no PR recorded for $id"
+    # has_ci decides what "none" means below: on a CI-configured repo, `none`
+    # right after a PR opens is the race window before Actions has registered
+    # any check — not terminal, keep polling. Only a confirmed CI-less repo
+    # treats `none` as the (immediate) terminal answer, matching the merge gate's
+    # own has_ci-gated treatment of `none` (never used to relax "never merge red").
+    if task_has_ci "$id"; then has_ci=1; else has_ci=0; fi
     waited=0
     # Loop checks first, then tests the timeout, so timeout=0 still does exactly
     # one check (a single-shot probe) rather than none.
@@ -216,8 +284,13 @@ case "$cmd" in
         checks="unknown"
       fi
       case "$checks" in
-        passing|none) mh_info "await-checks: $checks after ${waited}s: $url"; exit 0 ;;
-        failing)      mh_info "await-checks: FAILING after ${waited}s: $url"; exit 1 ;;
+        passing) mh_info "await-checks: passing after ${waited}s: $url"; exit 0 ;;
+        none)
+          if [ "$has_ci" -eq 0 ]; then
+            mh_info "await-checks: none after ${waited}s (repo has no CI configured): $url"; exit 0
+          fi
+          ;;   # CI configured but no check has registered yet: not terminal, keep waiting
+        failing) mh_info "await-checks: FAILING after ${waited}s: $url"; exit 1 ;;
         *) : ;;   # pending / unknown / empty: not terminal, keep waiting
       esac
       if [ "$waited" -ge "$timeout_secs" ]; then
@@ -257,17 +330,10 @@ case "$cmd" in
     # longer bypass `none` (closes #49) — a repo that gained CI must wait for
     # it, never merge on a rollup that just hasn't registered yet.
     repo="$(mh_meta_get "$id" repo)"
-    ci_dir="$(mh_repo_dir "$repo")"
-    # has_ci is checked in the worktree first (if still recorded), so a
-    # workflow file added on the crewmate's branch but not yet in the managed
-    # clone still counts; falls back to the clone otherwise.
-    wt="$(mh_meta_get "$id" worktree)"
-    has_ci=0
-    if [ -n "$wt" ] && [ -d "$wt/.github/workflows" ]; then
-      has_ci=1
-    elif [ -d "$ci_dir/.github/workflows" ]; then
-      has_ci=1
-    fi
+    # `if` (not a bare `task_has_ci "$id" && has_ci=1`): under set -e, a false
+    # exit here is the last statement of this line, so a bare `&&` would abort
+    # the merge command itself when the repo simply has no CI.
+    if task_has_ci "$id"; then has_ci=1; else has_ci=0; fi
     case "$(mh_merge_gate "$checks" "$allow_no_checks" "$has_ci")" in
       allow) : ;;
       refuse-failing) mh_die "REFUSED: PR has failing checks (never merge red): $url" ;;
@@ -424,5 +490,5 @@ case "$cmd" in
     mh_meta_get "$id" pr ;;
 
   *)
-    echo "usage: mh-pr.sh {open|check|await-checks|merge|sweep|security-scan|url} ..." >&2; exit 2 ;;
+    echo "usage: mh-pr.sh {open|adopt|check|await-checks|merge|sweep|security-scan|url} ..." >&2; exit 2 ;;
 esac
