@@ -251,6 +251,45 @@ dm_registry_get() {
   fi
 }
 
+# dm_merge_authority <name>  -> the repo's effective merge authority, one of
+# yolo|ask|never|invalid. Single owner of the value AND its legacy migration.
+#   - A stored `merge_authority` of yolo|ask|never is returned verbatim.
+#   - A stored `merge_authority` that is present but NOT one of those three is a
+#     corrupt/hand-broken value: it returns `invalid` so the merge/land gate can
+#     FAIL CLOSED (a typo like "nevr" must never be silently downgraded to a
+#     permissive posture). It is NOT re-derived from the legacy boolean.
+#   - Only an ABSENT/empty `merge_authority` falls back to the retired boolean
+#     `yolo` (true -> yolo, false/absent -> ask) — the legacy-registry migration.
+# The repo object is snapshotted with ONE file read (`jq -c` of `.repos[$n]`) so a
+# concurrent `dm-repo.sh set` cannot interleave between reads of the two fields;
+# `merge_authority` and `yolo` are then extracted from that in-memory snapshot,
+# not the file. The extraction pulls the WHOLE stored `merge_authority` string
+# (any embedded tab/newline included) and validates it EXACTLY against
+# yolo|ask|never — a hand-corrupted value like "yolo\tx" must not be truncated to
+# a valid-looking prefix and pass. Every merge/landing path and the `list` display
+# read authority through here.
+dm_merge_authority() {
+  dm_ensure_dirs
+  local name="$1" obj ma yolo
+  # Snapshot the repo object (compact, single line) with the sole file read. A
+  # missing repo yields "{}", which reads as the legacy default (ask) below.
+  obj="$(jq -c --arg n "$name" '.repos[$n] // {}' "$DM_REGISTRY" 2>/dev/null)"
+  # Extract each field from the snapshot string, not the file — the exact decoded
+  # value, validated whole. `$(...)` strips only a trailing newline, so an
+  # embedded tab or newline survives into $ma and fails the exact match below.
+  ma="$(printf '%s' "$obj" | jq -r '.merge_authority // "" | tostring')"
+  yolo="$(printf '%s' "$obj" | jq -r 'if .yolo == true then "true" else "false" end')"
+  case "$ma" in
+    yolo|ask|never) printf '%s\n' "$ma"; return 0 ;;
+    "")             : ;;                       # absent -> legacy derivation below
+    *)              printf 'invalid\n'; return 0 ;;   # corrupt -> fail closed
+  esac
+  case "$yolo" in
+    true) printf 'yolo\n' ;;
+    *)    printf 'ask\n' ;;
+  esac
+}
+
 # dm_repo_dir <name>  -> print the managed clone's directory, or die if absent.
 # Single owner of "resolve a registered repo's clone path"; every script that
 # needs a repo's working tree goes through here so the error is identical.
@@ -363,6 +402,25 @@ dm_merge_gate() {
     pending) printf 'refuse-pending\n' ;;
     none)    if [ "$2" = "1" ] && [ "$3" = "0" ]; then printf 'allow\n'; else printf 'refuse-none\n'; fi ;;
     *)       printf 'refuse-unknown\n' ;;
+  esac
+}
+
+# --- merge authority gate: the "never merge in this repo" hard stop -----------
+# Decide whether the dockmaster may merge/land in a repo with this authority, as
+# a pure function so it is testable offline (like dm_merge_gate). This is a
+# SEPARATE, earlier gate than the never-merge-red check: it fires before any CI
+# rollup is even consulted. `never` is an absolute refusal no flag can bypass;
+# `ask`/`yolo` both permit the merge MECHANICS here (the operator-approval part
+# of `ask` stays a skill-layer duty). A `never` repo refuses; a corrupt/`invalid`
+# authority (or any unrecognized token) also FAILS CLOSED to a distinct
+# `refuse-invalid` so the caller can name the bad value and the fix — the safe
+# direction for a merge gate. Prints: allow | refuse-never | refuse-invalid.
+dm_merge_authority_gate() {
+  # dm_merge_authority_gate <authority>
+  case "$1" in
+    yolo|ask) printf 'allow\n' ;;
+    never)    printf 'refuse-never\n' ;;
+    *)        printf 'refuse-invalid\n' ;;
   esac
 }
 

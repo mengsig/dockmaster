@@ -80,8 +80,11 @@ full path. When unsure, it is not trivial: default to the full path.
 - Tests still run (`fast` keeps the `tests` gate).
 - One cold, independent review still happens (`fast` keeps the coldstart
   `review` gate).
-- Merge authority is unchanged: never merge red, and it is still the operator's
-  explicit word or the repo's standing `yolo` for routine green work.
+- Merge authority is unchanged: never merge red, honor the repo's
+  `merge_authority` (`never` means the operator merges on GitHub, never the
+  dockmaster), and otherwise it is still the operator's explicit word — or, under
+  a standing `yolo`, auto-merge only LOW/MEDIUM-risk green work, while a HIGH-risk
+  change always needs the explicit word (risk tiers defined in `pr-workflow`).
 - The operator can always demand the full path for any change.
 
 ## Rules

@@ -23,7 +23,7 @@ bin/dm-repo.sh add <name> <remote> [--mode pipeline|direct-pr|local-only] \
 ```
 
 This clones the repo, resolves its default branch, registers it (`mode=pipeline`,
-`yolo=false` by default), and scaffolds the repo's git-excluded private memory
+`merge_authority=ask` by default), and scaffolds the repo's git-excluded private memory
 store via `seed` (below). The shared `AGENTS.md` `dm:knowledge` section is added
 later by a crewmate in a worktree.
 
@@ -92,14 +92,25 @@ the operator's word.
 
 ```
 bin/dm-repo.sh set <name> mode pipeline|direct-pr|local-only
-bin/dm-repo.sh set <name> yolo true|false        # standing routine-merge autonomy
+bin/dm-repo.sh set <name> merge_authority yolo|ask|never  # who may merge (enforced)
 bin/dm-repo.sh set <name> test_cmd "<cmd>"
 bin/dm-repo.sh set <name> pipeline <config-name>  # points at config/pr-pipeline.<name>.json
 ```
 
-Delivery **mode** and **yolo** are orthogonal: mode is *how work lands*, yolo is
-*how much routine confirmation the dockmaster skips*. Yolo never authorizes
-destructive, irreversible, or security-sensitive actions.
+`merge_authority` is an enforced merge gate, not just a hint:
+- `yolo` — the dockmaster may auto-merge LOW/MEDIUM-risk green work without
+  asking; a HIGH-risk change still needs the operator's explicit word (risk tiers
+  are defined in the `pr-workflow` skill; the bash gate itself is risk-blind).
+- `ask` (default) — the dockmaster merges only on the operator's explicit word.
+- `never` — the dockmaster may NEVER merge. The pipeline, review, and PR creation
+  still run; the flow ends with the PR reported merge-ready and the operator
+  merges on GitHub. `dm-pr.sh merge` and `dm-merge.sh local` hard-refuse — no flag
+  bypasses it. Use it for work/shared repos where only the operator lands.
+
+`set <name> yolo true|false` still works as a back-compat alias (true→yolo,
+false→ask). Delivery **mode** and **merge_authority** are orthogonal: mode is
+*how work lands*, merge_authority is *who is allowed to merge*. Authority never
+authorizes destructive, irreversible, or security-sensitive actions.
 
 ## Per-repo memory
 

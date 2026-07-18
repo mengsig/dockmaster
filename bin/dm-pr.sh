@@ -8,8 +8,12 @@
 #   - PR data is recorded into task meta; it is never interpolated into shell.
 #   - repository is derived from the clone's origin, never from caller input.
 #
-# Explicit merge AUTHORITY (captain approval / standing yolo) is enforced by the
-# dockmaster one layer up, per AGENTS.md. This script enforces mechanics only.
+# Merge AUTHORITY is enforced here in two layers. The repo's merge_authority
+# (yolo|ask|never) is a HARD stop: `merge` refuses outright, before any GitHub
+# call, for a `never` repo (dm_merge_authority_gate) — no flag bypasses it. The
+# operator-approval part of `ask` (vs. standing `yolo`) stays the dockmaster's
+# duty one layer up, per AGENTS.md; this script enforces the never-stop and the
+# CI mechanics.
 #
 # GitHub access splits by need: reads that are parsed by jq use `gh api` (it
 # returns real JSON), while mutations use `gh-axi` (`gh-axi api` emits a
@@ -303,9 +307,23 @@ case "$cmd" in
     ;;
 
   merge)
-    dm_need gh-axi; dm_need gh
     id="${1:-}"; shift || true
     [ -n "$id" ] || dm_die "usage: dm-pr.sh merge <id> [--method squash|merge|rebase] [--delete-branch] [--allow-no-checks]"
+    dm_require_id "$id"
+    # Merge authority is the OUTERMOST gate, checked before GitHub tools are even
+    # required and before any GitHub call: a `never` repo can never be merged by
+    # the dockmaster — no flag, no --allow-no-checks, no CI state bypasses it.
+    # Enforcing it here makes the refusal deterministic offline and independent of
+    # the never-merge-red gate that follows.
+    repo="$(dm_meta_get "$id" repo)"
+    [ -n "$repo" ] || dm_die "no such task: $id"
+    case "$(dm_merge_authority_gate "$(dm_merge_authority "$repo")")" in
+      allow) : ;;
+      refuse-never) dm_die "REFUSED: repo $repo is merge_authority=never: the dockmaster may not merge; the PR is merge-ready — the operator merges it on GitHub" ;;
+      refuse-invalid) dm_die "REFUSED: repo $repo has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to merge. Set a valid one: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
+      *) dm_die "REFUSED: repo $repo merge authority could not be resolved; refusing to merge" ;;
+    esac
+    dm_need gh-axi; dm_need gh
     method="squash"; delete=0; allow_no_checks=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -329,7 +347,7 @@ case "$cmd" in
     # (has_ci=0): once .github/workflows exists, --allow-no-checks can no
     # longer bypass `none` (closes #49) — a repo that gained CI must wait for
     # it, never merge on a rollup that just hasn't registered yet.
-    repo="$(dm_meta_get "$id" repo)"
+    # (repo was resolved above for the merge-authority gate.)
     # `if` (not a bare `task_has_ci "$id" && has_ci=1`): under set -e, a false
     # exit here is the last statement of this line, so a bare `&&` would abort
     # the merge command itself when the repo simply has no CI.
