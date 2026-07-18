@@ -590,14 +590,16 @@ check "worktree create refuses a task with no record" '! b mh-worktree.sh create
 SGINR="$(b mh-worktree.sh create sgi-norecord sgi 2>&1 || true)"
 check "worktree create points at mh-task.sh new"      'grep -q "mh-task.sh new" <<<"$SGINR"'
 
-echo "== state-gate-integrity: merge check-gate never merges red on 'none' (#21-a) =="
-gate() { ( . "$ROOT/bin/mh-lib.sh"; mh_merge_gate "$1" "$2" ); }
-check "gate refuses 'none' without --allow-no-checks"   '[ "$(gate none 0)" = "refuse-none" ]'
-check "gate allows 'none' only with --allow-no-checks"  '[ "$(gate none 1)" = "allow" ]'
-check "gate allows 'passing'"                           '[ "$(gate passing 0)" = "allow" ]'
-check "gate refuses 'failing'"                          '[ "$(gate failing 0)" = "refuse-failing" ]'
-check "gate refuses 'pending'"                          '[ "$(gate pending 0)" = "refuse-pending" ]'
-check "gate refuses an unknown rollup"                  '[ "$(gate bogus 0)" = "refuse-unknown" ]'
+echo "== state-gate-integrity: merge check-gate never merges red on 'none' (#21-a, #49) =="
+gate() { ( . "$ROOT/bin/mh-lib.sh"; mh_merge_gate "$1" "$2" "$3" ); }
+check "gate refuses 'none' without --allow-no-checks (no CI)"        '[ "$(gate none 0 0)" = "refuse-none" ]'
+check "gate refuses 'none' without --allow-no-checks (CI present)"   '[ "$(gate none 0 1)" = "refuse-none" ]'
+check "gate allows 'none' with --allow-no-checks when repo has no CI" '[ "$(gate none 1 0)" = "allow" ]'
+check "gate refuses 'none' with --allow-no-checks when repo HAS CI"   '[ "$(gate none 1 1)" = "refuse-none" ]'
+check "gate allows 'passing'"                           '[ "$(gate passing 0 0)" = "allow" ]'
+check "gate refuses 'failing'"                          '[ "$(gate failing 0 0)" = "refuse-failing" ]'
+check "gate refuses 'pending'"                          '[ "$(gate pending 0 0)" = "refuse-pending" ]'
+check "gate refuses an unknown rollup"                  '[ "$(gate bogus 0 0)" = "refuse-unknown" ]'
 
 echo "== state-gate-integrity: pr_state cannot be forged via 'set' (#20 F6) =="
 b mh-task.sh new sgi-forge --kind ship --repo sgi >/dev/null 2>&1 || true
