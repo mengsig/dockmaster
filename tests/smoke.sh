@@ -1408,12 +1408,18 @@ fi
 exec "$REAL_GIT" "\$@"
 STUB
 chmod +x "$GHSTUB/git"
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"has_hooks"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
 printf '{"object":{"sha":"%s"}}\n' "$AWHEAD" > "$GHSTUB/ref.json"
+printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$AWHEAD" > "$GHSTUB/runs.json"
+printf '{"total_count":0}\n' > "$GHSTUB/status.json"
+HASHOOKSCHECK="$(PATH="$GHSTUB:$PATH" b dm-pr.sh check await-75 2>&1)"
+check "has_hooks is accepted by check" 'grep -q "merge_state: has_hooks" <<<"$HASHOOKSCHECK"'
+HASHOOKSAWAIT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1)"
+check "has_hooks permits green await-checks" 'grep -q "passing after 0s" <<<"$HASHOOKSAWAIT"'
 rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events" "$GHSTUB/git-push-calls"
 : > "$GHSTUB/conflict"
 AW409="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge await-75 --method rebase --delete-branch 2>&1 || true)"
-check "atomic merge sends exact head and merge method" 'grep -Fx "api PUT /repos/o/r/pulls/75/merge --field sha=$AWHEAD --field merge_method=rebase" "$GHSTUB/axi-calls" >/dev/null'
+check "has_hooks merge reaches SHA-conditioned mutation" 'grep -Fx "api PUT /repos/o/r/pulls/75/merge --field sha=$AWHEAD --field merge_method=rebase" "$GHSTUB/axi-calls" >/dev/null'
 check "atomic 409 remains a visible refusal" 'grep -q "atomic merge failed" <<<"$AW409" && grep -q "409 Conflict" <<<"$AW409"'
 check "409 records no merged state or event" '[ "$(b dm-task.sh get await-75 pr_state)" = "OPEN" ] && ! grep -q " merged: https://github.com/o/r/pull/75" "$DM_HOME/state/tasks/await-75.status"'
 check "409 performs no branch deletion" '[ ! -s "$GHSTUB/git-push-calls" ]'

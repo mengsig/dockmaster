@@ -182,7 +182,7 @@ load_check_snapshot_json() {
   } <<<"$values"
   [ -z "$PR_SNAPSHOT_HEAD" ] || is_git_oid "$PR_SNAPSHOT_HEAD" || return 1
   case "$PR_SNAPSHOT_CHECKS" in passing|failing|pending|none|unknown) ;; *) return 1 ;; esac
-  case "$PR_SNAPSHOT_MERGE_STATE" in clean|blocked|unstable|dirty|behind|draft|unknown) ;; *) return 1 ;; esac
+  case "$PR_SNAPSHOT_MERGE_STATE" in clean|blocked|unstable|dirty|behind|draft|has_hooks|unknown) ;; *) return 1 ;; esac
   case "$PR_SNAPSHOT_STATE" in OPEN|CLOSED|MERGED|UNKNOWN) ;; *) return 1 ;; esac
   if [ -z "$PR_SNAPSHOT_HEAD_REPO" ] && [ -z "$PR_SNAPSHOT_HEAD_REF" ]; then
     return 0
@@ -415,7 +415,7 @@ case "$cmd" in
       status_rollup="$(commit_status_rollup "$slug" "$sha")"
     fi
     rollup="$(worst_rollup "$runs_rollup" "$status_rollup")"
-    # mergeable_state (clean/blocked/unstable/dirty/behind/draft/unknown) gates
+    # mergeable_state (clean/blocked/unstable/dirty/behind/draft/has_hooks/unknown) gates
     # the merge alongside CI; GitHub often reports "unknown" on first fetch.
     merge_state="$(printf '%s' "$json" | jq -er '(.mergeable_state // "unknown") | select(type == "string")' 2>/dev/null)" \
       || dm_die "invalid PR response for $url"
