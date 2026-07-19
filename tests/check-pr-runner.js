@@ -10,11 +10,11 @@ const SOURCE = fs.readFileSync(path.join(ROOT, 'workflows/pr-pipeline.js'), 'utf
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 
 function defaultResponse(label) {
+  if (label.startsWith('state:')) return { head: 'a'.repeat(40), porcelain: '' }
   if (label.startsWith('review:')) return { findings: [] }
   if (label.startsWith('tests:') || label === 'verify') return { passed: true, summary: 'passed' }
   if (label === 'security') return { surface: false, findings: [], summary: 'no surface' }
   if (label === 'pr') return { url: 'https://github.com/o/r/pull/12' }
-  if (label === 'fix:head-status') return { head: 'a'.repeat(40), dirty: false }
   if (label === 'verify-findings') return { refuted: false, rationale: 'real' }
   return {}
 }
@@ -48,11 +48,12 @@ async function run(overrides, scripted, parallelImpl) {
 
 async function checkTierOrder() {
   const cases = [
-    ['fast', ['review:coldstart', 'tests:gate', 'pr']],
-    ['default', ['review:coldstart', 'tests:gate', 'review:merge-gate', 'tests:gate', 'security', 'pr']],
+    ['fast', ['state:before-review', 'review:coldstart', 'state:before-tests', 'tests:gate', 'state:before-pr', 'pr']],
+    ['default', ['state:before-review', 'review:coldstart', 'state:before-tests', 'tests:gate', 'state:before-review', 'review:merge-gate', 'state:before-tests', 'tests:gate', 'security', 'state:before-pr', 'pr']],
     ['rigorous', [
-      'review:coldstart:correctness', 'review:coldstart:security', 'review:coldstart:concurrency',
-      'review:coldstart:portability', 'review:coldstart:tests', 'tests:gate', 'verify', 'security', 'pr',
+      'state:before-review', 'review:coldstart:correctness', 'review:coldstart:security',
+      'review:coldstart:concurrency', 'review:coldstart:portability', 'review:coldstart:tests',
+      'state:before-tests', 'tests:gate', 'verify', 'security', 'state:before-pr', 'pr',
     ]],
   ]
   for (const [tier, expected] of cases) {
@@ -68,19 +69,36 @@ async function checkFixLoop() {
     { gate: 'review', pass: 'coldstart' }, { gate: 'fix', max_rounds: 1 }, { gate: 'tests' },
   ] }, {
     'review:coldstart': [{ findings: [finding] }, { findings: [] }],
-    'fix:head-status': [{ head: 'a'.repeat(40), dirty: false }, { head: 'b'.repeat(40), dirty: false }],
+    'state:before-fix': { head: 'a'.repeat(40), porcelain: '' },
+    'state:after-fix': { head: 'b'.repeat(40), porcelain: '' },
   })
   assert.equal(fixed.result.ok, true)
-  assert.deepEqual(fixed.calls, ['review:coldstart', 'fix:head-status', 'fix', 'fix:head-status', 'review:coldstart', 'tests:gate'])
+  assert.deepEqual(fixed.calls, ['state:before-review', 'review:coldstart', 'state:before-fix', 'fix', 'state:after-fix', 'review:coldstart', 'state:before-tests', 'tests:gate'])
 
-  const dirty = await run({ gates: [
+  const dirtyBefore = await run({ gates: [
     { gate: 'review' }, { gate: 'fix', max_rounds: 1 },
   ] }, {
     'review:review': { findings: [finding] },
-    'fix:head-status': [{ head: 'a'.repeat(40), dirty: false }, { head: 'a'.repeat(40), dirty: true }],
+    'state:before-fix': { head: 'a'.repeat(40), porcelain: '?? stale.txt' },
   })
-  assert.equal(dirty.result.stage, 'fix')
-  assert.match(dirty.result.detail, /no commit/)
+  assert.equal(dirtyBefore.result.stage, 'fix')
+  assert.deepEqual(dirtyBefore.calls, ['state:before-review', 'review:review', 'state:before-fix'])
+
+  for (const after of [
+    { head: 'a'.repeat(40), porcelain: ' M x.js' },
+    { head: 'b'.repeat(40), porcelain: ' M x.js' },
+    { head: 'b'.repeat(40), porcelain: '?? generated.txt' },
+  ]) {
+    const dirty = await run({ gates: [
+      { gate: 'review' }, { gate: 'fix', max_rounds: 1 },
+    ] }, {
+      'review:review': { findings: [finding] },
+      'state:before-fix': { head: 'a'.repeat(40), porcelain: '' },
+      'state:after-fix': after,
+    })
+    assert.equal(dirty.result.stage, 'fix')
+    assert.match(dirty.result.detail, /not fully clean/)
+  }
 }
 
 async function checkFindingVotes() {
@@ -126,22 +144,68 @@ async function checkParallelFailure() {
   }), /parallel host unavailable/)
 }
 
+async function checkBoundedParallel() {
+  const serialBatches = []
+  await run({ tier: 'rigorous', parallelCapacity: 1 }, {}, async (thunks) => {
+    serialBatches.push(thunks.length)
+    return Promise.all(thunks.map((thunk) => thunk()))
+  })
+  assert.deepEqual(serialBatches, [1, 1, 1, 1, 1])
+
+  const batches = []
+  const parallel = async (thunks) => {
+    batches.push(thunks.length)
+    return Promise.all(thunks.map((thunk) => thunk()))
+  }
+  await run({ tier: 'rigorous', parallelCapacity: 2 }, {}, parallel)
+  assert.deepEqual(batches, [2, 2, 1])
+
+  const finding = { severity: 'medium', file: 'x.js', summary: 'check me' }
+  const voterBatches = []
+  await run({ parallelCapacity: 2, gates: [
+    { gate: 'review', dimensions: ['correctness'] }, { gate: 'verify-findings', voters: 3 },
+  ] }, {
+    'review:review:correctness': { findings: [finding] },
+  }, async (thunks) => {
+    voterBatches.push(thunks.length)
+    return Promise.all(thunks.map((thunk) => thunk()))
+  })
+  assert.deepEqual(voterBatches, [1, 2, 1])
+
+  const defaultBatches = []
+  await run({ tier: 'rigorous', parallelCapacity: 3 }, {}, async (thunks) => {
+    defaultBatches.push(thunks.length)
+    return Promise.all(thunks.map((thunk) => thunk()))
+  })
+  assert.deepEqual(defaultBatches, [3, 2])
+  for (const value of [0, 4, 1.5]) {
+    await assert.rejects(run({ parallelCapacity: value }, {}), /parallelCapacity/)
+  }
+}
+
 async function checkCompatibilityEdges() {
   const deferred = await run({ gates: [{ gate: 'await-checks' }, { gate: 'pr' }] }, {})
-  assert.deepEqual(deferred.calls, ['pr'])
+  assert.deepEqual(deferred.calls, ['state:before-pr', 'pr'])
   assert(deferred.logs.some((line) => line.includes('deferred')))
 
   const softSkip = await run({ gates: [{ gate: 'tests' }], testCmd: '' }, {})
   assert.deepEqual(softSkip.result, { ok: true, stage: 'complete' })
-  assert.deepEqual(softSkip.calls, [])
+  assert.deepEqual(softSkip.calls, ['state:before-tests'])
 
   const verifySkip = await run({ gates: [{ gate: 'verify', optional: true }], noRuntimeSurface: true }, {})
   assert.deepEqual(verifySkip.calls, [])
 
+  const untrackedPR = await run({ gates: [{ gate: 'pr' }] }, {
+    'state:before-pr': { head: 'b'.repeat(40), porcelain: '?? review-output.json' },
+  })
+  assert.equal(untrackedPR.result.stage, 'pr')
+  assert.deepEqual(untrackedPR.calls, ['state:before-pr'])
+
   const finding = { severity: 'low', file: 'x.js', summary: 'still present' }
   const unresolved = await run({ gates: [{ gate: 'review' }, { gate: 'fix', max_rounds: 1 }] }, {
     'review:review': [{ findings: [finding] }, { findings: [finding] }],
-    'fix:head-status': [{ head: 'a'.repeat(40), dirty: false }, { head: 'b'.repeat(40), dirty: false }],
+    'state:before-fix': { head: 'a'.repeat(40), porcelain: '' },
+    'state:after-fix': { head: 'b'.repeat(40), porcelain: '' },
   })
   assert.equal(unresolved.result.stage, 'fix')
   assert.match(unresolved.result.detail, /unresolved/)
@@ -156,6 +220,7 @@ async function main() {
   await checkFindingVotes()
   await checkFailures()
   await checkParallelFailure()
+  await checkBoundedParallel()
   await checkCompatibilityEdges()
   console.log('ok   compatible runner gate order, fan-out, voting, fix, failure, security, and PR paths')
 }

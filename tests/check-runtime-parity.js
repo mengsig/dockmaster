@@ -175,7 +175,7 @@ function checkCapabilities() {
     if (!item.id || ids.has(item.id)) fail(`invalid or duplicate capability id: ${item.id}`)
     ids.add(item.id)
     if (!item.claude || !item.codex || !item.requirement || !item.verification) fail(`${item.id}: incomplete mapping`)
-    if (!['direct', 'manual'].includes(item.verification)) fail(`${item.id}: invalid verification label`)
+    if (!['direct', 'contract', 'manual'].includes(item.verification)) fail(`${item.id}: invalid verification label`)
     if (!docs.includes(`\`${item.id}\``)) fail(`${item.id}: absent from markdown matrix`)
     if (!Array.isArray(item.evidence) || item.evidence.length < 2) fail(`${item.id}: weak evidence list`)
     for (const evidence of item.evidence) {
@@ -187,7 +187,14 @@ function checkCapabilities() {
     if (!pattern.test(read(assertionFile))) fail(`${item.id}: assertion failed in ${assertionFile}`)
   }
   sameList(Object.keys(CAPABILITY_ASSERTIONS), [...ids], 'capability assertion coverage')
-  console.log(`ok   ${ids.size}-capability matrix and evidence paths`)
+  const counts = MANIFEST.capabilities.reduce((all, item) => {
+    all[item.verification] = (all[item.verification] || 0) + 1
+    return all
+  }, {})
+  if (counts.direct !== 13 || counts.contract !== 9 || counts.manual !== 6) {
+    fail(`verification class drift: ${JSON.stringify(counts)}`)
+  }
+  console.log(`ok   ${ids.size}-capability matrix: direct=${counts.direct || 0} contract=${counts.contract || 0} manual=${counts.manual || 0}`)
 }
 
 function checkCodexConfig() {

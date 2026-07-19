@@ -2,21 +2,22 @@
 
 Validated 2026-07-19 in the task worktree. All live prompts were non-mutating:
 Claude used plan permissions; Codex used an ephemeral read-only execution. Raw
-machine-local evidence was written to a unique mode-0700 child under `/tmp`, not
-committed because it contains session identifiers.
+auth/session output existed only while each assertion ran and was then deleted.
+The mode-0700 evidence directory is removed on success or failure by default;
+`--keep-evidence` retains only sanitized statuses plus version/help output.
 
 ## Automated evidence
 
 | command | result |
 | --- | --- |
-| `bash tests/smoke.sh` | 475 passed, 0 failed; includes role/name collisions, atomic secondmate ownership, quoted/nested/indirect command bypasses, capability mutations, exact Claude hashes, and same-size mutation rejection |
-| `node tests/check-runtime-parity.js` | 18 exact skills/triggers, 28 capability-specific assertions, direct/manual labels, vocabulary separation, durable waiter/worker identity, and executable rigorous fallbacks |
-| `node tests/check-pr-runner.js` | table-driven fast/default/rigorous order, thunk fan-out, skeptic voting, fix loops, every gate failure, skips, malformed PR, and unavailable-host paths |
+| `bash tests/smoke.sh` | 492 passed, 0 failed; includes cross-record supervisor uniqueness, stateful runtime snapshots, CI-hermetic auth, dynamic command bypasses, full-tree PR cleanliness, evidence cleanup, capability mutations, and exact Claude hashes |
+| `node tests/check-runtime-parity.js` | 18 exact skills/triggers; 28 capability-specific assertions classified as 13 direct, 9 contract, and 6 manual; vocabulary separation, durable identities, and executable rigorous fallbacks |
+| `node tests/check-pr-runner.js` | table-driven fast/default/rigorous order, capacity-bounded review/voter waves, full porcelain checks around every mutation/gate, every failure, skips, malformed PR, and unavailable-host paths |
 | `node tests/check-gate-drift.js` | all three built-in gate sequences match shipped configs |
 | `bash tests/runtime-performance.sh` | deterministic context, per-file Claude SHA-256, exact inventory, and same-size no-regression guardrails passed; startup sampling disabled by default |
 | `bash tests/runtime-codex-offline.sh` | pinned Codex 0.144.6 strict doctor, structured discovery, execpolicy, and spaced-path hook handler passed without model login |
 | Node 14 compatibility run | runner, parity, and performance checks passed on the documented minimum |
-| `bash tests/runtime-smoke.sh --live` | canonical/symlink discovery, quoted/spaced command probes, both authenticated model probes, and real PreToolUse block passed |
+| `bash tests/runtime-smoke.sh --live` | canonical/symlink discovery, command-guard probes, both authenticated model probes, real PreToolUse block, and default evidence cleanup passed |
 
 ## Installed runtimes
 
@@ -62,7 +63,7 @@ and labels mailbox delivery manual; it does not overclaim this live observation.
 | Claude settings | 1,579 B | 1,579 B | byte-identical |
 | Claude full skill bodies on disk | 80,906 B | 82,045 B | +1,139 B including upstream comment guidance plus bounded campaigns/locked secondmate recovery; every file SHA-256 pinned |
 | Claude discovery descriptions | 4,603 B | 4,603 B | byte-identical |
-| Codex adapter/config/rules | none | 87,991 B / 516 B / 1,746 B | full bodies load only when selected; descriptions 4,567 B, under documented 8,000-character fallback budget |
+| Codex adapter/config/rules | none | 88,631 B / 516 B / 1,746 B | full bodies load only when selected; descriptions 4,567 B, under documented 8,000-character fallback budget |
 
 A bounded opt-in five-run local `--version` process-start sample reported
 medians of 68.5 ms for Claude and 40.5 ms for Codex. Each child has a three-second

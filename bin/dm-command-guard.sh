@@ -16,12 +16,13 @@ append_token() {
 }
 
 lex_shell_command() {
-  local input="$1" i=0 char next state="plain" escaped=0
+  local input="$1" i=0 char next state="plain" escaped=0 depth
   TOKENS=(); DYNAMIC=(); token=""; dynamic=0; started=0
   while [ "$i" -lt "${#input}" ]; do
     char="${input:$i:1}"; next="${input:$((i + 1)):1}"
     if [ "$escaped" -eq 1 ]; then
-      token+="$char"; started=1; escaped=0; i=$((i + 1)); continue
+      [ "$char" = $'\n' ] || { token+="$char"; started=1; }
+      escaped=0; i=$((i + 1)); continue
     fi
     case "$state" in
       single)
@@ -31,7 +32,7 @@ lex_shell_command() {
       double)
         case "$char" in
           '"') state="plain" ;;
-          '\\') escaped=1 ;;
+          \\) escaped=1 ;;
           '$'|'`') token+="$char"; dynamic=1 ;;
           *) token+="$char" ;;
         esac
@@ -41,13 +42,31 @@ lex_shell_command() {
         case "$char" in
           "'") state="single"; started=1 ;;
           '"') state="double"; started=1 ;;
-          '\\') escaped=1; started=1 ;;
-          '$'|'`') token+="$char"; dynamic=1; started=1 ;;
+          \\) escaped=1; started=1 ;;
+          '$')
+            if [ "$next" = "(" ]; then
+              token+='$('; dynamic=1; started=1; depth=1; i=$((i + 2))
+              while [ "$i" -lt "${#input}" ] && [ "$depth" -gt 0 ]; do
+                char="${input:$i:1}"; token+="$char"
+                case "$char" in '(') depth=$((depth + 1)) ;; ')') depth=$((depth - 1)) ;; esac
+                i=$((i + 1))
+              done
+              [ "$depth" -eq 0 ] || deny "unterminated command substitution"
+              i=$((i - 1))
+            else
+              token+="$char"; dynamic=1; started=1
+            fi
+            ;;
+          '`') token+="$char"; dynamic=1; started=1 ;;
           '#')
             if [ "$started" -eq 0 ]; then break; else token+="$char"; fi
             ;;
-          ' '|$'\t'|$'\n')
+          ' '|$'\t')
             [ "$started" -eq 0 ] || append_token
+            ;;
+          $'\n')
+            [ "$started" -eq 0 ] || append_token
+            TOKENS+=(";"); DYNAMIC+=(0)
             ;;
           ';'|'&'|'|'|'('|')')
             [ "$started" -eq 0 ] || append_token
@@ -137,6 +156,7 @@ check_git_segment() {
     i=$((i + 1))
   done
   sub_index="$(git_subcommand_index "$git_index" "$end")" || return 0
+  [ "${DYNAMIC[$sub_index]}" -eq 0 ] || deny "dynamic Git subcommand cannot be safety-classified"
   subcommand="${TOKENS[$sub_index]}"
   case "$subcommand" in
     reset) deny "git reset" ;;
@@ -155,7 +175,7 @@ check_git_segment() {
 
 check_nested_shell() {
   local start="$1" end="$2" executable="$3" i option
-  case "$executable" in sh|bash|dash|zsh|eval) ;; *) return 0 ;; esac
+  case "$executable" in sh|bash|dash|zsh|ash|ksh|mksh|eval) ;; *) return 0 ;; esac
   if [ "$executable" = "eval" ]; then
     i=$((start + 1))
   else
@@ -163,6 +183,7 @@ check_nested_shell() {
     while [ "$i" -lt "$end" ]; do
       option="${TOKENS[$i]}"
       case "$option" in
+        -s|-*s*) deny "shell reads unresolved stdin" ;;
         -*c*) i=$((i + 1)); break ;;
         -*) i=$((i + 1)) ;;
         *) return 0 ;;
@@ -171,6 +192,23 @@ check_nested_shell() {
   fi
   [ "$i" -lt "$end" ] || return 0
   DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "${TOKENS[$i]}"
+}
+
+is_shell_executable() {
+  case "$1" in sh|bash|dash|zsh|ash|ksh|mksh) return 0 ;; *) return 1 ;; esac
+}
+
+check_shell_input() {
+  local start="$1" end="$2" executable="$3" i
+  is_shell_executable "$executable" || return 0
+  if [ "$start" -gt 0 ] && [ "${TOKENS[$((start - 1))]}" = "|" ]; then
+    deny "shell executes unresolved piped stdin"
+  fi
+  i=$((start + 1))
+  while [ "$i" -lt "$end" ]; do
+    case "${TOKENS[$i]}" in '<<'*) deny "shell executes unresolved redirected stdin" ;; esac
+    i=$((i + 1))
+  done
 }
 
 segment_command_index() {
@@ -204,18 +242,17 @@ segment_command_index() {
 check_indirect_segment() {
   local start="$1" end="$2" i
   i="$(segment_command_index "$start" "$end")" || return 0
-  if [ "${DYNAMIC[$i]}" -eq 1 ] && contains_destructive_word $((i + 1)) "$end"; then
-    deny "indirect executable followed by a destructive Git form"
+  if [ "${DYNAMIC[$i]}" -eq 1 ]; then
+    case "${TOKENS[$i]}" in *[Gg][Ii][Tt]*) deny "dynamic Git executable cannot be safety-classified" ;; esac
+    if contains_destructive_word $((i + 1)) "$end"; then
+      deny "indirect executable followed by a destructive Git form"
+    fi
   fi
 }
 
 check_shell_command() {
   local command="$1" i=0 end command_index token executable
   [ "$DM_GUARD_DEPTH" -le 4 ] || deny "excessively nested shell command"
-  case "$command" in
-    *'$('*git*reset*|*'$('*git*clean*|*'$('*git*restore*|*'$('*git*checkout*|*'`'*git*reset*|*'`'*git*clean*|*'`'*git*restore*|*'`'*git*checkout*)
-      deny "command substitution builds a destructive Git form" ;;
-  esac
   lex_shell_command "$command"
   while [ "$i" -lt "${#TOKENS[@]}" ]; do
     if is_segment_end "${TOKENS[$i]}"; then i=$((i + 1)); continue; fi
@@ -224,13 +261,15 @@ check_shell_command() {
     check_indirect_segment "$i" "$end"
     if command_index="$(segment_command_index "$i" "$end")"; then
       token="${TOKENS[$command_index]}"; executable="${token##*/}"
+      check_shell_input "$command_index" "$end" "$executable"
       check_nested_shell "$command_index" "$end" "$executable"
+      if [ "$executable" = "busybox" ] && [ $((command_index + 1)) -lt "$end" ]; then
+        token="${TOKENS[$((command_index + 1))]}"; executable="${token##*/}"
+        check_shell_input "$command_index" "$end" "$executable"
+        check_nested_shell $((command_index + 1)) "$end" "$executable"
+      fi
+      [ "$executable" != "git" ] || check_git_segment "$command_index" "$end"
     fi
-    while [ "$i" -lt "$end" ]; do
-      token="${TOKENS[$i]}"; executable="${token##*/}"
-      [ "$executable" != "git" ] || check_git_segment "$i" "$end"
-      i=$((i + 1))
-    done
     i=$((end + 1))
   done
 }

@@ -74,7 +74,10 @@ case "$cmd" in
     validate_thread_name "$thread_name"
     dm_json_update "$STATE" --arg id "$id" --arg scope "$scope" --arg repos "$repos" \
       --arg thread "$thread_name" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-      if (.secondmates[$id] == null or .secondmates[$id].status == "dormant") then
+      ([.secondmates | to_entries[] |
+        select(.key != $id and .value.status != "retired" and .value.thread_name == $thread)] | length) as $duplicates |
+      if $duplicates > 0 then error("thread name already owned by another secondmate")
+      elif (.secondmates[$id] == null or .secondmates[$id].status == "dormant") then
         .secondmates[$id] = ((.secondmates[$id] // {}) + {
           scope:$scope, repos:($repos | split(",")), thread_name:$thread,
           agent_id:"", status:"launching", updated:$now
@@ -87,7 +90,10 @@ case "$cmd" in
     [ "${#agent_id}" -le 256 ] || dm_die "agent id exceeds 256 characters"
     dm_json_update "$STATE" --arg id "$id" --arg agent "$agent_id" \
       --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-      if (.secondmates[$id].status == "launching" and
+      ([.secondmates | to_entries[] |
+        select(.key != $id and (.value.agent_id // "") == $agent)] | length) as $duplicates |
+      if $duplicates > 0 then error("agent id already owned by another secondmate")
+      elif (.secondmates[$id].status == "launching" and
           (.secondmates[$id].thread_name | length > 0) and
           ((.secondmates[$id].agent_id // "") == "")) then
         .secondmates[$id].agent_id=$agent |

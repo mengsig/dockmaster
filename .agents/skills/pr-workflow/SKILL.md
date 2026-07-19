@@ -57,6 +57,14 @@ compatible-host runner drives with its injected API):
   lever: it kills plausible-but-wrong findings before they cost a fix cycle. Only
   the survivors go to `fix`.
 
+Before each reviewer or skeptic wave, inspect `list_agents` and the durable task
+owners. The six-thread ceiling still reserves three slots for waiter/recovery;
+therefore launch at most three review children at once, and fewer when fewer
+slots are actually free. Run the five lenses as bounded waves (for example 3+2)
+and skeptic votes as one wave of at most three; with one free slot, run serially.
+With zero free slots, wait or report capacity—never exceed the ceiling or skip a
+lens/vote.
+
 The rigorous gate order is
 `review (dimension-parallel) → verify-findings → fix → tests → verify → security
 → pr`. The behavioral `verify` gate drives the changed behavior end to end and
@@ -254,7 +262,9 @@ The default is the native `spawn_agent(..., fork_turns="none")` procedure above.
 `workflows/pr-pipeline.js` is an opt-in adapter only for a compatible host that
 injects its documented `args`, `agent`, `parallel`, and `log` API. It has a
 built-in gate list for each tier (`fast` | `default` | `rigorous`) when the host
-passes no explicit `gates`. Do not invoke a nonexistent Codex workflow primitive
+passes no explicit `gates`. The host also passes its currently available review
+slots as `parallelCapacity` (1..3); the runner batches every `parallel()` call to
+that bound. Do not invoke a nonexistent Codex workflow primitive
 or treat the file as auto-discovered. If the injected API is absent, run the
 complete native path; never skip a gate. A live rigorous run remains a
 dockmaster/operator action. See `config/README.md` for executor coverage.

@@ -43,7 +43,7 @@
       "requirement": "Shared operating contract and exact trigger parity",
       "claude": "CLAUDE.md includes AGENTS.md; Claude skill adapter loads at each named trigger",
       "codex": "Codex reads AGENTS.md directly; matching .agents skill adapter loads at each named trigger",
-      "verification": "direct",
+      "verification": "contract",
       "evidence": ["AGENTS.md", "CLAUDE.md", "tests/check-runtime-parity.js"]
     },
     {
@@ -59,7 +59,7 @@
       "requirement": "Asynchronous worker dispatch with complete isolated brief",
       "claude": "background Agent with generated brief",
       "codex": "spawn_agent with fork_turns=none and generated brief",
-      "verification": "direct",
+      "verification": "contract",
       "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", "bin/dm-brief.sh", "bin/dm-thread-name.sh"]
     },
     {
@@ -99,7 +99,7 @@
       "requirement": "Restart and stuck-worker recovery without split-brain work",
       "claude": "task reconciliation then same-agent relaunch ladder",
       "codex": "list/message/interrupt controls then same-task, same-worktree relaunch",
-      "verification": "direct",
+      "verification": "contract",
       "evidence": ["bin/dm-session-start.sh", ".claude/skills/stuck-worker/SKILL.md", ".agents/skills/stuck-worker/SKILL.md", "tests/smoke.sh"]
     },
     {
@@ -139,7 +139,7 @@
       "requirement": "Address review feedback and red post-open CI",
       "claude": "post-pr-review skill",
       "codex": "same neutral post-pr-review contract",
-      "verification": "direct",
+      "verification": "contract",
       "evidence": [".claude/skills/post-pr-review/SKILL.md", ".agents/skills/post-pr-review/SKILL.md"]
     },
     {
@@ -171,7 +171,7 @@
       "requirement": "References cross worker boundary; secret values never persist",
       "claude": "credential-handoff skill",
       "codex": "same neutral credential-handoff contract",
-      "verification": "direct",
+      "verification": "contract",
       "evidence": [".claude/skills/credential-handoff/SKILL.md", ".agents/skills/credential-handoff/SKILL.md"]
     },
     {
@@ -187,7 +187,7 @@
       "requirement": "Evidence-first diagnosis separate from implementation authority",
       "claude": "diagnostic-reasoning skill",
       "codex": "same neutral diagnostic contract",
-      "verification": "direct",
+      "verification": "contract",
       "evidence": [".claude/skills/diagnostic-reasoning/SKILL.md", ".agents/skills/diagnostic-reasoning/SKILL.md"]
     },
     {
@@ -203,7 +203,7 @@
       "requirement": "Landed changes revert through the normal gated flow",
       "claude": "rollback skill",
       "codex": "same neutral rollback contract",
-      "verification": "direct",
+      "verification": "contract",
       "evidence": [".claude/skills/rollback/SKILL.md", ".agents/skills/rollback/SKILL.md"]
     },
     {
@@ -243,7 +243,7 @@
       "requirement": "Preserve quality/performance without unsupported capability claims",
       "claude": "per-Agent model/effort plus tier selection",
       "codex": "tier, task shape, focused fork_turns=none context, and bounded fan-out; no per-spawn model claim",
-      "verification": "direct",
+      "verification": "contract",
       "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", ".agents/skills/pr-workflow/SKILL.md", "tests/runtime-performance.sh"]
     },
     {
@@ -251,7 +251,7 @@
       "requirement": "External GitHub/browser/review capabilities degrade explicitly, never disappear silently",
       "claude": "installed skills/tools with plain gh/direct review fallback",
       "codex": "plugins or local tools when installed; focused native/general-agent fallback contracts",
-      "verification": "direct",
+      "verification": "contract",
       "evidence": ["README.md", "bin/dm-doctor.sh", ".agents/skills/pr-workflow/SKILL.md"]
     },
     {

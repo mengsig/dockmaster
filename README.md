@@ -152,7 +152,9 @@ opt-in, bounded, non-fatal diagnostic:
 Run `node tests/check-runtime-parity.js` for adapter/capability drift,
 `bash tests/runtime-performance.sh` for context guardrails, and
 `bash tests/runtime-smoke.sh` for installed-runtime structured discovery,
-trusted rule/hook guardrails, and config checks.
+trusted rule/hook guardrails, and config checks. Runtime smoke deletes its
+evidence on success or failure; add `--keep-evidence` only when sanitized
+version/status artifacts are needed for a report.
 
 ## License
 

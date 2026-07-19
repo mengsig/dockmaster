@@ -27,9 +27,6 @@ jobs:
       - name: Check jq is present
         run: jq --version
 
-      - name: Install pinned Codex CLI
-        run: npm install --global @openai/codex@0.144.6
-
       # Enforce the bash-3.2 portability invariant (see dm:knowledge) before
       # anything else runs: a bash-4-only construct in bin/*.sh would only
       # blow up at runtime on a macOS 3.2 shell, so catch it here for both
@@ -67,6 +64,9 @@ jobs:
       # can never mask a 3.2 regression.
       - name: Run smoke tests (system bash)
         run: /bin/bash tests/smoke.sh
+
+      - name: Install pinned Codex CLI
+        run: npm install --global @openai/codex@0.144.6
 
       - name: Check workflows/pr-pipeline.js syntax
         run: node --check workflows/pr-pipeline.js

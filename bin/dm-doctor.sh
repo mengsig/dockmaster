@@ -78,13 +78,26 @@ runtime_probe() {
   esac
 }
 
-report_one_runtime() {
-  local runtime="$1" required="$2" status=0
+runtime_status() {
+  local runtime="$1" status=0
   runtime_probe "$runtime" || status=$?
+  case "$status" in 0) printf 'ready\n' ;; 2) printf 'absent\n' ;; *) printf 'unauthenticated\n' ;; esac
+}
+
+snapshot_runtimes() {
+  CLAUDE_RUNTIME_STATUS="$(runtime_status claude)"
+  CODEX_RUNTIME_STATUS="$(runtime_status codex)"
+  case "$CLAUDE_RUNTIME_STATUS" in ready|absent|unauthenticated) ;; *) dm_die "invalid Claude probe result" ;; esac
+  case "$CODEX_RUNTIME_STATUS" in ready|absent|unauthenticated) ;; *) dm_die "invalid Codex probe result" ;; esac
+}
+
+report_one_runtime() {
+  local runtime="$1" required="$2" status
+  case "$runtime" in claude) status="$CLAUDE_RUNTIME_STATUS" ;; codex) status="$CODEX_RUNTIME_STATUS" ;; esac
   case "$status" in
-    0) printf '  ok       %-13s %s\n' "$runtime-runtime" "installed and authenticated"; return 0 ;;
-    2) printf '  %s  %-13s %s\n' "$required" "$runtime-runtime" "CLI absent" ;;
-    *) printf '  %s  %-13s %s\n' "$required" "$runtime-runtime" "authentication unavailable" ;;
+    ready) printf '  ok       %-13s %s\n' "$runtime-runtime" "installed and authenticated"; return 0 ;;
+    absent) printf '  %-8s %-13s %s\n' "$required" "$runtime-runtime" "CLI absent" ;;
+    unauthenticated) printf '  %-8s %-13s %s\n' "$required" "$runtime-runtime" "authentication unavailable" ;;
   esac
   [ "$required" = "MISSING" ] && return 1
   return 0
@@ -92,8 +105,9 @@ report_one_runtime() {
 
 report_runtime() {
   local selected="$1" claude_ok=0 codex_ok=0 miss=0
-  runtime_probe claude && claude_ok=1 || true
-  runtime_probe codex && codex_ok=1 || true
+  snapshot_runtimes
+  if [ "$CLAUDE_RUNTIME_STATUS" = ready ]; then claude_ok=1; fi
+  if [ "$CODEX_RUNTIME_STATUS" = ready ]; then codex_ok=1; fi
   case "$selected" in
     claude|codex) report_one_runtime "$selected" MISSING || miss=1 ;;
     both)
@@ -186,9 +200,13 @@ probe_state_json() {
       (.secondmates | type) == "object" and
       all(.secondmates[];
         (.status | IN("launching","active","dormant","retired")) and
-        (.thread_name | type == "string") and
+        (.thread_name | type == "string" and test("^[a-z0-9_]{1,64}$")) and
         (.agent_id | type == "string") and
-        (.repos | type == "array"))
+        (.repos | type == "array")) and
+      ([.secondmates | to_entries[] | select(.value.status != "retired") | .value.thread_name] as $threads |
+        ($threads | length) == ($threads | unique | length)) and
+      ([.secondmates[].agent_id | select(length > 0)] as $agents |
+        ($agents | length) == ($agents | unique | length))
     ' "$DM_STATE/secondmates.json" >/dev/null 2>&1; then
     printf '  FAIL state/secondmates.json has invalid supervisor state\n'
     printf '       ^ restore a valid {"secondmates":{}} document; do not hand-edit live identity records\n'

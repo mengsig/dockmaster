@@ -320,6 +320,8 @@ case "$cmd" in
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || dm_die "worktree is on a detached HEAD; crewmate must create a branch first"
     ! dm_tracked_dirty "$wt" || dm_die "worktree has uncommitted changes to tracked files; commit before opening a PR"
+    untracked="$(dm_untracked "$wt")"
+    [ -z "$untracked" ] || dm_die "worktree has untracked files; clean or commit them before opening a PR: $(printf '%s' "$untracked" | head -n1)"
     dir="$(dm_repo_dir "$repo")"; slug="$(repo_slug "$repo")"
     # No explicit --base: default to the recorded parent (a stacked sub-PR
     # created via `dm-worktree.sh create --base`), else the default branch.

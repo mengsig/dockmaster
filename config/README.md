@@ -47,6 +47,9 @@ that injects the runner's workflow API; nothing auto-discovers it. It reads:
 - **`voters`** on the `verify-findings` gate (rigorous) — how many skeptics
   independently try to refute each finding (default 3); a finding survives only
   if it is not refuted by a majority. Only survivors reach `fix`.
+- **`parallelCapacity`** in runner `args` — current injected reviewer capacity,
+  integer 1..3. The runner batches five review lenses and every skeptic set to
+  this bound; default 3 preserves the six-thread runtime's three reserved slots.
 - **`optional`** on the `verify` gate (rigorous) — with a caller-declared
   `noRuntimeSurface` (docs/config-only diff), skips the behavioral gate. There is
   no automatic detector for this; the compatible workflow host (the

@@ -29,6 +29,7 @@ export const meta = {
 //                                            //   gate list when args.gates is not passed
 //   securitySurface,                         // caller-declared security surface (optional security gate)
 //   noRuntimeSurface,                        // true when the diff is docs/config-only (skips the verify gate)
+//   parallelCapacity,                        // injected available reviewer slots, integer 1..3 (default 3)
 //   title, issue, type, prTitle             // PR metadata
 // }
 
@@ -81,6 +82,19 @@ const RIGOROUS_GATES = [
 const gates = (t.gates && t.gates.length)
   ? t.gates
   : (t.tier === 'rigorous' ? RIGOROUS_GATES : t.tier === 'fast' ? FAST_GATES : DEFAULT_GATES)
+const parallelCapacity = t.parallelCapacity === undefined ? 3 : t.parallelCapacity
+if (!Number.isInteger(parallelCapacity) || parallelCapacity < 1 || parallelCapacity > 3) {
+  throw new Error('pr-pipeline parallelCapacity must be an integer from 1 to 3')
+}
+
+async function boundedParallel(thunks) {
+  const results = []
+  for (let i = 0; i < thunks.length; i += parallelCapacity) {
+    const batch = await parallel(thunks.slice(i, i + parallelCapacity))
+    results.push(...batch)
+  }
+  return results
+}
 
 const TEST_SCHEMA = {
   type: 'object', additionalProperties: false,
@@ -134,8 +148,8 @@ const PR_URL_PATTERN = /^https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/[0-9]+$/
 // fix agent actually did to the worktree rather than trusting its own summary.
 const HEAD_STATUS_SCHEMA = {
   type: 'object', additionalProperties: false,
-  properties: { head: { type: 'string' }, dirty: { type: 'boolean' } },
-  required: ['head', 'dirty'],
+  properties: { head: { type: 'string' }, porcelain: { type: 'string' } },
+  required: ['head', 'porcelain'],
 }
 
 async function runTests(label) {
@@ -159,7 +173,7 @@ async function review(pass, effort, dimensions) {
   if (dimensions && dimensions.length) {
     // parallel() takes an array of THUNKS (() => Promise), not already-invoked
     // promises — each thunk is invoked by the runtime to fan the work out.
-    const results = await parallel(dimensions.map((dim) => () => agent(
+    const results = await boundedParallel(dimensions.map((dim) => () => agent(
       `Cold, independent review of ONLY the ${dim} dimension of this change. In ${t.worktree}, read the diff of this branch against its base:\n\n` +
       `    git -C ${t.worktree} diff ${base}...HEAD\n\n` +
       `and the changed files. Do not trust any prior summary or earlier review. Report concrete, real ${dim} findings only, ranked by severity. ` +
@@ -193,7 +207,7 @@ async function verifyFindings(findings, voters) {
     const desc = `[${f.severity}] ${f.file || ''} ${f.summary}${f.dimension ? ` (dimension: ${f.dimension})` : ''}`
     // parallel() takes thunks (() => Promise); Array.from's factory returns one
     // per skeptic, each of which the runtime invokes to run the votes in parallel.
-    const votes = await parallel(Array.from({ length: voters }, () => () => agent(
+    const votes = await boundedParallel(Array.from({ length: voters }, () => () => agent(
       `You are a skeptical verifier. A prior reviewer raised this finding against the diff ${base}...HEAD in ${t.worktree}:\n\n` +
       `    ${desc}\n\n` +
       `Read the actual diff and the changed files and try to REFUTE it. Set refuted=true ONLY if the finding is wrong, already ` +
@@ -221,18 +235,24 @@ async function applyFixes(findings) {
   )
 }
 
-// Independent check of the worktree's git state (never trusts applyFixes'
-// own report): the fix agent could summarize a change it forgot to commit, so
-// this is a separate, mechanical query used by the fix loop to verify a commit
-// actually happened before the next review diffs base...HEAD against it.
-async function gitHeadStatus() {
+// Mechanical state check: every review, test, fix result, and PR requires a
+// clean index, tracked tree, and untracked tree.
+async function gitHeadStatus(label) {
   return agent(
     `In the git worktree at ${t.worktree}, run exactly:\n\n` +
-    `    git -C ${t.worktree} rev-parse HEAD\n    git -C ${t.worktree} status --porcelain --untracked-files=no\n\n` +
-    `Report the full commit SHA printed by the first command as "head". Report "dirty": true if the second command ` +
-    `printed any output (uncommitted changes to tracked files), false if it printed nothing. Do not change any files.`,
-    { label: 'fix:head-status', phase: 'Fix', effort: 'low', schema: HEAD_STATUS_SCHEMA },
+    `    git -C ${t.worktree} rev-parse HEAD\n    git -C ${t.worktree} status --porcelain=v1 --untracked-files=all\n\n` +
+    `Report the full commit SHA as "head" and the second command's complete stdout as "porcelain" (empty only when ` +
+    `the index, tracked files, and untracked files are all clean). Do not change any files.`,
+    { label: `state:${label}`, phase: 'Fix', effort: 'low', schema: HEAD_STATUS_SCHEMA },
   )
+}
+
+function dirtyResult(status, stage) {
+  if (!status.porcelain) return null
+  return {
+    ok: false, stage,
+    detail: `worktree is not fully clean before ${stage}: ${status.porcelain.split('\n')[0]}`,
+  }
 }
 
 async function openPR() {
@@ -273,6 +293,10 @@ let currentPass = 'review'
 let currentEffort            // effort of the active review pass, reused when a fix gate re-reviews
 let currentDimensions        // dimensions of the active review pass, reused when a fix gate re-reviews
 for (const g of gates) {
+  if (g.gate === 'review' || g.gate === 'tests' || g.gate === 'pr') {
+    const dirty = dirtyResult(await gitHeadStatus(`before-${g.gate}`), g.gate)
+    if (dirty) return dirty
+  }
   if (g.gate === 'tests') {
     const r = await runTests('gate')
     if (!r.passed) return { ok: false, stage: 'tests', detail: r.summary }
@@ -294,29 +318,18 @@ for (const g of gates) {
   } else if (g.gate === 'fix') {
     const max = g.max_rounds || 2
     let round = 0
-    let prevHead = null // captured lazily, once, before the first round
     // Apply fixes and re-review until findings clear or the cap is hit. Tests are
     // NOT run here: the dedicated `tests` gate that follows validates the tree, so
     // tests run once per stage (never doubled) and still at least once even when a
     // review found nothing to fix.
     while (lastReview && lastReview.findings.length && round < max) {
       round++
-      if (prevHead === null) prevHead = (await gitHeadStatus()).head
+      const before = dirtyResult(await gitHeadStatus('before-fix'), 'fix')
+      if (before) return before
       await applyFixes(lastReview.findings)
-      const after = await gitHeadStatus()
-      // The next review() diffs base...HEAD, which only sees committed history.
-      // If HEAD did not move AND tracked changes are sitting uncommitted, the fix
-      // agent produced edits invisible to that diff — the loop would otherwise
-      // silently re-review the unchanged base and re-report the same findings
-      // round after round until max_rounds, with no signal of what went wrong.
-      // Fail immediately and distinctly instead. (HEAD unchanged with a CLEAN
-      // tree is not this failure: it means the agent made no edits at all, e.g.
-      // it judged the finding not actionable — the next review will accurately
-      // re-report that, which is a true signal, not a stale one.)
-      if (after.head === prevHead && after.dirty) {
-        return { ok: false, stage: 'fix', detail: `fix agent produced no commit in round ${round} (tracked changes remain uncommitted)` }
-      }
-      prevHead = after.head
+      const after = await gitHeadStatus('after-fix')
+      const dirty = dirtyResult(after, 'fix')
+      if (dirty) return dirty
       // Intentional asymmetry: the adversarial skeptic filter (verify-findings)
       // runs once, before the first fix round. This in-loop re-review is NOT
       // re-filtered through skeptics, so a false positive here can only
