@@ -341,7 +341,15 @@ case "$cmd" in
     elif [ -n "$body" ]; then args+=(--body "$body")
     else args+=(--body ""); fi
     [ "$draft" -eq 1 ] && args+=(--draft)
-    out="$(gh-axi "${args[@]}")" || dm_die "pr create failed"
+    # stderr captured separately (not 2>&1) so the URL parse below only ever
+    # sees gh-axi's stdout, never a stray url from a warning line.
+    errf="$(mktemp "$DM_STATE/.pr-open.XXXXXX")" || dm_die "mktemp failed opening PR for $id"
+    if out="$(gh-axi "${args[@]}" 2>"$errf")"; then
+      rm -f "$errf"
+    else
+      err="$(cat "$errf" 2>/dev/null || true)"; rm -f "$errf"
+      dm_die "pr create failed: ${err:-${out:-no output from gh-axi}}"
+    fi
     url="$(printf '%s\n' "$out" | grep -oE 'https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[0-9]+' | head -n1)"
     [ -n "$url" ] || dm_die "could not determine PR url from output"
     dm_meta_set "$id" branch "$branch"

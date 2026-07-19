@@ -331,6 +331,26 @@ PR_UNTRACKED_OUT="$(PATH="$PR_OPEN_STUB:$PATH" b dm-pr.sh open pr-untracked --ti
 check "pr open refuses untracked files before push" 'grep -q "untracked files" <<<"$PR_UNTRACKED_OUT" && [ ! -f "$PR_OPEN_STUB/invoked" ]'
 b dm-worktree.sh remove pr-untracked --force >/dev/null 2>&1
 
+# A create failure past the push must surface gh-axi's real stderr, not a bare
+# "pr create failed" (#74) — the failure was previously discarded by $(...).
+GHAXI_FAIL_STUB="$TMP/pr-open-ghaxi-fail-stub"
+mkdir -p "$GHAXI_FAIL_STUB"
+printf '#!/bin/sh\necho "gh-axi: HTTP 422: a pull request already exists for demo:feat/x/pr-ghaxi-fail" >&2\nexit 1\n' > "$GHAXI_FAIL_STUB/gh-axi"
+chmod +x "$GHAXI_FAIL_STUB/gh-axi"
+b dm-task.sh new pr-ghaxi-fail --kind ship --repo demo --mode pipeline >/dev/null
+PR_GHAXI_WT="$(b dm-worktree.sh create pr-ghaxi-fail demo | tail -n1)"
+git -C "$PR_GHAXI_WT" checkout -q -b feat/x/pr-ghaxi-fail
+printf 'x = 1\n' > "$PR_GHAXI_WT/ghaxi_fail.py"
+git -C "$PR_GHAXI_WT" add -A >/dev/null
+git -C "$PR_GHAXI_WT" commit -qm "add ghaxi_fail" >/dev/null
+check "pr open fails when gh-axi fails" \
+  '! PATH="$GHAXI_FAIL_STUB:$PATH" b dm-pr.sh open pr-ghaxi-fail --title x >/dev/null 2>&1'
+GHAXI_FAIL_OUT="$(PATH="$GHAXI_FAIL_STUB:$PATH" b dm-pr.sh open pr-ghaxi-fail --title x 2>&1 || true)"
+check "pr open surfaces gh-axi's real stderr on create failure" \
+  'grep -q "HTTP 422: a pull request already exists" <<<"$GHAXI_FAIL_OUT"'
+check "no leftover temp file after the failure" '[ -z "$(find "$DM_HOME/state" -maxdepth 1 -name ".pr-open.*")" ]'
+b dm-worktree.sh remove pr-ghaxi-fail --force >/dev/null 2>&1
+
 echo "== status drift lint (three-source reconciliation) =="
 # demo-1 is marked done in the backlog above, but its work is committed and not
 # yet landed (state reconciles to working) — a real three-source disagreement.
