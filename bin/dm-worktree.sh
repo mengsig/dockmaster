@@ -197,11 +197,19 @@ case "$cmd" in
       if [ "$kind" != "scout" ] && ! "$0" landed "$id" >/dev/null 2>&1; then
         dm_die "REFUSED: $id has unlanded work. Confirm it landed, or pass --force only with explicit discard authority."
       fi
-      # Untracked non-ignored files could be forgotten work; fail closed.
-      untracked="$(dm_untracked "$wt")"
-      if [ -n "$untracked" ]; then
+      # Untracked non-ignored files could be forgotten work; fail closed UNLESS
+      # every one is provably-disposable tool cruft (dm_is_disposable_cruft) —
+      # then teardown discards only regenerable artifacts and needs no --force.
+      undisposable=""
+      while IFS= read -r u; do
+        [ -n "$u" ] || continue
+        dm_is_disposable_cruft "$u" && continue
+        if [ -z "$undisposable" ]; then undisposable="$u"; else undisposable="$undisposable
+$u"; fi
+      done < <(dm_untracked "$wt")
+      if [ -n "$undisposable" ]; then
         dm_die "REFUSED: $id worktree has untracked files (forgotten work, or build cruft the repo should ignore). Review/clean them, or pass --force. Files:
-$untracked"
+$undisposable"
       fi
     fi
     dir="$(dm_repo_dir "$repo")"

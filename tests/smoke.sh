@@ -444,6 +444,42 @@ b dm-worktree.sh remove demo-3 --force >/dev/null 2>&1
 SYNC="$(b dm-sync.sh all)"   # capture once (see doctor note on grep -q + pipefail)
 check "sync reports OK"   'grep -q "OK:" <<<"$SYNC"'
 
+echo "== teardown tolerates disposable tool cruft, not real work (#84) =="
+# A worktree venv/test run drops predictable regenerable cruft (uv.lock,
+# __pycache__, coverage, htmlcov) the managed repo may not gitignore. Teardown
+# must not force reflexive --force past it, yet must still fail closed on any
+# real untracked file. Dedicated clone with global excludes neutralized so the
+# classifier is exercised deterministically regardless of the runner's ~/.gitconfig.
+b dm-repo.sh add cruft "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+git -C "$DM_HOME/repos/cruft" config core.excludesFile /dev/null
+# (a) disposable-only cruft on a LANDED worktree -> teardown succeeds w/o --force.
+b dm-task.sh new cruft-ok --kind ship --repo cruft --mode local-only >/dev/null
+COK="$(b dm-worktree.sh create cruft-ok cruft | tail -n1)"
+git -C "$COK" checkout -q -b feat/x/cruft-ok
+printf 'def sub(a,b):\n    return a-b\n' >> "$COK/src/calc.py"
+git -C "$COK" -c user.email=c@c.co -c user.name=c commit -qam "add subtract" >/dev/null
+b dm-merge.sh local cruft-ok >/dev/null
+printf 'lock\n' > "$COK/uv.lock"; printf 'lock\n' > "$COK/src/uv.lock"
+mkdir -p "$COK/src/__pycache__"; printf '\n' > "$COK/src/__pycache__/calc.cpython-311.pyc"
+mkdir -p "$COK/htmlcov"; printf '<html></html>\n' > "$COK/htmlcov/index.html"
+printf '1\n' > "$COK/.coverage"
+check "disposable cruft is genuinely untracked" '[ -n "$(git -C "$COK" ls-files --others --exclude-standard)" ]'
+check "teardown accepts disposable-only cruft without --force" 'b dm-worktree.sh remove cruft-ok >/dev/null 2>&1'
+check "cruft-only worktree is gone" '[ ! -d "$COK" ]'
+# (b) a real untracked source file amid cruft -> teardown still REFUSES w/o
+# --force, and the message names the real file, never the disposable cruft.
+b dm-task.sh new cruft-bad --kind ship --repo cruft --mode local-only >/dev/null
+CBAD="$(b dm-worktree.sh create cruft-bad cruft | tail -n1)"
+git -C "$CBAD" checkout -q -b feat/x/cruft-bad
+printf 'def sub(a,b):\n    return a-b\n' >> "$CBAD/src/calc.py"
+git -C "$CBAD" -c user.email=c@c.co -c user.name=c commit -qam "add subtract" >/dev/null
+b dm-merge.sh local cruft-bad >/dev/null
+printf 'lock\n' > "$CBAD/uv.lock"; printf 'scratch\n' > "$CBAD/notes.py"
+CBAD_OUT="$(b dm-worktree.sh remove cruft-bad 2>&1 || true)"
+check "teardown refuses a real untracked file amid cruft" '! b dm-worktree.sh remove cruft-bad >/dev/null 2>&1'
+check "refusal names the real file, not the cruft" 'grep -q "notes.py" <<<"$CBAD_OUT" && ! grep -q "uv.lock" <<<"$CBAD_OUT"'
+b dm-worktree.sh remove cruft-bad --force >/dev/null 2>&1
+
 echo "== toolbelt input guards =="
 # dm-repo.sh set: whitelist + default_branch validation. 'main' is a real branch
 # in the clone; a bogus ref and an unknown field must both be refused.
