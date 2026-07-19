@@ -208,6 +208,13 @@ $untracked"
     git -C "$dir" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
     git -C "$dir" worktree prune 2>/dev/null || true
     dm_meta_set "$id" worktree ""
+    # Operator discard (#69): without a terminal event the task would stay
+    # 'working' forever. Written here, not via dm-task.sh event, to bar forgery.
+    if [ "$force" -eq 1 ] && [ "$kind" != "scout" ] \
+       && [ "$(dm_meta_get "$id" pr_state)" != "MERGED" ] \
+       && ! grep -qE '^[^ ]+ merged: ' "$(dm_status_path "$id")" 2>/dev/null; then
+      dm_status_append "$id" discarded "worktree force-removed with operator discard authority"
+    fi
     dm_info "removed worktree for $id"
     ;;
 

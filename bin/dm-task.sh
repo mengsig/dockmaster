@@ -20,8 +20,8 @@
 #   get <id> [<key>]
 #   event <id> <state> [<note>]
 #   state <id>            reconcile and print current state
-#   archive <id>          move a terminal-done task's records + artifacts to
-#                         state/archive/ (fails closed on a non-done or live task)
+#   archive <id>          move a terminal (done/discarded) task's records +
+#                         artifacts to state/archive/ (fails closed otherwise)
 #   list
 
 set -euo pipefail
@@ -97,6 +97,9 @@ case "$cmd" in
     # unregistered over a live worktree).
     case "$st" in
       merged) dm_die "'merged' is a landing signal appended only by dm-merge/dm-pr; dm-task.sh event must not forge it" ;;
+      # Appended only by dm-worktree.sh remove --force, so a crewmate cannot
+      # flip its own live task terminal.
+      discarded) dm_die "'discarded' is appended only by dm-worktree.sh remove --force (operator discard); dm-task.sh event must not forge it" ;;
     esac
     dm_status_append "$id" "$st" "$note"
     ;;
@@ -151,6 +154,14 @@ case "$cmd" in
       needs-decision)         echo "state: needs-decision · source: status-log · $last" ;;
       paused)                 echo "state: paused · source: status-log · $last" ;;
       failed)                 echo "state: failed · source: status-log · $last" ;;
+      # Terminal only once the worktree is gone; a lingering local copy keeps
+      # the task live so archive/remove stay refused.
+      discarded)
+        if [ -n "$wt" ] && [ -d "$wt" ]; then
+          echo "state: working · source: worktree · discard recorded but local copy still present"
+        else
+          echo "state: discarded · source: status-log · $last"
+        fi ;;
       review-ready)           echo "state: awaiting-review · source: status-log · lavish artifact ready for the operator: $last" ;;
       ready|done)             echo "state: working · source: status-log · reported ready but not yet landed: $last" ;;
       ''|created)
@@ -170,7 +181,10 @@ case "$cmd" in
     # ship task with unlanded work reconciles to 'working' and is refused here —
     # archival must never bury unfinished work.
     st="$("$0" state "$id" | sed 's/ · .*//; s/^state: //')"
-    [ "$st" = "done" ] || dm_die "refusing to archive '$id': current state is '$st', not done"
+    case "$st" in
+      done|discarded) ;;
+      *) dm_die "refusing to archive '$id': current state is '$st', not done/discarded" ;;
+    esac
     # A worktree still on disk is a live local copy that teardown never removed.
     # Its (possibly unlanded) work must not be swept away behind the operator's
     # back — require teardown first.
