@@ -35,6 +35,17 @@ splits one task across two copies.
    operator the plain outcome, and report exactly what work is preserved and
    where.
 
+## Continuing an already-completed or terminated worker
+
+Not every case is a wedged live agent — a common one is picking up a worker
+that already finished (one more fix, a review comment to address). `SendMessage`
+to a finished worker can fail with "no transcript": its thread is gone once the
+agent terminates, which is not evidence the work is stuck. Recover it the same
+way as step 4 above — spawn a **fresh** `Agent` in the **same worktree**, same
+task id, same brief plus a short progress note. Never a new worktree, never
+`--force`: either risks a split-brain duplicate or loses the worker's prior
+commits.
+
 ## Dead endpoint after a restart
 
 Before relaunching anything:

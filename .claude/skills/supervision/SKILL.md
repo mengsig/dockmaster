@@ -89,7 +89,8 @@ Supervision state lives on disk, not in this conversation. On restart,
 whose worktree still holds unlanded work, load `stuck-worker`: re-attach by
 `agent_id` if the agent is resumable, else re-dispatch the same task into the
 same worktree with the same identity. Never spawn a duplicate — a second worktree
-splits one task across two copies.
+splits one task across two copies. The same move covers a worker that already
+finished but needs a follow-up — `stuck-worker`'s completed-worker case.
 
 ## Discipline
 
