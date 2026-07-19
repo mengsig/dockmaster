@@ -114,7 +114,8 @@ whose worktree still holds unlanded work, load `stuck-worker`: re-attach by exac
 `agent_id`; if absent, list and match the exact persisted `thread_name`. One
 match is adopted, zero requires a no-live-owner proof, and multiple matches fail
 closed as ambiguous. Never spawn a duplicate — a second worktree splits one
-task across two copies.
+task across two copies. The same move covers a worker that already finished but
+needs a follow-up — `stuck-worker`'s completed-worker case.
 
 ## Discipline
 
