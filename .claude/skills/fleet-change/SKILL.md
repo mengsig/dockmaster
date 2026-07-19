@@ -53,13 +53,31 @@ parallel. `bin/dm-backlog.sh ready` still gates each child on its blockers'
 
 ## 3. Dispatch one ordinary child task per repo
 
-For each target repo, run the normal `task-lifecycle` dispatch (`dm-task.sh new`
-→ `dm-backlog.sh add ... --campaign <id> --status inflight` → `dm-worktree.sh
-create` → `dm-brief.sh` → spawn the crewmate). Nothing here is special-cased:
-the child is briefed, gated, and delivered exactly as a single-repo task. Route
-a child to an existing `secondmate` where one owns that repo (load `secondmate`).
-Dispatch independent children immediately; hold `--blocked-by` children until
-`bin/dm-backlog.sh ready` clears them.
+The phase-2 backlog item stays `queued` while its worktree and brief are
+prepared. For each ready child, follow this exact ownership transition:
+
+```
+bin/dm-task.sh new <child-id> --kind ship --repo <repo> --title "<title>"
+bin/dm-worktree.sh create <child-id> <repo>
+bin/dm-brief.sh <child-id>
+Agent(prompt=<brief>, run in background,
+      subagent_type/model/effort per task-lifecycle)
+bin/dm-task.sh set <child-id> agent_id <returned-agent-id>
+bin/dm-backlog.sh move <child-id> inflight
+```
+
+Never move a child to `inflight` before the returned runtime owner is durably
+recorded. On spawn failure it remains queued; on owner-persistence failure,
+stop that exact returned id and leave/requeue it visibly. Nothing else is
+special-cased: each child is briefed, gated, and delivered exactly as a
+single-repo task. Route a child to an existing `secondmate` where one owns that
+repo (load `secondmate`).
+Dispatch independent children in bounded waves through `task-lifecycle`; respect
+the active runtime's capacity and keep enough room for approval, recovery, and
+review workers. Keep excess children queued and mark a child `inflight` only
+after its runtime owner is durably recorded. Hold `--blocked-by` children until
+`bin/dm-backlog.sh ready` clears them. A campaign is never authority for
+unbounded fan-out.
 
 ## 4. Supervise and report as a unit
 

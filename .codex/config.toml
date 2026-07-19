@@ -1,0 +1,20 @@
+# Project-scoped Codex configuration loads only after the operator trusts the repo.
+project_doc_max_bytes = 32768
+
+[features]
+multi_agent = true
+
+[agents]
+# Root -> secondmate -> worker requires two spawn edges. Keep total fan-out bounded.
+max_depth = 2
+max_threads = 6
+interrupt_message = true
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = '"$(git rev-parse --show-toplevel)/bin/dm-command-guard.sh" hook'
+timeout = 10
+statusMessage = "Checking Git command safety"

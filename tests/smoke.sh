@@ -22,6 +22,16 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+
+# Hermetic authenticated runtime snapshot. Production doctor still probes real
+# auth; smoke must not inherit developer login state or hosted-CI anonymity.
+RUNTIME_OK="$TMP/runtime-ok"
+mkdir -p "$RUNTIME_OK"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNTIME_OK/claude"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNTIME_OK/codex"
+chmod +x "$RUNTIME_OK/claude" "$RUNTIME_OK/codex"
+export PATH="$RUNTIME_OK:$PATH"
 
 # --- fixtures ----------------------------------------------------------------
 git init -q --bare -b main "$TMP/origin.git"
@@ -32,6 +42,74 @@ git init -q -b main "$TMP/seed"
 
 cd "$ROOT"
 b() { "$ROOT/bin/$@"; }
+
+echo "== Codex thread identity + command guard =="
+THREAD_A="$(b dm-thread-name.sh fix-login-412 worker)"
+THREAD_B="$(b dm-thread-name.sh fix.login-412 worker)"
+THREAD_C="$(b dm-thread-name.sh fix_login_412 worker)"
+LONG_THREAD="$(b dm-thread-name.sh task-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-12345 review_waiter)"
+ROLE_THREAD="$(b dm-thread-name.sh fix-login-412 verify)"
+MAX_ID="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+MAX_THREAD="$(b dm-thread-name.sh "$MAX_ID" secondmate)"
+check "thread name is stable" '[ "$THREAD_A" = "$(b dm-thread-name.sh fix-login-412 worker)" ]'
+check "thread name matches Codex grammar" 'grep -Eq "^[a-z0-9_]{1,64}$" <<<"$THREAD_A"'
+check "normalized collisions retain distinct identities" '[ "$THREAD_A" != "$THREAD_B" ] && [ "$THREAD_A" != "$THREAD_C" ] && [ "$THREAD_B" != "$THREAD_C" ]'
+check "role participates in identity" '[ "$THREAD_A" != "$ROLE_THREAD" ]'
+check "long and max-length ids stay bounded" '[ "${#LONG_THREAD}" -le 64 ] && [ "${#MAX_THREAD}" -le 64 ]'
+check "invalid durable id and role are rejected separately" '! b dm-thread-name.sh "bad id" worker >/dev/null 2>&1 && ! b dm-thread-name.sh valid-id "bad-role" >/dev/null 2>&1'
+check "guard blocks git -C reset flag permutation" '! b dm-command-guard.sh check "git -C /tmp reset HEAD --hard" >/dev/null 2>&1'
+check "guard blocks absolute git clean flag permutation" '! b dm-command-guard.sh check "/usr/bin/git --no-pager -C /tmp clean -d -f" >/dev/null 2>&1'
+check "guard blocks non-hard reset and dry-run clean bypasses" '! b dm-command-guard.sh check "/usr/bin/git -C /tmp reset --merge HEAD" >/dev/null 2>&1 && ! b dm-command-guard.sh check "/usr/bin/git -C /tmp clean -n" >/dev/null 2>&1'
+check "guard blocks restore and destructive switch" '! b dm-command-guard.sh check "git restore file" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch --discard-changes main" >/dev/null 2>&1'
+check "guard blocks checkout and combined switch flags" '! b dm-command-guard.sh check "git checkout feature" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch -fq main" >/dev/null 2>&1'
+check "guard blocks quoted spaced-path destructive Git" '! b dm-command-guard.sh check "git -C \"/tmp/path with spaces\" reset --hard" >/dev/null 2>&1'
+check "guard blocks nested, indirect, and alias destructive Git" '! b dm-command-guard.sh check "bash -c \"git clean -fd\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env bash -c \"git reset --hard\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "\$GIT restore file" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git -c alias.nuke=\"!git reset --hard\" nuke" >/dev/null 2>&1'
+check "guard blocks dynamic Git executable and subcommands" '! b dm-command-guard.sh check "op=reset; git \"\$op\" --hard" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git \"\$(printf reset)\" --hard" >/dev/null 2>&1 && ! b dm-command-guard.sh check "\$(printf git) reset --hard" >/dev/null 2>&1'
+ESCAPED_RESET=$'git re\\\nset --hard'
+check "guard blocks escaped-newline destructive Git" '! b dm-command-guard.sh check "$ESCAPED_RESET" >/dev/null 2>&1'
+check "guard blocks shell-fed and alternate-shell destructive content" '! b dm-command-guard.sh check "printf \"git reset --hard\" | bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env dash -c \"git restore file\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "bash <<< \"git clean -fd\"" >/dev/null 2>&1'
+check "guard propagates piped stdin through shell wrappers" '! b dm-command-guard.sh check "printf \"git reset --hard\" | env bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "printf \"git reset --hard\" | command bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env command bash -s" >/dev/null 2>&1'
+check "guard rejects unresolved command positions" '! b dm-command-guard.sh check "\$SHELL -c \"git reset --hard\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git \"\$OP\" --hard" >/dev/null 2>&1'
+check "guard blocks invoked environment Git aliases" '! b dm-command-guard.sh check "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0=\"!git reset --hard\" git nuke" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0=\"\$ALIAS\" git nuke" >/dev/null 2>&1'
+check "guard blocks invoked option Git aliases" '! b dm-command-guard.sh check "git -c alias.nuke=\"\$ALIAS\" nuke" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git --config-env=alias.nuke=NUKE_ALIAS nuke" >/dev/null 2>&1'
+check "guard permits read-only Git" 'b dm-command-guard.sh check "git -C /tmp status" >/dev/null'
+check "guard permits quoted spaced-path read-only Git" 'b dm-command-guard.sh check "git -C \"/tmp/path with spaces\" status" >/dev/null'
+check "guard ignores harmless Git words in argv text" 'b dm-command-guard.sh check "echo git reset --hard" >/dev/null && b dm-command-guard.sh check "printf %s \"git restore file\"" >/dev/null && b dm-command-guard.sh check "bash -c \"echo git clean -fd\"" >/dev/null'
+check "guard ignores uninvoked harmless alias text" 'b dm-command-guard.sh check "git -c alias.cleanup=\"!printf harmless\" status" >/dev/null'
+
+echo "== secondmate durable identity state =="
+SECOND_THREAD="$(b dm-thread-name.sh payments secondmate)"
+b dm-secondmate.sh prepare payments --scope "payments services" --repos "demo,fresh" --thread-name "$SECOND_THREAD"
+check "prepared secondmate is visibly ambiguous until attach" 'b dm-secondmate.sh reconcile | grep -q "AMBIGUOUS-LAUNCH.*payments"'
+b dm-secondmate.sh attach payments agent-123
+check "secondmate attach persists exact owner" '[ "$(b dm-secondmate.sh get payments | jq -r .agent_id)" = agent-123 ] && b dm-secondmate.sh reconcile | grep -q "VERIFY-LIVE.*agent-123"'
+check "secondmate clear refuses wrong owner" '! b dm-secondmate.sh clear payments agent-wrong stopped >/dev/null 2>&1'
+b dm-secondmate.sh clear payments agent-123 stopped
+check "secondmate clear records dormant state" '[ "$(b dm-secondmate.sh get payments | jq -r .status)" = dormant ]'
+b dm-secondmate.sh retire payments --confirmed-idle
+check "secondmate retirement is durable" '[ "$(b dm-secondmate.sh get payments | jq -r .status)" = retired ]'
+for i in 1 2 3 4 5; do
+  thread="$(b dm-thread-name.sh "domain-$i" secondmate)"
+  b dm-secondmate.sh prepare "domain-$i" --scope "scope $i" --repos demo --thread-name "$thread" &
+done
+wait
+check "concurrent secondmate writes remain valid and complete" 'jq -e ".secondmates | length == 6" "$DM_HOME/state/secondmates.json" >/dev/null'
+check "secondmate prepare rejects another record's active thread name" \
+  '! b dm-secondmate.sh prepare domain-dup --scope duplicate --repos demo --thread-name "$(b dm-thread-name.sh domain-3 secondmate)" >/dev/null 2>&1'
+check "prepare refuses to overwrite an ambiguous launch" '! b dm-secondmate.sh prepare domain-1 --scope overwritten --repos demo --thread-name "$(b dm-thread-name.sh domain-1 secondmate)" >/dev/null 2>&1'
+b dm-secondmate.sh abandon domain-1 --confirmed-no-live
+check "confirmed no-live launch can be abandoned" '[ "$(b dm-secondmate.sh get domain-1 | jq -r .status)" = dormant ]'
+(b dm-secondmate.sh attach domain-2 agent-a >/dev/null 2>&1 || true) &
+(b dm-secondmate.sh attach domain-2 agent-b >/dev/null 2>&1 || true) &
+wait
+check "concurrent attach records exactly one runtime owner" 'OWNER="$(b dm-secondmate.sh get domain-2 | jq -r .agent_id)"; [ "$OWNER" = agent-a ] || [ "$OWNER" = agent-b ]'
+OWNER="$(b dm-secondmate.sh get domain-2 | jq -r .agent_id)"
+check "secondmate attach rejects another record's agent id" '! b dm-secondmate.sh attach domain-3 "$OWNER" >/dev/null 2>&1'
+(b dm-secondmate.sh attach domain-3 agent-shared >/dev/null 2>&1 || true) &
+(b dm-secondmate.sh attach domain-4 agent-shared >/dev/null 2>&1 || true) &
+wait
+SHARED_AGENT_COUNT="$(jq '[.secondmates[].agent_id | select(. == "agent-shared")] | length' "$DM_HOME/state/secondmates.json")"
+check "concurrent cross-record attach preserves unique agent ids" '[ "$SHARED_AGENT_COUNT" = 1 ]'
 
 echo "== registry =="
 b dm-repo.sh add demo "$TMP/origin.git" --mode local-only --test-cmd "test -f src/calc.py" >/dev/null 2>&1
@@ -46,6 +124,24 @@ DOC="$(b dm-doctor.sh check)"
 check "doctor check passes (git+jq present)" 'b dm-doctor.sh check >/dev/null'
 check "doctor reports git ok"                'grep -qE "ok +git" <<<"$DOC"'
 check "doctor scaffolds home"                'b dm-doctor.sh >/dev/null && [ -d "$DM_HOME/state/tasks" ] && [ -d "$DM_HOME/state/worktrees" ] && [ -f "$DM_HOME/state/repos.json" ]'
+RUNTIME_BAD="$TMP/runtime-bad"
+mkdir -p "$RUNTIME_BAD"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNTIME_BAD/claude"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$RUNTIME_BAD/codex"
+chmod +x "$RUNTIME_BAD/claude" "$RUNTIME_BAD/codex"
+check "doctor requires only selected Claude runtime" 'PATH="$RUNTIME_BAD:$PATH" b dm-doctor.sh check --runtime claude >/dev/null'
+check "doctor fails selected unavailable Codex runtime" '! PATH="$RUNTIME_BAD:$PATH" b dm-doctor.sh check --runtime codex >/dev/null 2>&1'
+CLEAN_DOCTOR_HOME="$TMP/clean-doctor-home"
+check "doctor passes CI-like environment only through explicit authenticated stub" \
+  'env -i HOME="$HOME" DM_HOME="$CLEAN_DOCTOR_HOME" PATH="$RUNTIME_OK:$PATH" "$ROOT/bin/dm-doctor.sh" check --runtime codex >/dev/null'
+STATEFUL_RUNTIME="$TMP/runtime-stateful"
+STATEFUL_COUNT="$TMP/runtime-stateful-count"
+mkdir -p "$STATEFUL_RUNTIME"
+printf '%s\n' '#!/usr/bin/env bash' 'n=0; [ ! -f "$STATEFUL_COUNT" ] || n="$(cat "$STATEFUL_COUNT")"' 'n=$((n + 1)); printf "%s\n" "$n" > "$STATEFUL_COUNT"' '[ "$n" -eq 1 ]' > "$STATEFUL_RUNTIME/codex"
+chmod +x "$STATEFUL_RUNTIME/codex"
+STATEFUL_OUT="$(STATEFUL_COUNT="$STATEFUL_COUNT" PATH="$STATEFUL_RUNTIME:$PATH" b dm-doctor.sh check --runtime codex)"
+check "doctor probes selected runtime exactly once" '[ "$(cat "$STATEFUL_COUNT")" = 1 ]'
+check "doctor reports and exits from the same immutable snapshot" 'grep -qE "ok +codex-runtime" <<<"$STATEFUL_OUT" && ! grep -q "MISSING.*codex-runtime" <<<"$STATEFUL_OUT"'
 
 echo "== create (new repo from an empty remote) =="
 git init -q --bare -b main "$TMP/new.git"   # an empty remote the operator "made"
@@ -193,6 +289,17 @@ b dm-task.sh new pr-localonly --kind ship --repo demo --mode local-only >/dev/nu
 check "pr open refuses a local-only task" '! b dm-pr.sh open pr-localonly --title x >/dev/null 2>&1'
 PRLO="$(b dm-pr.sh open pr-localonly --title x 2>&1 || true)"
 check "pr open names the local-only path" 'grep -q "local-only" <<<"$PRLO"'
+PR_OPEN_STUB="$TMP/pr-open-stub"
+mkdir -p "$PR_OPEN_STUB"
+printf '#!/bin/sh\n: > "%s/invoked"\nexit 1\n' "$PR_OPEN_STUB" > "$PR_OPEN_STUB/gh-axi"
+chmod +x "$PR_OPEN_STUB/gh-axi"
+b dm-task.sh new pr-untracked --kind ship --repo demo --mode pipeline >/dev/null
+PR_UNTRACKED_WT="$(b dm-worktree.sh create pr-untracked demo | tail -n1)"
+git -C "$PR_UNTRACKED_WT" checkout -q -b feat/x/pr-untracked
+printf 'not committed\n' > "$PR_UNTRACKED_WT/untracked.txt"
+PR_UNTRACKED_OUT="$(PATH="$PR_OPEN_STUB:$PATH" b dm-pr.sh open pr-untracked --title x 2>&1 || true)"
+check "pr open refuses untracked files before push" 'grep -q "untracked files" <<<"$PR_UNTRACKED_OUT" && [ ! -f "$PR_OPEN_STUB/invoked" ]'
+b dm-worktree.sh remove pr-untracked --force >/dev/null 2>&1
 
 echo "== status drift lint (three-source reconciliation) =="
 # demo-1 is marked done in the backlog above, but its work is committed and not
@@ -325,6 +432,14 @@ DOCBAD="$(b dm-doctor.sh 2>&1 || true)"
 check "doctor fails on invalid repos.json" '! b dm-doctor.sh >/dev/null 2>&1'
 check "doctor names the invalid JSON"      'grep -q "not valid JSON" <<<"$DOCBAD"'
 cp "$TMP/repos.bak" "$DM_HOME/state/repos.json"
+cp "$DM_HOME/state/secondmates.json" "$TMP/secondmates.bak"
+printf '{"secondmates":{"bad":{"status":"active"}}}\n' > "$DM_HOME/state/secondmates.json"
+check "doctor fails malformed secondmate identity state" '! b dm-doctor.sh check >/dev/null 2>&1'
+STATUS_BAD="$(b dm-status.sh 2>&1 || true)"
+check "status fails malformed secondmate identity state" '! b dm-status.sh >/dev/null 2>&1 && grep -q "FAIL supervisor state" <<<"$STATUS_BAD" && ! grep -q "(none registered)" <<<"$STATUS_BAD"'
+SESSION_BAD="$(b dm-session-start.sh --no-sync 2>&1 || true)"
+check "session start fails malformed supervisor section" '! b dm-session-start.sh --no-sync >/dev/null 2>&1 && grep -q "DOMAIN SUPERVISORS" <<<"$SESSION_BAD" && grep -q "FAIL supervisor state" <<<"$SESSION_BAD" && grep -q "NOT READY" <<<"$SESSION_BAD"'
+cp "$TMP/secondmates.bak" "$DM_HOME/state/secondmates.json"
 
 echo "== branch name =="
 # Pure function (no DM_HOME): type/issue validation, slug kebab-collapsing, cap.
@@ -1482,6 +1597,100 @@ check "adopted PR merges through base-repo endpoint" 'grep -Fx "api PUT /repos/o
 check "fork head ref with slashes is resolved encoded" 'grep -q "repos/forker/r/git/ref/heads/feature%2Fnested%2Fhead" "$GHSTUB/gh-calls"'
 check "fork branch is never deleted" '[ ! -s "$GHSTUB/git-push-calls" ] && grep -q "head belongs to fork forker/r" <<<"$FORKMERGE"'
 rm -rf "$DM_HOME/repos/mauth/.github"
+
+echo "== runtime parity + performance guards =="
+check "runtime parity suite passes" 'node "$ROOT/tests/check-runtime-parity.js" >/dev/null'
+EVIDENCE_PARENT="$TMP/evidence-parent"
+mkdir -m 700 "$EVIDENCE_PARENT"
+printf 'untouched\n' > "$TMP/evidence-victim"
+ln -s "$TMP/evidence-victim" "$EVIDENCE_PARENT/codex-version.txt"
+EVIDENCE_ONE="$("$ROOT/tests/runtime-evidence-dir.sh" create "$EVIDENCE_PARENT")"
+EVIDENCE_TWO="$("$ROOT/tests/runtime-evidence-dir.sh" create "$EVIDENCE_PARENT")"
+check "runtime evidence uses unique private children" '[ "$EVIDENCE_ONE" != "$EVIDENCE_TWO" ] && [ ! -L "$EVIDENCE_ONE" ] && [ "$(file_mode "$EVIDENCE_ONE")" = 700 ]'
+SAFE_EVIDENCE="$("$ROOT/tests/runtime-evidence-dir.sh" reserve "$EVIDENCE_ONE" codex-version.txt)"
+check "runtime evidence files are private regular files" '[ -f "$SAFE_EVIDENCE" ] && [ ! -L "$SAFE_EVIDENCE" ] && [ "$(file_mode "$SAFE_EVIDENCE")" = 600 ]'
+ln -s "$TMP/evidence-victim" "$EVIDENCE_ONE/attacker.json"
+check "runtime evidence refuses fixed-file symlinks" '! "$ROOT/tests/runtime-evidence-dir.sh" reserve "$EVIDENCE_ONE" attacker.json >/dev/null 2>&1 && grep -Fx untouched "$TMP/evidence-victim" >/dev/null'
+ln -s "$EVIDENCE_PARENT" "$TMP/evidence-root-link"
+check "runtime evidence refuses symlink roots" '! "$ROOT/tests/runtime-evidence-dir.sh" create "$TMP/evidence-root-link" >/dev/null 2>&1'
+RETENTION_PARENT="$TMP/runtime-retention"
+mkdir -m 700 "$RETENTION_PARENT"
+RETENTION_OUT="$(DM_RUNTIME_EVIDENCE_DIR="$RETENTION_PARENT" DM_RUNTIME_SMOKE_TEST_ONLY=1 DM_RUNTIME_SMOKE_FIXTURE_SECRET=super-secret bash "$ROOT/tests/runtime-smoke.sh")"
+check "non-live runtime smoke cleans evidence by default" 'grep -q "evidence cleaned" <<<"$RETENTION_OUT" && [ -z "$(find "$RETENTION_PARENT" -mindepth 1 -maxdepth 1 -print -quit)" ]'
+KEEP_OUT="$(DM_RUNTIME_EVIDENCE_DIR="$RETENTION_PARENT" DM_RUNTIME_SMOKE_TEST_ONLY=1 DM_RUNTIME_SMOKE_FIXTURE_SECRET=super-secret bash "$ROOT/tests/runtime-smoke.sh" --keep-evidence)"
+KEEP_DIR="${KEEP_OUT##*evidence retained: }"
+check "explicit keep reports private retained location" '[ -d "$KEEP_DIR" ] && [ "$(file_mode "$KEEP_DIR")" = 700 ] && grep -q "evidence retained:" <<<"$KEEP_OUT"'
+KEEP_BAD_MODE=0
+while IFS= read -r evidence_path; do
+  [ "$(file_mode "$evidence_path")" = 600 ] || KEEP_BAD_MODE=$((KEEP_BAD_MODE + 1))
+done < <(find "$KEEP_DIR" -type f)
+check "retained evidence is sanitized and mode 600" '! grep -R "super-secret" "$KEEP_DIR" >/dev/null 2>&1 && [ "$KEEP_BAD_MODE" = 0 ]'
+rm -rf "$KEEP_DIR"
+check "early runtime-smoke failure cleans by default" '! DM_RUNTIME_EVIDENCE_DIR="$RETENTION_PARENT" DM_RUNTIME_SMOKE_TEST_ONLY=1 DM_RUNTIME_SMOKE_FAIL_AFTER_EVIDENCE=1 bash "$ROOT/tests/runtime-smoke.sh" >/dev/null 2>&1 && [ -z "$(find "$RETENTION_PARENT" -mindepth 1 -maxdepth 1 -print -quit)" ]'
+FAIL_KEEP_OUT="$(DM_RUNTIME_EVIDENCE_DIR="$RETENTION_PARENT" DM_RUNTIME_SMOKE_TEST_ONLY=1 DM_RUNTIME_SMOKE_FAIL_AFTER_EVIDENCE=1 bash "$ROOT/tests/runtime-smoke.sh" --keep-evidence 2>&1 || true)"
+FAIL_KEEP_DIR="${FAIL_KEEP_OUT##*evidence retained: }"
+check "explicit keep is required to retain failed-run evidence" '[ -d "$FAIL_KEEP_DIR" ] && grep -q "evidence retained:" <<<"$FAIL_KEEP_OUT"'
+check "failed retained evidence removes raw secrets" '! grep -R "session-secret" "$FAIL_KEEP_DIR" >/dev/null 2>&1 && ! find "$FAIL_KEEP_DIR" -type f -name "*.raw*" | grep -q .'
+rm -rf "$FAIL_KEEP_DIR"
+check "runtime performance guard passes" 'node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+PARITY_FIXTURE="$TMP/runtime-parity"
+mkdir -p "$PARITY_FIXTURE"
+copy_parity_input() {
+  local relative="$1"
+  mkdir -p "$PARITY_FIXTURE/$(dirname "$relative")"
+  cp "$ROOT/$relative" "$PARITY_FIXTURE/$relative"
+}
+for relative in AGENTS.md CLAUDE.md config/runtime-capabilities.json \
+  config/runtime-performance-baseline.json docs/runtime-capabilities.md \
+  .codex/config.toml .claude/settings.json; do
+  copy_parity_input "$relative"
+done
+while IFS= read -r relative; do copy_parity_input "$relative"; done < <(
+  jq -r '.capabilities[].evidence[]' "$ROOT/config/runtime-capabilities.json" | sort -u
+)
+while IFS= read -r skill; do
+  copy_parity_input ".claude/skills/$skill/SKILL.md"
+  copy_parity_input ".agents/skills/$skill/SKILL.md"
+done < <(jq -r '.skills[]' "$ROOT/config/runtime-capabilities.json")
+check "runtime fixture excludes repository and private state" \
+  '[ ! -e "$PARITY_FIXTURE/.git" ] && [ ! -e "$PARITY_FIXTURE/state" ] && [ ! -e "$PARITY_FIXTURE/repos" ] && [ ! -e "$PARITY_FIXTURE/data" ] && [ ! -e "$PARITY_FIXTURE/.env" ]'
+rm "$PARITY_FIXTURE/.agents/skills/rollback/SKILL.md"
+check "runtime parity fails on a missing Codex skill" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
+cp "$ROOT/.agents/skills/rollback/SKILL.md" "$PARITY_FIXTURE/.agents/skills/rollback/SKILL.md"
+WAKE_SKILL="$PARITY_FIXTURE/.agents/skills/change-review/SKILL.md"
+sed 's/spawn_agent/command_session/g' "$WAKE_SKILL" > "$WAKE_SKILL.tmp"
+mv "$WAKE_SKILL.tmp" "$WAKE_SKILL"
+check "runtime parity fails when Codex Lavish loses its mailbox wake" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
+cp "$ROOT/.agents/skills/change-review/SKILL.md" "$WAKE_SKILL"
+DISPATCH_SKILL="$PARITY_FIXTURE/.agents/skills/task-lifecycle/SKILL.md"
+sed 's/at most three/at most four/' "$DISPATCH_SKILL" > "$DISPATCH_SKILL.tmp"
+mv "$DISPATCH_SKILL.tmp" "$DISPATCH_SKILL"
+check "runtime parity fails a capability-specific dispatch mutation" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
+cp "$ROOT/.agents/skills/task-lifecycle/SKILL.md" "$DISPATCH_SKILL"
+mkdir -p "$PARITY_FIXTURE/.claude/skills/added-runtime"
+printf '%s\n' '---' 'name: added-runtime' 'description: mutation fixture' '---' > "$PARITY_FIXTURE/.claude/skills/added-runtime/SKILL.md"
+check "runtime performance guard fails on added Claude skill" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+rm -rf "$PARITY_FIXTURE/.claude/skills/added-runtime"
+mkdir -p "$PARITY_FIXTURE/.claude/hooks"
+printf '#!/bin/sh\nexit 0\n' > "$PARITY_FIXTURE/.claude/hooks/added.sh"
+check "runtime performance guard rejects unclassified Claude files" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+rm -rf "$PARITY_FIXTURE/.claude/hooks"
+CLAUDE_TASK="$PARITY_FIXTURE/.claude/skills/task-lifecycle/SKILL.md"
+sed 's/run in background/run on background/' "$CLAUDE_TASK" > "$CLAUDE_TASK.tmp"
+check "same-size Claude mutation preserves byte count" \
+  '[ "$(wc -c < "$CLAUDE_TASK")" -eq "$(wc -c < "$CLAUDE_TASK.tmp")" ]'
+mv "$CLAUDE_TASK.tmp" "$CLAUDE_TASK"
+check "runtime performance guard fails on same-size Claude mutation" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+cp "$ROOT/.claude/skills/task-lifecycle/SKILL.md" "$CLAUDE_TASK"
+printf '%03000d\n' 0 >> "$PARITY_FIXTURE/AGENTS.md"
+check "runtime performance guard fails on instruction bloat" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
 
 echo
 echo "smoke: $pass passed, $fail failed"

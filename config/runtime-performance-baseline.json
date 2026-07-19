@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "base_commit": "c4a4276",
+  "shared_agents_bytes": 26634,
+  "claude_settings_bytes": 1579,
+  "claude_skill_bytes": 82540,
+  "claude_skill_description_bytes": 4603,
+  "claude_files_sha256": {
+    ".claude/settings.json": "2efe4d84bb21b43c94cb2782093f4b75432ea7de8e425f3edb8a1c721acade35",
+    ".claude/skills/change-review/SKILL.md": "b0ed49a1e46c6f9e154f8281f079f7bf07a6ef397a13b52f4a3c6cce2a987ce0",
+    ".claude/skills/coding-guidelines/SKILL.md": "9683da9febf7bf6ed4b3d5028df3a3736a7a6af6c096fce30b957818c2abd9e9",
+    ".claude/skills/credential-handoff/SKILL.md": "03bd5a829ee39de335263931599e0e5829798c0575d0507c39f39b135dd23b08",
+    ".claude/skills/decision-hold/SKILL.md": "2ecaeebd4ddeae7f139740d5a10ebeb70a9b594ae87b8d2d520a79b25d21efb6",
+    ".claude/skills/diagnostic-reasoning/SKILL.md": "e079d4582c200e5c09a421d61b1a07b1d3203398789e04c9e73b4aa3749ae5a2",
+    ".claude/skills/fleet-change/SKILL.md": "629370a1ef4d9886ce68ab4d5e1e3d6b57ecdd300b9b9d4511a53763d69a042a",
+    ".claude/skills/memory-routing/SKILL.md": "b8e51e0d843c542115e3bda2a6ee6d7c62902f17dd737750d14e55808b736fb4",
+    ".claude/skills/merge-conflict/SKILL.md": "9fd025b13a754bb561176c86d3f825861896ea384f03cd2ee2d96496dee96b13",
+    ".claude/skills/post-pr-review/SKILL.md": "6c7f6a16205561d0301610b86a56b5e9c71dfa3373bfed5257078f1ca7c603b4",
+    ".claude/skills/pr-workflow/SKILL.md": "5118ffb5cf9ba332068221507a66f2fc3bdee0a65c549d1edefb7014fc4e62ea",
+    ".claude/skills/project-management/SKILL.md": "dd9ce5fab2754cdf568992811efffb809175e248a3abc2b729b5a456741a0956",
+    ".claude/skills/repo-sync/SKILL.md": "a8dac0bdae8d3ee31b0631940aeaf8239ada0aebd2008ad3232a521503bce638",
+    ".claude/skills/rollback/SKILL.md": "2bf5dad1eec76aec0d865aebcf442a2ccb88a64feb24df87f7237c48acc7adb6",
+    ".claude/skills/secondmate/SKILL.md": "de070f494e3c27d54bcd4f8b6dccbf3a13dccf6e7a599bf793dfc5e8457d32d4",
+    ".claude/skills/stuck-worker/SKILL.md": "4b27153956c771a8d6b7da3aec520fafed5f9deb9b11eca04675b6d7d42993d9",
+    ".claude/skills/supervision/SKILL.md": "f2d9e5cdec44da4eafdd1e38ce8f180ab4638702e8996ac32927ac15ef0cf709",
+    ".claude/skills/task-lifecycle/SKILL.md": "3106146b259990d2165711ab8cd47be59e6613185a1554ad7781ad748052cf31",
+    ".claude/skills/testing-policy/SKILL.md": "3632ab3a7c0e39b4c6ad35acfa2178e753d73ec0f4df45542e5d29f86ceef475"
+  },
+  "limits": {
+    "shared_agents_growth_bytes": 2048,
+    "codex_project_doc_bytes": 32768,
+    "skill_description_bytes_per_runtime": 8000
+  }
+}

@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Codex Lavish waits now wake reliably.** A dedicated no-fork waiter owns the
+  long poll through terminal completion; its collaboration completion wakes the
+  parent mailbox. Raw command sessions are explicitly attached-only, with a
+  negative regression that rejects loss of the waiter wake contract. Claude's
+  existing background-notification path is unchanged.
 - **Honest onboarding docs and one dependency contract.** The README and
   `dm-doctor` now state the tool contract identically in three tiers: `git`/`jq`
   required for anything, `gh` (or `gh-axi`) required for the PR flow, and the
@@ -28,6 +33,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Complete OpenAI Codex runtime adapter** — all 18 workflow skills now have
+  exact-name Codex discovery under `.agents/skills`, with runtime-native
+  delegation, nesting, follow-up, supervision, waits, and recovery contracts.
+  Trusted project config bounds depth/concurrency and adds destructive-command
+  rules plus a shell-command hook guardrail. Task/thread identities stay
+  separate; rigorous native and compatible-host gates fail closed. A checked
+  capability matrix, adapter drift tests, private evidence paths, negative paths,
+  context-performance guardrails, and installed Claude/Codex validation preserve
+  the unchanged Claude path while making platform differences explicit.
 - **`CONTRIBUTING.md`** (how to test, the bash-3.2 portability invariant,
   branch/commit style) and **`SECURITY.md`** (trust model and private
   vulnerability reporting).

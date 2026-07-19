@@ -1,0 +1,39 @@
+prefix_rule(
+    pattern = ["git", "reset"],
+    decision = "forbidden",
+    justification = "Preserve index and worktree state; use a scoped non-discarding toolbelt path instead.",
+    match = ["git reset --hard", "git reset HEAD --hard", "git reset --soft HEAD~1"],
+    not_match = ["git status", "git rev-parse HEAD"],
+)
+
+prefix_rule(
+    pattern = ["git", "clean"],
+    decision = "forbidden",
+    justification = "Preserve untracked task artifacts; inspect them and remove only proven disposable files.",
+    match = ["git clean -f", "git clean -d -f", "git clean --force -dx"],
+    not_match = ["git status", "git diff --stat"],
+)
+
+prefix_rule(
+    pattern = ["git", "restore"],
+    decision = "forbidden",
+    justification = "Do not discard index or worktree edits; apply an explicit scoped patch instead.",
+    match = ["git restore file.txt", "git restore --staged file.txt"],
+    not_match = ["git status", "git show HEAD:file.txt"],
+)
+
+prefix_rule(
+    pattern = ["git", "checkout"],
+    decision = "forbidden",
+    justification = "Checkout is ambiguous between branches and destructive paths; use non-forced git switch for branches.",
+    match = ["git checkout -- file.txt", "git checkout feature-branch", "git checkout --ours file.txt"],
+    not_match = ["git switch feature-branch", "git switch -c feature-branch"],
+)
+
+prefix_rule(
+    pattern = ["git", "switch", ["-f", "--force", "--discard-changes", "-C", "--force-create", "--orphan"]],
+    decision = "forbidden",
+    justification = "Do not switch branches by discarding edits; preserve the current worktree.",
+    match = ["git switch -f main", "git switch --discard-changes main", "git switch -C feature"],
+    not_match = ["git switch main", "git switch -c feature"],
+)
