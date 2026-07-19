@@ -6,6 +6,7 @@
 
 # Local review surfaces and scratch.
 /.lavish/
+/out/
 *.log
 
 # Personal/local Claude Code permission overrides — never committed into the
