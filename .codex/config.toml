@@ -15,6 +15,8 @@ matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = '"$(git rev-parse --show-toplevel)/bin/dm-command-guard.sh" hook'
+# Resolve the guard from the distro root (DM_HOME, else walk up from cwd), not
+# git-toplevel: in a managed worktree/clone that toplevel has no guard script.
+command = 'root="${DM_HOME:-}"; [ -x "$root/bin/dm-command-guard.sh" ] || { root="$PWD"; while [ "$root" != / ] && [ ! -x "$root/bin/dm-command-guard.sh" ]; do root="$(dirname "$root")"; done; }; "$root/bin/dm-command-guard.sh" hook'
 timeout = 10
 statusMessage = "Checking Git command safety"
