@@ -48,7 +48,7 @@ bin/                 the toolbelt (read a script's header before first use)
 workflows/           the optional deterministic PR-pipeline runner
 config/              pr-pipeline defaults + per-repo overrides
 state/               runtime, gitignored: repos.json, tasks/, worktrees/,
-                     backlog.md, operator.md, learnings.md, secondmates.md
+                     backlog.md, operator.md, learnings.md, secondmates.json
 repos/               managed clones, gitignored, READ-ONLY to you
 data/                per-task artifacts (briefs, scout reports), gitignored
 ```
@@ -61,7 +61,8 @@ never hand-edit `state/tasks/*.meta`, `state/repos.json`, or the backlog. A
 `bin/dm` dispatcher — `dm <sub> ...` runs `bin/dm-<sub>.sh ...`, and `dm help`
 lists them): `dm-doctor`, `dm-session-start`, `dm-status`, `dm-repo`,
 `dm-worktree`, `dm-task`, `dm-brief`, `dm-branch-name`, `dm-pr`, `dm-merge`,
-`dm-sync`, `dm-lavish`, `dm-test`, `dm-backlog`, `dm-memory` — what each does is
+`dm-sync`, `dm-lavish`, `dm-test`, `dm-backlog`, `dm-memory`, `dm-thread-name`,
+`dm-secondmate`, `dm-command-guard` — what each does is
 the `[routing]` bullet in `dm:knowledge` below (the authoritative inventory).
 
 ## Session start
@@ -194,6 +195,9 @@ invariants, pitfalls, routing. Curated — not append-forever._
   local land + rebase), `dm-sync` (FF clone refresh), `dm-backlog`, `dm-lavish`
   (review artifact), `dm-test` (tests gate), `dm-memory` (context system). Point
   work at the right script instead of reinventing lifecycle logic.
+  `dm-thread-name` derives role-specific runtime labels; `dm-secondmate` owns
+  locked supervisor identities; `dm-command-guard` parses shell commands for
+  destructive Git forms.
 - **[convention]** Task current-state is reconciled on demand by `dm-task.sh
   state` from real signals (merged PR, merge event, report.md, committed-unlanded
   worktree), never from the last status line; `tasks/<id>.status` is an

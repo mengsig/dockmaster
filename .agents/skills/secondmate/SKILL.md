@@ -36,9 +36,19 @@ Give it, in its spawn brief:
 - its **return channel**: it reports outcomes back through its parent thread,
   never to the operator directly.
 
-Record the supervisor in `state/secondmates.md`: its agent id, scope, and repo
-list. That file is the routing table; the scope drives routing, and the repo
-list is provisioning data, not exclusive ownership.
+Prepare the supervisor through the locked state owner before spawning:
+
+```
+thread_name="$(bin/dm-thread-name.sh <id> secondmate)"
+bin/dm-secondmate.sh prepare <id> --scope "<scope>" --repos "<repo,...>" \
+  --thread-name "$thread_name"
+```
+
+Then spawn that exact name and immediately persist the returned runtime id with
+`bin/dm-secondmate.sh attach <id> <returned-agent-id>`. If attach fails,
+interrupt that exact id and leave the launching record visible. Never hand-edit
+`state/secondmates.json`; it is the routing table and the script is its locked,
+atomic owner.
 
 ## Routing to it
 
@@ -61,8 +71,14 @@ memory and are conveyed to the supervisor when it is created or when they change
 A domain supervisor is **idle by default** and acts only on routed work. An
 empty queue is healthy — it never self-initiates surveys or audits. Codex thread
 identity is not guaranteed to survive a host restart; durable scope and work
-remain in `state/secondmates.md` and task/worktree state, and recovery relaunches
-the same scope only after proving the prior thread is gone. Retire one only on an
-explicit decision and with no in-flight work: `interrupt_agent` the specific
-thread if active, confirm no unlanded work remains, then remove its entry.
+remain in `state/secondmates.json` and task/worktree state. At startup, run
+`bin/dm-secondmate.sh reconcile`, then match each exact saved id/name with
+`list_agents`. One match is reused; multiple matches or a `launching` record are
+ambiguous and block relaunch. After proving a launching record has zero matches,
+resolve it with `bin/dm-secondmate.sh abandon <id> --confirmed-no-live`. Clear a
+saved active owner only after proving it gone:
+`bin/dm-secondmate.sh clear <id> <agent-id> "<reason>"`. Retire only after
+explicit decision, interruption of the exact
+active id, and no in-flight/unlanded work:
+`bin/dm-secondmate.sh retire <id> --confirmed-idle`.
 Forced discard of unlanded work requires explicit operator authority.

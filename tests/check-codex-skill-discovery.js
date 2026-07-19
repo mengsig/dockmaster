@@ -57,8 +57,8 @@ function expectFailure(prompt, root, label) {
 
 const [promptFile, rootArg] = process.argv.slice(2)
 if (!promptFile || !rootArg) fail('usage: check-codex-skill-discovery.js <prompt.json> <root>')
-const root = path.resolve(rootArg)
-const prompt = JSON.parse(fs.readFileSync(path.resolve(promptFile), 'utf8'))
+const root = fs.realpathSync(rootArg)
+const prompt = JSON.parse(fs.readFileSync(fs.realpathSync(promptFile), 'utf8'))
 validatePrompt(prompt, root)
 expectFailure(replaceStrings(prompt, (value) =>
   value.includes('<skills_instructions>') ? 'skills block removed' : value), root, 'removed skills block')

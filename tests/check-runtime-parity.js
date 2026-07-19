@@ -11,6 +11,36 @@ const RUNTIMES = {
   claude: '.claude/skills',
   codex: '.agents/skills',
 }
+const CAPABILITY_ASSERTIONS = {
+  'guidance-and-triggers': ['AGENTS.md', /load the skill at its trigger/],
+  'skill-discovery': ['tests/check-codex-skill-discovery.js', /structured skills block/],
+  'task-dispatch': ['.agents/skills/task-lifecycle/SKILL.md', /status queued[\s\S]*thread_name[\s\S]*agent_id[\s\S]*move <id> inflight/],
+  'worktree-isolation': ['bin/dm-worktree.sh', /unlanded work/],
+  'nested-secondmate': ['bin/dm-secondmate.sh', /AMBIGUOUS-LAUNCH/],
+  'followup-and-steering': ['.agents/skills/supervision/SKILL.md', /send_message[\s\S]*followup_task/],
+  'background-supervision': ['.agents/skills/supervision/SKILL.md', /wait_agent[\s\S]*native wake path/],
+  recovery: ['.agents/skills/stuck-worker/SKILL.md', /Multiple exact-name matches are ambiguous/],
+  'bounded-ci-wait': ['bin/dm-pr.sh', /await-checks/],
+  'scheduled-fleet-sweep': ['.agents/skills/supervision/SKILL.md', /scheduled task[\s\S]*dm-pr\.sh sweep/],
+  'change-review': ['.agents/skills/change-review/SKILL.md', /waiter_agent_id[\s\S]*waiter_state=terminal/],
+  'pr-gates': ['config/pr-pipeline.rigorous.json', /"verify"[\s\S]*"security"/],
+  'post-pr-review': ['.agents/skills/post-pr-review/SKILL.md', /review comment|review feedback/],
+  'github-tooling': ['bin/dm-pr.sh', /gh api/],
+  'browser-tooling': ['AGENTS.md', /chrome-devtools-axi/],
+  'lavish-tooling': ['bin/dm-lavish.sh', /lavish-axi/],
+  'credential-handoff': ['.agents/skills/credential-handoff/SKILL.md', /reference[\s\S]*never the value/i],
+  'memory-routing': ['bin/dm-memory.sh', /--dockmaster-only/],
+  diagnostics: ['.agents/skills/diagnostic-reasoning/SKILL.md', /evidence[\s\S]*implementation/i],
+  'merge-conflicts': ['.agents/skills/merge-conflict/SKILL.md', /rebase/],
+  rollback: ['.agents/skills/rollback/SKILL.md', /revert/],
+  'testing-policy': ['bin/dm-test.sh', /soft skip|no test command/i],
+  'fleet-campaigns': ['.agents/skills/fleet-change/SKILL.md', /bounded waves[\s\S]*`inflight`/],
+  'deterministic-workflow': ['workflows/pr-pipeline.js', /verify-findings[\s\S]*security/],
+  'merge-safety': ['bin/dm-lib.sh', /dm_merge_gate/],
+  'right-sizing': ['.agents/skills/task-lifecycle/SKILL.md', /at most three[\s\S]*reserving three/],
+  'plugins-and-fallbacks': ['README.md', /degrades to a real, plainer mode/i],
+  'project-safety-config': ['.codex/config.toml', /dm-command-guard\.sh/],
+}
 
 function fail(message) {
   throw new Error(message)
@@ -144,13 +174,19 @@ function checkCapabilities() {
   for (const item of MANIFEST.capabilities) {
     if (!item.id || ids.has(item.id)) fail(`invalid or duplicate capability id: ${item.id}`)
     ids.add(item.id)
-    if (!item.claude || !item.codex || !item.requirement) fail(`${item.id}: incomplete mapping`)
+    if (!item.claude || !item.codex || !item.requirement || !item.verification) fail(`${item.id}: incomplete mapping`)
+    if (!['direct', 'manual'].includes(item.verification)) fail(`${item.id}: invalid verification label`)
     if (!docs.includes(`\`${item.id}\``)) fail(`${item.id}: absent from markdown matrix`)
     if (!Array.isArray(item.evidence) || item.evidence.length < 2) fail(`${item.id}: weak evidence list`)
     for (const evidence of item.evidence) {
       if (!fs.existsSync(path.join(ROOT, evidence))) fail(`${item.id}: missing evidence ${evidence}`)
     }
+    const assertion = CAPABILITY_ASSERTIONS[item.id]
+    if (!assertion) fail(`${item.id}: no capability-specific executable assertion`)
+    const [assertionFile, pattern] = assertion
+    if (!pattern.test(read(assertionFile))) fail(`${item.id}: assertion failed in ${assertionFile}`)
   }
+  sameList(Object.keys(CAPABILITY_ASSERTIONS), [...ids], 'capability assertion coverage')
   console.log(`ok   ${ids.size}-capability matrix and evidence paths`)
 }
 

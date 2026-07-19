@@ -35,21 +35,53 @@ cd "$ROOT"
 b() { "$ROOT/bin/$@"; }
 
 echo "== Codex thread identity + command guard =="
-THREAD_A="$(b dm-thread-name.sh fix-login-412)"
-THREAD_B="$(b dm-thread-name.sh fix.login-412)"
-THREAD_C="$(b dm-thread-name.sh fix_login_412)"
-LONG_THREAD="$(b dm-thread-name.sh task-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-12345)"
-check "thread name is stable" '[ "$THREAD_A" = "$(b dm-thread-name.sh fix-login-412)" ]'
+THREAD_A="$(b dm-thread-name.sh fix-login-412 worker)"
+THREAD_B="$(b dm-thread-name.sh fix.login-412 worker)"
+THREAD_C="$(b dm-thread-name.sh fix_login_412 worker)"
+LONG_THREAD="$(b dm-thread-name.sh task-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-12345 review_waiter)"
+ROLE_THREAD="$(b dm-thread-name.sh fix-login-412 verify)"
+MAX_ID="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+MAX_THREAD="$(b dm-thread-name.sh "$MAX_ID" secondmate)"
+check "thread name is stable" '[ "$THREAD_A" = "$(b dm-thread-name.sh fix-login-412 worker)" ]'
 check "thread name matches Codex grammar" 'grep -Eq "^[a-z0-9_]{1,64}$" <<<"$THREAD_A"'
 check "normalized collisions retain distinct identities" '[ "$THREAD_A" != "$THREAD_B" ] && [ "$THREAD_A" != "$THREAD_C" ] && [ "$THREAD_B" != "$THREAD_C" ]'
-check "long task id stays bounded" '[ "${#LONG_THREAD}" -le 64 ]'
-check "invalid durable id is rejected" '! b dm-thread-name.sh "bad id" >/dev/null 2>&1'
+check "role participates in identity" '[ "$THREAD_A" != "$ROLE_THREAD" ]'
+check "long and max-length ids stay bounded" '[ "${#LONG_THREAD}" -le 64 ] && [ "${#MAX_THREAD}" -le 64 ]'
+check "invalid durable id and role are rejected separately" '! b dm-thread-name.sh "bad id" worker >/dev/null 2>&1 && ! b dm-thread-name.sh valid-id "bad-role" >/dev/null 2>&1'
 check "guard blocks git -C reset flag permutation" '! b dm-command-guard.sh check "git -C /tmp reset HEAD --hard" >/dev/null 2>&1'
 check "guard blocks absolute git clean flag permutation" '! b dm-command-guard.sh check "/usr/bin/git --no-pager -C /tmp clean -d -f" >/dev/null 2>&1'
 check "guard blocks non-hard reset and dry-run clean bypasses" '! b dm-command-guard.sh check "/usr/bin/git -C /tmp reset --merge HEAD" >/dev/null 2>&1 && ! b dm-command-guard.sh check "/usr/bin/git -C /tmp clean -n" >/dev/null 2>&1'
 check "guard blocks restore and destructive switch" '! b dm-command-guard.sh check "git restore file" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch --discard-changes main" >/dev/null 2>&1'
 check "guard blocks checkout and combined switch flags" '! b dm-command-guard.sh check "git checkout feature" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch -fq main" >/dev/null 2>&1'
+check "guard blocks quoted spaced-path destructive Git" '! b dm-command-guard.sh check "git -C \"/tmp/path with spaces\" reset --hard" >/dev/null 2>&1'
+check "guard blocks nested, indirect, and alias destructive Git" '! b dm-command-guard.sh check "bash -c \"git clean -fd\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env bash -c \"git reset --hard\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "\$GIT restore file" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git -c alias.nuke=\"!git reset --hard\" nuke" >/dev/null 2>&1'
 check "guard permits read-only Git" 'b dm-command-guard.sh check "git -C /tmp status" >/dev/null'
+check "guard permits quoted spaced-path read-only Git" 'b dm-command-guard.sh check "git -C \"/tmp/path with spaces\" status" >/dev/null'
+
+echo "== secondmate durable identity state =="
+SECOND_THREAD="$(b dm-thread-name.sh payments secondmate)"
+b dm-secondmate.sh prepare payments --scope "payments services" --repos "demo,fresh" --thread-name "$SECOND_THREAD"
+check "prepared secondmate is visibly ambiguous until attach" 'b dm-secondmate.sh reconcile | grep -q "AMBIGUOUS-LAUNCH.*payments"'
+b dm-secondmate.sh attach payments agent-123
+check "secondmate attach persists exact owner" '[ "$(b dm-secondmate.sh get payments | jq -r .agent_id)" = agent-123 ] && b dm-secondmate.sh reconcile | grep -q "VERIFY-LIVE.*agent-123"'
+check "secondmate clear refuses wrong owner" '! b dm-secondmate.sh clear payments agent-wrong stopped >/dev/null 2>&1'
+b dm-secondmate.sh clear payments agent-123 stopped
+check "secondmate clear records dormant state" '[ "$(b dm-secondmate.sh get payments | jq -r .status)" = dormant ]'
+b dm-secondmate.sh retire payments --confirmed-idle
+check "secondmate retirement is durable" '[ "$(b dm-secondmate.sh get payments | jq -r .status)" = retired ]'
+for i in 1 2 3 4 5; do
+  thread="$(b dm-thread-name.sh "domain-$i" secondmate)"
+  b dm-secondmate.sh prepare "domain-$i" --scope "scope $i" --repos demo --thread-name "$thread" &
+done
+wait
+check "concurrent secondmate writes remain valid and complete" 'jq -e ".secondmates | length == 6" "$DM_HOME/state/secondmates.json" >/dev/null'
+check "prepare refuses to overwrite an ambiguous launch" '! b dm-secondmate.sh prepare domain-1 --scope overwritten --repos demo --thread-name "$(b dm-thread-name.sh domain-1 secondmate)" >/dev/null 2>&1'
+b dm-secondmate.sh abandon domain-1 --confirmed-no-live
+check "confirmed no-live launch can be abandoned" '[ "$(b dm-secondmate.sh get domain-1 | jq -r .status)" = dormant ]'
+(b dm-secondmate.sh attach domain-2 agent-a >/dev/null 2>&1 || true) &
+(b dm-secondmate.sh attach domain-2 agent-b >/dev/null 2>&1 || true) &
+wait
+check "concurrent attach records exactly one runtime owner" 'OWNER="$(b dm-secondmate.sh get domain-2 | jq -r .agent_id)"; [ "$OWNER" = agent-a ] || [ "$OWNER" = agent-b ]'
 
 echo "== registry =="
 b dm-repo.sh add demo "$TMP/origin.git" --mode local-only --test-cmd "test -f src/calc.py" >/dev/null 2>&1
@@ -64,6 +96,13 @@ DOC="$(b dm-doctor.sh check)"
 check "doctor check passes (git+jq present)" 'b dm-doctor.sh check >/dev/null'
 check "doctor reports git ok"                'grep -qE "ok +git" <<<"$DOC"'
 check "doctor scaffolds home"                'b dm-doctor.sh >/dev/null && [ -d "$DM_HOME/state/tasks" ] && [ -d "$DM_HOME/state/worktrees" ] && [ -f "$DM_HOME/state/repos.json" ]'
+RUNTIME_STUB="$TMP/runtime-stub"
+mkdir -p "$RUNTIME_STUB"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNTIME_STUB/claude"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$RUNTIME_STUB/codex"
+chmod +x "$RUNTIME_STUB/claude" "$RUNTIME_STUB/codex"
+check "doctor requires only selected Claude runtime" 'PATH="$RUNTIME_STUB:$PATH" b dm-doctor.sh check --runtime claude >/dev/null'
+check "doctor fails selected unavailable Codex runtime" '! PATH="$RUNTIME_STUB:$PATH" b dm-doctor.sh check --runtime codex >/dev/null 2>&1'
 
 echo "== create (new repo from an empty remote) =="
 git init -q --bare -b main "$TMP/new.git"   # an empty remote the operator "made"
@@ -343,6 +382,10 @@ DOCBAD="$(b dm-doctor.sh 2>&1 || true)"
 check "doctor fails on invalid repos.json" '! b dm-doctor.sh >/dev/null 2>&1'
 check "doctor names the invalid JSON"      'grep -q "not valid JSON" <<<"$DOCBAD"'
 cp "$TMP/repos.bak" "$DM_HOME/state/repos.json"
+cp "$DM_HOME/state/secondmates.json" "$TMP/secondmates.bak"
+printf '{"secondmates":{"bad":{"status":"active"}}}\n' > "$DM_HOME/state/secondmates.json"
+check "doctor fails malformed secondmate identity state" '! b dm-doctor.sh check >/dev/null 2>&1'
+cp "$TMP/secondmates.bak" "$DM_HOME/state/secondmates.json"
 
 echo "== branch name =="
 # Pure function (no DM_HOME): type/issue validation, slug kebab-collapsing, cap.
@@ -1548,6 +1591,20 @@ mv "$WAKE_SKILL.tmp" "$WAKE_SKILL"
 check "runtime parity fails when Codex Lavish loses its mailbox wake" \
   '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
 cp "$ROOT/.agents/skills/change-review/SKILL.md" "$WAKE_SKILL"
+DISPATCH_SKILL="$PARITY_FIXTURE/.agents/skills/task-lifecycle/SKILL.md"
+sed 's/at most three/at most four/' "$DISPATCH_SKILL" > "$DISPATCH_SKILL.tmp"
+mv "$DISPATCH_SKILL.tmp" "$DISPATCH_SKILL"
+check "runtime parity fails a capability-specific dispatch mutation" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
+cp "$ROOT/.agents/skills/task-lifecycle/SKILL.md" "$DISPATCH_SKILL"
+CLAUDE_TASK="$PARITY_FIXTURE/.claude/skills/task-lifecycle/SKILL.md"
+sed 's/run in background/run on background/' "$CLAUDE_TASK" > "$CLAUDE_TASK.tmp"
+check "same-size Claude mutation preserves byte count" \
+  '[ "$(wc -c < "$CLAUDE_TASK")" -eq "$(wc -c < "$CLAUDE_TASK.tmp")" ]'
+mv "$CLAUDE_TASK.tmp" "$CLAUDE_TASK"
+check "runtime performance guard fails on same-size Claude mutation" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+cp "$ROOT/.claude/skills/task-lifecycle/SKILL.md" "$CLAUDE_TASK"
 printf '%03000d\n' 0 >> "$PARITY_FIXTURE/AGENTS.md"
 check "runtime performance guard fails on instruction bloat" \
   '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'

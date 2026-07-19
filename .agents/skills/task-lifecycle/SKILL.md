@@ -35,8 +35,11 @@ against the enrolled repo — never build it outside the framework.
   before scoping a bug.)
 
 **Dispatchability:**
-- Dispatch immediately when the work does not overlap in-flight work — no
-  concurrency cap.
+- The configured six-thread ceiling is a hard fleet budget. Keep at most three
+  ordinary task owners live at once, reserving three slots for an approval
+  waiter, recovery, and review/verification. Count live agents with
+  `list_agents` before every spawn. If fewer slots remain, leave the item queued;
+  never claim it is in flight before a runtime owner exists.
 - Serialize (queue as blocked) when it touches the same repo subsystem as live
   work or depends on unlanded work. Record it durably:
   `bin/dm-backlog.sh add <id> "<title>" --repo <repo> --status queued --blocked-by <other-id>`.
@@ -51,7 +54,7 @@ Give the task an id (short kebab, e.g. `fix-login-412`), then:
 
 ```
 bin/dm-task.sh new <id> --kind ship|scout --repo <repo> --title "<title>"
-bin/dm-backlog.sh add <id> "<title>" --repo <repo> --status inflight
+bin/dm-backlog.sh add <id> "<title>" --repo <repo> --status queued
 bin/dm-worktree.sh create <id> <repo>
 bin/dm-brief.sh <id>              # scaffolds data/<id>/brief.md
 ```
@@ -64,7 +67,8 @@ separate deterministic thread label; its digest suffix prevents normalized ids
 such as `fix-a`, `fix.a`, and `fix_a` from colliding:
 
 ```
-thread_name="$(bin/dm-thread-name.sh <id>)"
+thread_name="$(bin/dm-thread-name.sh <id> worker)"
+bin/dm-task.sh set <id> thread_name "$thread_name"
 spawn_agent(task_name=<thread_name>, message=<contents of data/<id>/brief.md>,
             fork_turns="none")
 ```
@@ -88,9 +92,16 @@ acting. The spawn result's agent id is the runtime identity; never substitute
 the durable id or thread label for it. Record both values for recovery:
 
 ```
-bin/dm-task.sh set <id> thread_name "$thread_name"
 bin/dm-task.sh set <id> agent_id <returned-agent-id>
+bin/dm-backlog.sh move <id> inflight
 ```
+
+Persist `thread_name` **before** spawning. Persist the returned `agent_id`
+immediately, before any confirmation message, then mark the backlog item
+in-flight. If spawn is rejected, it remains queued with its prepared worktree.
+If `agent_id` persistence fails after spawn, interrupt that exact returned id
+and leave/requeue the item visibly; never create an owner that durable state
+cannot name.
 
 Confirm the crewmate is processing the brief, then resume supervision
 (load `supervision`).
@@ -189,6 +200,9 @@ A reproduced bug becomes the regression test.
 
 State lives on disk, not in conversation memory. After any restart, reconcile
 each task with `bin/dm-task.sh state <id>` (authoritative current state) before
-acting. For a crewmate whose agent is gone but whose worktree holds unlanded
-work, load `stuck-worker` — preserve the worktree and identity; never spawn a
-duplicate.
+acting. For every queued/in-flight item, read both `thread_name` and `agent_id`,
+then `list_agents`. An exact live `agent_id` wins; otherwise match the exact
+persisted thread name. Exactly one match is reattached and its id persisted.
+Zero matches permits recovery only after the no-owner proof in `stuck-worker`;
+multiple matches are an ambiguity blocker and **must not** trigger another
+spawn. Preserve the worktree and identity; never spawn a duplicate.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 LIVE=0
 [ "${1:-}" = "--live" ] && LIVE=1
 umask 077
@@ -36,6 +36,9 @@ if command -v codex >/dev/null 2>&1; then
   codex --strict-config doctor --json > "$CODEX_DOCTOR"
   codex debug prompt-input "Do not act." > "$CODEX_PROMPT"
   node "$ROOT/tests/check-codex-skill-discovery.js" "$CODEX_PROMPT" "$ROOT"
+  SYMLINK_ROOT="$EVIDENCE/project-link"
+  ln -s "$ROOT" "$SYMLINK_ROOT"
+  node "$ROOT/tests/check-codex-skill-discovery.js" "$CODEX_PROMPT" "$SYMLINK_ROOT"
   check_rule forbidden git reset --hard
   check_rule forbidden git reset HEAD --hard
   check_rule forbidden git clean -fd
@@ -47,6 +50,15 @@ if command -v codex >/dev/null 2>&1; then
   check_guard_blocked '/usr/bin/git --no-pager -C /tmp clean -d -f'
   check_guard_blocked '/usr/bin/git -C /tmp restore --source HEAD file.txt'
   check_guard_blocked '/usr/bin/git -C /tmp switch --discard-changes main'
+  check_guard_blocked 'git -C "/tmp/a path with spaces" reset --hard'
+  check_guard_blocked 'bash -c "git clean -fd"'
+  check_guard_blocked '$GIT restore file.txt'
+  "$ROOT/bin/dm-command-guard.sh" check 'git -C "/tmp/a path with spaces" status'
+  SPACED_GUARD_DIR="$EVIDENCE/root with spaces/bin"
+  mkdir -p "$SPACED_GUARD_DIR"
+  cp "$ROOT/bin/dm-command-guard.sh" "$SPACED_GUARD_DIR/"
+  printf '{"tool_input":{"command":"git status"}}' \
+    | "${SPACED_GUARD_DIR}/dm-command-guard.sh" hook
   printf 'ok   Codex config, discovery, and command-policy probes\n'
 else
   printf 'skip Codex binary absent\n'
@@ -81,7 +93,7 @@ codex exec -C "$ROOT" --dangerously-bypass-hook-trust --ephemeral --sandbox read
 grep -q 'RUNTIME_OK' "$CODEX_LIVE"
 
 CODEX_HOOK="$(evidence_file codex-hook-live.jsonl)"
-HOOK_CONFIG="hooks.PreToolUse=[{matcher=\"^Bash$\",hooks=[{type=\"command\",command=\"$ROOT/bin/dm-command-guard.sh hook\",timeout=10}]}]"
+HOOK_CONFIG="hooks.PreToolUse=[{matcher=\"^Bash$\",hooks=[{type=\"command\",command=\"'$ROOT/bin/dm-command-guard.sh' hook\",timeout=10}]}]"
 # Worktree trust is path-specific. Inject the checked project's exact hook for
 # this read-only proof while leaving the user's persistent trust config untouched.
 codex exec -C "$ROOT" -c "$HOOK_CONFIG" --dangerously-bypass-hook-trust --ephemeral --sandbox read-only --json \

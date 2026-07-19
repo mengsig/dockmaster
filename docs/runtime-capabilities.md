@@ -2,25 +2,28 @@
 
 `config/runtime-capabilities.json` is the machine-readable source. This table is
 the review surface; `tests/check-runtime-parity.js` fails if an id, skill,
-trigger, adapter, or evidence path drifts.
+trigger, adapter, or evidence path drifts. `direct` means CI executes a
+capability-specific assertion; `manual` means CI validates the contract and
+harness but an authenticated runtime/browser/mailbox observation remains a
+human-run proof. Manual rows are labeled explicitly; all others are direct.
 
-| id | capability | Claude implementation | Codex implementation | direct evidence |
+| id | capability | Claude implementation | Codex implementation | evidence / verification |
 | --- | --- | --- | --- | --- |
 | `guidance-and-triggers` | shared contract and exact triggers | `CLAUDE.md` → `AGENTS.md` | direct `AGENTS.md` discovery | contract + parity test |
 | `skill-discovery` | all 18 skills, separated vocabularies | `.claude/skills` | official `.agents/skills` | adapter trees + parity test |
 | `task-dispatch` | async complete-brief worker | background `Agent` | sanitized thread label + returned `agent_id`, `fork_turns=none` | task-lifecycle + brief/thread helpers |
 | `worktree-isolation` | one guarded copy per task | toolbelt + agent isolation | toolbelt + absolute path in brief | `dm-worktree.sh` + smoke suite |
-| `nested-secondmate` | root → supervisor → worker | nested background agents | depth 2, six-thread cap | secondmate skills + Codex config/runtime smoke |
-| `followup-and-steering` | same-worker correction | `SendMessage`/task controls | message/follow-up/interrupt/list controls | supervision + recovery adapters |
-| `background-supervision` | no polling daemon | completion notification | mailbox + efficient agent wait | supervision adapters |
+| `nested-secondmate` | root → supervisor → worker | nested background agents | depth 2, six-thread cap | **manual** live nesting; direct state/config assertions |
+| `followup-and-steering` | same-worker correction | `SendMessage`/task controls | message/follow-up/interrupt/list controls | **manual** live identity controls; direct adapter assertion |
+| `background-supervision` | no polling daemon | completion notification | mailbox + efficient agent wait | **manual** mailbox wake; deterministic waiter harness in CI |
 | `recovery` | same task/work survives restart | reconcile and relaunch ladder | list/message/interrupt then same-copy relaunch | session-start + stuck-worker + smoke |
 | `bounded-ci-wait` | terminal CI rollup | Monitor/schedule + `await-checks` | attached command, dedicated waiter, or schedule + `await-checks` | dm-pr + supervision adapters |
-| `scheduled-fleet-sweep` | recurring PR health | runtime schedule/cron | desktop/web scheduled task; CLI prepares it | `dm-pr sweep` + supervision adapters |
-| `change-review` | pre-delivery approval loop | background Lavish poll | no-fork waiter owns poll; mailbox completion wakes parent | dm-lavish + adapters + parity regression |
+| `scheduled-fleet-sweep` | recurring PR health | runtime schedule/cron | desktop/web scheduled task; CLI prepares it | **manual** desktop/web schedule; direct sweep assertion |
+| `change-review` | pre-delivery approval loop | background Lavish poll | no-fork waiter owns poll; mailbox completion wakes parent | **manual** mailbox wake; direct identity/adapter regressions |
 | `pr-gates` | fast/default/rigorous gates | fresh reviewers | executable no-fork verify/security fallbacks; fail closed | pr-workflow + configs + runner tests |
 | `post-pr-review` | review comments/red CI tail | shared skill | shared skill | both post-pr-review skills |
 | `github-tooling` | PR API/checks/merge | gh-axi/gh | gh-axi/gh or plugin tools | dm-pr + smoke |
-| `browser-tooling` | real browser validation | chrome-devtools-axi | chrome-devtools-axi or Browser Use | contract + doctor |
+| `browser-tooling` | real browser validation | chrome-devtools-axi | chrome-devtools-axi or Browser Use | **manual** authenticated browser flow; direct readiness assertion |
 | `lavish-tooling` | reviewable HTML/plain fallback | lavish-axi | lavish-axi | dm-lavish + smoke |
 | `credential-handoff` | reference-only secret handoff | shared contract | shared contract | both credential skills |
 | `memory-routing` | six durable ownership scopes | plain stores + optional runtime memory | same stores + optional Codex memory | dm-memory + both adapters + smoke |
@@ -56,7 +59,8 @@ Codex collaboration names in Claude adapters.
   and shell interpretation can exceed the parser. Guarded toolbelt paths and the
   operating contract remain primary.
 - Nesting defaults to one edge, so dockmaster explicitly sets depth 2 for
-  secondmate → worker. Six concurrent open threads bound fan-out.
+  secondmate → worker. Six concurrent open threads bound fan-out; ordinary work
+  uses at most three so approval, recovery, and review retain capacity.
 - The active collaboration call has no per-spawn model/effort field. Codex
   therefore right-sizes tiers, task shape, prompt scope, and agent count and does
   not claim a selector it did not invoke.

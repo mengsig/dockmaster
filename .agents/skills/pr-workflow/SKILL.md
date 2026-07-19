@@ -111,14 +111,14 @@ worktree/branch from meta, communicates only through the task record, and
 - **fix / tests** — resolve any merge-gate findings and re-confirm green.
 - **verify** — rigorous only. Unless the diff is proven docs/config-only, spawn a
   fresh no-fork general verifier using a label from `bin/dm-thread-name.sh
-  "<id>.verify"`. Give it the acceptance criteria, worktree, and diff base. It
+  <id> verify`. Give it the acceptance criteria, worktree, and diff base. It
   must exercise the affected behavior end to end without editing: use the real
   browser for a web flow, otherwise the narrowest executable CLI/API path. It
   returns `PASS` with observed evidence or `FAIL` with concrete findings. A
   missing browser/runtime/capability is `FAIL`, never a skip.
 - **security** — optional or auto. Run `bin/dm-pr.sh security-scan <id>` first.
   On a hit, spawn a fresh no-fork general reviewer using a label from
-  `bin/dm-thread-name.sh "<id>.security"` with this exact scope: inspect only
+  `bin/dm-thread-name.sh <id> security` with this exact scope: inspect only
   `<base>...HEAD` and changed files for auth/authz, input validation/injection,
   secret exposure, crypto misuse, unsafe external I/O, and privilege/data-loss
   paths; do not edit; return `PASS` or ranked concrete findings with file/line

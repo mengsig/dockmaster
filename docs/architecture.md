@@ -138,7 +138,10 @@ session or a scheduled task for long-running/recurring work.
 
 ## Concurrency & worktrees
 
-Independent work dispatches immediately within the runtime concurrency cap.
+Independent work dispatches in bounded waves within runtime capacity. Durable
+thread name is recorded before spawn; returned runtime id is recorded before the
+backlog item moves to in-flight. Codex keeps three of six slots available for
+approval, recovery, and review work.
 Work that touches the same
 repo subsystem, or depends on unlanded work, is serialized or recorded as
 blocked. Every ship task runs in its **own** worktree created by

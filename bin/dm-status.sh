@@ -115,6 +115,10 @@ else
   echo "  (no tasks)"
 fi
 
+section "DOMAIN SUPERVISORS (durable identities)"
+secondmates="$("$here/dm-secondmate.sh" reconcile 2>/dev/null || true)"
+if [ -n "$secondmates" ]; then printf '%s\n' "$secondmates"; else echo "  (none registered)"; fi
+
 section "OPEN PRs (needing attention)"
 # The fleet PR/health sweep, run through dm-pr.sh so the CI rollup has one owner.
 # DM_NO_FETCH is exported above, so the sweep performs NO network and reports the

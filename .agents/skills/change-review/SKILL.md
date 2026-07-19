@@ -40,6 +40,19 @@ of a command session does **not** wake the dockmaster's collaboration mailbox.
 The dockmaster therefore delegates each approval wait to one dedicated Codex
 waiter with `spawn_agent(..., fork_turns="none")`.
 
+Before spawning, derive and persist the waiter identity:
+
+```
+waiter_thread="$(bin/dm-thread-name.sh <id> review_waiter)"
+bin/dm-task.sh set <id> waiter_thread_name "$waiter_thread"
+```
+
+Reconcile any saved `waiter_agent_id` and exact thread name with `list_agents`.
+Reuse one exact idle match with `followup_task`; multiple matches are an
+ambiguity blocker. Only a proven zero-owner state permits `spawn_agent`. Persist
+its returned id immediately as `waiter_agent_id`, then set
+`waiter_state=active`.
+
 Give the waiter the absolute dockmaster directory, task id, and this exact job:
 
 1. Run `bin/dm-lavish.sh poll <id>` synchronously in the dockmaster directory.
@@ -52,7 +65,8 @@ The waiter's completion is delivered to the parent mailbox. Use `wait_agent`
 while the approval goal is active; when the waiter completes, reconcile the
 review and relay actionable feedback to the implementation crewmate. Never
 treat a raw background or yielded terminal session as a parent wake source.
-Keep the waiter id for this review session. If dispatch fails because no thread
+Keep the waiter id for this review session. On approval, session end, or visible
+waiter failure, set `waiter_agent_id` to empty and `waiter_state=terminal`. If dispatch fails because no thread
 slot is available, remain attached to the poll or surface the capacity blocker;
 never silently fall back to an unattended terminal wait.
 

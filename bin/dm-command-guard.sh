@@ -2,17 +2,70 @@
 # dm-command-guard.sh - block destructive Git shell commands before execution.
 
 set -euo pipefail
+DM_GUARD_DEPTH="${DM_GUARD_DEPTH:-0}"
 
 deny() {
   printf 'BLOCKED: destructive Git command refused: %s\n' "$1" >&2
   exit 2
 }
 
-clean_token() {
-  local token="$1"
-  token="${token#\"}"; token="${token%\"}"
-  token="${token#\'}"; token="${token%\'}"
-  printf '%s\n' "$token"
+append_token() {
+  TOKENS+=("$token")
+  DYNAMIC+=("$dynamic")
+  token=""; dynamic=0; started=0
+}
+
+lex_shell_command() {
+  local input="$1" i=0 char next state="plain" escaped=0
+  TOKENS=(); DYNAMIC=(); token=""; dynamic=0; started=0
+  while [ "$i" -lt "${#input}" ]; do
+    char="${input:$i:1}"; next="${input:$((i + 1)):1}"
+    if [ "$escaped" -eq 1 ]; then
+      token+="$char"; started=1; escaped=0; i=$((i + 1)); continue
+    fi
+    case "$state" in
+      single)
+        if [ "$char" = "'" ]; then state="plain"; else token+="$char"; fi
+        started=1
+        ;;
+      double)
+        case "$char" in
+          '"') state="plain" ;;
+          '\\') escaped=1 ;;
+          '$'|'`') token+="$char"; dynamic=1 ;;
+          *) token+="$char" ;;
+        esac
+        started=1
+        ;;
+      plain)
+        case "$char" in
+          "'") state="single"; started=1 ;;
+          '"') state="double"; started=1 ;;
+          '\\') escaped=1; started=1 ;;
+          '$'|'`') token+="$char"; dynamic=1; started=1 ;;
+          '#')
+            if [ "$started" -eq 0 ]; then break; else token+="$char"; fi
+            ;;
+          ' '|$'\t'|$'\n')
+            [ "$started" -eq 0 ] || append_token
+            ;;
+          ';'|'&'|'|'|'('|')')
+            [ "$started" -eq 0 ] || append_token
+            if { [ "$char" = "&" ] || [ "$char" = "|" ]; } && [ "$next" = "$char" ]; then
+              TOKENS+=("$char$char"); DYNAMIC+=(0); i=$((i + 1))
+            else
+              TOKENS+=("$char"); DYNAMIC+=(0)
+            fi
+            ;;
+          *) token+="$char"; started=1 ;;
+        esac
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  [ "$escaped" -eq 0 ] || deny "unterminated shell escape"
+  [ "$state" = "plain" ] || deny "unterminated shell quote"
+  [ "$started" -eq 0 ] || append_token
 }
 
 is_segment_end() {
@@ -24,7 +77,7 @@ git_subcommand_index() {
   local start="$1" end="$2" i token
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    token="$(clean_token "${TOKENS[$i]}")"
+    token="${TOKENS[$i]}"
     case "$token" in
       -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env) i=$((i + 2)) ;;
       -C*|-c*|--git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*) i=$((i + 1)) ;;
@@ -37,23 +90,37 @@ git_subcommand_index() {
 }
 
 has_arg() {
-  local start="$1" end="$2" wanted="$3" i token
+  local start="$1" end="$2" wanted="$3" i
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    token="$(clean_token "${TOKENS[$i]}")"
-    [ "$token" = "$wanted" ] && return 0
+    [ "${TOKENS[$i]}" = "$wanted" ] && return 0
     i=$((i + 1))
   done
   return 1
 }
 
 has_short_flag() {
-  local start="$1" end="$2" wanted="$3" i token flags
+  local start="$1" end="$2" wanted="$3" i flags
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    token="$(clean_token "${TOKENS[$i]}")"
-    case "$token" in
-      -?*) flags="${token#-}"; case "$flags" in *"$wanted"*) return 0 ;; esac ;;
+    case "${TOKENS[$i]}" in
+      -?*) flags="${TOKENS[$i]#-}"; case "$flags" in *"$wanted"*) return 0 ;; esac ;;
+    esac
+    i=$((i + 1))
+  done
+  return 1
+}
+
+contains_destructive_word() {
+  local start="$1" end="$2" i value
+  i="$start"
+  while [ "$i" -lt "$end" ]; do
+    value="${TOKENS[$i]}"
+    case "$value" in reset|clean|restore|checkout) return 0 ;; esac
+    case "$value" in
+      *reset*|*clean*|*restore*|*checkout*)
+        case "$value" in alias.*|*'git '*|*'/git '*) return 0 ;; esac
+        ;;
     esac
     i=$((i + 1))
   done
@@ -61,9 +128,16 @@ has_short_flag() {
 }
 
 check_git_segment() {
-  local git_index="$1" end="$2" sub_index subcommand
+  local git_index="$1" end="$2" sub_index subcommand i
+  i=$((git_index + 1))
+  while [ "$i" -lt "$end" ]; do
+    case "${TOKENS[$i]}" in
+      alias.*=*) contains_destructive_word "$i" $((i + 1)) && deny "Git alias expands to a destructive command" ;;
+    esac
+    i=$((i + 1))
+  done
   sub_index="$(git_subcommand_index "$git_index" "$end")" || return 0
-  subcommand="$(clean_token "${TOKENS[$sub_index]}")"
+  subcommand="${TOKENS[$sub_index]}"
   case "$subcommand" in
     reset) deny "git reset" ;;
     clean) deny "git clean" ;;
@@ -79,21 +153,85 @@ check_git_segment() {
   esac
 }
 
+check_nested_shell() {
+  local start="$1" end="$2" executable="$3" i option
+  case "$executable" in sh|bash|dash|zsh|eval) ;; *) return 0 ;; esac
+  if [ "$executable" = "eval" ]; then
+    i=$((start + 1))
+  else
+    i=$((start + 1))
+    while [ "$i" -lt "$end" ]; do
+      option="${TOKENS[$i]}"
+      case "$option" in
+        -*c*) i=$((i + 1)); break ;;
+        -*) i=$((i + 1)) ;;
+        *) return 0 ;;
+      esac
+    done
+  fi
+  [ "$i" -lt "$end" ] || return 0
+  DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "${TOKENS[$i]}"
+}
+
+segment_command_index() {
+  local i="$1" end="$2" wrapper token
+  while [ "$i" -lt "$end" ]; do
+    token="${TOKENS[$i]}"
+    case "$token" in *=*) i=$((i + 1)); continue ;; esac
+    wrapper="${token##*/}"
+    case "$wrapper" in
+      env)
+        i=$((i + 1))
+        while [ "$i" -lt "$end" ]; do
+          case "${TOKENS[$i]}" in -u|--unset) i=$((i + 2)) ;; -*|*=*) i=$((i + 1)) ;; *) break ;; esac
+        done
+        ;;
+      sudo)
+        i=$((i + 1))
+        while [ "$i" -lt "$end" ]; do
+          case "${TOKENS[$i]}" in -u|-g|-h|-p|-C|-T|-R) i=$((i + 2)) ;; -*) i=$((i + 1)) ;; *) break ;; esac
+        done
+        ;;
+      command)
+        i=$((i + 1)); while [ "$i" -lt "$end" ] && [[ "${TOKENS[$i]}" = -* ]]; do i=$((i + 1)); done
+        ;;
+      *) printf '%s\n' "$i"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+check_indirect_segment() {
+  local start="$1" end="$2" i
+  i="$(segment_command_index "$start" "$end")" || return 0
+  if [ "${DYNAMIC[$i]}" -eq 1 ] && contains_destructive_word $((i + 1)) "$end"; then
+    deny "indirect executable followed by a destructive Git form"
+  fi
+}
+
 check_shell_command() {
-  local command="$1" normalized i end token executable
-  normalized="$(printf '%s' "$command" | tr '\n' ' ' | sed 's/[;&|()]/ & /g')"
-  read -r -a TOKENS <<< "$normalized"
-  i=0
+  local command="$1" i=0 end command_index token executable
+  [ "$DM_GUARD_DEPTH" -le 4 ] || deny "excessively nested shell command"
+  case "$command" in
+    *'$('*git*reset*|*'$('*git*clean*|*'$('*git*restore*|*'$('*git*checkout*|*'`'*git*reset*|*'`'*git*clean*|*'`'*git*restore*|*'`'*git*checkout*)
+      deny "command substitution builds a destructive Git form" ;;
+  esac
+  lex_shell_command "$command"
   while [ "$i" -lt "${#TOKENS[@]}" ]; do
-    token="$(clean_token "${TOKENS[$i]}")"; executable="${token##*/}"
-    if [ "$executable" = "git" ]; then
-      end=$((i + 1))
-      while [ "$end" -lt "${#TOKENS[@]}" ] && ! is_segment_end "${TOKENS[$end]}"; do end=$((end + 1)); done
-      check_git_segment "$i" "$end"
-      i="$end"
-    else
-      i=$((i + 1))
+    if is_segment_end "${TOKENS[$i]}"; then i=$((i + 1)); continue; fi
+    end="$i"
+    while [ "$end" -lt "${#TOKENS[@]}" ] && ! is_segment_end "${TOKENS[$end]}"; do end=$((end + 1)); done
+    check_indirect_segment "$i" "$end"
+    if command_index="$(segment_command_index "$i" "$end")"; then
+      token="${TOKENS[$command_index]}"; executable="${token##*/}"
+      check_nested_shell "$command_index" "$end" "$executable"
     fi
+    while [ "$i" -lt "$end" ]; do
+      token="${TOKENS[$i]}"; executable="${token##*/}"
+      [ "$executable" != "git" ] || check_git_segment "$i" "$end"
+      i=$((i + 1))
+    done
+    i=$((end + 1))
   done
 }
 

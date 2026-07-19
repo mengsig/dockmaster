@@ -12,8 +12,7 @@
 # its tooling check here so "what the toolbelt needs" lives in exactly one place.
 #
 # Usage:
-#   dm-doctor.sh          full report + scaffold; exit 1 if a REQUIRED tool is missing
-#   dm-doctor.sh check    compact tooling + GitHub-auth check only (no scaffold)
+#   dm-doctor.sh [check] [--runtime auto|claude|codex|both]
 #
 # Exit 0 = required tools present. Exit 1 = a required tool is missing. A missing
 # PR-flow or optional tool warns and degrades a feature, but never fails the
@@ -70,10 +69,71 @@ report_warn_tier() {
   done
 }
 
+runtime_probe() {
+  local runtime="$1"
+  command -v "$runtime" >/dev/null 2>&1 || return 2
+  case "$runtime" in
+    claude) claude auth status --json >/dev/null 2>&1 ;;
+    codex) codex login status >/dev/null 2>&1 ;;
+  esac
+}
+
+report_one_runtime() {
+  local runtime="$1" required="$2" status=0
+  runtime_probe "$runtime" || status=$?
+  case "$status" in
+    0) printf '  ok       %-13s %s\n' "$runtime-runtime" "installed and authenticated"; return 0 ;;
+    2) printf '  %s  %-13s %s\n' "$required" "$runtime-runtime" "CLI absent" ;;
+    *) printf '  %s  %-13s %s\n' "$required" "$runtime-runtime" "authentication unavailable" ;;
+  esac
+  [ "$required" = "MISSING" ] && return 1
+  return 0
+}
+
+report_runtime() {
+  local selected="$1" claude_ok=0 codex_ok=0 miss=0
+  runtime_probe claude && claude_ok=1 || true
+  runtime_probe codex && codex_ok=1 || true
+  case "$selected" in
+    claude|codex) report_one_runtime "$selected" MISSING || miss=1 ;;
+    both)
+      report_one_runtime claude MISSING || miss=$((miss + 1))
+      report_one_runtime codex MISSING || miss=$((miss + 1))
+      ;;
+    auto)
+      if [ "$claude_ok" -eq 1 ]; then report_one_runtime claude MISSING
+      elif [ "$codex_ok" -eq 1 ]; then report_one_runtime codex MISSING
+      else
+        printf '  MISSING  %-13s %s\n' "agent-runtime" "no authenticated Claude or Codex runtime"
+        miss=1
+      fi
+      [ "$claude_ok" -eq 1 ] || report_one_runtime claude warn
+      [ "$codex_ok" -eq 1 ] || report_one_runtime codex warn
+      ;;
+  esac
+  return "$miss"
+}
+
+report_node() {
+  local version major
+  if ! command -v node >/dev/null 2>&1; then
+    printf '  warn     %-13s %s\n' node 'development/runtime validation unavailable (requires Node >=14)'
+    return 0
+  fi
+  version="$(node -p 'process.versions.node' 2>/dev/null || true)"
+  major="${version%%.*}"
+  case "$major" in ''|*[!0-9]*) major=0 ;; esac
+  if [ "$major" -ge 14 ]; then
+    printf '  ok       %-13s %s\n' node "development/runtime validation (${version})"
+  else
+    printf '  warn     %-13s %s\n' node "${version:-unknown}; development checks require >=14"
+  fi
+}
+
 # report_tools <compact> -> prints one line per tool; returns the count of
 # missing REQUIRED tools (so a caller can gate on readiness).
 report_tools() {
-  local compact="$1" name purpose miss=0 i
+  local compact="$1" selected_runtime="$2" name purpose miss=0 runtime_miss=0 i
   for ((i = 0; i < ${#REQUIRED_TOOLS[@]}; i += 2)); do
     name="${REQUIRED_TOOLS[i]}"; purpose="${REQUIRED_TOOLS[i + 1]}"
     if command -v "$name" >/dev/null 2>&1; then
@@ -86,6 +146,9 @@ report_tools() {
   done
   report_warn_tier "$compact" "needed for the PR flow" "${PRFLOW_TOOLS[@]}"
   report_warn_tier "$compact" "optional" "${OPTIONAL_TOOLS[@]}"
+  report_node
+  report_runtime "$selected_runtime" || runtime_miss=$?
+  miss=$((miss + runtime_miss))
   # GitHub auth only matters when gh is present.
   if command -v gh >/dev/null 2>&1; then
     if gh auth status >/dev/null 2>&1; then
@@ -119,17 +182,37 @@ probe_state_json() {
     printf '       ^ restore from git or a backup, or reset to {"items":[],"decisions":[]}\n'
     bad=$((bad + 1))
   fi
+  if [ -f "$DM_STATE/secondmates.json" ] && ! jq -e '
+      (.secondmates | type) == "object" and
+      all(.secondmates[];
+        (.status | IN("launching","active","dormant","retired")) and
+        (.thread_name | type == "string") and
+        (.agent_id | type == "string") and
+        (.repos | type == "array"))
+    ' "$DM_STATE/secondmates.json" >/dev/null 2>&1; then
+    printf '  FAIL state/secondmates.json has invalid supervisor state\n'
+    printf '       ^ restore a valid {"secondmates":{}} document; do not hand-edit live identity records\n'
+    bad=$((bad + 1))
+  fi
   return "$bad"
 }
 
-mode="${1:-full}"
+mode="full"; selected_runtime="auto"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    check|full) mode="$1"; shift ;;
+    --runtime) selected_runtime="${2:-}"; shift 2 ;;
+    *) dm_die "usage: dm-doctor.sh [check] [--runtime auto|claude|codex|both]" ;;
+  esac
+done
+case "$selected_runtime" in auto|claude|codex|both) ;; *) dm_die "runtime must be auto|claude|codex|both" ;; esac
 case "$mode" in
   check)
     # Compact readiness probe for dm-session-start; no scaffold, no headings.
     # Tooling first, then state-JSON integrity so a corrupt registry surfaces its
     # recovery hint here (session-start runs `check` before its repo/backlog
     # sections) instead of as raw jq errors later.
-    miss=0; report_tools 1 || miss=$?
+    miss=0; report_tools 1 "$selected_runtime" || miss=$?
     badjson=0; probe_state_json || badjson=$?
     if [ "$miss" -gt 0 ]; then exit "$miss"; fi
     if [ "$badjson" -gt 0 ]; then exit 1; fi
@@ -137,7 +220,7 @@ case "$mode" in
 
   full|"")
     section "TOOLING"
-    miss=0; report_tools 0 || miss=$?
+    miss=0; report_tools 0 "$selected_runtime" || miss=$?
 
     section "HOME (scaffolded if missing)"
     dm_ensure_dirs
@@ -171,6 +254,6 @@ case "$mode" in
     ;;
 
   *)
-    dm_die "usage: dm-doctor.sh [check]"
+    dm_die "usage: dm-doctor.sh [check] [--runtime auto|claude|codex|both]"
     ;;
 esac

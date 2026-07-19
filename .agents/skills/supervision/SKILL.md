@@ -14,7 +14,9 @@ A crewmate is a **Codex subagent thread**. `spawn_agent` returns immediately.
 Completion is delivered to the parent mailbox; `wait_agent` blocks efficiently
 until a mailbox update or steered user input rather than polling task files.
 
-1. **Dispatch** a crewmate with `spawn_agent(..., fork_turns="none")`; record its id.
+1. **Dispatch** only after persisting its deterministic role-specific thread
+   name. Call `spawn_agent(..., fork_turns="none")`, persist its returned id
+   immediately, then mark the backlog item in flight.
 2. **Resume** the conversation and dispatch other independent work. Do not block.
 3. **On a mailbox completion**, reconcile and act:
    - `bin/dm-task.sh state <id>` for authoritative current state.
@@ -56,6 +58,13 @@ must run the command synchronously, resume any yielded session until terminal,
 and return only the result or visible failure. The waiter completion reaches the
 parent mailbox; `wait_agent` then provides the native wake path. Keep this waiter
 read-only and single-purpose, and do not count it as a second owner of the task.
+Derive its identity with `bin/dm-thread-name.sh <id> review_waiter`; persist
+`waiter_thread_name`, `waiter_agent_id`, and `waiter_state=active` in task meta.
+Before spawning, reconcile the saved id and exact name with `list_agents`:
+reattach one exact match, block on multiple, and spawn only after proving zero.
+Reuse an idle waiter with `followup_task`. On terminal approval, session end, or
+visible waiter failure, clear `waiter_agent_id` and set `waiter_state=terminal`;
+never leave a stale waiter recorded as active.
 
 ## External waits
 
@@ -101,10 +110,11 @@ silently.
 
 Supervision state lives on disk, not in this conversation. On restart,
 `dm-session-start` reconciles it. For each in-flight task whose agent is gone but
-whose worktree still holds unlanded work, load `stuck-worker`: re-attach by
-`agent_id` if the thread is still addressable, else prove no live owner remains
-before re-dispatching the same task into the same worktree. Never spawn a
-duplicate — a second worktree splits one task across two copies.
+whose worktree still holds unlanded work, load `stuck-worker`: re-attach by exact
+`agent_id`; if absent, list and match the exact persisted `thread_name`. One
+match is adopted, zero requires a no-live-owner proof, and multiple matches fail
+closed as ambiguous. Never spawn a duplicate — a second worktree splits one
+task across two copies.
 
 ## Discipline
 

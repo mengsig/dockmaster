@@ -128,7 +128,9 @@ Run any script with no arguments for its usage.
 
 Supported platforms: macOS and Linux; the scripts run on bash 3.2+.
 
-- **Required for anything:** Claude Code or Codex, plus `git` and `jq`.
+- **Required for anything:** one authenticated runtime (Claude Code or Codex),
+  plus `git` and `jq`. Select explicitly with `bin/dm-doctor.sh check --runtime
+  claude|codex`; the default `auto` accepts either and never requires both.
 - **Required for the PR flow:** the GitHub CLI `gh`, authenticated with
   `gh auth login` (or the `gh-axi` wrapper below). Without it the dockmaster
   still runs in local-only mode — approved fast-forward landing, no PR.
@@ -141,6 +143,11 @@ Supported platforms: macOS and Linux; the scripts run on bash 3.2+.
 
 Per-repo memory is plain markdown — no extra tool to install. Run
 `bin/dm-doctor.sh` to see what you have and what each tool gates.
+
+Node.js is not a toolbelt/runtime dependency. Repository JS validation requires
+Node 14 or newer; CI checks that documented minimum. CLI startup timing is an
+opt-in, bounded, non-fatal diagnostic:
+`DM_RUNTIME_STARTUP_SAMPLE=1 bash tests/runtime-performance.sh`.
 
 Run `node tests/check-runtime-parity.js` for adapter/capability drift,
 `bash tests/runtime-performance.sh` for context guardrails, and

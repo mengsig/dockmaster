@@ -58,8 +58,12 @@ For each target repo, run the normal `task-lifecycle` dispatch (`dm-task.sh new`
 create` → `dm-brief.sh` → spawn the crewmate). Nothing here is special-cased:
 the child is briefed, gated, and delivered exactly as a single-repo task. Route
 a child to an existing `secondmate` where one owns that repo (load `secondmate`).
-Dispatch independent children immediately; hold `--blocked-by` children until
-`bin/dm-backlog.sh ready` clears them.
+Dispatch independent children in bounded waves through `task-lifecycle`; respect
+the active runtime's capacity and keep enough room for approval, recovery, and
+review workers. Keep excess children queued and mark a child `inflight` only
+after its runtime owner is durably recorded. Hold `--blocked-by` children until
+`bin/dm-backlog.sh ready` clears them. A campaign is never authority for
+unbounded fan-out.
 
 ## 4. Supervise and report as a unit
 

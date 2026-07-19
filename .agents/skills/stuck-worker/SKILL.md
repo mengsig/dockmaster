@@ -40,9 +40,14 @@ splits one task across two copies.
 
 Before relaunching anything:
 
-- Prove no live agent still owns the task and the worktree is available.
+- Read the persisted `agent_id` and `thread_name`, then inspect `list_agents`.
+  An exact id or exactly one exact-name match is still the owner; persist any
+  recovered id and reattach. Multiple exact-name matches are ambiguous and
+  block recovery. Only zero matches proves there is no live owner.
 - Preserve uncommitted changes and commits; keep the same task id.
-- Relaunch in the **same worktree** with the same brief and a progress note.
+- Relaunch in the **same worktree** with the same brief and a progress note;
+  reuse the deterministic `bin/dm-thread-name.sh <id> worker` label and persist
+  the new returned id immediately.
 
 If ownership cannot be reconciled safely, leave the state exactly as it is and
 report `blocked`/`failed` with evidence — do not risk a split-brain duplicate.

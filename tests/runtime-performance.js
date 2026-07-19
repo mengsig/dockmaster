@@ -2,6 +2,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
 const ROOT = process.env.DM_PARITY_ROOT
@@ -19,6 +20,10 @@ function json(relativePath) {
 
 function bytes(relativePath) {
   return fs.statSync(path.join(ROOT, relativePath)).size
+}
+
+function sha256(relativePath) {
+  return crypto.createHash('sha256').update(fs.readFileSync(path.join(ROOT, relativePath))).digest('hex')
 }
 
 function skillMetrics(root) {
@@ -40,9 +45,12 @@ function medianStartup(command) {
   const samples = []
   for (let i = 0; i < 5; i++) {
     const start = process.hrtime.bigint()
-    const run = spawnSync(command, ['--version'], { encoding: 'utf8' })
+    const run = spawnSync(command, ['--version'], { encoding: 'utf8', timeout: 3000 })
     if (run.error?.code === 'ENOENT') return null
-    if (run.status !== 0) throw new Error(`${command} --version failed: ${run.stderr}`)
+    if (run.error || run.status !== 0) {
+      console.error(`warn ${command} startup sample unavailable: ${run.error?.code || run.status}`)
+      return null
+    }
     samples.push(Number(process.hrtime.bigint() - start) / 1e6)
   }
   samples.sort((a, b) => a - b)
@@ -63,6 +71,16 @@ function assertGuardrails(metrics) {
   if (metrics.claude.skills.descriptions !== BASELINE.claude_skill_description_bytes) {
     throw new Error('Codex support changed Claude skill discovery descriptions')
   }
+  for (const [file, expected] of Object.entries(BASELINE.claude_files_sha256)) {
+    if (metrics.claude.files_sha256[file] !== expected) {
+      throw new Error(`Claude runtime file changed: ${file}`)
+    }
+  }
+  const actualFiles = Object.keys(metrics.claude.files_sha256).sort()
+  const expectedFiles = Object.keys(BASELINE.claude_files_sha256).sort()
+  if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
+    throw new Error('Claude runtime file hash inventory changed')
+  }
   for (const [runtime, skill] of Object.entries({ claude: metrics.claude.skills, codex: metrics.codex.skills })) {
     if (skill.descriptions > limits.skill_description_bytes_per_runtime) {
       throw new Error(`${runtime} descriptions exceed ${limits.skill_description_bytes_per_runtime}B`)
@@ -72,6 +90,8 @@ function assertGuardrails(metrics) {
 }
 
 function collect() {
+  const sampleStartup = process.env.DM_RUNTIME_STARTUP_SAMPLE === '1'
+  const claudeFiles = Object.keys(BASELINE.claude_files_sha256)
   return {
     baseline_commit: BASELINE.base_commit,
     shared: {
@@ -82,14 +102,16 @@ function collect() {
     claude: {
       settings: bytes('.claude/settings.json'),
       skills: skillMetrics('.claude/skills'),
-      cli_startup_median_ms: medianStartup('claude'),
+      files_sha256: Object.fromEntries(claudeFiles.map((file) => [file, sha256(file)])),
+      cli_startup_median_ms: sampleStartup ? medianStartup('claude') : null,
     },
     codex: {
       config: bytes('.codex/config.toml'),
       rules: bytes('.codex/rules/dockmaster.rules'),
       skills: skillMetrics('.agents/skills'),
-      cli_startup_median_ms: medianStartup('codex'),
+      cli_startup_median_ms: sampleStartup ? medianStartup('codex') : null,
     },
+    startup_sampling: sampleStartup ? 'bounded diagnostic' : 'disabled (set DM_RUNTIME_STARTUP_SAMPLE=1)',
   }
 }
 
