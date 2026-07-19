@@ -4,7 +4,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 command -v codex >/dev/null 2>&1 || { echo "Codex CLI is required" >&2; exit 1; }
-tmp="$(mktemp -d "${TMPDIR:-/tmp}/dm-codex-offline.XXXXXX")"
+# Canonicalize: codex reports the real CODEX_HOME path, but macOS $TMPDIR lives
+# under /var -> /private/var, so a raw mktemp path would never string-match.
+tmp="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/dm-codex-offline.XXXXXX")" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 check_strict_config() {
