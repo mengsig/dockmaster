@@ -215,11 +215,16 @@ invariants, pitfalls, routing. Curated — not append-forever._
   up AND exit — a trapped signal must not resume the unlocked section). It
   self-heals only a DEAD-PID lock (reclaim serialized by a second lock, re-verified
   before removal); a stuck-but-alive or metadata-less lock fails visibly at ~30s.
+- **[invariant]** `dm-lib.sh` owns task-meta syntax: ids and keys are allowlisted,
+  keys cannot contain `=`/line breaks, and values cannot contain CR/LF. Validate
+  there before locking so every writer shares the same injection guard.
 - **[invariant]** Landing/PR fields (`pr`, `pr_state`, `merge_state`, the atomic
   `pr_check_snapshot`, and the `merged` status event) are written ONLY by
-  `dm-pr`/`dm-merge` (directly via
-  `dm_meta_set`/`dm_status_append`); `dm-task.sh set`/`event` reject them so a
-  crewmate cannot forge a landed signal. `dm-task.sh state`/`landed` refresh
+  `dm-pr`/`dm-merge` (directly via `dm_meta_set`/`dm_status_append`);
+  `dm-task.sh set`/`event` reject them so a crewmate cannot forge a landed
+  signal. Merge/await consume the snapshot returned by their own `check`
+  invocation, never a concurrently-overwritable cached snapshot.
+  `dm-task.sh state`/`landed` refresh
   `pr_state` live (skipped under `DM_NO_FETCH=1`) so an out-of-band merge is seen;
   bulk `list` and `dm-status` run offline.
 - **[invariant]** Never merge red: `dm-pr.sh merge` refuses `failing`/`pending`/
@@ -228,7 +233,12 @@ invariants, pitfalls, routing. Curated — not append-forever._
   worktree/clone) — once a repo has CI, `none` always refuses regardless of the
   flag (#49). `.github/workflows` presence is used only to FORBID the bypass,
   never to auto-pass `none`. The decision is the pure, offline-testable
-  `dm_merge_gate <rollup> <allow_no_checks> <has_ci>`.
+  `dm_merge_gate <rollup> <allow_no_checks> <has_ci>`. Check-runs request one
+  bounded 100-item page and become `unknown` if `total_count` proves it
+  incomplete. Merge additionally requires state `OPEN`, matching local+remote
+  head refs, and GitHub's atomic merge endpoint accepting the checked `sha`.
+  Requested branch deletion happens only after success and only for same-repo
+  heads; fork refs are never deleted.
 - **[invariant]** Per-repo `merge_authority` (yolo|ask|never) is an enforced
   merge gate, not just prose. `never` HARD-refuses in `dm-pr.sh merge` and
   `dm-merge.sh local` (before any gh call, no flag bypasses) via the pure

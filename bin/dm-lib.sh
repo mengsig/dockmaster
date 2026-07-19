@@ -133,9 +133,20 @@ dm_require_id() {
 dm_meta_path() { printf '%s/%s.meta\n' "$DM_TASKS" "$1"; }
 dm_status_path() { printf '%s/%s.status\n' "$DM_TASKS" "$1"; }
 
+dm_valid_meta_key() {
+  case "${1:-}" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "${#1}" -le 64 ]
+}
+
+dm_require_meta_key() {
+  dm_valid_meta_key "$1" || dm_die "invalid meta key: '$1' (use [A-Za-z0-9._-], <= 64 chars)"
+}
+
 dm_meta_get() {
   # dm_meta_get <id> <key>  -> prints value or empty. The key is matched as a
   # FIXED string (not a regex); value may itself contain '='; last line wins.
+  dm_require_id "$1"
+  dm_require_meta_key "$2"
   local f; f="$(dm_meta_path "$1")"
   [ -f "$f" ] || return 0
   awk -v k="$2" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) } END { print v }' "$f"
@@ -145,9 +156,10 @@ dm_meta_set() {
   # dm_meta_set <id> <key> <value>  (value must be single-line). The key is
   # matched as a FIXED string (not a regex) when dropping the old line.
   dm_require_id "$1"
+  dm_require_meta_key "$2"
   dm_ensure_dirs
   local f tmp; f="$(dm_meta_path "$1")"
-  case "$3" in *$'\n'*) dm_die "meta value for '$2' must be single-line" ;; esac
+  case "$3" in *$'\n'*|*$'\r'*) dm_die "meta value for '$2' must be single-line" ;; esac
   dm_lock "$f"
   tmp="$(mktemp "$DM_TASKS/.meta.XXXXXX")" || { dm_unlock "$f"; dm_die "mktemp failed for meta '$1'"; }
   # Build into $tmp; on any write failure remove the temp (no orphan) and fail
