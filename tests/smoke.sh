@@ -581,8 +581,8 @@ check "seed creates the private notes store"          '[ -f "$DM_HOME/repos/demo
 check "seed git-excludes the private store"           'grep -qxF ".dm/" "$DM_HOME/repos/demo/.git/info/exclude"'
 check "seed leaves the clone pristine"                '[ -z "$(git -C "$DM_HOME/repos/demo" status --porcelain)" ]'
 check "seed is idempotent"                            'b dm-memory.sh seed demo >/dev/null 2>&1'
-# SHARED knowledge is authored by a crewmate in a worktree and committed; simulate
-# a committed dm:knowledge section and assert recall surfaces + filters it.
+# A committed LEGACY dm:knowledge block in AGENTS.md must still surface in recall
+# (back-compat / migration); simulate one and assert recall surfaces + filters it.
 printf '# demo\n\n<!-- dm:knowledge:start -->\n## Repository knowledge\n- **[command]** run tests with pytest -q\n<!-- dm:knowledge:end -->\n' > "$DM_HOME/repos/demo/AGENTS.md"
 b dm-memory.sh remember demo --private --kind routing "prefer squash merges here" >/dev/null
 check "remember --private appends the fact"           'grep -q "squash merges" "$DM_HOME/repos/demo/.dm/notes.md"'
@@ -598,7 +598,7 @@ GRECALL="$(b dm-memory.sh recall --global)"
 check "recall --global shows fleet learnings"         'grep -q "fleet gotcha alpha" <<<"$GRECALL"'
 check "multi-line fact is rejected"     '! b dm-memory.sh remember demo --private --kind command "$(printf "a\nb")" >/dev/null 2>&1'
 check "invalid kind is rejected"        '! b dm-memory.sh remember demo --private --kind bogus "x" >/dev/null 2>&1'
-check "shared append via tool is refused" '! b dm-memory.sh remember demo --kind command "x" >/dev/null 2>&1'
+check "remember with no store selector is refused" '! b dm-memory.sh remember demo --kind command "x" >/dev/null 2>&1'
 check "unregistered repo is rejected"   '! b dm-memory.sh seed nope >/dev/null 2>&1'
 
 echo "== dm-memory: recall query is a literal substring, not a regex (fix 4) =="
@@ -638,6 +638,53 @@ cmiss=0
 for i in $(seq 1 15); do grep -q "concfact$i" "$DM_HOME/repos/memconc/.dm/notes.md" || cmiss=$((cmiss+1)); done
 check "all 15 concurrent private facts survived" '[ "$cmiss" -eq 0 ]'
 check "exactly one private-notes header"         '[ "$(grep -c "dockmaster private notes" "$DM_HOME/repos/memconc/.dm/notes.md")" -eq 1 ]'
+
+echo "== dm-memory: shared knowledge via committed per-task files (#81) =="
+# SHARED knowledge is one committed file per note under .dm-knowledge/, written into
+# a worktree by `remember <id> --shared`. Two concurrent tasks write DIFFERENT files
+# (named by task id) so recording knowledge never collides on a hot AGENTS.md block.
+b dm-repo.sh add shknow "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-task.sh new shk-a --kind ship --repo shknow >/dev/null
+b dm-task.sh new shk-b --kind ship --repo shknow >/dev/null
+SKWA="$(b dm-worktree.sh create shk-a shknow | tail -n1)"
+SKWB="$(b dm-worktree.sh create shk-b shknow | tail -n1)"
+git -C "$SKWA" checkout -q -b feat/x/shk-a
+git -C "$SKWB" checkout -q -b feat/x/shk-b
+b dm-memory.sh remember shk-a --shared --kind convention "note ALPHA from shk-a" >/dev/null
+b dm-memory.sh remember shk-b --shared --kind convention "note BETA from shk-b" >/dev/null
+check "shared note A lands in task A's own worktree file" '[ -f "$SKWA/.dm-knowledge/shk-a.md" ] && grep -q "note ALPHA from shk-a" "$SKWA/.dm-knowledge/shk-a.md"'
+check "shared note B lands in task B's own worktree file" '[ -f "$SKWB/.dm-knowledge/shk-b.md" ] && grep -q "note BETA from shk-b" "$SKWB/.dm-knowledge/shk-b.md"'
+check "the two tasks write different note files"          '[ "$SKWA/.dm-knowledge/shk-a.md" != "$SKWB/.dm-knowledge/shk-b.md" ] && ! grep -q "BETA" "$SKWA/.dm-knowledge/shk-a.md"'
+check "shared remember refuses a task with no worktree"   '! b dm-memory.sh remember no-such-task --shared --kind command "x" >/dev/null 2>&1'
+check "shared remember rejects an invalid kind"           '! b dm-memory.sh remember shk-a --shared --kind bogus "x" >/dev/null 2>&1'
+git -C "$SKWA" add .dm-knowledge/shk-a.md && git -C "$SKWA" -c user.email=c@c.co -c user.name=c commit -qm "knowledge A" >/dev/null
+git -C "$SKWB" add .dm-knowledge/shk-b.md && git -C "$SKWB" -c user.email=c@c.co -c user.name=c commit -qm "knowledge B" >/dev/null
+# Land A, then B. B is behind after A lands; a rebase must replay CLEANLY because
+# each task touched a DIFFERENT file — the exact conflict the old hot AGENTS.md
+# block manufactured on nearly every PR (#81).
+check "first shared note lands"                       'b dm-merge.sh local shk-a >/dev/null'
+check "second note rebases without a notes collision" 'b dm-merge.sh rebase shk-b >/dev/null 2>&1'
+check "second shared note lands"                      'b dm-merge.sh local shk-b >/dev/null'
+check "both notes are committed in the clone" 'LS="$(git -C "$DM_HOME/repos/shknow" ls-files .dm-knowledge)"; grep -q "shk-a.md" <<<"$LS" && grep -q "shk-b.md" <<<"$LS"'
+SKREC="$(b dm-memory.sh recall shknow)"
+check "recall surfaces both landed shared notes" 'grep -q "note ALPHA from shk-a" <<<"$SKREC" && grep -q "note BETA from shk-b" <<<"$SKREC"'
+# The brief must point crewmates at the new mechanism AND relay the landed notes.
+b dm-task.sh new shk-brief --kind ship --repo shknow >/dev/null
+b dm-worktree.sh create shk-brief shknow >/dev/null 2>&1
+b dm-brief.sh shk-brief >/dev/null 2>/dev/null
+check "brief surfaces landed shared notes"     'grep -q "note ALPHA from shk-a" "$DM_HOME/data/shk-brief/brief.md"'
+check "brief points crewmates at remember --shared" 'grep -q -- "--shared" "$DM_HOME/data/shk-brief/brief.md"'
+
+echo "== dm-memory: recall assembles directory notes + legacy AGENTS.md block (migration) =="
+# demo carries a legacy committed dm:knowledge block in AGENTS.md (above). A
+# .dm-knowledge/ note must surface ALONGSIDE it, so pre-existing inline knowledge is
+# never stranded by the move to per-file notes.
+mkdir -p "$DM_HOME/repos/demo/.dm-knowledge"
+printf -- '- **[convention]** use ruff for lint\n' > "$DM_HOME/repos/demo/.dm-knowledge/mig-note.md"
+MIGREC="$(b dm-memory.sh recall demo)"
+check "recall surfaces a .dm-knowledge note"             'grep -q "use ruff for lint" <<<"$MIGREC"'
+check "recall still surfaces the legacy AGENTS.md block" 'grep -q "pytest -q" <<<"$MIGREC"'
+rm -rf "$DM_HOME/repos/demo/.dm-knowledge"
 
 # === toolbelt-debt tests (#23) ===
 echo "== toolbelt debt: backlog write via delegated bwrite =="

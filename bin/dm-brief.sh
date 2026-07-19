@@ -96,8 +96,9 @@ primary clone. If it is not, do nothing else - append a blocked status and stop:
 ## Memory (per-repo, plain markdown - no bespoke tool)
 
 What this repo already knows that bears on your task is injected below. SHARED
-knowledge lives in this repo's own \`AGENTS.md\` \`dm:knowledge\` section (committed,
-so it travels to every clone and worktree). PRIVATE notes (the \`private notes\`
+knowledge lives as committed per-note files in this repo's \`.dm-knowledge/\`
+directory (so it travels to every clone and worktree; the notes are assembled
+into the section below). PRIVATE notes (the \`private notes\`
 section) are dockmaster orchestration context relayed to you for your awareness
 ONLY: use them to inform your work, but never copy or paraphrase them into
 commits, PR descriptions, code comments, or the repo's \`AGENTS.md\` — they must
@@ -114,10 +115,11 @@ $fleet
 
 When you learn something durable, non-obvious, and repo-specific, record it:
 - A SHARED, contributor-relevant fact (a build/test command, an invariant, a
-  pitfall, a convention, a routing hint) → edit the \`dm:knowledge\` section of
-  this repo's \`AGENTS.md\` IN YOUR WORKTREE and commit it with your change, as one
-  curated \`- **[<kind>]** <fact>\` bullet. Rewrite a superseded fact; do not append
-  forever.
+  pitfall, a convention, a routing hint) → record it IN YOUR WORKTREE with
+  \`$DM_HOME/bin/dm-memory.sh remember $id --shared --kind <kind> "<fact>"\` (writes
+  a \`- **[<kind>]** <fact>\` bullet to \`.dm-knowledge/$id.md\`), then \`git add\` and
+  commit that file with your change. One file per task, so concurrent work never
+  collides; to supersede a fact, edit the note file that holds it.
 - A private/orchestration fact → \`$DM_HOME/bin/dm-memory.sh remember $repo --private --kind <kind> "<fact>"\`.
 
 Do not store secrets, transient failures, task status, or code excerpts.

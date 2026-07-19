@@ -4,14 +4,17 @@
 # No bespoke database, no query engine: memory is markdown you can read, diff,
 # and edit by hand. Three stores, each with exactly one owner:
 #
-#   1. SHARED (committed, travels)  - the `dm:knowledge` section inside a managed
-#      repo's own AGENTS.md, delimited by the markers below. Contributor-relevant
-#      facts (build/test commands, conventions, invariants, pitfalls, routing). It
-#      is committed and so reaches every clone and worktree for free. The dockmaster
-#      NEVER writes it here: a crewmate adds/edits this section IN ITS WORKTREE and
-#      commits it with its work, so the clone stays pristine (landable and
-#      fast-forward-syncable). `seed` therefore never touches the clone's AGENTS.md;
-#      `recall` reads whatever committed section the clone has.
+#   1. SHARED (committed, travels)  - one file per note under a managed repo's
+#      committed `.dm-knowledge/` directory (a distinct, TRACKED dir, NOT the
+#      git-excluded `.dm/`). Contributor-relevant facts (build/test commands,
+#      conventions, invariants, pitfalls, routing). Committed, so it reaches every
+#      clone and worktree for free. A crewmate records a note with `remember <id>
+#      --shared` IN ITS WORKTREE (file `.dm-knowledge/<id>.md`) and commits it with
+#      its work; one file per task means two concurrent tasks never edit the same
+#      block, so notes no longer serialize on a hot AGENTS.md (#81). The dockmaster
+#      never writes the clone directly. `recall` assembles the directory's notes
+#      PLUS the legacy `dm:knowledge` AGENTS.md block (migration: pre-existing
+#      inline knowledge is never stranded). `seed` only scaffolds the private store.
 #
 #   2. PRIVATE (git-excluded, RELAYED to crewmates)  - repos/<repo>/.dm/notes.md.
 #      Per-repo orchestration context: routing, per-repo operator preferences,
@@ -36,6 +39,7 @@
 # Usage:
 #   dm-memory.sh recall <repo> [query] [--crew]
 #   dm-memory.sh recall --global [query]
+#   dm-memory.sh remember <id> --shared --kind <kind> "<fact>"
 #   dm-memory.sh remember <repo> --private --kind <kind> "<fact>"
 #   dm-memory.sh remember <repo> --dockmaster-only --kind <kind> "<fact>"
 #   dm-memory.sh remember --global --kind <kind> "<fact>"
@@ -55,6 +59,13 @@ dm_ensure_dirs
 DM_KNOWLEDGE_START='<!-- dm:knowledge:start -->'
 DM_KNOWLEDGE_END='<!-- dm:knowledge:end -->'
 
+# Per-repo SHARED knowledge as one committed file per note (#81). A crewmate
+# writes its note into this worktree dir and commits it; two concurrent tasks
+# write DIFFERENT files (named by task id) so recording knowledge never
+# serializes on a single AGENTS.md block. A TRACKED dir, deliberately distinct
+# from the git-excluded `.dm/`, so the notes are committed and travel with the repo.
+DM_KNOWLEDGE_DIR='.dm-knowledge'
+
 # Soft per-store line cap for recall output. Keeps an unbounded store from
 # flooding a brief (dm-brief injects recall verbatim); a tail pointer tells the
 # reader how to see the rest with a query. Full content is always reachable via
@@ -68,8 +79,9 @@ usage() {
   cat <<'EOF'
 dm-memory.sh - native plain-markdown context for the dockmaster
 
-  recall <repo> [query] [--crew]   print a repo's SHARED knowledge (its AGENTS.md
-                                   dm:knowledge section) + PRIVATE notes + the
+  recall <repo> [query] [--crew]   print a repo's SHARED knowledge (its committed
+                                   .dm-knowledge/ notes + the legacy AGENTS.md
+                                   dm:knowledge block) + PRIVATE notes + the
                                    DOCKMASTER-ONLY store; [query] filters to lines
                                    matching any whitespace-separated term as a
                                    literal, case-insensitive substring (grep -i -F,
@@ -79,6 +91,12 @@ dm-memory.sh - native plain-markdown context for the dockmaster
                                    --crew omits the dockmaster-only store (what
                                    dm-brief injects into a crewmate brief).
   recall --global [query]          print state/learnings.md + state/operator.md.
+  remember <id> --shared --kind <kind> [--] "<fact>"
+                                   append one dated bullet to task <id>'s own
+                                   committed shared-knowledge file in its worktree
+                                   (.dm-knowledge/<id>.md); the crewmate commits it
+                                   with the work. One file per task, so concurrent
+                                   tasks never collide on a hot AGENTS.md block.
   remember <repo> --private --kind <kind> [--] "<fact>"
                                    append one dated bullet to repos/<repo>/.dm/notes.md
                                    (relayed to crewmate briefs).
@@ -96,13 +114,13 @@ dm-memory.sh - native plain-markdown context for the dockmaster
                                    (literal) from the store, printing what it
                                    removed. Fails if nothing matched.
   seed <repo>                      ensure the git-excluded private store exists.
-                                   Idempotent. Never touches the clone's AGENTS.md.
+                                   Idempotent. Never touches the clone.
 
   kinds: command convention invariant pitfall routing decision
 
-SHARED knowledge is authored by a crewmate adding an dm:knowledge section to the
-repo's AGENTS.md in its worktree and committing it - never written through this
-tool (that would dirty the clone). Never record a secret value in any store.
+SHARED knowledge is recorded with `remember <id> --shared` INTO A WORKTREE and
+committed with the crewmate's work — never written to a clone (that would dirty
+it). Never record a secret value in any store.
 EOF
 }
 
@@ -157,6 +175,29 @@ extract_knowledge() {
         print "dm-memory: dm:knowledge start marker without a matching end in " file "; recall omits it (file may be truncated)" > "/dev/stderr"
     }
   ' "$f"
+}
+
+# extract_knowledge_dir <root> - print the concatenated bullets from every note
+# file under <root>/.dm-knowledge/ (sorted glob = deterministic). Each file holds
+# one task's committed shared-knowledge notes. `awk '{print}'` normalizes line
+# endings so a file lacking a trailing newline still separates from the next.
+extract_knowledge_dir() {
+  local root="$1" dir f
+  dir="$root/$DM_KNOWLEDGE_DIR"
+  [ -d "$dir" ] || return 0
+  for f in "$dir"/*.md; do
+    [ -f "$f" ] || continue   # literal glob (no match) yields a non-file; skip
+    awk '{ print }' "$f"
+  done
+}
+
+# join_blocks <a> <b> - concatenate two possibly-empty text blocks with a single
+# newline between them; if either is empty, the other is returned unchanged (so
+# no spurious leading/trailing blank line enters recall).
+join_blocks() {
+  if [ -z "$1" ]; then printf '%s' "$2"; return 0; fi
+  if [ -z "$2" ]; then printf '%s' "$1"; return 0; fi
+  printf '%s\n%s' "$1" "$2"
 }
 
 # filter_query <content> <query> - keep the lines of <content> that match ANY
@@ -245,11 +286,15 @@ ensure_dockmaster_store() { ensure_store "$1" private.md "dockmaster-only notes"
 # sees it); the dockmaster's own recall (crew=0) includes it.
 recall_repo() {
   local repo="$1" query="${2:-}" crew="${3:-0}" dir hint
-  local shared_content priv_content priv_file dm_content dm_file
+  local shared_content shared_legacy shared_dir priv_content priv_file dm_content dm_file
   require_registered "$repo"
   dir="$(clone_dir "$repo")"
   hint="dm-memory.sh recall $repo <query>"
-  shared_content="$(extract_knowledge "$dir/AGENTS.md")"
+  # Assemble SHARED knowledge from both sources: the legacy AGENTS.md dm:knowledge
+  # block (back-compat / migration) and the committed .dm-knowledge/ note files.
+  shared_legacy="$(extract_knowledge "$dir/AGENTS.md")"
+  shared_dir="$(extract_knowledge_dir "$dir")"
+  shared_content="$(join_blocks "$shared_legacy" "$shared_dir")"
   priv_file="$dir/.dm/notes.md"; priv_content=""
   [ -f "$priv_file" ] && priv_content="$(cat "$priv_file")"
   print_section "shared knowledge: $repo ($dir/AGENTS.md)" "$shared_content" "$query" "$hint"
@@ -293,6 +338,29 @@ append_repo_note() {
   printf '%s\n' "$bullet" >> "$file" || { dm_unlock "$file"; dm_die "failed appending $label for '$repo'"; }
   dm_unlock "$file"
   dm_info "recorded $label for '$repo'"
+}
+
+# remember_shared <id> <kind> <fact> - append one dated bullet to task <id>'s
+# own per-task shared-knowledge file inside its worktree (.dm-knowledge/<id>.md),
+# which the crewmate commits with its work. One file per task (named by id) means
+# two concurrent tasks write DIFFERENT files and never collide on a hot AGENTS.md
+# block (#81). No lock: the file has a single writer (this task's crewmate). Writes
+# the WORKTREE, never the clone, so the clone stays pristine and the note lands
+# through the normal PR/local flow like any other change.
+remember_shared() {
+  local id="$1" kind="$2" fact="$3" wt dir file bullet
+  dm_require_id "$id"
+  validate_kind "$kind"; validate_fact "$fact"
+  wt="$(dm_require_worktree "$id")"
+  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || dm_die "worktree for '$id' ($wt) is not a git work tree; a shared note only travels once committed"
+  dir="$wt/$DM_KNOWLEDGE_DIR"
+  mkdir -p "$dir" || dm_die "failed creating $DM_KNOWLEDGE_DIR in worktree for '$id'"
+  file="$dir/$id.md"
+  warn_if_duplicate "$file" "$fact"
+  bullet="- **[$kind]** $fact  _($(date -u +%Y-%m-%dT%H:%M:%SZ))_"
+  printf '%s\n' "$bullet" >> "$file" || dm_die "failed recording shared knowledge for '$id'"
+  dm_info "recorded shared knowledge for '$id' in $DM_KNOWLEDGE_DIR/$id.md — commit it with your change"
 }
 
 remember_private() {
@@ -371,7 +439,7 @@ seed_repo() {
   local repo="$1"
   require_registered "$repo"
   ensure_private_store "$repo"
-  dm_info "seeded private memory store for '$repo' (git-excluded repos/$repo/.dm/). Shared knowledge is added to the repo's AGENTS.md dm:knowledge section by a crewmate in a worktree."
+  dm_info "seeded private memory store for '$repo' (git-excluded repos/$repo/.dm/). Shared knowledge is recorded by a crewmate in a worktree with 'dm-memory.sh remember <id> --shared' (committed .dm-knowledge/ files)."
 }
 
 # --- dispatch ----------------------------------------------------------------
@@ -416,25 +484,33 @@ case "$cmd" in
       fact="${1:-}"; [ -n "$fact" ] || dm_die "remember --global requires a \"<fact>\""
       remember_global "$kind" "$fact"
     else
-      repo="$target"; private=0; dmonly=0; kind=""
+      private=0; dmonly=0; shared=0; kind=""
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --private) private=1; shift ;;
           --dockmaster-only) dmonly=1; shift ;;
+          --shared) shared=1; shift ;;
           --kind) kind="${2:-}"; shift 2 ;;
           --) shift; break ;;
           -*) dm_die "unknown flag: $1" ;;
           *) break ;;
         esac
       done
-      [ "$private" = 1 ] || [ "$dmonly" = 1 ] || dm_die "repo-scoped remember must use --private or --dockmaster-only; SHARED knowledge is authored by a crewmate in the repo's AGENTS.md dm:knowledge section, not appended here"
-      if [ "$private" = 1 ] && [ "$dmonly" = 1 ]; then dm_die "use only one of --private / --dockmaster-only"; fi
-      [ -n "$kind" ] || dm_die "remember <repo> requires --kind <kind>"
-      fact="${1:-}"; [ -n "$fact" ] || dm_die "remember <repo> requires a \"<fact>\""
-      if [ "$dmonly" = 1 ]; then
-        remember_dockmaster "$repo" "$kind" "$fact"
+      # Exactly one store selector. --shared reads $target as a TASK id (its
+      # worktree receives the note, committed with the work); --private and
+      # --dockmaster-only read $target as a repo name (its git-excluded clone
+      # store receives the note).
+      if [ "$((private + dmonly + shared))" -ne 1 ]; then
+        dm_die "remember must use exactly one of --shared / --private / --dockmaster-only"
+      fi
+      [ -n "$kind" ] || dm_die "remember requires --kind <kind>"
+      fact="${1:-}"; [ -n "$fact" ] || dm_die "remember requires a \"<fact>\""
+      if [ "$shared" = 1 ]; then
+        remember_shared "$target" "$kind" "$fact"
+      elif [ "$dmonly" = 1 ]; then
+        remember_dockmaster "$target" "$kind" "$fact"
       else
-        remember_private "$repo" "$kind" "$fact"
+        remember_private "$target" "$kind" "$fact"
       fi
     fi
     ;;
