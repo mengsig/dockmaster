@@ -59,26 +59,32 @@ case "$cmd" in
     repo="$(dm_meta_get "$id" repo)"; wt="$(dm_require_worktree "$id")"
     ! dm_tracked_dirty "$wt" || dm_die "worktree has uncommitted changes to tracked files; commit or stash before rebasing"
     dir="$(dm_repo_dir "$repo")"; def="$(dm_default_branch "$dir")"
-    git -C "$dir" fetch --quiet origin "$def" 2>/dev/null || dm_warn "$repo: fetch failed; base may be stale"
+    # Same resolver dm-pr.sh open uses for the PR base: explicit -> recorded
+    # stacked-parent meta -> default branch. A stacked child restacks onto its
+    # parent, not main (#72).
+    base_ref="$(dm_pr_base_for "$id" "" "$dir")"
+    git -C "$dir" fetch --quiet origin "$base_ref" 2>/dev/null || dm_warn "$repo: fetch failed; base may be stale"
     # Pick the rebase base to MATCH the base a worktree is created from, or the
     # branch will loop between "clean rebase" and "diverged, rebase first". For a
-    # local-only repo the LOCAL <def> holds local landings and origin lags, so
-    # prefer local <def>; other modes prefer origin/<def>.
+    # local-only repo rebasing onto the DEFAULT branch, the LOCAL <def> holds
+    # local landings and origin lags, so prefer local <def>; a stacked parent
+    # ref (or any non-local-only default) usually lives on origin, so prefer
+    # origin/<base_ref> there.
     mode="$(dm_meta_get "$id" mode)"
-    if [ "$mode" = "local-only" ]; then
-      base="$(git -C "$dir" rev-parse --verify --quiet "$def" 2>/dev/null || git -C "$dir" rev-parse "origin/$def")"
+    if [ "$mode" = "local-only" ] && [ "$base_ref" = "$def" ]; then
+      base="$(git -C "$dir" rev-parse --verify --quiet "$base_ref" 2>/dev/null || git -C "$dir" rev-parse "origin/$base_ref")"
     else
-      base="$(git -C "$dir" rev-parse --verify --quiet "origin/$def" 2>/dev/null || git -C "$dir" rev-parse "$def")"
+      base="$(git -C "$dir" rev-parse --verify --quiet "origin/$base_ref" 2>/dev/null || git -C "$dir" rev-parse "$base_ref")"
     fi
     if git -C "$wt" rebase "$base" >/dev/null 2>&1; then
-      dm_info "rebased $id onto $def cleanly"
+      dm_info "rebased $id onto $base_ref cleanly"
       exit 0
     fi
     # conflicts: report and abort so the worktree is left untouched for a crewmate
     conflicts="$(git -C "$wt" diff --name-only --diff-filter=U 2>/dev/null || true)"
     git -C "$wt" rebase --abort >/dev/null 2>&1 \
       || dm_die "rebase of $id hit conflicts and 'git rebase --abort' failed; worktree is half-rebased and could not be restored — resolve manually in $wt"
-    echo "CONFLICT: rebasing $id onto $def hit conflicts in:" >&2
+    echo "CONFLICT: rebasing $id onto $base_ref hit conflicts in:" >&2
     printf '%s\n' "$conflicts" >&2
     echo "worktree left unchanged; dispatch a crewmate via the merge-conflict skill to resolve with full context" >&2
     exit 3
