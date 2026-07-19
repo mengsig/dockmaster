@@ -2,8 +2,8 @@
 # dm-backlog.sh - the durable, cross-session work queue and operator-decision log.
 #
 # Source of truth is state/backlog.json (one jq-owned parser, no format drift);
-# a human-readable state/backlog.md is re-rendered on every change. The native
-# Claude Code task list is an in-session convenience; this file survives restarts.
+# a human-readable state/backlog.md is re-rendered on every change. Runtime
+# task/thread lists are in-session conveniences; this file survives restarts.
 #
 # Work items:
 #   add <id> "<title>" [--repo R] [--status queued|inflight] [--blocked-by a,b] [--note "..."] [--campaign C]

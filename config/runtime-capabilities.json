@@ -1,0 +1,238 @@
+{
+  "version": 1,
+  "official_codex_sources": [
+    "https://learn.chatgpt.com/docs/agent-configuration/subagents",
+    "https://learn.chatgpt.com/docs/customization/skills",
+    "https://learn.chatgpt.com/docs/config-file/config-advanced#project-config-files-codexconfigtoml",
+    "https://learn.chatgpt.com/docs/automations",
+    "https://learn.chatgpt.com/docs/agent-configuration/rules",
+    "https://learn.chatgpt.com/docs/plugins"
+  ],
+  "runtime_specific_skills": [
+    "change-review",
+    "memory-routing",
+    "pr-workflow",
+    "secondmate",
+    "stuck-worker",
+    "supervision",
+    "task-lifecycle"
+  ],
+  "skills": [
+    "change-review",
+    "coding-guidelines",
+    "credential-handoff",
+    "decision-hold",
+    "diagnostic-reasoning",
+    "fleet-change",
+    "memory-routing",
+    "merge-conflict",
+    "post-pr-review",
+    "pr-workflow",
+    "project-management",
+    "repo-sync",
+    "rollback",
+    "secondmate",
+    "stuck-worker",
+    "supervision",
+    "task-lifecycle",
+    "testing-policy"
+  ],
+  "capabilities": [
+    {
+      "id": "guidance-and-triggers",
+      "requirement": "Shared operating contract and exact trigger parity",
+      "claude": "CLAUDE.md includes AGENTS.md; Claude skill adapter loads at each named trigger",
+      "codex": "Codex reads AGENTS.md directly; matching .agents skill adapter loads at each named trigger",
+      "evidence": ["AGENTS.md", "CLAUDE.md", "tests/check-runtime-parity.js"]
+    },
+    {
+      "id": "skill-discovery",
+      "requirement": "All 18 workflow skills discoverable without cross-runtime tool vocabulary",
+      "claude": ".claude/skills",
+      "codex": ".agents/skills, the official repository skill location",
+      "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", "tests/check-runtime-parity.js"]
+    },
+    {
+      "id": "task-dispatch",
+      "requirement": "Asynchronous worker dispatch with complete isolated brief",
+      "claude": "background Agent with generated brief",
+      "codex": "spawn_agent with fork_turns=none and generated brief",
+      "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", "bin/dm-brief.sh"]
+    },
+    {
+      "id": "worktree-isolation",
+      "requirement": "One task, one guarded worktree; managed clone remains read-only",
+      "claude": "dm-worktree plus Claude isolation support",
+      "codex": "dm-worktree plus absolute worktree in a no-fork brief",
+      "evidence": ["bin/dm-worktree.sh", ".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", "tests/smoke.sh"]
+    },
+    {
+      "id": "nested-secondmate",
+      "requirement": "Root to domain supervisor to worker delegation",
+      "claude": "nested background Agent delegation",
+      "codex": "nested spawn_agent with max_depth=2 and max_threads=6",
+      "evidence": [".claude/skills/secondmate/SKILL.md", ".agents/skills/secondmate/SKILL.md", ".codex/config.toml", "tests/runtime-smoke.sh"]
+    },
+    {
+      "id": "followup-and-steering",
+      "requirement": "Message, steer, interrupt, and resume the same worker",
+      "claude": "SendMessage and task controls",
+      "codex": "send_message, followup_task, interrupt_agent, and list_agents",
+      "evidence": [".claude/skills/supervision/SKILL.md", ".agents/skills/supervision/SKILL.md", ".agents/skills/stuck-worker/SKILL.md"]
+    },
+    {
+      "id": "background-supervision",
+      "requirement": "No polling daemon and no idle model turns",
+      "claude": "completion notifications",
+      "codex": "mailbox completion and wait_agent",
+      "evidence": [".claude/skills/supervision/SKILL.md", ".agents/skills/supervision/SKILL.md"]
+    },
+    {
+      "id": "recovery",
+      "requirement": "Restart and stuck-worker recovery without split-brain work",
+      "claude": "task reconciliation then same-agent relaunch ladder",
+      "codex": "list/message/interrupt controls then same-task, same-worktree relaunch",
+      "evidence": ["bin/dm-session-start.sh", ".claude/skills/stuck-worker/SKILL.md", ".agents/skills/stuck-worker/SKILL.md", "tests/smoke.sh"]
+    },
+    {
+      "id": "bounded-ci-wait",
+      "requirement": "Scheduled and CI waits are bounded and visible",
+      "claude": "Monitor or scheduled wake plus dm-pr await-checks",
+      "codex": "yielded command wait or scheduled task plus dm-pr await-checks",
+      "evidence": ["bin/dm-pr.sh", ".claude/skills/supervision/SKILL.md", ".agents/skills/supervision/SKILL.md"]
+    },
+    {
+      "id": "scheduled-fleet-sweep",
+      "requirement": "Recurring open-PR health supervision",
+      "claude": "schedule/cron invokes dm-pr sweep",
+      "codex": "desktop/web scheduled task invokes dm-pr sweep; CLI prepares prompt only",
+      "evidence": ["bin/dm-pr.sh", ".claude/skills/supervision/SKILL.md", ".agents/skills/supervision/SKILL.md"]
+    },
+    {
+      "id": "change-review",
+      "requirement": "Lavish approval and feedback loop before delivery",
+      "claude": "background poll and worker message",
+      "codex": "yielded poll session and worker follow-up",
+      "evidence": ["bin/dm-lavish.sh", ".claude/skills/change-review/SKILL.md", ".agents/skills/change-review/SKILL.md"]
+    },
+    {
+      "id": "pr-gates",
+      "requirement": "Fast/default/rigorous review, fix, test, security, and PR gates",
+      "claude": "fresh Agent reviewers and shared gate configs",
+      "codex": "fresh fork_turns=none reviewers with focused fallback and shared configs",
+      "evidence": [".claude/skills/pr-workflow/SKILL.md", ".agents/skills/pr-workflow/SKILL.md", "config/pr-pipeline.default.json", "tests/check-gate-drift.js"]
+    },
+    {
+      "id": "post-pr-review",
+      "requirement": "Address review feedback and red post-open CI",
+      "claude": "post-pr-review skill",
+      "codex": "same neutral post-pr-review contract",
+      "evidence": [".claude/skills/post-pr-review/SKILL.md", ".agents/skills/post-pr-review/SKILL.md"]
+    },
+    {
+      "id": "github-tooling",
+      "requirement": "GitHub reads, mutations, checks, and PR merge gates",
+      "claude": "gh-axi/gh through shared toolbelt",
+      "codex": "gh-axi/gh through shared toolbelt or installed plugin tools",
+      "evidence": ["bin/dm-pr.sh", "AGENTS.md", "tests/smoke.sh"]
+    },
+    {
+      "id": "browser-tooling",
+      "requirement": "Real-browser investigation and validation",
+      "claude": "chrome-devtools-axi",
+      "codex": "chrome-devtools-axi or Codex Browser Use when available",
+      "evidence": ["AGENTS.md", "bin/dm-doctor.sh"]
+    },
+    {
+      "id": "lavish-tooling",
+      "requirement": "Reviewable HTML artifacts with plain fallback",
+      "claude": "lavish-axi",
+      "codex": "lavish-axi",
+      "evidence": ["bin/dm-lavish.sh", "tests/smoke.sh"]
+    },
+    {
+      "id": "credential-handoff",
+      "requirement": "References cross worker boundary; secret values never persist",
+      "claude": "credential-handoff skill",
+      "codex": "same neutral credential-handoff contract",
+      "evidence": [".claude/skills/credential-handoff/SKILL.md", ".agents/skills/credential-handoff/SKILL.md"]
+    },
+    {
+      "id": "memory-routing",
+      "requirement": "Shared, private, dockmaster-only, global, task, and finding stores",
+      "claude": "plain stores plus optional Claude memory",
+      "codex": "plain stores plus optional Codex memory; durable facts never depend on it",
+      "evidence": ["bin/dm-memory.sh", ".claude/skills/memory-routing/SKILL.md", ".agents/skills/memory-routing/SKILL.md", "tests/smoke.sh"]
+    },
+    {
+      "id": "diagnostics",
+      "requirement": "Evidence-first diagnosis separate from implementation authority",
+      "claude": "diagnostic-reasoning skill",
+      "codex": "same neutral diagnostic contract",
+      "evidence": [".claude/skills/diagnostic-reasoning/SKILL.md", ".agents/skills/diagnostic-reasoning/SKILL.md"]
+    },
+    {
+      "id": "merge-conflicts",
+      "requirement": "Conflicts resolved in the task worktree without discarding work",
+      "claude": "merge-conflict skill",
+      "codex": "same neutral merge-conflict contract",
+      "evidence": [".claude/skills/merge-conflict/SKILL.md", ".agents/skills/merge-conflict/SKILL.md", "bin/dm-merge.sh"]
+    },
+    {
+      "id": "rollback",
+      "requirement": "Landed changes revert through the normal gated flow",
+      "claude": "rollback skill",
+      "codex": "same neutral rollback contract",
+      "evidence": [".claude/skills/rollback/SKILL.md", ".agents/skills/rollback/SKILL.md"]
+    },
+    {
+      "id": "testing-policy",
+      "requirement": "Real tests, explicit soft skips, bounded flaky handling",
+      "claude": "testing-policy skill plus dm-test",
+      "codex": "same neutral testing contract plus dm-test",
+      "evidence": ["bin/dm-test.sh", ".claude/skills/testing-policy/SKILL.md", ".agents/skills/testing-policy/SKILL.md", "tests/smoke.sh"]
+    },
+    {
+      "id": "fleet-campaigns",
+      "requirement": "Multi-repo intent fans out to independently gated child tasks",
+      "claude": "fleet-change skill and background agents",
+      "codex": "fleet-change skill and bounded spawn_agent fan-out",
+      "evidence": ["bin/dm-backlog.sh", ".claude/skills/fleet-change/SKILL.md", ".agents/skills/fleet-change/SKILL.md", "tests/smoke.sh"]
+    },
+    {
+      "id": "deterministic-workflow",
+      "requirement": "Optional deterministic PR runner retains all configured gates",
+      "claude": "host Workflow API when available",
+      "codex": "same injected runner only on a compatible host; native pr-workflow fallback is complete",
+      "evidence": ["workflows/pr-pipeline.js", "config/README.md", "tests/check-gate-drift.js"]
+    },
+    {
+      "id": "merge-safety",
+      "requirement": "Never merge red, honor authority, preserve branches and unlanded work",
+      "claude": "shared dm-pr/dm-merge gates",
+      "codex": "shared dm-pr/dm-merge gates plus destructive command rules",
+      "evidence": ["bin/dm-pr.sh", "bin/dm-merge.sh", ".codex/rules/dockmaster.rules", "tests/smoke.sh"]
+    },
+    {
+      "id": "right-sizing",
+      "requirement": "Preserve quality/performance without unsupported capability claims",
+      "claude": "per-Agent model/effort plus tier selection",
+      "codex": "tier, task shape, focused fork_turns=none context, and bounded fan-out; no per-spawn model claim",
+      "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", ".agents/skills/pr-workflow/SKILL.md", "tests/runtime-performance.sh"]
+    },
+    {
+      "id": "plugins-and-fallbacks",
+      "requirement": "External GitHub/browser/review capabilities degrade explicitly, never disappear silently",
+      "claude": "installed skills/tools with plain gh/direct review fallback",
+      "codex": "plugins or local tools when installed; focused native/general-agent fallback contracts",
+      "evidence": ["README.md", "bin/dm-doctor.sh", ".agents/skills/pr-workflow/SKILL.md"]
+    },
+    {
+      "id": "project-safety-config",
+      "requirement": "Trusted Codex project config validates nesting and destructive-command policy",
+      "claude": ".claude/settings.json command allowlist",
+      "codex": ".codex/config.toml plus inline-tested execpolicy rules",
+      "evidence": [".claude/settings.json", ".codex/config.toml", ".codex/rules/dockmaster.rules", "tests/runtime-smoke.sh"]
+    }
+  ]
+}

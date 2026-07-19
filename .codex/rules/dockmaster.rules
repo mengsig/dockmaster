@@ -1,0 +1,23 @@
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "forbidden",
+    justification = "Preserve unlanded work; inspect status and make a scoped repair instead.",
+    match = ["git reset --hard", "git reset --hard HEAD~1"],
+    not_match = ["git reset --soft HEAD~1", "git reset HEAD file.txt"],
+)
+
+prefix_rule(
+    pattern = ["git", "clean", ["-f", "-fd", "-df", "-fdx", "-xdf"]],
+    decision = "forbidden",
+    justification = "Preserve untracked task artifacts; inspect them and remove only proven disposable files.",
+    match = ["git clean -f", "git clean -fd", "git clean -fdx"],
+    not_match = ["git clean -n", "git clean -nd"],
+)
+
+prefix_rule(
+    pattern = ["git", "checkout", "--"],
+    decision = "forbidden",
+    justification = "Do not discard edits; inspect the diff and apply an explicit scoped patch.",
+    match = ["git checkout -- file.txt", "git checkout -- ."],
+    not_match = ["git checkout feature-branch", "git checkout -b feature-branch"],
+)

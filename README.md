@@ -4,7 +4,7 @@
 
 **Talk to one agent. Ship across every repo.**
 
-> v0.2.0 · MIT licensed · built for [Claude Code](https://claude.com/claude-code)
+> v0.2.0 · MIT licensed · native adapters for Claude Code and OpenAI Codex
 
 [![CI](https://github.com/mengsig/dockmaster/actions/workflows/ci.yml/badge.svg)](https://github.com/mengsig/dockmaster/actions/workflows/ci.yml)
 
@@ -13,20 +13,20 @@ never handles cargo itself, but directs a crew of dockhands (crewmates) working 
 the holds, hoisting cargo aboard the ships of your fleet, and reports back to you. See
 [the theme note](docs/architecture.md#the-dockyard) for the full mapping.
 
-dockmaster is an *agent distro* for Claude Code: a portable directory of
-instructions, skills, and helper scripts that turns a Claude Code session into a
-fleet handler. You talk to a single agent — the **dockmaster** — and it runs a
-crew of autonomous subagents across all of your repositories: spawning each in
-its own clean git worktree, supervising them to completion at zero idle token
-cost, and handing you finished PRs, approved local merges, or investigation
-reports.
+dockmaster is an *agent distro* for Claude Code and OpenAI Codex: portable shared
+instructions, runtime-native skill adapters, and helper scripts that turn either
+session into a fleet handler. You talk to a single **dockmaster**; it runs
+autonomous workers in clean git worktrees and hands you finished PRs, approved
+local merges, or investigation reports.
 
-It is built natively for Claude Code — no bash daemon, no terminal multiplexer.
-Rather than *simulating* asynchronous supervision on a generic harness, dockmaster
-uses Claude Code's native primitives — background agents, task-completion
-notifications, worktree-isolated subagents, Monitor, and cron — which do the job
-with less machinery and no polling. See
-[docs/architecture.md](docs/architecture.md) for the full concept→primitive map.
+There is no bash daemon or terminal multiplexer. Shared lifecycle contracts stay
+in `AGENTS.md` and the toolbelt; `.claude/` and `.agents/` isolate each runtime's
+tool vocabulary. Both use native background collaboration and bounded waits, so
+one runtime never has to interpret the other's tool calls. See
+[docs/architecture.md](docs/architecture.md) and the checked
+[capability matrix](docs/runtime-capabilities.md).
+Installed-runtime and performance proof is recorded in
+[runtime validation](docs/runtime-validation.md).
 
 ## What it does
 
@@ -50,8 +50,9 @@ with less machinery and no polling. See
   passes (coldstart → fix+tests → merge-gate → fix+tests) then PR — declared per
   repo in one JSON array you can reorder. Branches follow `<type>/<issue>/<slug>`;
   descriptions are short and human; nothing merges without your word.
-- **Zero-token supervision.** Crewmates run as background agents; a completion
-  notification is the wake. Nothing polls while work is in flight.
+- **Native supervision.** Crewmates run through the active runtime's background
+  collaboration surface; mailbox/completion events are the wake. External waits
+  use bounded command waits or scheduled tasks, never a polling daemon.
 - **Guarded by construction.** The dockmaster is read-only over your repos except
   for narrow, guarded fast-forward paths. Teardown refuses to discard unlanded
   work. Nothing merges red or without your word.
@@ -70,13 +71,15 @@ with less machinery and no polling. See
 ## Layout
 
 ```
-AGENTS.md            the dockmaster's operating contract (CLAUDE.md includes it)
+AGENTS.md            runtime-neutral operating contract
 docs/architecture.md the design and why it is built this way
 bin/                 the toolbelt; run `bin/dm help` for the full list (`bin/dm <sub>` dispatches to `bin/dm-<sub>.sh`)
-.claude/skills/      skills loaded at their trigger points
+.claude/skills/      Claude-native workflow adapters
+.agents/skills/      Codex-native workflow adapters
+.codex/              trusted-project Codex nesting and safety config
 workflows/           optional deterministic PR-pipeline runner
 config/              PR-pipeline defaults and per-repo overrides
-tests/               tests/smoke.sh, the end-to-end regression check
+tests/               lifecycle, parity, runtime, and performance checks
 .github/             CI workflow (smoke + syntax on ubuntu + macos)
 CONTRIBUTING.md      how to test, portability rules, branch/commit style
 SECURITY.md          trust model and private vulnerability reporting
@@ -90,14 +93,15 @@ state/ repos/ data/  operator-private runtime, clones, and artifacts (gitignored
 1. **Clone** this repository and `cd` into it.
 2. **Run `bin/dm-doctor.sh`** — it checks your tools and GitHub auth and
    scaffolds the runtime layout (`state/`, `data/`, `repos/`).
-3. **Launch Claude Code** in the repo root — `CLAUDE.md` pulls in `AGENTS.md`,
-   which activates the dockmaster persona.
+3. **Launch Claude Code or Codex** in the repo root and accept its project trust
+   prompt. Claude loads `CLAUDE.md` → `AGENTS.md`; Codex loads `AGENTS.md` and
+   the trusted `.codex/config.toml` layer.
 4. **Ask it to add a repo** and give it work (see Quick start).
 
 ## Quick start
 
 ```sh
-# from a Claude Code session started in this directory:
+# from a Claude Code or Codex session started in this directory:
 > add my repo git@github.com:me/app.git and fix the flaky login test in #412
 ```
 
@@ -124,7 +128,7 @@ Run any script with no arguments for its usage.
 
 Supported platforms: macOS and Linux; the scripts run on bash 3.2+.
 
-- **Required for anything:** Claude Code, `git`, and `jq`.
+- **Required for anything:** Claude Code or Codex, plus `git` and `jq`.
 - **Required for the PR flow:** the GitHub CLI `gh`, authenticated with
   `gh auth login` (or the `gh-axi` wrapper below). Without it the dockmaster
   still runs in local-only mode — approved fast-forward landing, no PR.
@@ -137,6 +141,10 @@ Supported platforms: macOS and Linux; the scripts run on bash 3.2+.
 
 Per-repo memory is plain markdown — no extra tool to install. Run
 `bin/dm-doctor.sh` to see what you have and what each tool gates.
+
+Run `node tests/check-runtime-parity.js` for adapter/capability drift,
+`bash tests/runtime-performance.sh` for context guardrails, and
+`bash tests/runtime-smoke.sh` for installed-runtime discovery and config checks.
 
 ## License
 

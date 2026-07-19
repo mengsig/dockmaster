@@ -72,9 +72,21 @@ jobs:
       - name: Check pr-pipeline gate lists match config
         run: node tests/check-gate-drift.js
 
+      - name: Check Claude/Codex runtime parity
+        run: node tests/check-runtime-parity.js
+
+      - name: Check runtime context-performance guardrails
+        run: /bin/bash tests/runtime-performance.sh
+
       - name: Check bin/*.sh syntax
         run: |
           for f in bin/*.sh; do
             echo "checking $f"
             bash -n "$f"
           done
+
+      - name: Check runtime test syntax
+        run: |
+          bash -n tests/runtime-performance.sh tests/runtime-smoke.sh
+          node --check tests/check-runtime-parity.js
+          node --check tests/runtime-performance.js

@@ -1483,6 +1483,20 @@ check "fork head ref with slashes is resolved encoded" 'grep -q "repos/forker/r/
 check "fork branch is never deleted" '[ ! -s "$GHSTUB/git-push-calls" ] && grep -q "head belongs to fork forker/r" <<<"$FORKMERGE"'
 rm -rf "$DM_HOME/repos/mauth/.github"
 
+echo "== runtime parity + performance guards =="
+check "runtime parity suite passes" 'node "$ROOT/tests/check-runtime-parity.js" >/dev/null'
+check "runtime performance guard passes" 'node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+PARITY_FIXTURE="$TMP/runtime-parity"
+mkdir -p "$PARITY_FIXTURE"
+cp -R "$ROOT/." "$PARITY_FIXTURE/"
+rm "$PARITY_FIXTURE/.agents/skills/rollback/SKILL.md"
+check "runtime parity fails on a missing Codex skill" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
+cp "$ROOT/.agents/skills/rollback/SKILL.md" "$PARITY_FIXTURE/.agents/skills/rollback/SKILL.md"
+printf '%03000d\n' 0 >> "$PARITY_FIXTURE/AGENTS.md"
+check "runtime performance guard fails on instruction bloat" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

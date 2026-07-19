@@ -1,51 +1,45 @@
 # dockmaster architecture
 
-dockmaster is an **agent distro**: a portable directory of instructions, skills,
-helper scripts, and state conventions that turns a Claude Code session into a
-fleet handler. You talk to one agent — the **dockmaster** — and it runs a crew
-of autonomous subagents across many repositories on your behalf.
+dockmaster is an **agent distro**: shared instructions, runtime-native skill
+adapters, helper scripts, and state conventions that turn either Claude Code or
+OpenAI Codex into a fleet handler. You talk to one **dockmaster**; it runs a crew
+of autonomous subagents across many repositories.
 
-dockmaster targets exactly one runtime — **Claude Code** — and leans on the
-primitives it provides natively: background agents, a task list, structured
-subagents, worktree isolation, completion notifications, Monitor, and cron.
-Generic terminal harnesses have none of those, so *simulating* async, gated,
-worktree-isolated fleet supervision there takes tens of thousands of lines of
-bash and a terminal multiplexer (tmux/zellij/…). dockmaster needs none of that
-machinery — it keeps the hard-won *contracts* of that model (async supervision,
-worktree isolation, gated delivery, durable memory) and lets Claude Code supply
-the mechanism.
+The shared layer owns policy and durable state. Runtime adapters own tool nouns
+and scheduling semantics: `.claude/skills/` for Claude, `.agents/skills/` plus
+trusted `.codex/config.toml` for Codex. They have exact skill-name parity but are
+never loaded by the other runtime. This keeps prompt context clean while
+preserving one lifecycle and one toolbelt.
 
 ## The core bet
 
-> Anywhere you would otherwise build infrastructure to *simulate* async
-> supervision, Claude Code has a native primitive that does it with zero idle
-> token cost and higher fidelity. Use the primitive.
+> Keep lifecycle policy shared; use each runtime's native collaboration and wait
+> primitives behind an adapter. Never teach one runtime the other's tool schema.
 
-| concern | dockmaster mechanism |
-| --- | --- |
-| liaison agent | `AGENTS.md` persona |
-| per-task worker ("crewmate") | **`Agent` subagent** run in background |
-| visible session backend | Claude Code task list + background-agent transcripts (`/tasks`) |
-| zero-token supervision | **background task → `<task-notification>`** (idle costs nothing; the harness re-invokes the dockmaster on completion) |
-| external / periodic waits (CI, deploy) | **`Monitor`** (until-condition) and **`CronCreate` / `ScheduleWakeup`** |
-| "no turn ends blind" | completion notifications + optional Stop hook; no polling |
-| worktree isolation | native `git worktree` (`bin/dm-worktree.sh`) + `Agent(isolation:"worktree")` |
-| durable backlog | native **Task list** (session) mirrored to `state/backlog.md` (cross-session) |
-| project registry | `state/repos.json` + clones under `repos/` |
-| global memory | dockmaster home memory: native `memory/`, `state/operator.md`, `state/learnings.md` |
-| per-repo memory | **dm-memory hybrid**: committed `dm:knowledge` section in the repo's `AGENTS.md` + git-excluded private `.dm/` notes |
-| delivery modes | modular **PR pipeline** (ordered gates) per repo |
-| the no-mistakes gate | composable gates the dockmaster drives (`code-review` / `lavish`), optionally a `Workflow` script |
-| persistent domain supervisor ("secondmate") | long-lived **background agent** addressed via `SendMessage` (can spawn its own crew) |
-| per-task model/effort | `Agent` `model` / `effort` / `subagent_type` per dispatch — the orchestrator's per-task judgment, not a fixed table (`task-lifecycle` §3 Dispatch) |
-| review surface | lavish-axi (`/lavish` skill) |
-| self-update / fleet sync | guarded `git` fast-forward, via `bin/` + `git` |
-| stacked sub-PRs | `dm-worktree.sh create --base <ref>` branches a child off a parent branch; `dm-pr.sh open` auto-targets the parent's PR |
+| concern | shared contract | Claude adapter | Codex adapter |
+| --- | --- | --- | --- |
+| liaison | `AGENTS.md` | `CLAUDE.md` includes it | Codex discovers it directly |
+| per-task worker | one task / one worktree | background `Agent` | `spawn_agent`, `fork_turns="none"` |
+| supervision | durable state + no daemon | completion notification, task controls | mailbox, `wait_agent`, collaboration controls |
+| follow-up / steering | same worker identity | `SendMessage` | `send_message` / `followup_task` |
+| external wait | bounded `dm-pr.sh await-checks` | `Monitor` or schedule | yielded command wait or scheduled task |
+| nested domain crew | root → secondmate → worker | native nested agents | `agents.max_depth=2`, six-thread cap |
+| worktree isolation | `bin/dm-worktree.sh` | worktree-aware agent | brief-pinned existing worktree |
+| durable backlog | `state/backlog.json` + rendered markdown | task list mirror | thread list mirror |
+| project registry | `state/repos.json` + clones under `repos/` | shared | shared |
+| global memory | `state/operator.md`, `state/learnings.md`, optional runtime memory | shared | shared |
+| per-repo memory | committed `dm:knowledge` + private `.dm/` stores | shared | shared |
+| delivery modes | modular **PR pipeline** (ordered gates) per repo | shared | shared |
+| no-mistakes gate | review/test/security gates + optional runner | Claude reviewers | Codex fresh subagents; focused fallback if optional review skill absent |
+| right-sizing | task shape, review tier, focused context | per-agent model/effort where available | agent count and prompt scope; no unproved per-spawn selector |
+| review surface | lavish-axi | shared CLI | shared CLI |
+| self-update / fleet sync | guarded fast-forward via `bin/` | shared | shared |
+| stacked sub-PRs | recorded parent base + guarded PR open | shared | shared |
 
-The result is a small distro — instructions, skills, and helper scripts, no
-daemon — that spends **zero tokens while work is in flight** and loses no accuracy
-versus driving a Claude Code agent by hand: each worker *is* a full agent with the
-full tool surface, not a constrained pane.
+The result remains a small distro with no supervisor daemon. Each worker is a
+full runtime agent, while generated briefs and `fork_turns="none"` keep redundant
+parent context out of Codex workers. The complete mapping and evidence live in
+[`runtime-capabilities.md`](runtime-capabilities.md).
 
 ## The Dockyard
 
@@ -69,9 +63,9 @@ The vocabulary below is framed as a working dockyard:
 - **crewmate** — a subagent the dockmaster spawns for one task, in its own git
   worktree. Ship or scout (below). Crewmates never talk to the operator; all
   reporting flows through the dockmaster.
-- **domain agent** ("secondmate") — an optional *persistent* background agent
-  that owns a domain (one repo or a family of repos), keeps its own memory, and
-  can spawn its own crewmates. Addressed via `SendMessage`. Idle by default.
+- **domain agent** ("secondmate") — an optional long-lived background agent that
+  owns a domain, keeps durable scope/memory, and can spawn its own crewmates.
+  Addressed through the active runtime's follow-up adapter. Idle by default.
 
 ## Task shapes
 
@@ -117,8 +111,8 @@ the crewmate brief injects that recall output automatically, so a crewmate has t
 repo's knowledge with no tool call.
 
 **Global (dockmaster home):**
-- `memory/` — Claude Code native file memory (operator identity, standing
-  feedback, cross-repo project state). Indexed by `MEMORY.md`.
+- Optional runtime memory — recall aid only, never the sole owner of a required
+  fact.
 - `state/operator.md` — operator preferences and working style (inspect-then-update,
   curated, never append-forever).
 - `state/learnings.md` — fleet-wide operational facts and gotchas that are *not*
@@ -133,29 +127,22 @@ single source of truth per fact — no duplication that can drift.
 
 ## Supervision model
 
-There is no daemon. The lifecycle of a background crewmate is:
+There is no daemon. The dockmaster creates a background worker, records its
+runtime id beside durable task state, and resumes other work. Runtime-native
+completion/mailbox events wake the dockmaster; it reconciles real state before
+advancing. CI and deploy waits use the bounded toolbelt wait during an active
+session or a scheduled task for long-running/recurring work.
 
-1. dockmaster spawns it with `Agent(..., background)` → returns an `agentId`
-   immediately, costing nothing while it runs.
-2. dockmaster records it in the backlog (native task + `state/backlog.md`
-   mirror) and resumes the conversation / other dispatches.
-3. When the crewmate finishes, Claude Code delivers a `<task-notification>`;
-   the dockmaster wakes, reconciles state, and either reports an outcome to the
-   operator or advances the pipeline.
-4. For waits Claude Code cannot notify on (CI turning green, an external deploy),
-   the dockmaster uses `Monitor` (poll an until-condition) or schedules a
-   `CronCreate`/`ScheduleWakeup` check sized to how fast that state changes.
-
-"Check up on them" = `TaskList` / `SendMessage` to a running agent. "Report
-back" = surface outcomes (not mechanics) in chat. See `escalation` etiquette in
-`AGENTS.md` §Escalation.
+"Check up on them" uses the runtime adapter's list/message controls plus
+`bin/dm-task.sh state`. "Report back" surfaces outcomes, never mechanics.
 
 ## Concurrency & worktrees
 
-Independent work dispatches immediately with no cap. Work that touches the same
+Independent work dispatches immediately within the runtime concurrency cap.
+Work that touches the same
 repo subsystem, or depends on unlanded work, is serialized or recorded as
 blocked. Every ship task runs in its **own** worktree created by
-`bin/dm-worktree.sh` (or `Agent(isolation:"worktree")`), so parallel work on one
+`bin/dm-worktree.sh`, so parallel work on one
 repo never collides. Teardown refuses to discard uncommitted or unlanded work —
 a refusal is a stop-and-investigate signal, never an obstacle to force past.
 
@@ -170,7 +157,7 @@ and reports. Never forced, never discards unlanded work.
 Every requested change follows one canonical flow. The crewmate implements in
 its worktree and renders the change as a **lavish review artifact**; the operator
 approves it (with back-and-forth, all mediated by the dockmaster); only then does
-the dockmaster ask **PR or local**. See `.claude/skills/change-review/SKILL.md`.
+the dockmaster ask **PR or local**. See the active runtime's `change-review` skill.
 
 On the PR path, delivery is an **ordered list of named gates** declared per repo
 in `config/pr-pipeline.<repo>.json` (falling back to
@@ -184,14 +171,12 @@ coldstart review → fix → tests → merge-gate review → fix → tests → (
 
 then a **merge gate**: the operator merges on GitHub, or the dockmaster asks for
 approval and merges (`bin/dm-pr.sh merge`, never red). By default the gates are
-executed by the **dockmaster itself**, driving each one with ordinary `Agent`
-calls while following `.claude/skills/pr-workflow/SKILL.md`; nothing else runs
-them. `workflows/pr-pipeline.js` is an **optional** deterministic `Workflow`
-runner for the same gates — used only when the operator opts into hands-off
-multi-agent orchestration (invoked via the Workflow tool; not auto-discovered and
-not wired to any `bin/` script). Adding a gate = document it in the skill and
-list its name in the config array. See `.claude/skills/pr-workflow/SKILL.md` and
-`config/README.md` (which part of the config each executor reads).
+executed by the **dockmaster itself**, driving runtime-native review workers
+while following `pr-workflow`; nothing else runs them.
+`workflows/pr-pipeline.js` is an **optional** deterministic runner for hosts that
+expose its injected workflow API. It is not auto-discovered or wired to a `bin/`
+script. Adding a gate means documenting it in both runtime adapters and listing
+it in the config array. See `config/README.md` for executor coverage.
 
 **Branch naming:** `<type>/<issue>/<slug>` — `type ∈ {feat,fix,bug,chore,refactor,docs,perf,test}`,
 `issue` = the issue number (or `x` when none), `slug` = a short kebab summary.
@@ -219,10 +204,12 @@ AGENTS.md                operating contract for the dockmaster (CLAUDE.md → th
 README.md                overview
 docs/architecture.md     this file
 bin/                     portable helper scripts (repo/worktree/pr/backlog/merge/memory)
-.claude/skills/          dockmaster skills (some /-invocable, some agent-loaded at triggers)
+.claude/skills/          Claude-native workflow adapters
+.agents/skills/          Codex-native workflow adapters
+.codex/                  trusted-project Codex config and command rules
 workflows/               optional Workflow runner for the PR pipeline (opt-in)
 config/                  pipeline defaults + per-repo overrides (committed defaults)
-tests/                   tests/smoke.sh, the end-to-end regression check
+tests/                   lifecycle, parity, runtime, and performance checks
 .github/                 CI workflow (smoke + syntax on ubuntu + macos)
 CONTRIBUTING.md          how to test, portability rules, branch/commit style
 SECURITY.md              trust model and private vulnerability reporting
@@ -237,5 +224,6 @@ This distro is itself a managed repo: its own per-repo memory is the
 `dm:knowledge` section of this `AGENTS.md`.
 
 `state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
-tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `workflows/`, `config/`
-defaults, docs) is the shared distro and ships through this repo's own PR path.
+tracked surface (`AGENTS.md`, `bin/`, both runtime adapters, `.codex/`,
+`workflows/`, `config/` defaults, docs) is the shared distro and ships through
+this repo's own PR path.

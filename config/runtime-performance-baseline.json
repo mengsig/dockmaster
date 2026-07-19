@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "base_commit": "c4a4276",
+  "shared_agents_bytes": 26634,
+  "claude_settings_bytes": 1579,
+  "claude_skill_bytes": 80906,
+  "claude_skill_description_bytes": 4603,
+  "limits": {
+    "shared_agents_growth_bytes": 2048,
+    "codex_project_doc_bytes": 32768,
+    "skill_description_bytes_per_runtime": 8000
+  }
+}

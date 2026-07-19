@@ -28,6 +28,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Complete OpenAI Codex runtime adapter** — all 18 workflow skills now have
+  exact-name Codex discovery under `.agents/skills`, with runtime-native
+  delegation, nesting, follow-up, supervision, waits, and recovery contracts.
+  Trusted project config bounds depth/concurrency and adds destructive-command
+  rules. A checked capability matrix, adapter drift tests, negative paths,
+  context-performance guardrails, and installed Claude/Codex validation preserve
+  the unchanged Claude path while making platform differences explicit.
 - **`CONTRIBUTING.md`** (how to test, the bash-3.2 portability invariant,
   branch/commit style) and **`SECURITY.md`** (trust model and private
   vulnerability reporting).

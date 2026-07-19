@@ -1,14 +1,17 @@
 # Contributing
 
-dockmaster is an agent distro: the tracked surface (`AGENTS.md`, `bin/`,
-`.claude/skills/`, `workflows/`, `config/` defaults, `docs/`) is the shared
-distro; `state/`, `repos/`, `data/`, and `.env` are operator-private and
-gitignored. Changes to the tracked surface go through this repo's own PR path.
+dockmaster is an agent distro: the tracked surface (`AGENTS.md`, `bin/`, both
+runtime skill adapters, `.codex/`, `workflows/`, `config/` defaults, `docs/`) is
+the shared distro; `state/`, `repos/`, `data/`, and `.env` are operator-private
+and gitignored. Changes to the tracked surface go through this repo's own PR path.
 
 ## Testing
 
 ```sh
 bash tests/smoke.sh
+node tests/check-runtime-parity.js
+bash tests/runtime-performance.sh
+bash tests/runtime-smoke.sh
 ```
 
 `tests/smoke.sh` is the end-to-end regression check for the toolbelt (exit 0 =
@@ -17,7 +20,7 @@ covers the local-only lifecycle; the PR path has no automated coverage. Run it
 before every change to `bin/`, and add an assertion when you change a script's
 behavior.
 
-CI (`.github/workflows/ci.yml`) runs the smoke suite plus bash/JS syntax and
+CI (`.github/workflows/ci.yml`) runs the smoke/parity suites plus bash/JS syntax and
 bash-3.2 lint checks on `ubuntu-latest` and `macos-latest` on every push and PR.
 
 ## Portability

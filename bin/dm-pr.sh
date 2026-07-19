@@ -439,7 +439,7 @@ case "$cmd" in
   await-checks)
     # Poll `check` until the CI rollup is terminal (passing/failing, or none on
     # a confirmed CI-less repo) or the timeout elapses, so a caller (the merge
-    # gate, a supervision Monitor) can WAIT for GitHub Actions rather than
+    # gate, a runtime supervision wait) can WAIT for GitHub Actions rather than
     # treating a still-pending PR as a refusal. This does NOT merge and does
     # NOT relax "never merge red": it is a pre-step, and the outcome maps to an
     # exit code the caller acts on.

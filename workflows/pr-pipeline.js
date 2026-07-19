@@ -11,11 +11,11 @@ export const meta = {
 }
 
 // OPTIONAL, opt-in runner for the modular PR pipeline described in
-// .claude/skills/pr-workflow/SKILL.md. It is NOT the default executor and NOT
+// the active runtime's pr-workflow skill. It is NOT the default executor and NOT
 // wired to anything: nothing auto-discovers it, no bin/ script invokes it. The
-// dockmaster's default path is to drive the gates with ordinary Agent calls
-// following the pr-workflow skill. Run this only via the Workflow tool, and only
-// when the operator has opted into hands-off multi-agent orchestration. A live
+// dockmaster's default path is to drive gates with runtime-native subagents
+// following pr-workflow. Run this only on a host that injects the documented
+// workflow API, and only after the operator opts in. A live
 // rigorous run is a dockmaster/operator action — this file has been verified for
 // structural/syntactic conformance (`node --check`) only, never executed here.
 //

@@ -11,8 +11,8 @@
 #                             from real signals (worktree landed? PR merged?
 #                             agent alive?), never from the last status line.
 #
-# The native Claude Code task list is the in-session working mirror; these files
-# are the cross-session source of truth.
+# The active runtime's task/thread list is the in-session working mirror; these
+# files are the cross-session source of truth.
 #
 # Commands:
 #   new <id> --kind ship|scout --repo R [--mode M] [--title T]
