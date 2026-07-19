@@ -19,8 +19,14 @@ id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-brief.sh <id>"
 dm_require_id "$id"
 kind="$(dm_meta_get "$id" kind)"; repo="$(dm_meta_get "$id" repo)"
 mode="$(dm_meta_get "$id" mode)"; wt="$(dm_meta_get "$id" worktree)"
+title="$(dm_meta_get "$id" title)"
 [ -n "$kind" ] || dm_die "task $id has no kind; run dm-task.sh new first"
 [ -n "$wt" ] || dm_die "task $id has no worktree; run dm-worktree.sh create first"
+
+# Advisory dispatch right-sizing (#77): recommend a model tier from kind + title
+# and record it in meta so dm-status can flag an unsized dispatch. Advisory only.
+model_rec="$(dm_recommended_model "$kind" "$title")"
+dm_meta_set "$id" model_recommended "$model_rec"
 
 out="$DM_DATA/$id"; mkdir -p "$out"
 brief="$out/brief.md"
@@ -64,6 +70,10 @@ fleet="$(recall_block "recall(--global)" "(no fleet-wide context recorded yet.)"
 {
 cat <<EOF
 # Task $id ($kind) - repo: $repo
+
+> Recommended model tier: $model_rec - Claude: pass it as the Agent \`model\`;
+> Codex: bias reasoning effort and task granularity accordingly. This is
+> advisory - the dockmaster decides the final resourcing.
 
 You are a crewmate working one task to completion. You report only to the
 dockmaster through short status lines, never to a human. Work only inside your

@@ -26,7 +26,8 @@ the diff's difficulty — the resourcing policy in `task-lifecycle` (§3 Dispatc
 A low-stakes diff's cold review can run on a small fast model; a subtle
 safety / concurrency diff's review and adversarial verification get the top tier
 at high effort. Bias toward enough power to catch what matters — never under-power
-a review to save tokens.
+a review to save tokens. The same advisory tier `dm-brief` surfaces (and
+`dm-status` flags when a `working` task is unsized) applies to these passes too.
 
 - **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial** changes
   only (see `change-review` for the criteria): one review pass instead of two,

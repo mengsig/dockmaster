@@ -165,6 +165,11 @@ b dm-brief.sh demo-1 >/dev/null
 check "brief bakes commandments" 'grep -q "The Ten Commandments" "$DM_HOME/data/demo-1/brief.md"'
 check "brief has review-ready"    'grep -q "review-ready" "$DM_HOME/data/demo-1/brief.md"'
 check "brief labels the private-notes boundary" 'grep -q "never copy or paraphrase them" "$DM_HOME/data/demo-1/brief.md"'
+# Advisory dispatch right-sizing (#77): the recommended tier is surfaced in the
+# header and the same value is recorded in task meta. "add multiply" is ordinary
+# implementation work -> sonnet.
+check "brief surfaces the recommended model tier"     'grep -q "Recommended model tier: sonnet" "$DM_HOME/data/demo-1/brief.md"'
+check "brief records model_recommended in task meta"  '[ "$(b dm-task.sh get demo-1 model_recommended)" = sonnet ]'
 
 echo "== status (read-only view) =="
 STATUS="$(b dm-status.sh)"   # capture once (see doctor note on grep -q + pipefail)
@@ -745,6 +750,30 @@ check "gate allows 'passing'"                           '[ "$(gate passing 0 0)"
 check "gate refuses 'failing'"                          '[ "$(gate failing 0 0)" = "refuse-failing" ]'
 check "gate refuses 'pending'"                          '[ "$(gate pending 0 0)" = "refuse-pending" ]'
 check "gate refuses an unknown rollup"                  '[ "$(gate bogus 0 0)" = "refuse-unknown" ]'
+
+echo "== dispatch right-sizing: dm_recommended_model is a pure advisory tier (#77) =="
+# Pure like dm_merge_gate: risk signals -> opus, scout/mechanical -> haiku, else
+# sonnet. Case-insensitive substring match; risk dominates the scout kind.
+rec() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_model "$1" "$2" ); }
+check "recommend opus for auth/security work"      '[ "$(rec ship "harden auth token security")" = opus ]'
+check "recommend opus for a migration"             '[ "$(rec ship "add Alembic migration")" = opus ]'
+check "recommend opus for a concurrency/lock fix"  '[ "$(rec ship "fix mutex lock race")" = opus ]'
+check "recommend haiku for a scout"                '[ "$(rec scout "look into the page layout")" = haiku ]'
+check "recommend haiku for a docs/typo fix"        '[ "$(rec ship "fix docs typo")" = haiku ]'
+check "recommend sonnet for ordinary impl"         '[ "$(rec ship "add a multiply endpoint")" = sonnet ]'
+check "risk signals dominate the scout kind"       '[ "$(rec scout "security audit of auth flow")" = opus ]'
+
+echo "== dispatch right-sizing: dm-status flags an unsized dispatch (#77) =="
+# A live `working` task with no `model` recorded is an unsized dispatch; the
+# advisory hint names a recommended tier and clears once a model is recorded.
+b dm-task.sh new unsized-1 --kind ship --repo demo --title "add a widget" >/dev/null
+b dm-task.sh event unsized-1 working "started" >/dev/null
+UNSIZED_STATUS="$(b dm-status.sh)"   # capture once (grep -q + pipefail)
+check "status flags a working task with no model as UNSIZED" 'grep -q "UNSIZED.*unsized-1" <<<"$UNSIZED_STATUS"'
+check "UNSIZED hint names a recommended tier"                'grep -qE "recommended: (haiku|sonnet|opus)" <<<"$UNSIZED_STATUS"'
+b dm-task.sh set unsized-1 model sonnet >/dev/null
+SIZED_STATUS="$(b dm-status.sh)"
+check "recording a model clears the UNSIZED flag"            '! grep -q "UNSIZED.*unsized-1" <<<"$SIZED_STATUS"'
 
 echo "== state-gate-integrity: pr_state cannot be forged via 'set' (#20 F6) =="
 b dm-task.sh new sgi-forge --kind ship --repo sgi >/dev/null 2>&1 || true
