@@ -607,7 +607,49 @@ check "rebase conflict stays on its branch"  '[ "$(git -C "$CFWT" rev-parse --ab
 check "rebase conflict leaves no in-progress rebase" '! [ -d "$(git -C "$CFWT" rev-parse --git-path rebase-merge)" ] && ! [ -d "$(git -C "$CFWT" rev-parse --git-path rebase-apply)" ]'
 CFOUT="$(b dm-merge.sh rebase rb-conf 2>&1 || true)"
 check "rebase conflict reports CONFLICT"     'grep -q "CONFLICT" <<<"$CFOUT"'
+RBCLEANOUT="$(b dm-merge.sh rebase rb-clean 2>&1 || true)"   # already up to date: a no-op rebase that still names the base
+check "non-stacked rebase message names the default branch" 'grep -q "onto main" <<<"$RBCLEANOUT"'
 git -C "$DM_HOME/repos/demo" checkout -q main   # leave the demo clone on default for later sections
+
+echo "== merge rebase honors a stacked task's recorded parent, not default (#72) =="
+# A worktree created with --base <parent> records the parent in task meta
+# (dm_pr_base_for). Rebase must restack onto that PARENT tip, not silently
+# no-op onto main, or a stacked child never picks up its parent's new commits.
+b dm-repo.sh add stackreb "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+git -C "$DM_HOME/repos/stackreb" checkout -q -b parent-branch
+printf 'parent v1\n' > "$DM_HOME/repos/stackreb/parent.txt"
+git -C "$DM_HOME/repos/stackreb" -c user.email=c@c.co -c user.name=c add parent.txt >/dev/null
+git -C "$DM_HOME/repos/stackreb" -c user.email=c@c.co -c user.name=c commit -qm "parent v1"
+git -C "$DM_HOME/repos/stackreb" push -q origin parent-branch >/dev/null 2>&1
+git -C "$DM_HOME/repos/stackreb" checkout -q main
+
+b dm-task.sh new stack-child --kind ship --repo stackreb >/dev/null
+SRWT="$(b dm-worktree.sh create stack-child stackreb feat/x/stack-child --base parent-branch | tail -n1)"
+printf 'child feature\n' > "$SRWT/child.txt"
+git -C "$SRWT" -c user.email=c@c.co -c user.name=c add child.txt >/dev/null
+git -C "$SRWT" -c user.email=c@c.co -c user.name=c commit -qm "child feature"
+check "stacked worktree records the parent as base" '[ "$(b dm-task.sh get stack-child base)" = "parent-branch" ]'
+
+# Advance the parent branch on ORIGIN via an independent clone (as another
+# crewmate pushing to the parent PR would), past what the child branched from
+# and past what main has, WITHOUT touching the stackreb clone's own checkout.
+git clone -q "$TMP/origin.git" "$TMP/stackreb-seed" >/dev/null 2>&1
+( cd "$TMP/stackreb-seed"; git config user.email c@c.co; git config user.name c
+  git checkout -q parent-branch
+  printf 'parent v2\n' >> parent.txt
+  git commit -qam "parent v2"
+  git push -q origin parent-branch ) >/dev/null 2>&1
+PARENT_V2_SHA="$(git -C "$TMP/stackreb-seed" rev-parse parent-branch)"
+check "main lacks the parent's newer commit" \
+  '! git -C "$TMP/stackreb-seed" merge-base --is-ancestor "$PARENT_V2_SHA" origin/main'
+
+if SR_OUT="$(b dm-merge.sh rebase stack-child 2>&1)"; then SR_RC=0; else SR_RC=$?; fi
+check "stacked rebase succeeds"                              '[ "$SR_RC" -eq 0 ]'
+check "stacked rebase message names the PARENT, not main"    'grep -q "onto parent-branch" <<<"$SR_OUT"'
+check "stacked rebase lands onto the parent's newer commit, not just its v1" \
+  'git -C "$SRWT" merge-base --is-ancestor "$PARENT_V2_SHA" HEAD'
+check "stacked rebase keeps the child feature"               '[ -f "$SRWT/child.txt" ]'
+check "stacked rebase stays on its branch"                   '[ "$(git -C "$SRWT" rev-parse --abbrev-ref HEAD)" = "feat/x/stack-child" ]'
 
 echo "== dm-memory (native plain-markdown context) =="
 # seed scaffolds only the git-excluded private store; it never touches the clone's
