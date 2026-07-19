@@ -215,8 +215,9 @@ invariants, pitfalls, routing. Curated — not append-forever._
   up AND exit — a trapped signal must not resume the unlocked section). It
   self-heals only a DEAD-PID lock (reclaim serialized by a second lock, re-verified
   before removal); a stuck-but-alive or metadata-less lock fails visibly at ~30s.
-- **[invariant]** Landing/PR fields (`pr`, `pr_state`, `merge_state`, and the
-  `merged` status event) are written ONLY by `dm-pr`/`dm-merge` (directly via
+- **[invariant]** Landing/PR fields (`pr`, `pr_state`, `merge_state`, the atomic
+  `pr_check_snapshot`, and the `merged` status event) are written ONLY by
+  `dm-pr`/`dm-merge` (directly via
   `dm_meta_set`/`dm_status_append`); `dm-task.sh set`/`event` reject them so a
   crewmate cannot forge a landed signal. `dm-task.sh state`/`landed` refresh
   `pr_state` live (skipped under `DM_NO_FETCH=1`) so an out-of-band merge is seen;

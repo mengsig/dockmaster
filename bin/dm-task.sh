@@ -72,7 +72,7 @@ case "$cmd" in
     # It is recorded only by `dm-worktree.sh create --base`, which also writes
     # directly via dm_meta_set and so is unaffected by this CLI-only guard.
     case "$key" in
-      pr|pr_state|merge_state) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
+      pr|pr_state|merge_state|pr_check_snapshot) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
       base) dm_die "'base' is recorded by dm-worktree.sh create --base; it must not be set by hand" ;;
     esac
     dm_meta_set "$id" "$key" "$value"

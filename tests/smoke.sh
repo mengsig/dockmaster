@@ -630,6 +630,7 @@ echo "== state-gate-integrity: pr_state cannot be forged via 'set' (#20 F6) =="
 b dm-task.sh new sgi-forge --kind ship --repo sgi >/dev/null 2>&1 || true
 check "set refuses hand-writing pr_state" '! b dm-task.sh set sgi-forge pr_state MERGED >/dev/null 2>&1'
 check "set refuses hand-writing pr"       '! b dm-task.sh set sgi-forge pr "https://x/y/pull/1" >/dev/null 2>&1'
+check "set refuses a forged check snapshot" '! b dm-task.sh set sgi-forge pr_check_snapshot "{}" >/dev/null 2>&1'
 
 echo "== state-gate-integrity: mutex reclaims a crashed holder (#21-b) =="
 # Pre-create a lock dir owned by a dead PID; the next dm_lock must reclaim it
@@ -1092,8 +1093,8 @@ check "reader prints nothing after the clear"    '[ -z "$(mbread mauth)" ]'
 echo "== merge-base exception: dm-pr.sh merge honors the LIVE PR base on a never repo =="
 # Stub gh so the live-base read is deterministic and offline: PR-detail calls
 # answer with pr.json (or pr2.json after the first read when "retarget" is
-# armed, simulating a mid-merge base retarget), check-runs/status calls answer
-# with runs.json/status.json, and a "fail" marker makes gh exit non-zero.
+# armed, simulating a mid-merge base/head change), check-runs/status/ref calls
+# answer with their matching fixture, and a "fail" marker makes gh exit non-zero.
 # gh-axi records that it was invoked, then fails loudly, so reaching (or not
 # reaching) the actual merge mutation is observable.
 b dm-repo.sh set mauth merge_authority never >/dev/null
@@ -1107,6 +1108,7 @@ D="$GHSTUB"
 case "\$*" in
   *check-runs*) cat "\$D/runs.json"; exit 0 ;;
   *commits*status*) cat "\$D/status.json"; exit 0 ;;
+  *git/ref/heads/*) cat "\$D/ref.json"; exit 0 ;;
 esac
 [ -f "\$D/fail" ] && exit 1
 if [ -f "\$D/retarget" ]; then
@@ -1119,6 +1121,7 @@ printf '#!/bin/sh\n: > "%s/ghaxi-called"\nexit 1\n' "$GHSTUB" > "$GHSTUB/gh-axi"
 chmod +x "$GHSTUB/gh" "$GHSTUB/gh-axi"
 printf '{"check_runs":[]}\n' > "$GHSTUB/runs.json"
 printf '{"total_count":0}\n' > "$GHSTUB/status.json"
+printf '{"object":{"sha":"abc123"}}\n' > "$GHSTUB/ref.json"
 printf '{"state":"open","merged":false,"base":{"ref":"integration","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
 EXCOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a listed live base passes the authority gate"        'grep -q "operator-granted merge base" <<<"$EXCOUT"'
@@ -1156,15 +1159,15 @@ check "a listed base that IS the live default still refuses" 'grep -q "not an op
 # every gate INCLUDING the pre-mutation re-verify, reach the gh-axi mutation
 # (observable via the stub's marker), and fail only on the stub's exit 1.
 b dm-repo.sh set mauth merge_allowed_bases "integration,integration2" >/dev/null
-printf '{"check_runs":[{"status":"completed","conclusion":"success"}]}\n' > "$GHSTUB/runs.json"
-printf '{"state":"open","merged":false,"head":{"sha":"abc123"},"base":{"ref":"integration","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr.json"
+printf '{"total_count":1,"check_runs":[{"head_sha":"abc123","status":"completed","conclusion":"success"}]}\n' > "$GHSTUB/runs.json"
+printf '{"state":"open","merged":false,"head":{"sha":"abc123","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"integration","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr.json"
 rm -f "$GHSTUB/ghaxi-called" "$GHSTUB/seen"
 GREENOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a green listed-base merge reaches the merge mutation" '[ -f "$GHSTUB/ghaxi-called" ] && grep -q "merge failed" <<<"$GREENOUT"'
 # TOCTOU: the base is retargeted to the DEFAULT after the first verification —
 # the pre-mutation re-check refuses and the mutation is never invoked.
 rm -f "$GHSTUB/ghaxi-called" "$GHSTUB/seen"
-printf '{"state":"open","merged":false,"head":{"sha":"abc123"},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr2.json"
+printf '{"state":"open","merged":false,"head":{"sha":"abc123","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr2.json"
 : > "$GHSTUB/retarget"
 TOCTOU1="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a mid-merge retarget to the default refuses"           'grep -q "not an operator-granted merge base" <<<"$TOCTOU1"'
@@ -1172,7 +1175,7 @@ check "the retargeted merge never reaches the mutation"       '[ ! -f "$GHSTUB/g
 # TOCTOU: retargeted to ANOTHER allowed branch — still refused (the base
 # changed since verification), mutation never invoked.
 rm -f "$GHSTUB/seen"
-printf '{"state":"open","merged":false,"head":{"sha":"abc123"},"base":{"ref":"integration2","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr2.json"
+printf '{"state":"open","merged":false,"head":{"sha":"abc123","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"integration2","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr2.json"
 TOCTOU2="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a retarget to another ALLOWED base still refuses"      'grep -q "base changed" <<<"$TOCTOU2"'
 check "the allowed-retarget merge never reaches the mutation" '[ ! -f "$GHSTUB/ghaxi-called" ]'
@@ -1205,25 +1208,72 @@ check "the no-list refusal does not mention the carve-out"  '! grep -q "merge_al
 
 echo
 echo "== await-checks head-race guards (#75) =="
-# Reuse the GHSTUB harness: a task whose PR is merge-conflicted (dirty) gets no
-# checks from GitHub ever — await-checks must fail fast naming the conflict,
-# not poll to timeout.
 b dm-task.sh new await-75 --kind ship --repo mauth >/dev/null
+AWT="$(b dm-worktree.sh create await-75 mauth | tail -n1)"
+git -C "$AWT" checkout -q -b fix/await-75
+AWHEAD="$(git -C "$AWT" rev-parse HEAD)"
+OLDHEAD="1111111111111111111111111111111111111111"
+CHANGEDHEAD="2222222222222222222222222222222222222222"
 ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set await-75 pr "https://github.com/o/r/pull/75" ) >/dev/null 2>&1
-printf '{"state":"open","merged":false,"head":{"sha":"aaa111"},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"dirty"}\n' > "$GHSTUB/pr.json"
-printf '{"check_runs":[]}\n' > "$GHSTUB/runs.json"
+mkdir -p "$DM_HOME/repos/mauth/.github/workflows"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"dirty"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+printf '{"total_count":0,"check_runs":[]}\n' > "$GHSTUB/runs.json"
 printf '{"total_count":0}\n' > "$GHSTUB/status.json"
 AWDIRTY="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 120 --interval-secs 1 2>&1 || true)"
 check "dirty PR fails fast, no timeout wait"   'grep -q "DIRTY" <<<"$AWDIRTY" && grep -q "after 0s" <<<"$AWDIRTY"'
 check "dirty fast-fail is non-zero"            '! PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 >/dev/null 2>&1'
-# Stale-rollup guard: check-runs says passing but the CURRENT head has zero
-# runs — a just-pushed branch whose rollup still describes the old head. A
-# single probe (timeout 0) must NOT report passing; it times out pending.
-mkdir -p "$DM_HOME/repos/mauth/.github/workflows"   # stale guard applies only to CI-configured repos
-printf '{"state":"open","merged":false,"head":{"sha":"bbb222"},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
-printf '{"total_count":0,"check_runs":[{"status":"completed","conclusion":"success"}]}\n' > "$GHSTUB/runs.json"
+
+# A stale PR response can still name the previous head and its real terminal
+# run. The independent worktree head must keep that rollup non-terminal.
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' "$OLDHEAD" > "$GHSTUB/pr.json"
+printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$OLDHEAD" > "$GHSTUB/runs.json"
 AWSTALE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
-check "stale green rollup is not trusted as terminal" '! grep -q "passing" <<<"$AWSTALE"'
+check "old-head green is not trusted as terminal" 'grep -q "has not reached expected head" <<<"$AWSTALE" && grep -q "last rollup: pending" <<<"$AWSTALE"'
+
+# A real not-yet-registered response has both count zero and an empty array.
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+printf '{"total_count":0,"check_runs":[]}\n' > "$GHSTUB/runs.json"
+AWNONE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
+check "consistent zero-run response remains non-terminal" 'grep -q "last rollup: none" <<<"$AWNONE" && ! grep -q "passing" <<<"$AWNONE"'
+
+# Legacy commit statuses remain first-class CI signals even when there are no
+# check-runs and the repository also has workflow configuration.
+printf '{"total_count":1,"state":"success"}\n' > "$GHSTUB/status.json"
+AWSTATUSOK="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1)"
+check "status-only success passes immediately" 'grep -q "passing after 0s" <<<"$AWSTATUSOK"'
+printf '{"total_count":1,"state":"failure"}\n' > "$GHSTUB/status.json"
+AWSTATUSBAD="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
+check "status-only failure fails immediately" 'grep -q "FAILING after 0s" <<<"$AWSTATUSBAD" && ! grep -q "TIMED OUT" <<<"$AWSTATUSBAD"'
+
+# A failed refresh after a previously-dirty result must be reported as unknown,
+# never by reusing the cached dirty state.
+printf '{"total_count":0}\n' > "$GHSTUB/status.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"dirty"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+PATH="$GHSTUB:$PATH" b dm-pr.sh check await-75 >/dev/null
+: > "$GHSTUB/fail"
+AWFAIL="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
+check "refresh API failure stays visible and unknown" 'grep -q "refresh failed" <<<"$AWFAIL" && grep -q "last rollup: unknown" <<<"$AWFAIL" && ! grep -q "DIRTY" <<<"$AWFAIL"'
+rm -f "$GHSTUB/fail"
+printf 'not json\n' > "$GHSTUB/pr.json"
+AWPARSE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
+check "refresh parse failure stays visible and unknown" 'grep -q "refresh failed" <<<"$AWPARSE" && grep -q "last rollup: unknown" <<<"$AWPARSE"'
+
+# The final mutation boundary re-reads the live PR head. A push after the green
+# check must refuse before gh-axi is invoked.
+b dm-repo.sh set mauth merge_authority ask >/dev/null
+printf '{"object":{"sha":"%s"}}\n' "$AWHEAD" > "$GHSTUB/ref.json"
+printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$AWHEAD" > "$GHSTUB/runs.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$CHANGEDHEAD" > "$GHSTUB/pr2.json"
+rm -f "$GHSTUB/ghaxi-called" "$GHSTUB/seen"
+: > "$GHSTUB/retarget"
+AWCHANGED="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge await-75 2>&1 || true)"
+check "changed head refuses at the merge boundary" 'grep -q "live PR head changed" <<<"$AWCHANGED" && [ ! -f "$GHSTUB/ghaxi-called" ]'
+rm -f "$GHSTUB/retarget" "$GHSTUB/seen"
+printf '{"object":{"sha":"%s"}}\n' "$CHANGEDHEAD" > "$GHSTUB/ref.json"
+rm -f "$GHSTUB/ghaxi-called"
+AWREMOTESTALE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge await-75 2>&1 || true)"
+check "remote push refuses when PR metadata is stale" 'grep -q "remote branch head changed" <<<"$AWREMOTESTALE" && [ ! -f "$GHSTUB/ghaxi-called" ]'
 rm -rf "$DM_HOME/repos/mauth/.github"
 
 echo

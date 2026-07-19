@@ -162,6 +162,75 @@ worst_rollup() {
   if [ "$(rollup_rank "$1")" -ge "$(rollup_rank "$2")" ]; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi
 }
 
+is_git_oid() {
+  [ -n "$1" ] && [ -z "${1//[0-9A-Fa-f]/}" ]
+}
+
+load_check_snapshot() {
+  local id="$1" snapshot values owner name
+  snapshot="$(dm_meta_get "$id" pr_check_snapshot)"
+  values="$(printf '%s' "$snapshot" | jq -er '
+    select(type == "object")
+    | [.head, .head_repo, .head_ref, .checks, .merge_state, .state]
+    | if all(.[]; type == "string") then .[] else error("invalid snapshot") end' 2>/dev/null)" || return 1
+  {
+    IFS= read -r PR_SNAPSHOT_HEAD
+    IFS= read -r PR_SNAPSHOT_HEAD_REPO
+    IFS= read -r PR_SNAPSHOT_HEAD_REF
+    IFS= read -r PR_SNAPSHOT_CHECKS
+    IFS= read -r PR_SNAPSHOT_MERGE_STATE
+    IFS= read -r PR_SNAPSHOT_STATE
+  } <<<"$values"
+  [ -z "$PR_SNAPSHOT_HEAD" ] || is_git_oid "$PR_SNAPSHOT_HEAD" || return 1
+  case "$PR_SNAPSHOT_CHECKS" in passing|failing|pending|none|unknown) ;; *) return 1 ;; esac
+  case "$PR_SNAPSHOT_MERGE_STATE" in clean|blocked|unstable|dirty|behind|draft|unknown) ;; *) return 1 ;; esac
+  case "$PR_SNAPSHOT_STATE" in OPEN|CLOSED|MERGED|UNKNOWN) ;; *) return 1 ;; esac
+  if [ -z "$PR_SNAPSHOT_HEAD_REPO" ] && [ -z "$PR_SNAPSHOT_HEAD_REF" ]; then
+    return 0
+  fi
+  owner="${PR_SNAPSHOT_HEAD_REPO%%/*}"; name="${PR_SNAPSHOT_HEAD_REPO#*/}"
+  [ -n "$owner" ] && [ -n "$name" ] && [ "$name" != "$PR_SNAPSHOT_HEAD_REPO" ] || return 1
+  case "$PR_SNAPSHOT_HEAD_REPO" in *[!A-Za-z0-9._/-]*|*/*/*) return 1 ;; esac
+  git check-ref-format "refs/heads/$PR_SNAPSHOT_HEAD_REF" >/dev/null 2>&1
+}
+
+local_task_head() {
+  local id="$1" wt head
+  wt="$(dm_meta_get "$id" worktree)"
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  head="$(git -C "$wt" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || return 1
+  is_git_oid "$head" || return 1
+  printf '%s\n' "$head"
+}
+
+remote_pr_head() {
+  local id="$1" encoded json head
+  load_check_snapshot "$id" || return 1
+  [ -n "$PR_SNAPSHOT_HEAD_REPO" ] && [ -n "$PR_SNAPSHOT_HEAD_REF" ] || return 1
+  encoded="$(jq -nr --arg ref "$PR_SNAPSHOT_HEAD_REF" '$ref | @uri')" || return 1
+  json="$(gh api "repos/$PR_SNAPSHOT_HEAD_REPO/git/ref/heads/$encoded" 2>/dev/null)" || return 1
+  head="$(printf '%s' "$json" | jq -er '.object.sha | select(type == "string" and length > 0)' 2>/dev/null)" || return 1
+  is_git_oid "$head" || return 1
+  printf '%s\n' "$head"
+}
+
+expected_pr_head() {
+  local id="$1" head
+  if head="$(local_task_head "$id")"; then
+    printf '%s\n' "$head"
+    return 0
+  fi
+  remote_pr_head "$id"
+}
+
+live_pr_head() {
+  local slug="$1" n="$2" json head
+  json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" || return 1
+  head="$(printf '%s' "$json" | jq -er '.head.sha | select(type == "string" and length > 0)' 2>/dev/null)" || return 1
+  is_git_oid "$head" || return 1
+  printf '%s\n' "$head"
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   open)
@@ -259,6 +328,9 @@ case "$cmd" in
     state="$(printf '%s' "$json" | jq -r '.state // "unknown" | ascii_upcase')"
     merged="$(printf '%s' "$json" | jq -r '.merged // false')"
     sha="$(printf '%s' "$json" | jq -r '.head.sha // empty')"
+    head_repo="$(printf '%s' "$json" | jq -r '.head.repo.full_name // empty')"
+    head_ref="$(printf '%s' "$json" | jq -r '.head.ref // empty')"
+    [ -z "$sha" ] || is_git_oid "$sha" || dm_die "PR returned an invalid head SHA: $url"
     [ "$merged" = "true" ] && state="MERGED"
     # Roll up CI for the head sha from BOTH the check-runs API and the legacy
     # combined commit-status API, worst-wins. A repo whose CI reports only via
@@ -288,7 +360,12 @@ case "$cmd" in
     dm_meta_set "$id" pr_state "$state"
     dm_meta_set "$id" checks "$rollup"
     dm_meta_set "$id" merge_state "$merge_state"
-    [ -n "$sha" ] && dm_meta_set "$id" pr_head "$sha"
+    dm_meta_set "$id" pr_head "$sha"
+    snapshot="$(jq -cn --arg state "$state" --arg checks "$rollup" \
+      --arg merge_state "$merge_state" --arg head "$sha" \
+      --arg head_repo "$head_repo" --arg head_ref "$head_ref" \
+      '{state:$state, checks:$checks, merge_state:$merge_state, head:$head, head_repo:$head_repo, head_ref:$head_ref}')"
+    dm_meta_set "$id" pr_check_snapshot "$snapshot"
     echo "pr: $url · state: $state · checks: $rollup · merge_state: $merge_state"
     ;;
 
@@ -328,30 +405,43 @@ case "$cmd" in
       # within the timeout rather than aborting the wait. A persistent failure
       # still surfaces — it never reaches a terminal rollup, so it times out
       # (non-zero) with the last-seen rollup reported.
-      if "$0" check "$id" >/dev/null 2>&1; then
-        checks="$(dm_meta_get "$id" checks)"
+      check_out=""
+      if check_out="$("$0" check "$id" 2>&1)"; then
+        if load_check_snapshot "$id"; then
+          checks="$PR_SNAPSHOT_CHECKS"; merge_state="$PR_SNAPSHOT_MERGE_STATE"
+          checked_head="$PR_SNAPSHOT_HEAD"
+        else
+          checks="unknown"; merge_state="unknown"; checked_head=""
+          dm_info "await-checks: refresh returned an invalid check snapshot after ${waited}s: $url"
+        fi
+        verify_head=0
+        case "$checks" in
+          passing|failing) verify_head=1 ;;
+          none) if [ "$has_ci" -eq 0 ]; then verify_head=1; fi ;;
+        esac
+        if [ "$merge_state" = "dirty" ]; then verify_head=1; fi
+        if [ "$verify_head" -eq 1 ] && expected_head="$(expected_pr_head "$id")"; then
+          if [ -z "$checked_head" ]; then
+            checks="unknown"; merge_state="unknown"
+            dm_info "await-checks: refresh returned no PR head after ${waited}s: $url"
+          elif [ "$checked_head" != "$expected_head" ]; then
+            checks="pending"; merge_state="unknown"
+            dm_info "await-checks: PR head $checked_head has not reached expected head $expected_head after ${waited}s: $url"
+          fi
+        elif [ "$verify_head" -eq 1 ]; then
+          checks="unknown"; merge_state="unknown"
+          dm_info "await-checks: could not resolve the expected PR head after ${waited}s: $url"
+        fi
       else
-        checks="unknown"
+        checks="unknown"; merge_state="unknown"
+        dm_info "await-checks: refresh failed after ${waited}s: ${check_out:-unknown error}"
       fi
-      # Two head-race guards (#75). A DIRTY (merge-conflicted) PR never gets
-      # checks — GitHub skips workflow runs when the merge commit cannot be
-      # built — so polling to timeout is futile: fail fast and name the fix.
-      merge_state="$(dm_meta_get "$id" merge_state)"
+      # A conflict on the expected head cannot produce the pull-request merge
+      # checks, so waiting is futile. A stale or failed refresh is never allowed
+      # to reuse an older cached dirty state.
       if [ "$merge_state" = "dirty" ]; then
         dm_info "await-checks: DIRTY after ${waited}s (merge conflict — GitHub runs no checks on an unmergeable PR; rebase first): $url"
         exit 1
-      fi
-      # And a terminal rollup is trusted only when the CURRENT head actually
-      # has check-runs: right after a push the rollup can still describe the
-      # previous head's finished run, turning stale green/red into a wrong
-      # terminal answer. Zero runs on a CI repo means "not started yet".
-      if [ "$has_ci" -eq 1 ] && { [ "$checks" = "passing" ] || [ "$checks" = "failing" ]; }; then
-        await_sha="$(dm_meta_get "$id" pr_head)"
-        if [ -n "$await_sha" ]; then
-          await_slug="$(repo_slug "$(dm_meta_get "$id" repo)")"
-          await_runs="$(gh api "repos/$await_slug/commits/$await_sha/check-runs" 2>/dev/null | jq -r '.total_count // 0' 2>/dev/null || echo 0)"
-          [ "$await_runs" = "0" ] && checks="pending"
-        fi
       fi
       case "$checks" in
         passing) dm_info "await-checks: passing after ${waited}s: $url"; exit 0 ;;
@@ -423,8 +513,9 @@ case "$cmd" in
     url="$(dm_meta_get "$id" pr)"; [ -n "$url" ] || dm_die "no PR recorded for $id"
     # refresh state, then guard
     "$0" check "$id" >/dev/null
-    state="$(dm_meta_get "$id" pr_state)"; checks="$(dm_meta_get "$id" checks)"
-    merge_state="$(dm_meta_get "$id" merge_state)"
+    load_check_snapshot "$id" || dm_die "REFUSED: check returned an invalid state snapshot: $url"
+    state="$PR_SNAPSHOT_STATE"; checks="$PR_SNAPSHOT_CHECKS"
+    merge_state="$PR_SNAPSHOT_MERGE_STATE"
     [ "$state" = "MERGED" ] && dm_die "PR already merged: $url"
     [ "$state" = "CLOSED" ] && dm_die "PR is closed, refusing to merge: $url"
     # Never merge red. A `none` rollup (no checks reported) does NOT auto-pass:
@@ -451,6 +542,13 @@ case "$cmd" in
         ;;
       *)              dm_die "REFUSED: could not confirm check status ($checks): $url" ;;
     esac
+    checked_head="$PR_SNAPSHOT_HEAD"
+    expected_head="$(expected_pr_head "$id")" \
+      || dm_die "REFUSED: could not resolve the expected task/remote head for $url"
+    [ -n "$checked_head" ] \
+      || dm_die "REFUSED: GitHub did not report a PR head for $url"
+    [ "$checked_head" = "$expected_head" ] \
+      || dm_die "REFUSED: checked PR head $checked_head does not match expected task/remote head $expected_head: $url"
     # mergeable_state gate. Refuse a conflicted, draft, or branch-protection-
     # blocked PR. Do NOT refuse solely on "unknown" (GitHub often hasn't computed
     # it on first fetch); the gh pr merge failure path is the remaining backstop.
@@ -477,6 +575,20 @@ case "$cmd" in
       recheck_base="$(verify_never_exception "$repo" "$slug" "$n" "$url")"
       [ "$recheck_base" = "$exception_base" ] || dm_die "REFUSED: PR base changed from '$exception_base' to '$recheck_base' between verification and merge (retargeted on GitHub); refusing: $url"
     fi
+    expected_head="$(expected_pr_head "$id")" \
+      || dm_die "REFUSED: could not re-verify the expected task/remote head immediately before merge: $url"
+    [ "$expected_head" = "$checked_head" ] \
+      || dm_die "REFUSED: expected task/remote head changed from $checked_head to $expected_head before merge: $url"
+    live_head="$(live_pr_head "$slug" "$n")" \
+      || dm_die "REFUSED: could not re-read the live PR head immediately before merge: $url"
+    [ "$live_head" = "$checked_head" ] \
+      || dm_die "REFUSED: live PR head changed from checked head $checked_head to $live_head before merge: $url"
+    remote_head="$(remote_pr_head "$id")" \
+      || dm_die "REFUSED: could not verify the remote branch head immediately before merge: $url"
+    [ "$remote_head" = "$checked_head" ] \
+      || dm_die "REFUSED: remote branch head changed from checked head $checked_head to $remote_head before merge: $url"
+    # gh-axi has no head-pinned merge flag. These independent re-reads minimize
+    # the unavoidable instant between the final verification and the mutation.
     gh-axi "${args[@]}" || dm_die "merge failed"
     dm_meta_set "$id" pr_state MERGED
     dm_status_append "$id" merged "$url"
