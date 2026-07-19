@@ -77,6 +77,31 @@ check "guard permits quoted spaced-path read-only Git" 'b dm-command-guard.sh ch
 check "guard ignores harmless Git words in argv text" 'b dm-command-guard.sh check "echo git reset --hard" >/dev/null && b dm-command-guard.sh check "printf %s \"git restore file\"" >/dev/null && b dm-command-guard.sh check "bash -c \"echo git clean -fd\"" >/dev/null'
 check "guard ignores uninvoked harmless alias text" 'b dm-command-guard.sh check "git -c alias.cleanup=\"!printf harmless\" status" >/dev/null'
 
+# --- managed-worktree guard wiring (#83) -------------------------------------
+# The shipped Codex PreToolUse hook must resolve dm-command-guard.sh from the
+# distro root even when cwd is a managed clone/worktree, whose git-toplevel has
+# no guard script. Exercise the EXACT resolver string from .codex/config.toml.
+GUARD_HOOK_CMD="$(sed -n "s/^command = '\(.*\)'\$/\1/p" "$ROOT/.codex/config.toml")"
+GUARD_DISTRO="$TMP/guard-distro"
+mkdir -p "$GUARD_DISTRO/bin" "$GUARD_DISTRO/repos/veriflow/src" "$GUARD_DISTRO/state/worktrees/dm-fake/src"
+cp "$ROOT/bin/dm-command-guard.sh" "$GUARD_DISTRO/bin/dm-command-guard.sh"
+chmod +x "$GUARD_DISTRO/bin/dm-command-guard.sh"
+GUARD_WT="$GUARD_DISTRO/state/worktrees/dm-fake/src"
+GUARD_CLONE="$GUARD_DISTRO/repos/veriflow/src"
+# Walk-up resolution: DM_HOME unset, cwd inside a managed worktree/clone.
+guard_walkup() { ( cd "$1" && printf '%s' "$2" | env -u DM_HOME sh -c "$GUARD_HOOK_CMD" ); }
+# DM_HOME fast path: cwd unrelated to the distro, DM_HOME names its root.
+guard_dmhome() { ( cd "$TMP" && printf '%s' "$1" | DM_HOME="$GUARD_DISTRO" sh -c "$GUARD_HOOK_CMD" ); }
+GUARD_RESET='{"tool_input":{"command":"git reset --hard"}}'
+GUARD_CHECKOUT='{"tool_input":{"command":"git checkout -- package-lock.json"}}'
+GUARD_CLEAN='{"tool_input":{"command":"git clean -fdx"}}'
+GUARD_STATUS='{"tool_input":{"command":"git status"}}'
+check "wiring resolves guard extracted from .codex/config.toml" '[ -n "$GUARD_HOOK_CMD" ]'
+check "wiring blocks destructive git from a managed worktree (walk-up, no DM_HOME)" '! guard_walkup "$GUARD_WT" "$GUARD_RESET" >/dev/null 2>&1'
+check "wiring blocks destructive git from a managed clone (walk-up, no DM_HOME)" '! guard_walkup "$GUARD_CLONE" "$GUARD_CHECKOUT" >/dev/null 2>&1'
+check "wiring permits read-only git from a managed worktree" 'guard_walkup "$GUARD_WT" "$GUARD_STATUS" >/dev/null 2>&1'
+check "wiring blocks destructive git via DM_HOME fast path" '! guard_dmhome "$GUARD_CLEAN" >/dev/null 2>&1'
+
 echo "== secondmate durable identity state =="
 SECOND_THREAD="$(b dm-thread-name.sh payments secondmate)"
 b dm-secondmate.sh prepare payments --scope "payments services" --repos "demo,fresh" --thread-name "$SECOND_THREAD"
