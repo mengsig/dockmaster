@@ -8,7 +8,7 @@ trigger, adapter, or evidence path drifts.
 | --- | --- | --- | --- | --- |
 | `guidance-and-triggers` | shared contract and exact triggers | `CLAUDE.md` → `AGENTS.md` | direct `AGENTS.md` discovery | contract + parity test |
 | `skill-discovery` | all 18 skills, separated vocabularies | `.claude/skills` | official `.agents/skills` | adapter trees + parity test |
-| `task-dispatch` | async complete-brief worker | background `Agent` | `spawn_agent`, `fork_turns=none` | both task-lifecycle skills + brief generator |
+| `task-dispatch` | async complete-brief worker | background `Agent` | sanitized thread label + returned `agent_id`, `fork_turns=none` | task-lifecycle + brief/thread helpers |
 | `worktree-isolation` | one guarded copy per task | toolbelt + agent isolation | toolbelt + absolute path in brief | `dm-worktree.sh` + smoke suite |
 | `nested-secondmate` | root → supervisor → worker | nested background agents | depth 2, six-thread cap | secondmate skills + Codex config/runtime smoke |
 | `followup-and-steering` | same-worker correction | `SendMessage`/task controls | message/follow-up/interrupt/list controls | supervision + recovery adapters |
@@ -17,7 +17,7 @@ trigger, adapter, or evidence path drifts.
 | `bounded-ci-wait` | terminal CI rollup | Monitor/schedule + `await-checks` | attached command, dedicated waiter, or schedule + `await-checks` | dm-pr + supervision adapters |
 | `scheduled-fleet-sweep` | recurring PR health | runtime schedule/cron | desktop/web scheduled task; CLI prepares it | `dm-pr sweep` + supervision adapters |
 | `change-review` | pre-delivery approval loop | background Lavish poll | no-fork waiter owns poll; mailbox completion wakes parent | dm-lavish + adapters + parity regression |
-| `pr-gates` | fast/default/rigorous gates | fresh reviewers | fresh no-fork reviewers; focused fallback | pr-workflow + configs + drift test |
+| `pr-gates` | fast/default/rigorous gates | fresh reviewers | executable no-fork verify/security fallbacks; fail closed | pr-workflow + configs + runner tests |
 | `post-pr-review` | review comments/red CI tail | shared skill | shared skill | both post-pr-review skills |
 | `github-tooling` | PR API/checks/merge | gh-axi/gh | gh-axi/gh or plugin tools | dm-pr + smoke |
 | `browser-tooling` | real browser validation | chrome-devtools-axi | chrome-devtools-axi or Browser Use | contract + doctor |
@@ -30,10 +30,10 @@ trigger, adapter, or evidence path drifts.
 | `testing-policy` | real tests/visible skips/flakes | shared contract | shared contract | dm-test + both skills + smoke |
 | `fleet-campaigns` | one gated child per repo | background fan-out | bounded collaboration fan-out | backlog + fleet skills + smoke |
 | `deterministic-workflow` | optional configured runner | Workflow host when available | compatible injected host; full native fallback | runner + gate drift test |
-| `merge-safety` | red/authority/unlanded guards | shared toolbelt | shared toolbelt + command rules | dm-pr/dm-merge/rules/smoke |
+| `merge-safety` | red/authority/unlanded guards | shared toolbelt | shared toolbelt + trusted rules/hook guardrails | dm-pr/dm-merge/rules/hook/smoke |
 | `right-sizing` | quality-aware resource use | per-agent model/effort and tiers | tiers, bounded count, focused no-fork prompts | task/pr adapters + perf guard |
 | `plugins-and-fallbacks` | optional tools never silently vanish | installed tools/skills with plain fallback | plugins/local tools with focused fallback | README + doctor + pr adapter |
-| `project-safety-config` | project policy | Claude settings allowlist | trusted config + inline-tested rules | both configs + runtime smoke |
+| `project-safety-config` | project policy | Claude settings allowlist | trusted config + tested rules/PreToolUse hook | configs + guard + runtime smoke |
 
 ## Clean separation
 
@@ -49,9 +49,12 @@ Codex collaboration names in Claude adapters.
 
 - Project `.codex/config.toml` and project rules load only after the project is
   trusted. The CLI must show no config warning; runtime smoke uses strict config.
-- Codex command rules are experimental and cover shell commands outside the
-  sandbox. They are an extra destructive-command guardrail, not the enforcement
-  boundary; guarded toolbelt paths and the operating contract remain primary.
+- Codex command rules use exact argv prefixes, so project `PreToolUse` also
+  parses shell commands for absolute Git paths, global options such as `-C`, and
+  destructive flag variants. Both layers are trust-scoped guardrails, not a
+  complete security boundary: specialized tools may not emit a Bash hook event,
+  and shell interpretation can exceed the parser. Guarded toolbelt paths and the
+  operating contract remain primary.
 - Nesting defaults to one edge, so dockmaster explicitly sets depth 2 for
   secondmate → worker. Six concurrent open threads bound fan-out.
 - The active collaboration call has no per-spawn model/effort field. Codex

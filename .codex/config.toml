@@ -9,3 +9,12 @@ multi_agent = true
 max_depth = 2
 max_threads = 6
 interrupt_message = true
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = '"$(git rev-parse --show-toplevel)/bin/dm-command-guard.sh" hook'
+timeout = 10
+statusMessage = "Checking Git command safety"

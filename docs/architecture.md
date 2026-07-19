@@ -209,7 +209,7 @@ docs/architecture.md     this file
 bin/                     portable helper scripts (repo/worktree/pr/backlog/merge/memory)
 .claude/skills/          Claude-native workflow adapters
 .agents/skills/          Codex-native workflow adapters
-.codex/                  trusted-project Codex config and command rules
+.codex/                  trusted-project Codex config/rules (including hooks)
 workflows/               optional Workflow runner for the PR pipeline (opt-in)
 config/                  pipeline defaults + per-repo overrides (committed defaults)
 tests/                   lifecycle, parity, runtime, and performance checks

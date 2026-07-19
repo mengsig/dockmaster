@@ -22,6 +22,7 @@ pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
+file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
 # --- fixtures ----------------------------------------------------------------
 git init -q --bare -b main "$TMP/origin.git"
@@ -32,6 +33,23 @@ git init -q -b main "$TMP/seed"
 
 cd "$ROOT"
 b() { "$ROOT/bin/$@"; }
+
+echo "== Codex thread identity + command guard =="
+THREAD_A="$(b dm-thread-name.sh fix-login-412)"
+THREAD_B="$(b dm-thread-name.sh fix.login-412)"
+THREAD_C="$(b dm-thread-name.sh fix_login_412)"
+LONG_THREAD="$(b dm-thread-name.sh task-abcdefghijklmnopqrstuvwxyz-abcdefghijklmnopqrstuvwxyz-12345)"
+check "thread name is stable" '[ "$THREAD_A" = "$(b dm-thread-name.sh fix-login-412)" ]'
+check "thread name matches Codex grammar" 'grep -Eq "^[a-z0-9_]{1,64}$" <<<"$THREAD_A"'
+check "normalized collisions retain distinct identities" '[ "$THREAD_A" != "$THREAD_B" ] && [ "$THREAD_A" != "$THREAD_C" ] && [ "$THREAD_B" != "$THREAD_C" ]'
+check "long task id stays bounded" '[ "${#LONG_THREAD}" -le 64 ]'
+check "invalid durable id is rejected" '! b dm-thread-name.sh "bad id" >/dev/null 2>&1'
+check "guard blocks git -C reset flag permutation" '! b dm-command-guard.sh check "git -C /tmp reset HEAD --hard" >/dev/null 2>&1'
+check "guard blocks absolute git clean flag permutation" '! b dm-command-guard.sh check "/usr/bin/git --no-pager -C /tmp clean -d -f" >/dev/null 2>&1'
+check "guard blocks non-hard reset and dry-run clean bypasses" '! b dm-command-guard.sh check "/usr/bin/git -C /tmp reset --merge HEAD" >/dev/null 2>&1 && ! b dm-command-guard.sh check "/usr/bin/git -C /tmp clean -n" >/dev/null 2>&1'
+check "guard blocks restore and destructive switch" '! b dm-command-guard.sh check "git restore file" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch --discard-changes main" >/dev/null 2>&1'
+check "guard blocks checkout and combined switch flags" '! b dm-command-guard.sh check "git checkout feature" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch -fq main" >/dev/null 2>&1'
+check "guard permits read-only Git" 'b dm-command-guard.sh check "git -C /tmp status" >/dev/null'
 
 echo "== registry =="
 b dm-repo.sh add demo "$TMP/origin.git" --mode local-only --test-cmd "test -f src/calc.py" >/dev/null 2>&1
@@ -1485,10 +1503,41 @@ rm -rf "$DM_HOME/repos/mauth/.github"
 
 echo "== runtime parity + performance guards =="
 check "runtime parity suite passes" 'node "$ROOT/tests/check-runtime-parity.js" >/dev/null'
+EVIDENCE_PARENT="$TMP/evidence-parent"
+mkdir -m 700 "$EVIDENCE_PARENT"
+printf 'untouched\n' > "$TMP/evidence-victim"
+ln -s "$TMP/evidence-victim" "$EVIDENCE_PARENT/codex-version.txt"
+EVIDENCE_ONE="$("$ROOT/tests/runtime-evidence-dir.sh" create "$EVIDENCE_PARENT")"
+EVIDENCE_TWO="$("$ROOT/tests/runtime-evidence-dir.sh" create "$EVIDENCE_PARENT")"
+check "runtime evidence uses unique private children" '[ "$EVIDENCE_ONE" != "$EVIDENCE_TWO" ] && [ ! -L "$EVIDENCE_ONE" ] && [ "$(file_mode "$EVIDENCE_ONE")" = 700 ]'
+SAFE_EVIDENCE="$("$ROOT/tests/runtime-evidence-dir.sh" reserve "$EVIDENCE_ONE" codex-version.txt)"
+check "runtime evidence files are private regular files" '[ -f "$SAFE_EVIDENCE" ] && [ ! -L "$SAFE_EVIDENCE" ] && [ "$(file_mode "$SAFE_EVIDENCE")" = 600 ]'
+ln -s "$TMP/evidence-victim" "$EVIDENCE_ONE/attacker.json"
+check "runtime evidence refuses fixed-file symlinks" '! "$ROOT/tests/runtime-evidence-dir.sh" reserve "$EVIDENCE_ONE" attacker.json >/dev/null 2>&1 && grep -Fx untouched "$TMP/evidence-victim" >/dev/null'
+ln -s "$EVIDENCE_PARENT" "$TMP/evidence-root-link"
+check "runtime evidence refuses symlink roots" '! "$ROOT/tests/runtime-evidence-dir.sh" create "$TMP/evidence-root-link" >/dev/null 2>&1'
 check "runtime performance guard passes" 'node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
 PARITY_FIXTURE="$TMP/runtime-parity"
 mkdir -p "$PARITY_FIXTURE"
-cp -R "$ROOT/." "$PARITY_FIXTURE/"
+copy_parity_input() {
+  local relative="$1"
+  mkdir -p "$PARITY_FIXTURE/$(dirname "$relative")"
+  cp "$ROOT/$relative" "$PARITY_FIXTURE/$relative"
+}
+for relative in AGENTS.md CLAUDE.md config/runtime-capabilities.json \
+  config/runtime-performance-baseline.json docs/runtime-capabilities.md \
+  .codex/config.toml .claude/settings.json; do
+  copy_parity_input "$relative"
+done
+while IFS= read -r relative; do copy_parity_input "$relative"; done < <(
+  jq -r '.capabilities[].evidence[]' "$ROOT/config/runtime-capabilities.json" | sort -u
+)
+while IFS= read -r skill; do
+  copy_parity_input ".claude/skills/$skill/SKILL.md"
+  copy_parity_input ".agents/skills/$skill/SKILL.md"
+done < <(jq -r '.skills[]' "$ROOT/config/runtime-capabilities.json")
+check "runtime fixture excludes repository and private state" \
+  '[ ! -e "$PARITY_FIXTURE/.git" ] && [ ! -e "$PARITY_FIXTURE/state" ] && [ ! -e "$PARITY_FIXTURE/repos" ] && [ ! -e "$PARITY_FIXTURE/data" ] && [ ! -e "$PARITY_FIXTURE/.env" ]'
 rm "$PARITY_FIXTURE/.agents/skills/rollback/SKILL.md"
 check "runtime parity fails on a missing Codex skill" \
   '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'

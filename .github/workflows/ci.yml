@@ -72,6 +72,9 @@ jobs:
       - name: Check pr-pipeline gate lists match config
         run: node tests/check-gate-drift.js
 
+      - name: Check compatible-host security gate
+        run: node tests/check-pr-runner.js
+
       - name: Check Claude/Codex runtime parity
         run: node tests/check-runtime-parity.js
 
@@ -87,6 +90,8 @@ jobs:
 
       - name: Check runtime test syntax
         run: |
-          bash -n tests/runtime-performance.sh tests/runtime-smoke.sh
+          bash -n tests/runtime-evidence-dir.sh tests/runtime-performance.sh tests/runtime-smoke.sh
+          node --check tests/check-codex-skill-discovery.js
           node --check tests/check-runtime-parity.js
+          node --check tests/check-pr-runner.js
           node --check tests/runtime-performance.js

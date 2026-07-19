@@ -58,11 +58,14 @@ bin/dm-brief.sh <id>              # scaffolds data/<id>/brief.md
 
 Open the brief, replace `{TASK}` with a concrete description, acceptance
 criteria, constraints, and context. Keep additions task-specific; do not restate
-the lifecycle. Then use Codex collaboration to spawn the crewmate with the brief
-as its complete prompt:
+the lifecycle. The durable id allows dots, hyphens, and uppercase, but Codex
+`task_name` accepts only lowercase letters, digits, and underscores. Derive a
+separate deterministic thread label; its digest suffix prevents normalized ids
+such as `fix-a`, `fix.a`, and `fix_a` from colliding:
 
 ```
-spawn_agent(task_name=<id>, message=<contents of data/<id>/brief.md>,
+thread_name="$(bin/dm-thread-name.sh <id>)"
+spawn_agent(task_name=<thread_name>, message=<contents of data/<id>/brief.md>,
             fork_turns="none")
 ```
 
@@ -81,7 +84,14 @@ offers that selector. Bias toward sufficient reasoning for safety-critical work.
 
 The crew already has a dedicated worktree from `dm-worktree.sh`, so pass its
 absolute path in the brief and require the worker to verify and enter it before
-acting. Record the returned agent id: `bin/dm-task.sh set <id> agent_id <id>`.
+acting. The spawn result's agent id is the runtime identity; never substitute
+the durable id or thread label for it. Record both values for recovery:
+
+```
+bin/dm-task.sh set <id> thread_name "$thread_name"
+bin/dm-task.sh set <id> agent_id <returned-agent-id>
+```
+
 Confirm the crewmate is processing the brief, then resume supervision
 (load `supervision`).
 
@@ -107,8 +117,8 @@ Every requested change goes through the same gated flow:
 1. **Build + review artifact.** The crewmate implements and commits in its
    worktree, then renders the change as a lavish review page and signals
    `review-ready`.
-2. **Lavish approval gate.** Load `change-review`: present the artifact, collect
-   feedback (poll as a background task), relay it to the crewmate, loop until the
+2. **Lavish approval gate.** Load `change-review`: present the artifact, let its
+   no-fork waiter own the poll through exit, relay feedback, loop until the
    operator approves. Nothing lands before this approval.
 3. **Ask how it lands: PR or local?** Put the plain question to the operator.
    - **local** (or a `local-only` repo) → set the task to local mode, then land

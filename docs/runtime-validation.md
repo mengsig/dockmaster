@@ -2,31 +2,38 @@
 
 Validated 2026-07-19 in the task worktree. All live prompts were non-mutating:
 Claude used plan permissions; Codex used an ephemeral read-only execution. Raw
-machine-local evidence was written under `/tmp/dockmaster-runtime-live-*`, not
+machine-local evidence was written to a unique mode-0700 child under `/tmp`, not
 committed because it contains session identifiers.
 
 ## Automated evidence
 
 | command | result |
 | --- | --- |
-| `bash tests/smoke.sh` | 440 passed, 0 failed; includes missing-Codex-skill, lost-Lavish-mailbox-wake, and instruction-bloat negative cases |
-| `node tests/check-runtime-parity.js` | 18 exact skills, 18 exact triggers, vocabulary separation, notification-producing Lavish wait, 28 mapped capabilities, every evidence path present |
+| `bash tests/smoke.sh` | 456 passed, 0 failed; includes thread-name collisions, command bypasses, private evidence/symlink attacks, minimal parity fixture, missing skill, lost mailbox wake, and instruction bloat |
+| `node tests/check-runtime-parity.js` | 18 exact skills/triggers, vocabulary separation, executable rigorous fallbacks, notification-producing Lavish wait, 28 mapped capabilities, every evidence path present |
+| `node tests/check-pr-runner.js` | compatible-host security finding and missing-capability paths fail closed |
 | `node tests/check-gate-drift.js` | all three built-in gate sequences match shipped configs |
 | `bash tests/runtime-performance.sh` | context and Claude no-regression guardrails passed |
-| `bash tests/runtime-smoke.sh --live` | installed config/discovery/policy probes and both authenticated model probes passed |
+| `bash tests/runtime-smoke.sh --live` | structured discovery, rule/parser bypasses, both authenticated model probes, and real PreToolUse block passed |
 
 ## Installed runtimes
 
 | runtime | version | config/discovery proof | authenticated proof |
 | --- | --- | --- | --- |
 | Claude Code | 2.1.215 | CLI/auth probe passed; existing `.claude/settings.json` parsed | loaded project `task-lifecycle`; returned `RUNTIME_OK` under plan mode |
-| Codex CLI | 0.144.6 | strict-config doctor: 18 checks, no failures/warnings; prompt-input contained dockmaster skills; rule allow/deny probes passed | ephemeral read-only run loaded `task-lifecycle` and the no-fork Lavish waiter contract from `change-review`; returned `RUNTIME_OK` |
+| Codex CLI | 0.144.6 | strict config parsed; prompt-input contained exact structured descriptions/locators for all skills; mutations failed; rule/parser bypass probes passed | ephemeral read-only run loaded dispatch/waiter/rigorous contracts and returned `RUNTIME_OK`; an injected equivalent of the project PreToolUse hook blocked absolute-path `git -C ... restore` |
 
 The isolated Claude worktree had not accepted Claude's trust dialog, so the CLI
 reported that its 45 project permission allow entries were ignored. This did not
 prevent `CLAUDE.md`, `AGENTS.md`, or skill discovery—the live proof passed—but a
 normal installation must accept each runtime's project trust prompt before its
 project-local permission/config layer is relied on.
+
+Codex trust is path-specific, so this isolated worktree did not load its project
+hook directly. The live hook proof injected the same checked handler for one
+ephemeral invocation with `--dangerously-bypass-hook-trust`; it persisted no
+trust change. Normal use loads `.codex/config.toml` only after project and hook
+trust. Rules and hooks remain guardrails, not complete enforcement boundaries.
 
 ## Real Codex collaboration proof
 
@@ -44,6 +51,10 @@ early yield, resumed the same terminal session through exit, and returned
 without a manual terminal read. The wake therefore came from collaboration
 completion, not from the command session.
 
+After the cold-review fixes, the same no-fork waiter proof was rerun and returned
+`WAITER_COMPLETION_OK` through the parent mailbox after owning its yielded shell
+session through exit.
+
 ## Performance evidence
 
 | model-visible or startup surface | before | after | result |
@@ -52,7 +63,7 @@ completion, not from the command session.
 | Claude settings | 1,579 B | 1,579 B | byte-identical |
 | Claude full skill bodies on disk | 80,906 B | 80,906 B | byte-identical; still progressive load |
 | Claude discovery descriptions | 4,603 B | 4,603 B | byte-identical |
-| Codex adapter/config/rules | none | 83,303 B / 295 B / 985 B | full bodies load only when selected; descriptions 4,567 B, under documented 8,000-character fallback budget |
+| Codex adapter/config/rules | none | 84,247 B / 516 B / 1,959 B | full bodies load only when selected; descriptions 4,567 B, under documented 8,000-character fallback budget |
 
 A five-run local `--version` process-start sample reported medians of 71.3 ms
 for Claude and 35.8 ms for Codex. This is reproducible CLI process overhead, not

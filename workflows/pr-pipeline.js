@@ -103,6 +103,15 @@ const REVIEW_SCHEMA = {
   },
   required: ['findings'],
 }
+const SECURITY_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    surface: { type: 'boolean' },
+    findings: REVIEW_SCHEMA.properties.findings,
+    summary: { type: 'string' },
+  },
+  required: ['surface', 'findings', 'summary'],
+}
 // One skeptic's verdict on a single finding: refuted=true means the finding is
 // wrong / already handled / not real in this diff, with a cited rationale.
 const REFUTE_SCHEMA = {
@@ -239,6 +248,26 @@ async function openPR() {
   )
 }
 
+async function runSecurityGate(g) {
+  const auto = g.method === 'auto' || (g.optional && !t.securitySurface)
+  const scan = auto
+    ? `First run exactly:\n\n    ${t.binDir}/dm-pr.sh security-scan ${t.taskId}\n\nSet surface=false only when it exits 1 for no signals. `
+    : 'The caller declared a security surface; set surface=true. '
+  const result = await agent(
+    `Security gate for diff ${base}...HEAD in ${t.worktree}. ${scan}` +
+    `When surface=true, inspect the changed files for auth/authz, input validation and injection, secret exposure, crypto misuse, ` +
+    `unsafe external I/O, and privilege or data-loss paths. Do not change files. Return every concrete finding with severity, file, ` +
+    `and summary; return an empty findings array only when the reviewed surface is sound. If a required capability is unavailable, ` +
+    `report a high-severity finding instead of skipping.`,
+    { label: 'security', phase: 'Review', effort: g.effort || 'high', schema: SECURITY_SCHEMA },
+  )
+  if (result.findings.length) {
+    return { passed: false, summary: result.summary, findings: result.findings }
+  }
+  if (!result.surface) log(`security: explicit no-surface skip — ${result.summary}`)
+  return { passed: true, summary: result.summary, findings: [] }
+}
+
 let lastReview = null
 let currentPass = 'review'
 let currentEffort            // effort of the active review pass, reused when a fix gate re-reviews
@@ -303,37 +332,17 @@ for (const g of gates) {
     // the test suite. Skippable only when the diff has no runtime surface.
     if (g.optional && t.noRuntimeSurface) { log('verify: diff has no runtime surface (docs/config-only) — behavioral gate skipped'); continue }
     const v = await agent(
-      `Behavioral verification of task ${t.taskId}. In ${t.worktree}, use the verify skill to drive the behavior the diff ${base}...HEAD ` +
-      `changes end to end: exercise the actual affected flow and observe it, not just that tests pass. Report what you exercised and ` +
-      `whether it behaved correctly. Do not change any files.`,
+      `Behavioral verification of task ${t.taskId}. In ${t.worktree}, drive the behavior changed by ${base}...HEAD end to end without ` +
+      `editing files. Use a real browser for an affected web flow; otherwise use the narrowest executable CLI or API path. Observe the ` +
+      `actual result, not just that tests pass. Set passed=false if behavior is wrong or any required runtime/browser capability is unavailable.`,
       { label: 'verify', phase: 'Verify', effort: g.effort || 'high', schema: TEST_SCHEMA },
     )
     if (!v.passed) return { ok: false, stage: 'verify', detail: v.summary }
   } else if (g.gate === 'security') {
-    // Self-compute whenever nothing has already decided the question: an
-    // explicit `auto` method (rigorous) or an `optional` gate with no
-    // caller-declared surface (default/fast). t.securitySurface has no producer
-    // of its own in default/fast configs, so without this the optional gate
-    // always skipped; self-computing mirrors what the rigorous `auto` path (and
-    // the dockmaster's own agent-driven default execution, see the pr-workflow
-    // skill) already does, rather than requiring every caller to wire the flag.
-    if (g.method === 'auto' || (g.optional && !t.securitySurface)) {
-      // Scan the diff, escalate to a full review only on a hit, and otherwise
-      // skip explicitly — never a silent forget.
-      await agent(
-        `Security gate for task ${t.taskId}. In ${t.worktree}, run the security-surface scan exactly:\n\n` +
-        `    ${t.binDir}/dm-pr.sh security-scan ${t.taskId}\n\n` +
-        `If it reports signals present (exit 0), perform a security-review of the diff ${base}...HEAD (auth, input handling, secrets, ` +
-        `crypto, external I/O) and report concrete issues only. If it reports no signals (non-zero exit), state explicitly that a ` +
-        `security review was skipped because the diff has no security surface. Do not change any files.`,
-        { label: 'security', phase: 'Review', effort: g.effort || 'high' })
-      continue
+    const security = await runSecurityGate(g)
+    if (!security.passed) {
+      return { ok: false, stage: 'security', detail: security.summary, findings: security.findings }
     }
-    // Caller explicitly declared a security surface (or a mandatory, non-auto
-    // gate): review directly without re-scanning.
-    await agent(
-      `Security review of the diff ${base}...HEAD in ${t.worktree}: auth, input handling, secrets, crypto, external I/O. ` +
-      `Report concrete issues only.`, { label: 'security', phase: 'Review', effort: g.effort || 'high' })
   } else if (g.gate === 'await-checks') {
     // Compatibility no-op: no shipped tier lists await-checks anymore (the CI-wait
     // moved to the operator-mediated merge tail, which this runner never reaches —
@@ -354,7 +363,7 @@ for (const g of gates) {
     // honor it (bin/dm-pr.sh merge --method <method>); this runner never merges.
     return { ok: true, stage: 'pr', pr: url, method: g.method || 'squash' }
   } else {
-    log(`unknown gate '${g.gate}' — skipped`)
+    return { ok: false, stage: 'config', detail: `unknown gate '${g.gate}'` }
   }
 }
 return { ok: true, stage: 'complete' }

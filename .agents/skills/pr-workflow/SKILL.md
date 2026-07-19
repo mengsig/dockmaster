@@ -42,8 +42,8 @@ claim per-child model control unless the active surface exposes and proves it.
 
 The tiers share one gate schema, so a tier is just a different ordered `gates`
 array. The two new mechanics the rigorous tier introduces are executable
-procedure the dockmaster drives agent-style (and the optional runner drives the
-same way):
+procedure the dockmaster drives with native Codex collaboration (and the
+compatible-host runner drives with its injected API):
 
 - **dimension-parallel review** — instead of one generalist read, spawn one
   fresh reviewer per lens (`dimensions`: `correctness`, `security`,
@@ -59,15 +59,14 @@ same way):
 
 The rigorous gate order is
 `review (dimension-parallel) → verify-findings → fix → tests → verify → security
-→ pr`. The behavioral `verify` gate drives the changed behavior
-end to end (via the `verify` skill) and reports what was actually exercised — not
-just that tests pass; it is skippable only when the diff has no runtime surface
-(docs/config-only). `security` is auto-triggered (`bin/dm-pr.sh security-scan`,
-then `security-review` only on a hit, else an explicit skip), and `pr` opens the
-PR. Waiting for CI is **not** a pipeline gate — it runs in the operator-mediated
-merge tail after the PR opens (see "Merge authority" below). The never-merge-red
-merge gate and the lavish-approval-first ordering are unchanged across all three
-tiers.
+→ pr`. The behavioral `verify` gate drives the changed behavior end to end and
+reports what was actually exercised — not just that tests pass; it is skippable
+only when the diff has no runtime surface (docs/config-only). `security` is
+auto-triggered (`bin/dm-pr.sh security-scan`, then a focused general security
+reviewer only on a hit, else an explicit skip), and `pr` opens the PR. Waiting
+for CI is **not** a pipeline gate — it runs in the operator-mediated merge tail
+after the PR opens (see "Merge authority" below). The never-merge-red merge gate
+and the lavish-approval-first ordering are unchanged across all three tiers.
 
 The file has a `gates` array. Run the gates top to bottom. A repo's delivery
 **mode** (registry: `pipeline` | `direct-pr` | `local-only`) shapes it:
@@ -110,12 +109,21 @@ worktree/branch from meta, communicates only through the task record, and
   final gate before the PR: same cold-read discipline, on the fixed tree. This
   is the "merge gate."
 - **fix / tests** — resolve any merge-gate findings and re-confirm green.
-- **security** — optional. Run `security-review` on the diff only when the change
-  touches auth, input handling, secrets, crypto, or external I/O. To make the
-  skip deliberate rather than silent, `bin/dm-pr.sh security-scan <id>` greps the
-  task's diff for those signals and prints whether a review is warranted (exit 0
-  = signals found, 1 = none); it is advisory only and never blocks. Skip
-  explicitly when there is no security surface; do not stack it as a reflex.
+- **verify** — rigorous only. Unless the diff is proven docs/config-only, spawn a
+  fresh no-fork general verifier using a label from `bin/dm-thread-name.sh
+  "<id>.verify"`. Give it the acceptance criteria, worktree, and diff base. It
+  must exercise the affected behavior end to end without editing: use the real
+  browser for a web flow, otherwise the narrowest executable CLI/API path. It
+  returns `PASS` with observed evidence or `FAIL` with concrete findings. A
+  missing browser/runtime/capability is `FAIL`, never a skip.
+- **security** — optional or auto. Run `bin/dm-pr.sh security-scan <id>` first.
+  On a hit, spawn a fresh no-fork general reviewer using a label from
+  `bin/dm-thread-name.sh "<id>.security"` with this exact scope: inspect only
+  `<base>...HEAD` and changed files for auth/authz, input validation/injection,
+  secret exposure, crypto misuse, unsafe external I/O, and privilege/data-loss
+  paths; do not edit; return `PASS` or ranked concrete findings with file/line
+  evidence. Any finding or unavailable review capability fails the gate. Exit 1
+  from the scan means an explicit no-security-surface skip, not a pass claim.
 - **pr** — open the PR (below).
 
 Adding a gate: document it here with the same contract (single responsibility,
@@ -240,15 +248,13 @@ behind the base, rebase it first so CI validates the actual combined state,
 not a stale diff against an older base (see `merge-conflict` if the rebase hits
 conflicts).
 
-## Optional: deterministic runner
+## Optional: compatible-host runner
 
-The default is to drive the gates above with ordinary `Agent` calls. For a
-hands-off run of the whole pipeline instead, `workflows/pr-pipeline.js` executes
-the same gates as a `Workflow` with zero-token idle between stages. It has a
-built-in gate list for each tier (`fast` | `default` | `rigorous`), selected by
-`tier:` when the caller passes no explicit `gates` — e.g. the `rigorous` tier
-(dimension-parallel review via `parallel()`, adversarial `verify-findings`, then
-fix → tests → verify → security → pr). It is opt-in and not wired to anything — invoke it via the
-Workflow tool only when the operator has asked for multi-agent orchestration, and
-a live **rigorous** run is a dockmaster/operator action. See `config/README.md`
-for which config fields it reads versus the agent-driven path.
+The default is the native `spawn_agent(..., fork_turns="none")` procedure above.
+`workflows/pr-pipeline.js` is an opt-in adapter only for a compatible host that
+injects its documented `args`, `agent`, `parallel`, and `log` API. It has a
+built-in gate list for each tier (`fast` | `default` | `rigorous`) when the host
+passes no explicit `gates`. Do not invoke a nonexistent Codex workflow primitive
+or treat the file as auto-discovered. If the injected API is absent, run the
+complete native path; never skip a gate. A live rigorous run remains a
+dockmaster/operator action. See `config/README.md` for executor coverage.

@@ -59,8 +59,9 @@ that injects the runner's workflow API; nothing auto-discovers it. It reads:
   `method: "auto"` below) and only reviewing on a hit, so no caller wiring is
   required. A caller-declared `securitySurface` is an override: if set, the
   runner reviews directly without re-scanning. **`method: "auto"`** (rigorous)
-  runs `bin/dm-pr.sh security-scan` and escalates to `security-review` only on
-  a hit.
+  runs `bin/dm-pr.sh security-scan` and performs a focused general security
+  review only on a hit. The runner consumes a structured result: any finding or
+  missing capability fails the gate; no-surface is an explicit skip.
 - **`method`** on the `pr` gate — surfaced in the runner's result so the
   operator-mediated merge step can honor it (the runner never merges).
 

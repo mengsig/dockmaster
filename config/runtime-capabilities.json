@@ -57,7 +57,7 @@
       "requirement": "Asynchronous worker dispatch with complete isolated brief",
       "claude": "background Agent with generated brief",
       "codex": "spawn_agent with fork_turns=none and generated brief",
-      "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", "bin/dm-brief.sh"]
+      "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", "bin/dm-brief.sh", "bin/dm-thread-name.sh"]
     },
     {
       "id": "worktree-isolation",
@@ -120,7 +120,7 @@
       "requirement": "Fast/default/rigorous review, fix, test, security, and PR gates",
       "claude": "fresh Agent reviewers and shared gate configs",
       "codex": "fresh fork_turns=none reviewers with focused fallback and shared configs",
-      "evidence": [".claude/skills/pr-workflow/SKILL.md", ".agents/skills/pr-workflow/SKILL.md", "config/pr-pipeline.default.json", "tests/check-gate-drift.js"]
+      "evidence": [".claude/skills/pr-workflow/SKILL.md", ".agents/skills/pr-workflow/SKILL.md", "config/pr-pipeline.default.json", "tests/check-gate-drift.js", "tests/check-pr-runner.js"]
     },
     {
       "id": "post-pr-review",
@@ -210,8 +210,8 @@
       "id": "merge-safety",
       "requirement": "Never merge red, honor authority, preserve branches and unlanded work",
       "claude": "shared dm-pr/dm-merge gates",
-      "codex": "shared dm-pr/dm-merge gates plus destructive command rules",
-      "evidence": ["bin/dm-pr.sh", "bin/dm-merge.sh", ".codex/rules/dockmaster.rules", "tests/smoke.sh"]
+      "codex": "shared gates plus trust-scoped execpolicy and PreToolUse shell guardrails",
+      "evidence": ["bin/dm-pr.sh", "bin/dm-merge.sh", ".codex/rules/dockmaster.rules", ".codex/config.toml", "bin/dm-command-guard.sh", "tests/smoke.sh"]
     },
     {
       "id": "right-sizing",
@@ -231,8 +231,8 @@
       "id": "project-safety-config",
       "requirement": "Trusted Codex project config validates nesting and destructive-command policy",
       "claude": ".claude/settings.json command allowlist",
-      "codex": ".codex/config.toml plus inline-tested execpolicy rules",
-      "evidence": [".claude/settings.json", ".codex/config.toml", ".codex/rules/dockmaster.rules", "tests/runtime-smoke.sh"]
+      "codex": ".codex/config.toml plus tested execpolicy and PreToolUse guardrails",
+      "evidence": [".claude/settings.json", ".codex/config.toml", ".codex/rules/dockmaster.rules", "bin/dm-command-guard.sh", "tests/runtime-smoke.sh"]
     }
   ]
 }

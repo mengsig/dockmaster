@@ -70,7 +70,7 @@ function checkTriggers() {
 
 function checkSeparation() {
   const specific = new Set(MANIFEST.runtime_specific_skills)
-  const claudeTerms = /\b(?:SendMessage|TaskList|Monitor|ScheduleWakeup|CronCreate)\b|Agent\(|Claude Code|subagent_type|isolation:/
+  const claudeTerms = /\b(?:SendMessage|TaskList|Monitor|ScheduleWakeup|CronCreate)\b|\bAgent\b|`Workflow`|Workflow tool|Claude Code|subagent_type|isolation:/
   const codexTerms = /\b(?:spawn_agent|followup_task|send_message|wait_agent|interrupt_agent|list_agents|fork_turns)\b/
   for (const name of MANIFEST.skills) {
     const claude = read(`${RUNTIMES.claude}/${name}/SKILL.md`)
@@ -80,6 +80,40 @@ function checkSeparation() {
     if (!specific.has(name) && claude !== codex) fail(`${name}: neutral adapters drifted`)
   }
   console.log('ok   runtime vocabulary separation and neutral-byte parity')
+}
+
+function checkCodexThreadNames() {
+  const lifecycle = read('.agents/skills/task-lifecycle/SKILL.md')
+  const requirements = [
+    [/bin\/dm-thread-name\.sh <id>/, 'deterministic thread-name helper'],
+    [/spawn_agent\(task_name=<thread_name>/, 'separate sanitized task_name'],
+    [/agent_id <returned-agent-id>/, 'returned runtime identity persistence'],
+    [/never substitute[\s\S]{0,80}durable id or thread label/, 'identity separation'],
+  ]
+  for (const [pattern, label] of requirements) {
+    if (!pattern.test(lifecycle)) fail(`Codex task dispatch missing ${label}`)
+  }
+  if (/spawn_agent\(task_name=<id>/.test(lifecycle)) fail('Codex dispatch reuses durable id as task_name')
+  console.log('ok   Codex durable task and runtime thread identities remain separate')
+}
+
+function checkCodexRigorousFallbacks() {
+  const workflow = read('.agents/skills/pr-workflow/SKILL.md')
+  const requirements = [
+    [/fresh no-fork general verifier/, 'native verification fallback'],
+    [/real\s+browser[\s\S]{0,160}CLI\/API/, 'browser and non-browser verification paths'],
+    [/missing browser\/runtime\/capability is `FAIL`/, 'verification fail-closed contract'],
+    [/fresh no-fork general reviewer/, 'native security fallback'],
+    [/auth\/authz[\s\S]{0,180}injection[\s\S]{0,180}secret exposure/, 'focused security lenses'],
+    [/compatible host[\s\S]{0,320}`args`[\s\S]{0,80}`agent`[\s\S]{0,80}`parallel`/, 'compatible-host runner boundary'],
+  ]
+  for (const [pattern, label] of requirements) {
+    if (!pattern.test(workflow)) fail(`Codex rigorous workflow missing ${label}`)
+  }
+  if (/verify skill|security-review|Workflow tool|\bAgent\b/.test(workflow)) {
+    fail('Codex rigorous workflow contains unavailable runtime vocabulary')
+  }
+  console.log('ok   Codex rigorous gates have executable fail-closed fallbacks')
 }
 
 function checkCodexLavishWake() {
@@ -129,6 +163,9 @@ function checkCodexConfig() {
   if (maxDepth < 2 || maxDepth > 3) fail(`Codex max_depth must support exactly bounded nesting: ${maxDepth}`)
   if (maxThreads < 2 || maxThreads > 6) fail(`Codex max_threads must be bounded at 2..6: ${maxThreads}`)
   if (!config.includes('multi_agent = true')) fail('Codex multi_agent must be explicit')
+  if (!config.includes('[[hooks.PreToolUse]]') || !config.includes('dm-command-guard.sh')) {
+    fail('Codex project config must install the destructive-command PreToolUse guard')
+  }
   if (agentsBytes > docBytes) fail(`AGENTS.md ${agentsBytes} exceeds Codex cap ${docBytes}`)
   console.log(`ok   Codex config depth=${maxDepth} threads=${maxThreads} AGENTS=${agentsBytes}/${docBytes}B`)
 }
@@ -137,6 +174,8 @@ function main() {
   checkSkillSets()
   checkTriggers()
   checkSeparation()
+  checkCodexThreadNames()
+  checkCodexRigorousFallbacks()
   checkCodexLavishWake()
   checkCapabilities()
   checkCodexConfig()

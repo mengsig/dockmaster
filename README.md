@@ -144,7 +144,8 @@ Per-repo memory is plain markdown — no extra tool to install. Run
 
 Run `node tests/check-runtime-parity.js` for adapter/capability drift,
 `bash tests/runtime-performance.sh` for context guardrails, and
-`bash tests/runtime-smoke.sh` for installed-runtime discovery and config checks.
+`bash tests/runtime-smoke.sh` for installed-runtime structured discovery,
+trusted rule/hook guardrails, and config checks.
 
 ## License
 
