@@ -483,13 +483,17 @@ case "$cmd" in
           checks="unknown"; merge_state="unknown"; checked_head=""
           dm_info "await-checks: refresh returned an invalid check snapshot after ${waited}s: $url"
         fi
-        verify_head=0
-        case "$checks" in
-          passing|failing) verify_head=1 ;;
-          none) if [ "$has_ci" -eq 0 ]; then verify_head=1; fi ;;
-        esac
-        if [ "$merge_state" = "dirty" ]; then verify_head=1; fi
-        if [ "$verify_head" -eq 1 ] && expected_head="$(expected_pr_head "$id" "$PR_SNAPSHOT_HEAD_REPO" "$PR_SNAPSHOT_HEAD_REF")"; then
+      else
+        checks="unknown"; merge_state="unknown"; checked_head=""
+        dm_info "await-checks: refresh failed after ${waited}s: ${check_out:-unknown error}"
+      fi
+      # Bind terminality to the PR's CURRENT head. Only a candidate-terminal
+      # observation (dm_await_needs_head) needs the extra head fetch; when its
+      # rolled-up head is stale, empty, or unverifiable, downgrade to a
+      # non-terminal rollup so a previous run — or a stale dirty state — can
+      # never end the wait early. dm_await_gate then decides the action.
+      if dm_await_needs_head "$checks" "$merge_state" "$has_ci"; then
+        if expected_head="$(expected_pr_head "$id" "$PR_SNAPSHOT_HEAD_REPO" "$PR_SNAPSHOT_HEAD_REF")"; then
           if [ -z "$checked_head" ]; then
             checks="unknown"; merge_state="unknown"
             dm_info "await-checks: refresh returned no PR head after ${waited}s: $url"
@@ -497,30 +501,25 @@ case "$cmd" in
             checks="pending"; merge_state="unknown"
             dm_info "await-checks: PR head $checked_head has not reached expected head $expected_head after ${waited}s: $url"
           fi
-        elif [ "$verify_head" -eq 1 ]; then
+        else
           checks="unknown"; merge_state="unknown"
           dm_info "await-checks: could not reconcile the local and remote expected PR head after ${waited}s: $url"
         fi
-      else
-        checks="unknown"; merge_state="unknown"
-        dm_info "await-checks: refresh failed after ${waited}s: ${check_out:-unknown error}"
       fi
-      # A conflict on the expected head cannot produce the pull-request merge
-      # checks, so waiting is futile. A stale or failed refresh is never allowed
-      # to reuse an older cached dirty state.
-      if [ "$merge_state" = "dirty" ]; then
-        dm_info "await-checks: DIRTY after ${waited}s (merge conflict — GitHub runs no checks on an unmergeable PR; rebase first): $url"
-        exit 1
-      fi
-      case "$checks" in
-        passing) dm_info "await-checks: passing after ${waited}s: $url"; exit 0 ;;
-        none)
-          if [ "$has_ci" -eq 0 ]; then
-            dm_info "await-checks: none after ${waited}s (repo has no CI configured): $url"; exit 0
+      case "$(dm_await_gate "$checks" "$merge_state" "$has_ci")" in
+        dirty)
+          dm_info "await-checks: DIRTY after ${waited}s (merge conflict — GitHub runs no checks on an unmergeable PR; rebase first): $url"
+          exit 1 ;;
+        pass)
+          if [ "$checks" = "none" ]; then
+            dm_info "await-checks: none after ${waited}s (repo has no CI configured): $url"
+          else
+            dm_info "await-checks: passing after ${waited}s: $url"
           fi
-          ;;   # CI configured but no check has registered yet: not terminal, keep waiting
-        failing) dm_info "await-checks: FAILING after ${waited}s: $url"; exit 1 ;;
-        *) : ;;   # pending / unknown / empty: not terminal, keep waiting
+          exit 0 ;;
+        fail)
+          dm_info "await-checks: FAILING after ${waited}s: $url"; exit 1 ;;
+        wait) : ;;   # pending / unknown / none-with-CI / stale head: keep polling
       esac
       if [ "$waited" -ge "$timeout_secs" ]; then
         dm_info "await-checks: TIMED OUT after ${waited}s (last rollup: ${checks:-unknown}): $url"
