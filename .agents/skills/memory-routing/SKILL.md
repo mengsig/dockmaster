@@ -10,40 +10,39 @@ keeps a single source of truth that cannot drift. Memory is plain markdown —
 readable, diffable, hand-editable — driven by `bin/dm-memory.sh` (no bespoke
 tool). There are three stores.
 
-## Per-repo SHARED — the repo's own `AGENTS.md` dm:knowledge section
+## Per-repo SHARED — the repo's committed `.dm-knowledge/` notes
 
 Contributor-relevant facts about **one repo**: build/test commands, invariants,
 conventions, pitfalls, routing hints, decisions.
 
-They live in a dockmaster-managed section of the repo's own `AGENTS.md`,
-delimited by exact markers:
+They live as **one committed file per note** under the repo's tracked
+`.dm-knowledge/` directory (a distinct, committed dir — NOT the git-excluded
+`.dm/`), each file holding curated `- **[<kind>]** <fact>` bullets. It is
+**committed**, so git materializes it in every clone and worktree and crewmates
+get it for free. The dockmaster **never writes a clone** (prime directive): a
+crewmate records a note **in its worktree** and commits it with the work — it
+lands through the normal PR/local flow, never force-committed onto a clone's
+default branch.
 
-```
-<!-- dm:knowledge:start -->
-## Repository knowledge (dockmaster-maintained)
-...
-- **[command]** ...
-- **[convention]** ...
-<!-- dm:knowledge:end -->
-```
-
-It is **committed**, so git materializes it in every clone and worktree and
-crewmates get it for free. The dockmaster **never hand-writes** a managed repo's
-AGENTS.md (prime directive): a crewmate edits this section **in its worktree** and
-commits it with the work, exactly like any other change — it lands through the
-normal PR/local flow, never force-committed onto a clone's default branch.
+One file per task (`.dm-knowledge/<id>.md`) is the point: two concurrent tasks
+recording knowledge write **different files**, so notes never serialize on a hot
+`AGENTS.md` block and no longer manufacture a rebase conflict on nearly every PR
+(#81).
 
 - **Onboarding:** `bin/dm-repo.sh seed <repo>` scaffolds the git-excluded private
   store below; `bin/dm-repo.sh add` runs it by default. `seed` never touches the
-  clone's AGENTS.md — the shared section is added by a crewmate in a worktree,
-  which keeps the clone pristine (landable and fast-forward-syncable).
-- **Recall:** `bin/dm-memory.sh recall <repo> [query]` prints the section (plus
-  private notes), filtered by an optional query. Bounded and task-relevant — the
-  crewmate brief injects this automatically so a crewmate needs no tool call.
-- **Remember:** edit the `dm:knowledge` section as one curated
-  `- **[<kind>]** <fact>` bullet and commit it. Rewrite a superseded fact; do not
-  append forever. `<kind> ∈ {command, convention, invariant, pitfall, routing,
-  decision}`.
+  clone — the shared notes are added by a crewmate in a worktree, which keeps the
+  clone pristine (landable and fast-forward-syncable).
+- **Recall:** `bin/dm-memory.sh recall <repo> [query]` assembles the
+  `.dm-knowledge/` notes **plus the legacy `dm:knowledge` AGENTS.md block**
+  (migration: pre-existing inline knowledge is never stranded), filtered by an
+  optional query. Bounded and task-relevant — the crewmate brief injects it
+  automatically so a crewmate needs no tool call.
+- **Remember:** `bin/dm-memory.sh remember <id> --shared --kind <kind> "<fact>"`
+  writes the bullet to `.dm-knowledge/<id>.md` in the task's worktree; `git add`
+  and commit it with the change. Rewrite a superseded fact in the file that holds
+  it; do not append forever. `<kind> ∈ {command, convention, invariant, pitfall,
+  routing, decision}`.
 
 ## Per-repo PRIVATE — `repos/<repo>/.dm/notes.md`
 
@@ -102,7 +101,7 @@ Recall both global files with `bin/dm-memory.sh recall --global [query]`.
 
 | Fact is about… | Owner |
 | --- | --- |
-| one managed repo, contributor-relevant | that repo's `AGENTS.md` dm:knowledge section |
+| one managed repo, contributor-relevant | that repo's committed `.dm-knowledge/` notes |
 | one managed repo, orchestration (crew may see) | `repos/<repo>/.dm/notes.md` |
 | one managed repo, crew must NOT see | `repos/<repo>/.dm/private.md` |
 | this distro's own code | this repo's `AGENTS.md` dm:knowledge section |

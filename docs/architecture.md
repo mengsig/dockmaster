@@ -28,7 +28,7 @@ preserving one lifecycle and one toolbelt.
 | durable backlog | `state/backlog.json` + rendered markdown | task list mirror | thread list mirror |
 | project registry | `state/repos.json` + clones under `repos/` | shared | shared |
 | global memory | `state/operator.md`, `state/learnings.md`, optional runtime memory | shared | shared |
-| per-repo memory | committed `dm:knowledge` + private `.dm/` stores | shared | shared |
+| per-repo memory | committed `.dm-knowledge/` notes + private `.dm/` stores | shared | shared |
 | delivery modes | modular **PR pipeline** (ordered gates) per repo | shared | shared |
 | no-mistakes gate | review/test/security gates + optional runner | Claude reviewers | Codex fresh subagents; focused fallback if optional review skill absent |
 | right-sizing | task shape, review tier, focused context | per-agent model/effort where available | agent count and prompt scope; no unproved per-spawn selector |
@@ -84,20 +84,25 @@ Knowledge is routed to its **most specific durable owner**. Per-repo memory is *
 bespoke store, no query engine, nothing to install. It is a hybrid of two stores
 so contributor knowledge travels while dockmaster-private context stays local.
 
-**Per-repo SHARED (`dm:knowledge` section of the repo's own `AGENTS.md`):**
+**Per-repo SHARED (committed `.dm-knowledge/<task-id>.md` note files):**
 - Contributor-relevant facts: build/test commands, invariants, conventions,
   pitfalls, routing hints, decisions — one curated `- **[<kind>]** <fact>` bullet
-  each, between `<!-- dm:knowledge:start -->` / `<!-- dm:knowledge:end -->`.
-- It is **committed** in the repo's own `AGENTS.md`, so git materializes it in
-  every worktree and clone — which is what makes recall work for crewmates, who
-  work in worktrees.
-- Delivered through the normal PR/land flow: a crewmate edits the section in its
-  worktree and commits it alongside its work, so it travels with the repo. The
-  dockmaster **never hand-writes** a managed repo's `AGENTS.md` (prime directive)
-  and never force-commits onto a clone's default branch (that would diverge from
-  origin and break fast-forward sync). `bin/dm-repo.sh seed` scaffolds only the
-  private store at onboarding and never touches the clone's `AGENTS.md`, so the
-  clone stays pristine.
+  per note file under the repo's tracked `.dm-knowledge/` directory (a committed
+  dir, distinct from the git-excluded `.dm/`).
+- It is **committed**, so git materializes it in every worktree and clone — which
+  is what makes recall work for crewmates, who work in worktrees. Recall assembles
+  the note files plus any legacy `dm:knowledge` `AGENTS.md` block, so pre-existing
+  inline knowledge is never stranded.
+- One file per task is the point: two concurrent tasks recording knowledge write
+  **different files**, so notes never serialize on a hot `AGENTS.md` block and
+  stop manufacturing a rebase conflict on nearly every PR.
+- Delivered through the normal PR/land flow: a crewmate runs `bin/dm-memory.sh
+  remember <id> --shared` in its worktree and commits the note alongside its work,
+  so it travels with the repo. The dockmaster **never writes a managed repo
+  directly** (prime directive) and never force-commits onto a clone's default
+  branch (that would diverge from origin and break fast-forward sync).
+  `bin/dm-repo.sh seed` scaffolds only the private store at onboarding and never
+  touches the clone, so it stays pristine.
 
 **Per-repo PRIVATE (`repos/<repo>/.dm/notes.md`):**
 - Dockmaster-only context that must not enter the user's project history: fleet
@@ -120,7 +125,8 @@ repo's knowledge with no tool call.
 - `state/repos.json` — the repo registry (source of truth for what is managed).
 
 **Routing rule:** a contributor-relevant fact about *one repo* → that repo's
-`dm:knowledge` section; a dockmaster-private repo fact → that repo's `.dm/` notes.
+committed `.dm-knowledge/` notes; a dockmaster-private repo fact → that repo's
+`.dm/` notes.
 A fact about the *operator* or *the fleet as a whole* → global memory. Task-scoped
 notes → the backlog item. Investigation findings → the scout report. This is the
 single source of truth per fact — no duplication that can drift.

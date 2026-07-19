@@ -3,7 +3,7 @@
   "base_commit": "c4a4276",
   "shared_agents_bytes": 26634,
   "claude_settings_bytes": 1579,
-  "claude_skill_bytes": 83013,
+  "claude_skill_bytes": 83364,
   "claude_skill_description_bytes": 4603,
   "claude_files_sha256": {
     ".claude/settings.json": "2efe4d84bb21b43c94cb2782093f4b75432ea7de8e425f3edb8a1c721acade35",
@@ -13,7 +13,7 @@
     ".claude/skills/decision-hold/SKILL.md": "2ecaeebd4ddeae7f139740d5a10ebeb70a9b594ae87b8d2d520a79b25d21efb6",
     ".claude/skills/diagnostic-reasoning/SKILL.md": "e079d4582c200e5c09a421d61b1a07b1d3203398789e04c9e73b4aa3749ae5a2",
     ".claude/skills/fleet-change/SKILL.md": "629370a1ef4d9886ce68ab4d5e1e3d6b57ecdd300b9b9d4511a53763d69a042a",
-    ".claude/skills/memory-routing/SKILL.md": "b8e51e0d843c542115e3bda2a6ee6d7c62902f17dd737750d14e55808b736fb4",
+    ".claude/skills/memory-routing/SKILL.md": "ef9b4f218a89325eb9d7d8b048fa127e5ccc09b94e767345e56e45dbc21e6041",
     ".claude/skills/merge-conflict/SKILL.md": "9fd025b13a754bb561176c86d3f825861896ea384f03cd2ee2d96496dee96b13",
     ".claude/skills/post-pr-review/SKILL.md": "6c7f6a16205561d0301610b86a56b5e9c71dfa3373bfed5257078f1ca7c603b4",
     ".claude/skills/pr-workflow/SKILL.md": "d4671bfdbbf67eff114161e7b81ff58aca06b52a47ccd2b224bfc67b7512f8c9",

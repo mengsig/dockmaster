@@ -126,11 +126,14 @@ Do not dispatch until required tools are present and GitHub auth is good. Use
 
 Native, plain-markdown context via `bin/dm-memory.sh` — no bespoke tool, three
 stores, one owner per fact (details in `memory-routing`):
-- **Per-repo SHARED** → the `dm:knowledge` section of the managed repo's own
-  `AGENTS.md`. Contributor-relevant facts (build/test, conventions, invariants,
-  pitfalls, routing). Committed, so it travels to every clone and worktree. You
-  NEVER hand-write it — a crewmate edits the section in its worktree and commits
-  it with the work.
+- **Per-repo SHARED** → committed per-note files under the managed repo's tracked
+  `.dm-knowledge/` directory (distinct from the git-excluded `.dm/`).
+  Contributor-relevant facts (build/test, conventions, invariants, pitfalls,
+  routing). Committed, so it travels to every clone and worktree. You NEVER write
+  a clone — a crewmate records a note in its worktree (`dm-memory.sh remember <id>
+  --shared`, one file per task so concurrent work never collides on a hot
+  `AGENTS.md`) and commits it with the work. Recall still reads legacy AGENTS.md
+  `dm:knowledge` blocks too (migration).
 - **Per-repo PRIVATE** → `repos/<repo>/.dm/notes.md`, git-excluded (routing,
   per-repo operator prefs, strategy). Never enters project history, but it IS
   relayed into every crewmate brief for the worker's awareness — do not put
