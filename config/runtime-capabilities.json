@@ -10,6 +10,7 @@
   ],
   "runtime_specific_skills": [
     "change-review",
+    "fleet-change",
     "memory-routing",
     "pr-workflow",
     "secondmate",

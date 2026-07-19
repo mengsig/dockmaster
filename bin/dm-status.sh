@@ -24,6 +24,7 @@ dm_ensure_dirs
 export DM_NO_FETCH=1
 here="$(dirname "${BASH_SOURCE[0]}")"
 shopt -s nullglob
+snapshot_failed=0
 
 # Long-runner threshold: an in-flight task older than this is flagged as
 # possibly stuck. One knob, overridable via env for a deliberately slow fleet.
@@ -116,8 +117,13 @@ else
 fi
 
 section "DOMAIN SUPERVISORS (durable identities)"
-secondmates="$("$here/dm-secondmate.sh" reconcile 2>/dev/null || true)"
-if [ -n "$secondmates" ]; then printf '%s\n' "$secondmates"; else echo "  (none registered)"; fi
+if secondmates="$("$here/dm-secondmate.sh" reconcile 2>&1)"; then
+  if [ -n "$secondmates" ]; then printf '%s\n' "$secondmates"; else echo "  (none registered)"; fi
+else
+  printf '  FAIL supervisor state unreadable or malformed: %s\n' "$DM_STATE/secondmates.json"
+  [ -z "$secondmates" ] || printf '       %s\n' "$(printf '%s' "$secondmates" | head -n1)"
+  snapshot_failed=1
+fi
 
 section "OPEN PRs (needing attention)"
 # The fleet PR/health sweep, run through dm-pr.sh so the CI rollup has one owner.
@@ -233,3 +239,5 @@ if [ -n "$ready" ]; then printf '%s\n' "$ready"; else echo "  (nothing ready)"; 
 section "OPEN DECISIONS (operator-owned)"
 dec="$("$here/dm-backlog.sh" decisions 2>/dev/null || true)"
 if [ -n "$dec" ]; then printf '%s\n' "$dec"; else echo "  (none open)"; fi
+
+[ "$snapshot_failed" -eq 0 ]

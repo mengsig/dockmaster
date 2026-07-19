@@ -26,6 +26,21 @@ init_state() {
   dm_unlock "$STATE"
 }
 
+validate_state() {
+  jq -e '
+    (.secondmates | type) == "object" and
+    all(.secondmates[];
+      (.status | IN("launching","active","dormant","retired")) and
+      (.thread_name | type == "string" and test("^[a-z0-9_]{1,64}$")) and
+      (.agent_id | type == "string") and
+      (.repos | type == "array")) and
+    ([.secondmates | to_entries[] | select(.value.status != "retired") | .value.thread_name] as $threads |
+      ($threads | length) == ($threads | unique | length)) and
+    ([.secondmates[].agent_id | select(length > 0)] as $agents |
+      ($agents | length) == ($agents | unique | length))
+  ' "$STATE" >/dev/null 2>&1 || dm_die "invalid supervisor state: $STATE"
+}
+
 require_single_line() {
   local label="$1" value="$2"
   [ -n "$value" ] || dm_die "$label must not be empty"
@@ -56,6 +71,7 @@ case "$cmd" in
     exit 0
   } ;;
 esac
+case "$cmd" in get|list|reconcile) validate_state ;; esac
 case "$cmd" in
   prepare)
     id="${1:-}"; shift || true

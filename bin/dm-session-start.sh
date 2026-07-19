@@ -44,8 +44,13 @@ section "IN-FLIGHT WORK (reconciled state)"
 "$here/dm-task.sh" list 2>/dev/null || echo "  (no tasks)"
 
 section "DOMAIN SUPERVISORS (identity recovery)"
-secondmates="$("$here/dm-secondmate.sh" reconcile 2>/dev/null || true)"
-if [ -n "$secondmates" ]; then printf '%s\n' "$secondmates"; else echo "  (none registered)"; fi
+if secondmates="$("$here/dm-secondmate.sh" reconcile 2>&1)"; then
+  if [ -n "$secondmates" ]; then printf '%s\n' "$secondmates"; else echo "  (none registered)"; fi
+else
+  printf '  FAIL supervisor state unreadable or malformed: %s\n' "$DM_STATE/secondmates.json"
+  [ -z "$secondmates" ] || printf '       %s\n' "$(printf '%s' "$secondmates" | head -n1)"
+  ready=0
+fi
 
 section "BACKLOG"
 if [ -f "$DM_STATE/backlog.md" ]; then "$here/dm-backlog.sh" list; else echo "  ABSENT (no backlog yet)"; fi
@@ -64,6 +69,6 @@ echo "  Load task-lifecycle before dispatching; supervision whenever work is in 
 # first (above), then make the failure the last thing seen and the exit code, so
 # both a human and a scripted caller can gate on readiness.
 if [ "$ready" -ne 1 ]; then
-  printf '\n*** NOT READY: required tooling/auth check FAILED (see TOOLING) — resolve before dispatching work. ***\n'
+  printf '\n*** NOT READY: tooling/auth or durable supervisor state FAILED — resolve before dispatching work. ***\n'
   exit 1
 fi

@@ -43,7 +43,7 @@ an authenticated runtime/browser/mailbox observation. Current split: 13 direct,
 
 The two discovery roots intentionally duplicate only skill content stored on
 disk. They do not add both contracts to either model's always-loaded prompt.
-Eleven runtime-neutral skills must stay byte-identical. Seven adapters may
+Ten runtime-neutral skills must stay byte-identical. Eight adapters may
 differ because they contain native calls: `change-review`, `memory-routing`,
 `pr-workflow`, `secondmate`, `stuck-worker`, `supervision`, and
 `task-lifecycle`. The parity test forbids Claude tool names in Codex adapters and

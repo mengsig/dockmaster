@@ -10,7 +10,7 @@ The mode-0700 evidence directory is removed on success or failure by default;
 
 | command | result |
 | --- | --- |
-| `bash tests/smoke.sh` | 492 passed, 0 failed; includes cross-record supervisor uniqueness, stateful runtime snapshots, CI-hermetic auth, dynamic command bypasses, full-tree PR cleanliness, evidence cleanup, capability mutations, and exact Claude hashes |
+| `bash tests/smoke.sh` | 501 passed, 0 failed; includes wrapper/alias guard probes, fail-closed supervisor status, ordered fleet ownership, runner-command mutation, recursive runtime inventory, and all prior lifecycle/safety regressions |
 | `node tests/check-runtime-parity.js` | 18 exact skills/triggers; 28 capability-specific assertions classified as 13 direct, 9 contract, and 6 manual; vocabulary separation, durable identities, and executable rigorous fallbacks |
 | `node tests/check-pr-runner.js` | table-driven fast/default/rigorous order, capacity-bounded review/voter waves, full porcelain checks around every mutation/gate, every failure, skips, malformed PR, and unavailable-host paths |
 | `node tests/check-gate-drift.js` | all three built-in gate sequences match shipped configs |
@@ -23,8 +23,8 @@ The mode-0700 evidence directory is removed on success or failure by default;
 
 | runtime | version | config/discovery proof | authenticated proof |
 | --- | --- | --- | --- |
-| Claude Code | 2.1.215 | CLI/auth probe passed; existing `.claude/settings.json` parsed | loaded project `task-lifecycle`; returned `RUNTIME_OK` under plan mode |
-| Codex CLI | 0.144.6 | strict config parsed; canonical and symlink-root prompt checks found exact structured descriptions/locators for all skills; mutations failed; quoted/nested/indirect rule/parser probes passed | ephemeral read-only run loaded dispatch/waiter/rigorous contracts and returned `RUNTIME_OK`; the injected project PreToolUse hook, with a shell-quoted path, blocked absolute-path `git -C ... restore` |
+| Claude Code | 2.1.215 | CLI/auth probe passed; existing `.claude/settings.json` parsed | loaded project task/fleet lifecycle; confirmed queued → returned-owner persistence → inflight and returned `RUNTIME_OK` under plan mode |
+| Codex CLI | 0.144.6 | strict config parsed; canonical and symlink-root prompt checks found exact structured descriptions/locators for all skills; mutations failed; quoted/nested/indirect rule/parser probes passed | ephemeral read-only run confirmed native fleet ownership plus dispatch/waiter/rigorous contracts and returned `RUNTIME_OK`; the injected project PreToolUse hook blocked absolute-path `git -C ... restore` |
 
 The isolated Claude worktree had not accepted Claude's trust dialog, so the CLI
 reported that its 45 project permission allow entries were ignored. This did not
@@ -61,9 +61,9 @@ and labels mailbox delivery manual; it does not overclaim this live observation.
 | --- | ---: | ---: | --- |
 | shared `AGENTS.md` | 26,634 B (~6,659 tokens) | 27,252 B (~6,813 tokens) | +618 B / +2.32%; under explicit 32,768 B cap |
 | Claude settings | 1,579 B | 1,579 B | byte-identical |
-| Claude full skill bodies on disk | 80,906 B | 82,045 B | +1,139 B including upstream comment guidance plus bounded campaigns/locked secondmate recovery; every file SHA-256 pinned |
+| Claude full skill bodies on disk | 80,906 B | 82,540 B | +1,634 B including durable fleet ownership; every discovered runtime file SHA-256 pinned |
 | Claude discovery descriptions | 4,603 B | 4,603 B | byte-identical |
-| Codex adapter/config/rules | none | 88,631 B / 516 B / 1,746 B | full bodies load only when selected; descriptions 4,567 B, under documented 8,000-character fallback budget |
+| Codex adapter/config/rules | none | 89,224 B / 516 B / 1,746 B | full bodies load only when selected; descriptions 4,567 B, under documented 8,000-character fallback budget |
 
 A bounded opt-in five-run local `--version` process-start sample reported
 medians of 68.5 ms for Claude and 40.5 ms for Codex. Each child has a three-second
@@ -73,6 +73,10 @@ network/model speed. The guardrail instead enforces the causal performance
 properties: Claude files match their per-file approved hashes, one runtime never scans the
 other's discovery root, shared instructions stay capped, and Codex workers use
 complete briefs with `fork_turns="none"` rather than duplicate parent history.
+The protected Claude runtime surface is `.claude/settings.json` plus every
+recursively discovered `.claude/skills/<name>/SKILL.md`. No other file class
+under `.claude` is currently part of this distro's runtime contract; adding one
+fails the guard until the discovery rule and baseline are explicitly extended.
 The Codex approval waiter adds no always-loaded text: its detailed contract is
 progressively loaded only with `change-review` or `supervision`, and it consumes
 one bounded collaboration thread only while operator feedback is pending. The

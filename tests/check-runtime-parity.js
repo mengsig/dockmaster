@@ -168,6 +168,28 @@ function checkCodexLavishWake() {
   console.log('ok   Codex Lavish wait has a notification-producing parent wake')
 }
 
+function checkFleetOwnershipOrder() {
+  const runtimes = [
+    ['Claude', '.claude/skills/fleet-change/SKILL.md', 'Agent(prompt=<brief>'],
+    ['Codex', '.agents/skills/fleet-change/SKILL.md', 'spawn_agent(task_name=<thread_name>'],
+  ]
+  for (const [runtime, file, spawnText] of runtimes) {
+    const content = read(file)
+    const positions = [
+      content.indexOf('--status queued'),
+      content.indexOf(spawnText),
+      content.indexOf('dm-task.sh set <child-id> agent_id <returned-agent-id>'),
+      content.indexOf('dm-backlog.sh move <child-id> inflight'),
+    ]
+    if (positions.some((position) => position < 0)) fail(`${runtime} fleet ownership sequence is incomplete`)
+    if (!positions.every((position, index) => index === 0 || position > positions[index - 1])) {
+      fail(`${runtime} fleet ownership sequence is out of order`)
+    }
+    if (/--campaign <id> --status inflight/.test(content)) fail(`${runtime} fleet skill still claims ownership before spawn`)
+  }
+  console.log('ok   fleet children stay queued until runtime ownership persists')
+}
+
 function checkCapabilities() {
   const docs = read('docs/runtime-capabilities.md')
   const ids = new Set()
@@ -220,6 +242,7 @@ function main() {
   checkCodexThreadNames()
   checkCodexRigorousFallbacks()
   checkCodexLavishWake()
+  checkFleetOwnershipOrder()
   checkCapabilities()
   checkCodexConfig()
   console.log('\nruntime parity checks passed')

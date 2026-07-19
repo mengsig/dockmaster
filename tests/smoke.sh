@@ -68,9 +68,14 @@ check "guard blocks dynamic Git executable and subcommands" '! b dm-command-guar
 ESCAPED_RESET=$'git re\\\nset --hard'
 check "guard blocks escaped-newline destructive Git" '! b dm-command-guard.sh check "$ESCAPED_RESET" >/dev/null 2>&1'
 check "guard blocks shell-fed and alternate-shell destructive content" '! b dm-command-guard.sh check "printf \"git reset --hard\" | bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env dash -c \"git restore file\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "bash <<< \"git clean -fd\"" >/dev/null 2>&1'
+check "guard propagates piped stdin through shell wrappers" '! b dm-command-guard.sh check "printf \"git reset --hard\" | env bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "printf \"git reset --hard\" | command bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env command bash -s" >/dev/null 2>&1'
+check "guard rejects unresolved command positions" '! b dm-command-guard.sh check "\$SHELL -c \"git reset --hard\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git \"\$OP\" --hard" >/dev/null 2>&1'
+check "guard blocks invoked environment Git aliases" '! b dm-command-guard.sh check "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0=\"!git reset --hard\" git nuke" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0=\"\$ALIAS\" git nuke" >/dev/null 2>&1'
+check "guard blocks invoked option Git aliases" '! b dm-command-guard.sh check "git -c alias.nuke=\"\$ALIAS\" nuke" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git --config-env=alias.nuke=NUKE_ALIAS nuke" >/dev/null 2>&1'
 check "guard permits read-only Git" 'b dm-command-guard.sh check "git -C /tmp status" >/dev/null'
 check "guard permits quoted spaced-path read-only Git" 'b dm-command-guard.sh check "git -C \"/tmp/path with spaces\" status" >/dev/null'
 check "guard ignores harmless Git words in argv text" 'b dm-command-guard.sh check "echo git reset --hard" >/dev/null && b dm-command-guard.sh check "printf %s \"git restore file\"" >/dev/null && b dm-command-guard.sh check "bash -c \"echo git clean -fd\"" >/dev/null'
+check "guard ignores uninvoked harmless alias text" 'b dm-command-guard.sh check "git -c alias.cleanup=\"!printf harmless\" status" >/dev/null'
 
 echo "== secondmate durable identity state =="
 SECOND_THREAD="$(b dm-thread-name.sh payments secondmate)"
@@ -430,6 +435,10 @@ cp "$TMP/repos.bak" "$DM_HOME/state/repos.json"
 cp "$DM_HOME/state/secondmates.json" "$TMP/secondmates.bak"
 printf '{"secondmates":{"bad":{"status":"active"}}}\n' > "$DM_HOME/state/secondmates.json"
 check "doctor fails malformed secondmate identity state" '! b dm-doctor.sh check >/dev/null 2>&1'
+STATUS_BAD="$(b dm-status.sh 2>&1 || true)"
+check "status fails malformed secondmate identity state" '! b dm-status.sh >/dev/null 2>&1 && grep -q "FAIL supervisor state" <<<"$STATUS_BAD" && ! grep -q "(none registered)" <<<"$STATUS_BAD"'
+SESSION_BAD="$(b dm-session-start.sh --no-sync 2>&1 || true)"
+check "session start fails malformed supervisor section" '! b dm-session-start.sh --no-sync >/dev/null 2>&1 && grep -q "DOMAIN SUPERVISORS" <<<"$SESSION_BAD" && grep -q "FAIL supervisor state" <<<"$SESSION_BAD" && grep -q "NOT READY" <<<"$SESSION_BAD"'
 cp "$TMP/secondmates.bak" "$DM_HOME/state/secondmates.json"
 
 echo "== branch name =="
@@ -1661,6 +1670,16 @@ mv "$DISPATCH_SKILL.tmp" "$DISPATCH_SKILL"
 check "runtime parity fails a capability-specific dispatch mutation" \
   '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
 cp "$ROOT/.agents/skills/task-lifecycle/SKILL.md" "$DISPATCH_SKILL"
+mkdir -p "$PARITY_FIXTURE/.claude/skills/added-runtime"
+printf '%s\n' '---' 'name: added-runtime' 'description: mutation fixture' '---' > "$PARITY_FIXTURE/.claude/skills/added-runtime/SKILL.md"
+check "runtime performance guard fails on added Claude skill" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+rm -rf "$PARITY_FIXTURE/.claude/skills/added-runtime"
+mkdir -p "$PARITY_FIXTURE/.claude/hooks"
+printf '#!/bin/sh\nexit 0\n' > "$PARITY_FIXTURE/.claude/hooks/added.sh"
+check "runtime performance guard rejects unclassified Claude files" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+rm -rf "$PARITY_FIXTURE/.claude/hooks"
 CLAUDE_TASK="$PARITY_FIXTURE/.claude/skills/task-lifecycle/SKILL.md"
 sed 's/run in background/run on background/' "$CLAUDE_TASK" > "$CLAUDE_TASK.tmp"
 check "same-size Claude mutation preserves byte count" \

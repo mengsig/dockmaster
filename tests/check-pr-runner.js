@@ -19,14 +19,15 @@ function defaultResponse(label) {
   return {}
 }
 
-async function run(overrides, scripted, parallelImpl) {
-  const calls = []; const logs = []; const queues = {}
+async function run(overrides, scripted, parallelImpl, sourceOverride) {
+  const calls = []; const logs = []; const prompts = []; const queues = {}
   for (const key of Object.keys(scripted || {})) {
     queues[key] = Array.isArray(scripted[key]) ? scripted[key].slice() : scripted[key]
   }
   const agent = async (prompt, options) => {
     const label = options.label
     calls.push(label)
+    prompts.push({ label, prompt })
     let response = queues[label]
     if (Array.isArray(response)) response = response.shift()
     if (typeof response === 'function') response = response({ prompt, options, calls })
@@ -41,9 +42,17 @@ async function run(overrides, scripted, parallelImpl) {
     taskId: 'runner-test', repo: 'demo', worktree: '/tmp/worktree', branch: 'fix/test',
     binDir: '/tmp/bin', base: 'main', testCmd: 'true',
   }, overrides || {})
-  const result = await new AsyncFunction('args', 'agent', 'parallel', 'log', SOURCE)(
+  const result = await new AsyncFunction('args', 'agent', 'parallel', 'log', sourceOverride || SOURCE)(
     args, agent, parallel, (message) => logs.push(message))
-  return { result, calls, logs }
+  return { result, calls, logs, prompts }
+}
+
+function assertFullStatusPrompt(runResult) {
+  const statePrompts = runResult.prompts.filter(({ label }) => label.startsWith('state:'))
+  assert(statePrompts.length > 0, 'expected at least one state-check prompt')
+  for (const { prompt } of statePrompts) {
+    assert(prompt.includes('git -C /tmp/worktree status --porcelain=v1 --untracked-files=all'))
+  }
 }
 
 async function checkTierOrder() {
@@ -60,6 +69,7 @@ async function checkTierOrder() {
     const actual = await run({ tier }, {})
     assert.equal(actual.result.ok, true, `${tier} should complete`)
     assert.deepEqual(actual.calls, expected, `${tier} gate call order`)
+    assertFullStatusPrompt(actual)
   }
 }
 
@@ -214,6 +224,12 @@ async function checkCompatibilityEdges() {
   await assert.rejects(run({ base: '', defaultBranch: '' }, {}), /requires args\.base/)
 }
 
+async function checkStatePromptMutation() {
+  const mutatedSource = SOURCE.replace('--untracked-files=all', '--untracked-files=no')
+  const mutated = await run({ gates: [{ gate: 'tests' }] }, {}, undefined, mutatedSource)
+  assert.throws(() => assertFullStatusPrompt(mutated))
+}
+
 async function main() {
   await checkTierOrder()
   await checkFixLoop()
@@ -222,6 +238,7 @@ async function main() {
   await checkParallelFailure()
   await checkBoundedParallel()
   await checkCompatibilityEdges()
+  await checkStatePromptMutation()
   console.log('ok   compatible runner gate order, fan-out, voting, fix, failure, security, and PR paths')
 }
 

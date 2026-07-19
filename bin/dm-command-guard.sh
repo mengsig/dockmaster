@@ -130,34 +130,82 @@ has_short_flag() {
   return 1
 }
 
-contains_destructive_word() {
-  local start="$1" end="$2" i value
+alias_value_is_destructive() {
+  local value=" $1 "
+  case "$value" in
+    *' reset '*|*' clean '*|*' restore '*|*' checkout '*) return 0 ;;
+  esac
+  return 1
+}
+
+check_alias_entry() {
+  local entry="$1" dynamic="$2" subcommand="$3" name value
+  case "$entry" in alias.*=*) ;; *) return 0 ;; esac
+  name="${entry#alias.}"; name="${name%%=*}"
+  [ "$name" = "$subcommand" ] || return 0
+  [ "$dynamic" -eq 0 ] || deny "invoked Git alias has a dynamic definition"
+  value="${entry#*=}"
+  alias_value_is_destructive "$value" && deny "Git alias invokes a destructive command"
+}
+
+check_environment_aliases() {
+  local start="$1" git_index="$2" subcommand="$3" i j token suffix value found
   i="$start"
-  while [ "$i" -lt "$end" ]; do
-    value="${TOKENS[$i]}"
-    case "$value" in reset|clean|restore|checkout) return 0 ;; esac
-    case "$value" in
-      *reset*|*clean*|*restore*|*checkout*)
-        case "$value" in alias.*|*'git '*|*'/git '*) return 0 ;; esac
+  while [ "$i" -lt "$git_index" ]; do
+    token="${TOKENS[$i]}"
+    case "$token" in
+      GIT_CONFIG_COUNT=*)
+        [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git config count cannot be safety-classified"
+        ;;
+      GIT_CONFIG_KEY_*=*)
+        [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git config key cannot be safety-classified"
+        case "${token#*=}" in
+          alias.*)
+            suffix="${token%%=*}"; suffix="${suffix#GIT_CONFIG_KEY_}"
+            value=""; found=0; j="$start"
+            while [ "$j" -lt "$git_index" ]; do
+              case "${TOKENS[$j]}" in
+                GIT_CONFIG_VALUE_"$suffix"=*) value="${TOKENS[$j]#*=}"; found=1; break ;;
+              esac
+              j=$((j + 1))
+            done
+            if [ "$found" -eq 0 ]; then
+              check_alias_entry "${token#*=}=" 1 "$subcommand"
+            else
+              check_alias_entry "${token#*=}=$value" "${DYNAMIC[$j]}" "$subcommand"
+            fi
+            ;;
+        esac
         ;;
     esac
     i=$((i + 1))
   done
-  return 1
 }
 
 check_git_segment() {
-  local git_index="$1" end="$2" sub_index subcommand i
-  i=$((git_index + 1))
-  while [ "$i" -lt "$end" ]; do
-    case "${TOKENS[$i]}" in
-      alias.*=*) contains_destructive_word "$i" $((i + 1)) && deny "Git alias expands to a destructive command" ;;
-    esac
-    i=$((i + 1))
-  done
+  local start="$1" git_index="$2" end="$3" sub_index subcommand i token config
   sub_index="$(git_subcommand_index "$git_index" "$end")" || return 0
   [ "${DYNAMIC[$sub_index]}" -eq 0 ] || deny "dynamic Git subcommand cannot be safety-classified"
   subcommand="${TOKENS[$sub_index]}"
+  check_environment_aliases "$start" "$git_index" "$subcommand"
+  i=$((git_index + 1))
+  while [ "$i" -lt "$sub_index" ]; do
+    token="${TOKENS[$i]}"
+    case "$token" in
+      -c|--config-env)
+        i=$((i + 1)); [ "$i" -lt "$sub_index" ] || deny "Git config option is missing a value"
+        config="${TOKENS[$i]}"
+        if [ "$token" = "--config-env" ]; then
+          check_alias_entry "$config" 1 "$subcommand"
+        else
+          check_alias_entry "$config" "${DYNAMIC[$i]}" "$subcommand"
+        fi
+        ;;
+      -calias.*=*) check_alias_entry "${token#-c}" "${DYNAMIC[$i]}" "$subcommand" ;;
+      --config-env=alias.*=*) check_alias_entry "${token#--config-env=}" 1 "$subcommand" ;;
+    esac
+    i=$((i + 1))
+  done
   case "$subcommand" in
     reset) deny "git reset" ;;
     clean) deny "git clean" ;;
@@ -199,14 +247,14 @@ is_shell_executable() {
 }
 
 check_shell_input() {
-  local start="$1" end="$2" executable="$3" i
+  local segment_start="$1" command_index="$2" end="$3" executable="$4" i
   is_shell_executable "$executable" || return 0
-  if [ "$start" -gt 0 ] && [ "${TOKENS[$((start - 1))]}" = "|" ]; then
+  if [ "$segment_start" -gt 0 ] && [ "${TOKENS[$((segment_start - 1))]}" = "|" ]; then
     deny "shell executes unresolved piped stdin"
   fi
-  i=$((start + 1))
+  i=$((command_index + 1))
   while [ "$i" -lt "$end" ]; do
-    case "${TOKENS[$i]}" in '<<'*) deny "shell executes unresolved redirected stdin" ;; esac
+    case "${TOKENS[$i]}" in '<'*) deny "shell executes unresolved redirected stdin" ;; esac
     i=$((i + 1))
   done
 }
@@ -243,10 +291,7 @@ check_indirect_segment() {
   local start="$1" end="$2" i
   i="$(segment_command_index "$start" "$end")" || return 0
   if [ "${DYNAMIC[$i]}" -eq 1 ]; then
-    case "${TOKENS[$i]}" in *[Gg][Ii][Tt]*) deny "dynamic Git executable cannot be safety-classified" ;; esac
-    if contains_destructive_word $((i + 1)) "$end"; then
-      deny "indirect executable followed by a destructive Git form"
-    fi
+    deny "dynamic executable cannot be safety-classified"
   fi
 }
 
@@ -261,14 +306,14 @@ check_shell_command() {
     check_indirect_segment "$i" "$end"
     if command_index="$(segment_command_index "$i" "$end")"; then
       token="${TOKENS[$command_index]}"; executable="${token##*/}"
-      check_shell_input "$command_index" "$end" "$executable"
+      check_shell_input "$i" "$command_index" "$end" "$executable"
       check_nested_shell "$command_index" "$end" "$executable"
       if [ "$executable" = "busybox" ] && [ $((command_index + 1)) -lt "$end" ]; then
         token="${TOKENS[$((command_index + 1))]}"; executable="${token##*/}"
-        check_shell_input "$command_index" "$end" "$executable"
+        check_shell_input "$i" $((command_index + 1)) "$end" "$executable"
         check_nested_shell $((command_index + 1)) "$end" "$executable"
       fi
-      [ "$executable" != "git" ] || check_git_segment "$command_index" "$end"
+      [ "$executable" != "git" ] || check_git_segment "$i" "$command_index" "$end"
     fi
     i=$((end + 1))
   done

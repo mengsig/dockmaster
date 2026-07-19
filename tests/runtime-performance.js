@@ -26,6 +26,30 @@ function sha256(relativePath) {
   return crypto.createHash('sha256').update(fs.readFileSync(path.join(ROOT, relativePath))).digest('hex')
 }
 
+function regularFiles(relativeRoot) {
+  const files = []
+  function visit(relativePath) {
+    const absolute = path.join(ROOT, relativePath)
+    for (const name of fs.readdirSync(absolute).sort()) {
+      const child = path.join(relativePath, name)
+      const stat = fs.lstatSync(path.join(ROOT, child))
+      if (stat.isDirectory()) visit(child)
+      else if (stat.isFile()) files.push(child.split(path.sep).join('/'))
+    }
+  }
+  visit(relativeRoot)
+  return files
+}
+
+function claudeRuntimeFiles() {
+  const all = regularFiles('.claude')
+  const runtime = all.filter((file) => file === '.claude/settings.json'
+    || /^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(file))
+  const unclassified = all.filter((file) => !runtime.includes(file))
+  if (unclassified.length) throw new Error(`unclassified Claude runtime files: ${unclassified.join(', ')}`)
+  return runtime.sort()
+}
+
 function skillMetrics(root) {
   let total = 0
   let descriptions = 0
@@ -91,7 +115,7 @@ function assertGuardrails(metrics) {
 
 function collect() {
   const sampleStartup = process.env.DM_RUNTIME_STARTUP_SAMPLE === '1'
-  const claudeFiles = Object.keys(BASELINE.claude_files_sha256)
+  const claudeFiles = claudeRuntimeFiles()
   return {
     baseline_commit: BASELINE.base_commit,
     shared: {

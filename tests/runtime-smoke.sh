@@ -116,7 +116,7 @@ fi
 
 CLAUDE_LIVE="$(evidence_file claude-live.raw.json)"
 claude -p --permission-mode plan --max-turns 2 --output-format json \
-  "Do not modify files. Load the task-lifecycle skill from this project. Reply exactly RUNTIME_OK if the project contract says the dockmaster delegates project work into isolated worktrees and the skill covers dispatch through delivery; otherwise reply RUNTIME_FAIL." \
+  "Do not modify files. Load task-lifecycle and fleet-change from this project. Reply exactly RUNTIME_OK only if tasks use isolated worktrees and a fleet child stays queued through Agent spawn, then persists the returned agent id before moving inflight; otherwise reply RUNTIME_FAIL." \
   > "$CLAUDE_LIVE"
 grep -q 'RUNTIME_OK' "$CLAUDE_LIVE"
 rm -f "$CLAUDE_LIVE"
@@ -124,7 +124,7 @@ printf 'RUNTIME_OK\n' > "$(evidence_file claude-live-status.txt)"
 
 CODEX_LIVE="$(evidence_file codex-live.raw.jsonl)"
 codex exec -C "$ROOT" --dangerously-bypass-hook-trust --ephemeral --sandbox read-only --json \
-  "Use read-only tools to read task-lifecycle, change-review, and pr-workflow from this project. Do not modify files. Reply exactly RUNTIME_OK only if: task-lifecycle derives a separate valid thread_name and stores the returned agent id; change-review uses a no-fork waiter whose completion wakes the parent; rigorous verification has executable browser or CLI/API fallback and missing capability fails; security review uses explicit general-review lenses and findings fail the gate. Otherwise reply RUNTIME_FAIL." \
+  "Use read-only tools to read task-lifecycle, fleet-change, change-review, and pr-workflow from this project. Do not modify files. Reply exactly RUNTIME_OK only if: task-lifecycle derives a separate valid thread_name and stores the returned agent id; fleet-change keeps a child queued through spawn_agent, persists its returned agent id, then moves inflight; change-review uses a no-fork waiter whose completion wakes the parent; rigorous verification and security review fail closed when required capabilities or findings remain. Otherwise reply RUNTIME_FAIL." \
   > "$CODEX_LIVE"
 grep -q 'RUNTIME_OK' "$CODEX_LIVE"
 rm -f "$CODEX_LIVE"
