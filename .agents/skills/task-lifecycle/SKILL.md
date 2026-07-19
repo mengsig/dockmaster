@@ -86,6 +86,11 @@ task granularity, role-specific prompts, and the smallest sufficient number of
 agents; use a configured custom agent only when the active Codex surface actually
 offers that selector. Bias toward sufficient reasoning for safety-critical work.
 
+`dm-brief.sh` computes an advisory tier (`model_recommended`) from the task kind
++ title and surfaces it in the brief header; `dm-status` flags any `working`
+task with none recorded as UNSIZED. This surface has no per-spawn model selector,
+so use the recommendation to bias task granularity and reviewer count.
+
 The crew already has a dedicated worktree from `dm-worktree.sh`, so pass its
 absolute path in the brief and require the worker to verify and enter it before
 acting. The spawn result's agent id is the runtime identity; never substitute

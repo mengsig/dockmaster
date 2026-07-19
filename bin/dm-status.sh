@@ -88,6 +88,7 @@ if [ -n "$tasks" ]; then
   now="$(date -u +%s)"
   stuck_secs=$((DM_STUCK_AGE_HOURS * 3600))
   agerows=""
+  unsized=""
   while IFS= read -r tid; do
     # `state` exits non-zero on a worktree-only or malformed record (no kind);
     # tolerate that here (|| true) — such a record has no start time to age and
@@ -95,6 +96,13 @@ if [ -n "$tasks" ]; then
     # pipefail would abort the whole snapshot on one odd record.
     short="$("$here/dm-task.sh" state "$tid" 2>/dev/null | sed 's/ · .*//; s/^state: //' || true)"
     case "$short" in done|'') continue ;; esac
+    # Advisory (#77): a live `working` task with no model tier recorded is an
+    # unsized dispatch. Soft hint only — never fails or changes the exit code.
+    if [ "$short" = "working" ] && [ -z "$(dm_meta_get "$tid" model)" ]; then
+      rec="$(dm_meta_get "$tid" model_recommended)"
+      [ -n "$rec" ] || rec="$(dm_recommended_model "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
+      unsized+="  UNSIZED: task $tid is working with no model recorded (recommended: $rec)"$'\n'
+    fi
     created="$(dm_meta_get "$tid" created)"
     epoch="$(iso_to_epoch "$created")"
     if [ -n "$epoch" ]; then
@@ -112,6 +120,7 @@ if [ -n "$tasks" ]; then
   if [ -n "$agerows" ]; then
     printf '%s' "$agerows" | column -t -s$'\t' 2>/dev/null || printf '%s' "$agerows"
   fi
+  [ -n "$unsized" ] && printf '%s' "$unsized"
 else
   echo "  (no tasks)"
 fi

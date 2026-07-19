@@ -75,6 +75,12 @@ the *least* that will still get an excellent result:
 - hard reasoning, adversarial review, or subtle safety / concurrency / security
   work → the top tier at high effort.
 
+`dm-brief.sh` now computes this recommendation from the task kind + title,
+surfaces it in the brief header, and records `model_recommended` in task meta;
+`dm-status` flags any `working` task with no `model` recorded as UNSIZED. Heed
+it — pass that tier as the Agent `model` (size up when you know more). It is
+advisory, so you still decide.
+
 Bias toward *sufficient* power: when unsure, size **up** — never trade
 correctness or quality for tokens. Optimize speed and cost only where they do not
 risk the result. This is the orchestrator's per-task judgment, not a fixed table,

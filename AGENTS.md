@@ -211,6 +211,12 @@ invariants, pitfalls, routing. Curated — not append-forever._
   (mediated by the dockmaster) → ask PR-or-local → on PR: coldstart review, fix +
   tests, merge-gate review, fix + tests, PR creation → merge gate. Lavish approval
   precedes PR/local and applies to both.
+- **[convention]** Dispatch right-sizing is ADVISORY, not a gate (the Codex
+  adapter has no per-spawn model field to enforce one): `dm_recommended_model
+  <kind> <text>` (dm-lib, pure) picks haiku|sonnet|opus; `dm-brief` surfaces it
+  in the header and records `model_recommended` in meta; `dm-status` flags a
+  `working` task with no `model` as UNSIZED. Claude sets the Agent `model`; Codex
+  biases effort/granularity. Additive — never blocks dispatch.
 - **[invariant]** Toolbelt scripts in `bin/` must run on bash 3.2 (macOS default):
   no `mapfile`/`readarray`, no `declare -A`, no `${var^^}`/`${var,,}`, no `&>>`.
   Use while-read loops and parallel indexed arrays instead.

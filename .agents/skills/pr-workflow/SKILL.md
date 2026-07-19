@@ -25,6 +25,8 @@ call has no per-spawn model/effort selector, so right-size with gate choice,
 focused prompts, and agent count. Use `fork_turns="none"` for fresh reviewers;
 give each only the diff, changed files, lens, and acceptance criteria. Do not
 claim per-child model control unless the active surface exposes and proves it.
+The advisory tier `dm-brief` surfaces (and `dm-status` flags when a `working`
+task is unsized) is the same signal — use it to bias gate choice and agent count.
 
 - **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial** changes
   only (see `change-review` for the criteria): one review pass instead of two,
