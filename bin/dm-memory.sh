@@ -297,7 +297,7 @@ recall_repo() {
   shared_content="$(join_blocks "$shared_legacy" "$shared_dir")"
   priv_file="$dir/.dm/notes.md"; priv_content=""
   [ -f "$priv_file" ] && priv_content="$(cat "$priv_file")"
-  print_section "shared knowledge: $repo ($dir/AGENTS.md)" "$shared_content" "$query" "$hint"
+  print_section "shared knowledge: $repo (.dm-knowledge/ + AGENTS.md)" "$shared_content" "$query" "$hint"
   print_section "private notes: $repo ($priv_file)" "$priv_content" "$query" "$hint"
   if [ "$crew" != "1" ]; then
     dm_file="$dir/.dm/private.md"; dm_content=""
