@@ -235,10 +235,13 @@ invariants, pitfalls, routing. Curated — not append-forever._
   never to auto-pass `none`. The decision is the pure, offline-testable
   `dm_merge_gate <rollup> <allow_no_checks> <has_ci>`. Check-runs request one
   bounded 100-item page and become `unknown` if `total_count` proves it
-  incomplete. Merge additionally requires state `OPEN`, matching local+remote
-  head refs, and GitHub's atomic merge endpoint accepting the checked `sha`.
-  Requested branch deletion happens only after success and only for same-repo
-  heads; fork refs are never deleted.
+  incomplete; only completed `success|neutral|skipped` conclusions pass, and
+  unknown/future conclusions fail closed. Merge additionally requires state
+  `OPEN`, matching local+remote head refs, and GitHub's atomic merge endpoint
+  accepting the checked `sha`.
+  Requested branch deletion happens only after success, only for same-repo
+  heads, and through a server-enforced `--force-with-lease` pinned to the merged
+  SHA; fork or concurrently-advanced refs are never deleted.
 - **[invariant]** Per-repo `merge_authority` (yolo|ask|never) is an enforced
   merge gate, not just prose. `never` HARD-refuses in `dm-pr.sh merge` and
   `dm-merge.sh local` (before any gh call, no flag bypasses) via the pure

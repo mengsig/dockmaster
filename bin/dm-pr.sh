@@ -21,9 +21,9 @@
 # duty one layer up, per AGENTS.md; this script enforces the never-stop and the
 # CI mechanics.
 #
-# GitHub access splits by need: reads that are parsed by jq use `gh api` (it
-# returns real JSON), while mutations use `gh-axi api`. The merge mutation is
-# conditioned on the checked head SHA by GitHub itself.
+# GitHub access splits by need: parsed reads use `gh api`; the merge mutation
+# uses `gh-axi api` with the checked SHA; same-repo branch cleanup uses Git's
+# server-enforced force-with-lease so an advanced ref cannot be deleted.
 #
 # Commands:
 #   open  <id> --title T (--body-file F | --body B) [--base B] [--draft]
@@ -203,10 +203,21 @@ check_runs_rollup() {
       or (.total_count | floor) != .total_count then error("invalid check-runs response")
     elif .total_count != (.check_runs | length) then "unknown"
     elif (.check_runs | length) == 0 then "none"
-    elif any(.check_runs[]; .conclusion == "failure" or .conclusion == "cancelled"
-      or .conclusion == "timed_out" or .conclusion == "action_required") then "failing"
+    elif any(.check_runs[]; .status == "completed" and
+      (.conclusion == "failure" or .conclusion == "cancelled"
+        or .conclusion == "timed_out" or .conclusion == "action_required"
+        or .conclusion == "startup_failure")) then "failing"
+    elif any(.check_runs[]; .status == "completed" and
+      (.conclusion == null or
+        (.conclusion != "success" and .conclusion != "neutral"
+          and .conclusion != "skipped" and .conclusion != "stale"
+          and .conclusion != "failure" and .conclusion != "cancelled"
+          and .conclusion != "timed_out" and .conclusion != "action_required"
+          and .conclusion != "startup_failure"))) then "unknown"
     elif any(.check_runs[]; .status != "completed" or .conclusion == "stale") then "pending"
-    else "passing" end' 2>/dev/null)" || rollup="unknown"
+    elif all(.check_runs[]; .status == "completed" and
+      (.conclusion == "success" or .conclusion == "neutral" or .conclusion == "skipped")) then "passing"
+    else "unknown" end' 2>/dev/null)" || rollup="unknown"
   printf '%s\n' "$rollup"
 }
 
@@ -266,24 +277,15 @@ atomic_merge_pull() {
 }
 
 delete_merged_head() {
-  local slug="$1" head_repo="$2" head_ref="$3" merged_head="$4" current_head encoded out
+  local repo="$1" slug="$2" head_repo="$3" head_ref="$4" merged_head="$5" dir lease out
   if ! same_repo "$slug" "$head_repo"; then
     dm_info "branch cleanup skipped: PR head belongs to fork $head_repo"
     return 0
   fi
-  current_head="$(remote_ref_head "$head_repo" "$head_ref")" || {
-    dm_warn "branch cleanup skipped: could not verify $head_repo:$head_ref after merge"
-    return 0
-  }
-  if [ "$current_head" != "$merged_head" ]; then
-    dm_warn "branch cleanup skipped: $head_repo:$head_ref advanced after merge"
-    return 0
-  fi
-  encoded="$(jq -nr --arg ref "$head_ref" '$ref | @uri')" || {
-    dm_warn "branch cleanup skipped: could not encode head ref"
-    return 0
-  }
-  out="$(gh-axi api DELETE "/repos/$slug/git/refs/heads/$encoded" 2>&1)" || {
+  dir="$(dm_repo_dir "$repo")"
+  lease="refs/heads/$head_ref:$merged_head"
+  out="$(git -C "$dir" push origin "--force-with-lease=$lease" \
+    ":refs/heads/$head_ref" 2>&1)" || {
     dm_warn "branch cleanup failed after merge: ${out:-no response}"
     return 0
   }
@@ -656,7 +658,7 @@ case "$cmd" in
     dm_meta_set "$id" pr_state MERGED
     dm_status_append "$id" merged "$url"
     dm_info "merged: $url"
-    [ "$delete" -eq 1 ] && delete_merged_head "$slug" "$head_repo" "$head_ref" "$checked_head"
+    [ "$delete" -eq 1 ] && delete_merged_head "$repo" "$slug" "$head_repo" "$head_ref" "$checked_head"
     # Best-effort: FF-sync the clone's default branch so it is never left behind
     # by the PR it just merged (reuses dm-sync's FF-only logic). The merge above
     # already completed and is recorded; a can't-FF sync must not fail it - just

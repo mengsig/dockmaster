@@ -1259,6 +1259,24 @@ AWTRUNCATED="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-s
 check "truncated check-runs cannot produce green" 'grep -q "last rollup: unknown" <<<"$AWTRUNCATED" && ! grep -q "passing after" <<<"$AWTRUNCATED"'
 check "check-runs requests the bounded maximum page" 'grep -q "check-runs?per_page=100" "$GHSTUB/gh-calls"'
 
+# Passing is allowlist-based. Every documented failure class fails, while a
+# completed null/future conclusion is unknown rather than accidental green.
+printf '{"total_count":3,"check_runs":[{"status":"completed","conclusion":"success"},{"status":"completed","conclusion":"neutral"},{"status":"completed","conclusion":"skipped"}]}\n' > "$GHSTUB/runs.json"
+AWALLOWED="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1)"
+check "only allowlisted completed conclusions pass" 'grep -q "passing after 0s" <<<"$AWALLOWED"'
+printf '{"total_count":5,"check_runs":[{"status":"completed","conclusion":"failure"},{"status":"completed","conclusion":"cancelled"},{"status":"completed","conclusion":"timed_out"},{"status":"completed","conclusion":"action_required"},{"status":"completed","conclusion":"startup_failure"}]}\n' > "$GHSTUB/runs.json"
+AWFAILURES="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
+check "all documented failure conclusions fail" 'grep -q "FAILING after 0s" <<<"$AWFAILURES"'
+printf '{"total_count":1,"check_runs":[{"status":"completed","conclusion":null}]}\n' > "$GHSTUB/runs.json"
+AWNULL="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
+check "completed null conclusion is unknown" 'grep -q "last rollup: unknown" <<<"$AWNULL" && ! grep -q "passing after" <<<"$AWNULL"'
+printf '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"future_result"}]}\n' > "$GHSTUB/runs.json"
+AWFUTURE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
+check "future conclusion is unknown" 'grep -q "last rollup: unknown" <<<"$AWFUTURE" && ! grep -q "passing after" <<<"$AWFUTURE"'
+printf '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"stale"}]}\n' > "$GHSTUB/runs.json"
+AWSTALERUN="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
+check "stale conclusion remains pending" 'grep -q "last rollup: pending" <<<"$AWSTALERUN"'
+
 # Legacy commit statuses remain first-class CI signals even when there are no
 # check-runs and the repository also has workflow configuration.
 printf '{"total_count":0,"check_runs":[]}\n' > "$GHSTUB/runs.json"
@@ -1365,34 +1383,63 @@ printf '%s\n' "\$*" >> "\$D/axi-calls"
 if [ "\${1:-}" = api ] && [ "\${2:-}" = PUT ]; then
   printf 'merge\n' >> "\$D/axi-events"
   if [ -f "\$D/conflict" ]; then printf 'HTTP 409 Conflict\n' >&2; exit 1; fi
+  [ -f "\$D/advance-on-merge" ] && : > "\$D/remote-advanced"
   printf 'merged: true\n'
-  exit 0
-fi
-if [ "\${1:-}" = api ] && [ "\${2:-}" = DELETE ]; then
-  printf 'delete\n' >> "\$D/axi-events"
-  printf 'deleted: true\n'
   exit 0
 fi
 printf 'unexpected gh-axi call: %s\n' "\$*" >&2
 exit 1
 STUB
 chmod +x "$GHSTUB/gh-axi"
+REAL_GIT="$(command -v git)"
+cat > "$GHSTUB/git" <<STUB
+#!/bin/sh
+D="$GHSTUB"
+if [ "\${1:-}" = -C ] && [ "\${3:-}" = push ]; then
+  printf '%s|%s|%s\n' "\${4:-}" "\${5:-}" "\${6:-}" >> "\$D/git-push-calls"
+  if [ -f "\$D/remote-advanced" ]; then
+    printf 'lease-rejected\n' >> "\$D/axi-events"
+    printf 'rejected: stale info\n' >&2
+    exit 1
+  fi
+  printf 'lease-delete\n' >> "\$D/axi-events"
+  exit 0
+fi
+exec "$REAL_GIT" "\$@"
+STUB
+chmod +x "$GHSTUB/git"
 printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
 printf '{"object":{"sha":"%s"}}\n' "$AWHEAD" > "$GHSTUB/ref.json"
-rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events"
+rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events" "$GHSTUB/git-push-calls"
 : > "$GHSTUB/conflict"
 AW409="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge await-75 --method rebase --delete-branch 2>&1 || true)"
 check "atomic merge sends exact head and merge method" 'grep -Fx "api PUT /repos/o/r/pulls/75/merge --field sha=$AWHEAD --field merge_method=rebase" "$GHSTUB/axi-calls" >/dev/null'
 check "atomic 409 remains a visible refusal" 'grep -q "atomic merge failed" <<<"$AW409" && grep -q "409 Conflict" <<<"$AW409"'
 check "409 records no merged state or event" '[ "$(b dm-task.sh get await-75 pr_state)" = "OPEN" ] && ! grep -q " merged: https://github.com/o/r/pull/75" "$DM_HOME/state/tasks/await-75.status"'
-check "409 performs no branch deletion" '! grep -q "api DELETE" "$GHSTUB/axi-calls"'
+check "409 performs no branch deletion" '[ ! -s "$GHSTUB/git-push-calls" ]'
 
-rm -f "$GHSTUB/conflict" "$GHSTUB/axi-calls" "$GHSTUB/axi-events"
+rm -f "$GHSTUB/conflict" "$GHSTUB/axi-calls" "$GHSTUB/axi-events" "$GHSTUB/git-push-calls"
 AWSUCCESS="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge await-75 --method rebase --delete-branch 2>&1)"
 check "successful atomic merge records landed state" '[ "$(b dm-task.sh get await-75 pr_state)" = "MERGED" ] && grep -q " merged: https://github.com/o/r/pull/75" "$DM_HOME/state/tasks/await-75.status"'
-check "same-repo cleanup happens only after merge" '[ "$(sed -n "1p" "$GHSTUB/axi-events")" = merge ] && [ "$(sed -n "2p" "$GHSTUB/axi-events")" = delete ]'
-check "slash branch deletion uses encoded same-repo ref" 'grep -Fx "api DELETE /repos/o/r/git/refs/heads/fix%2Fawait-75" "$GHSTUB/axi-calls" >/dev/null'
+check "same-repo cleanup happens only after merge" '[ "$(sed -n "1p" "$GHSTUB/axi-events")" = merge ] && [ "$(sed -n "2p" "$GHSTUB/axi-events")" = lease-delete ]'
+check "slash branch deletion uses exact conditional lease" 'grep -Fx "origin|--force-with-lease=refs/heads/fix/await-75:$AWHEAD|:refs/heads/fix/await-75" "$GHSTUB/git-push-calls" >/dev/null'
 check "successful cleanup is reported" 'grep -q "deleted merged branch: fix/await-75" <<<"$AWSUCCESS"'
+
+echo "== branch advance after merge is rejected by server lease =="
+RACEHEAD="4444444444444444444444444444444444444444"
+b dm-task.sh new cleanup-race --kind ship --repo mauth >/dev/null
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/race","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$RACEHEAD" > "$GHSTUB/pr.json"
+printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$RACEHEAD" > "$GHSTUB/runs.json"
+printf '{"object":{"sha":"%s"}}\n' "$RACEHEAD" > "$GHSTUB/ref.json"
+PATH="$GHSTUB:$PATH" b dm-pr.sh adopt cleanup-race "https://github.com/o/r/pull/77" >/dev/null
+rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events" "$GHSTUB/git-push-calls" "$GHSTUB/remote-advanced"
+: > "$GHSTUB/advance-on-merge"
+RACEMERGE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge cleanup-race --delete-branch 2>&1)"
+check "advanced branch lease rejects deletion" 'grep -q "lease-rejected" "$GHSTUB/axi-events" && grep -q "stale info" <<<"$RACEMERGE"'
+check "lease rejection preserves successful merge" '[ "$(b dm-task.sh get cleanup-race pr_state)" = "MERGED" ] && grep -q " merged: https://github.com/o/r/pull/77" "$DM_HOME/state/tasks/cleanup-race.status"'
+check "advanced branch uses checked SHA as exact lease" 'grep -Fx "origin|--force-with-lease=refs/heads/fix/race:$RACEHEAD|:refs/heads/fix/race" "$GHSTUB/git-push-calls" >/dev/null'
+check "lease failure is a visible post-merge warning" 'grep -q "warning: branch cleanup failed after merge" <<<"$RACEMERGE"'
+rm -f "$GHSTUB/advance-on-merge" "$GHSTUB/remote-advanced"
 
 echo "== adopted fork PR resolves live fork ref and never deletes it =="
 FORKHEAD="3333333333333333333333333333333333333333"
@@ -1402,11 +1449,11 @@ printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","co
 printf '{"object":{"sha":"%s"}}\n' "$FORKHEAD" > "$GHSTUB/ref.json"
 PATH="$GHSTUB:$PATH" b dm-pr.sh adopt adopted-fork "https://github.com/o/r/pull/76" >/dev/null
 check "adopted PR has no worktree dependency" '[ -z "$(b dm-task.sh get adopted-fork worktree)" ]'
-rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events" "$GHSTUB/gh-calls"
+rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events" "$GHSTUB/gh-calls" "$GHSTUB/git-push-calls"
 FORKMERGE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge adopted-fork --method squash --delete-branch 2>&1)"
 check "adopted PR merges through base-repo endpoint" 'grep -Fx "api PUT /repos/o/r/pulls/76/merge --field sha=$FORKHEAD --field merge_method=squash" "$GHSTUB/axi-calls" >/dev/null'
 check "fork head ref with slashes is resolved encoded" 'grep -q "repos/forker/r/git/ref/heads/feature%2Fnested%2Fhead" "$GHSTUB/gh-calls"'
-check "fork branch is never deleted" '! grep -q "api DELETE" "$GHSTUB/axi-calls" && grep -q "head belongs to fork forker/r" <<<"$FORKMERGE"'
+check "fork branch is never deleted" '[ ! -s "$GHSTUB/git-push-calls" ] && grep -q "head belongs to fork forker/r" <<<"$FORKMERGE"'
 rm -rf "$DM_HOME/repos/mauth/.github"
 
 echo
