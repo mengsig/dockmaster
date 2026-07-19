@@ -1493,6 +1493,12 @@ rm "$PARITY_FIXTURE/.agents/skills/rollback/SKILL.md"
 check "runtime parity fails on a missing Codex skill" \
   '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
 cp "$ROOT/.agents/skills/rollback/SKILL.md" "$PARITY_FIXTURE/.agents/skills/rollback/SKILL.md"
+WAKE_SKILL="$PARITY_FIXTURE/.agents/skills/change-review/SKILL.md"
+sed 's/spawn_agent/command_session/g' "$WAKE_SKILL" > "$WAKE_SKILL.tmp"
+mv "$WAKE_SKILL.tmp" "$WAKE_SKILL"
+check "runtime parity fails when Codex Lavish loses its mailbox wake" \
+  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
+cp "$ROOT/.agents/skills/change-review/SKILL.md" "$WAKE_SKILL"
 printf '%03000d\n' 0 >> "$PARITY_FIXTURE/AGENTS.md"
 check "runtime performance guard fails on instruction bloat" \
   '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'

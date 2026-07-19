@@ -9,7 +9,7 @@
 # Commands:
 #   path <id>          print (and create the dir for) the artifact path
 #   open <id>          open/resume the lavish session for the artifact
-#   poll <id>          long-poll for operator feedback (run as a background task)
+#   poll <id>          long-poll for operator feedback (caller owns wake delivery)
 #   end  <id>          end the lavish session
 #
 # lavish-axi is an OPTIONAL review tool: it drives the interactive browser

@@ -9,8 +9,8 @@ committed because it contains session identifiers.
 
 | command | result |
 | --- | --- |
-| `bash tests/smoke.sh` | 439 passed, 0 failed; includes missing-Codex-skill and instruction-bloat negative cases |
-| `node tests/check-runtime-parity.js` | 18 exact skills, 18 exact triggers, vocabulary separation, 28 mapped capabilities, every evidence path present |
+| `bash tests/smoke.sh` | 440 passed, 0 failed; includes missing-Codex-skill, lost-Lavish-mailbox-wake, and instruction-bloat negative cases |
+| `node tests/check-runtime-parity.js` | 18 exact skills, 18 exact triggers, vocabulary separation, notification-producing Lavish wait, 28 mapped capabilities, every evidence path present |
 | `node tests/check-gate-drift.js` | all three built-in gate sequences match shipped configs |
 | `bash tests/runtime-performance.sh` | context and Claude no-regression guardrails passed |
 | `bash tests/runtime-smoke.sh --live` | installed config/discovery/policy probes and both authenticated model probes passed |
@@ -20,7 +20,7 @@ committed because it contains session identifiers.
 | runtime | version | config/discovery proof | authenticated proof |
 | --- | --- | --- | --- |
 | Claude Code | 2.1.215 | CLI/auth probe passed; existing `.claude/settings.json` parsed | loaded project `task-lifecycle`; returned `RUNTIME_OK` under plan mode |
-| Codex CLI | 0.144.6 | strict-config doctor: 18 checks, no failures/warnings; prompt-input contained dockmaster skills; rule allow/deny probes passed | ephemeral read-only run loaded `task-lifecycle`; returned `RUNTIME_OK` |
+| Codex CLI | 0.144.6 | strict-config doctor: 18 checks, no failures/warnings; prompt-input contained dockmaster skills; rule allow/deny probes passed | ephemeral read-only run loaded `task-lifecycle` and the no-fork Lavish waiter contract from `change-review`; returned `RUNTIME_OK` |
 
 The isolated Claude worktree had not accepted Claude's trust dialog, so the CLI
 reported that its 45 project permission allow entries were ignored. This did not
@@ -37,6 +37,13 @@ This directly proves the secondmate → worker nesting edge and same-thread
 follow-up surface used by the adapter. No model/effort selector was present in
 the actual spawn call, so the adapters make no per-child selection claim.
 
+The approval-wake regression also used the native path. A depth-1 parent spawned
+a no-fork dedicated waiter. The waiter deliberately started a command with an
+early yield, resumed the same terminal session through exit, and returned
+`WAITER_COMPLETION_OK`; that subagent completion arrived in the parent mailbox
+without a manual terminal read. The wake therefore came from collaboration
+completion, not from the command session.
+
 ## Performance evidence
 
 | model-visible or startup surface | before | after | result |
@@ -45,17 +52,21 @@ the actual spawn call, so the adapters make no per-child selection claim.
 | Claude settings | 1,579 B | 1,579 B | byte-identical |
 | Claude full skill bodies on disk | 80,906 B | 80,906 B | byte-identical; still progressive load |
 | Claude discovery descriptions | 4,603 B | 4,603 B | byte-identical |
-| Codex adapter/config/rules | none | 80,863 B / 295 B / 985 B | full bodies load only when selected; descriptions 4,567 B, under documented 8,000-character fallback budget |
+| Codex adapter/config/rules | none | 83,303 B / 295 B / 985 B | full bodies load only when selected; descriptions 4,567 B, under documented 8,000-character fallback budget |
 
-A five-run local `--version` process-start sample reported medians of 72.0 ms
-for Claude and 37.4 ms for Codex. This is reproducible CLI process overhead, not
+A five-run local `--version` process-start sample reported medians of 71.3 ms
+for Claude and 35.8 ms for Codex. This is reproducible CLI process overhead, not
 model inference latency, and is reported only as a diagnostic—not used to claim
 network/model speed. The guardrail instead enforces the causal performance
 properties: Claude files stay byte-identical, one runtime never scans the
 other's discovery root, shared instructions stay capped, and Codex workers use
 complete briefs with `fork_turns="none"` rather than duplicate parent history.
+The Codex approval waiter adds no always-loaded text: its detailed contract is
+progressively loaded only with `change-review` or `supervision`, and it consumes
+one bounded collaboration thread only while operator feedback is pending. The
+same idle waiter is re-armed for revision rounds instead of leaking threads.
 
-The live Codex proof consumed 23,340 input tokens (5,888 cached) and 69 output
-tokens. The live Claude proof consumed 28,545 cache-creation, 59,590 cache-read,
-4 uncached input, and 589 output tokens across skill loading and response. These
+The live Codex proof consumed 23,369 input tokens (5,888 cached) and 131 output
+tokens. The live Claude proof consumed 30,282 cache-creation, 56,491 cache-read,
+4 uncached input, and 541 output tokens across skill loading and response. These
 are one-run environment measurements, not cross-model performance comparisons.

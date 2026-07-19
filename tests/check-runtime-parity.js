@@ -82,6 +82,28 @@ function checkSeparation() {
   console.log('ok   runtime vocabulary separation and neutral-byte parity')
 }
 
+function checkCodexLavishWake() {
+  const review = read('.agents/skills/change-review/SKILL.md')
+  const supervision = read('.agents/skills/supervision/SKILL.md')
+  const requirements = [
+    [review, /spawn_agent\([\s\S]*fork_turns="none"\)/, 'no-fork waiter dispatch'],
+    [review, /bin\/dm-lavish\.sh poll <id>/, 'synchronous Lavish poll'],
+    [review, /waiter must not return while the command is still live/, 'waiter session ownership'],
+    [review, /completion is delivered to the parent mailbox/, 'parent mailbox completion'],
+    [review, /Never[\s\S]{0,80}terminal session as a parent wake source/, 'raw-session prohibition'],
+    [review, /followup_task[\s\S]{0,80}instead of consuming another thread/, 'waiter reuse'],
+    [supervision, /exit does not\nproduce a parent-mailbox wake/, 'terminal non-notification'],
+    [supervision, /wait_agent[\s\S]{0,80}native wake path/, 'native mailbox wait'],
+  ]
+  for (const [content, pattern, label] of requirements) {
+    if (!pattern.test(content)) fail(`Codex Lavish wake contract missing ${label}`)
+  }
+  if (/collect feedback with a yielded command session/.test(review)) {
+    fail('Codex change review still treats a yielded command as the approval wake')
+  }
+  console.log('ok   Codex Lavish wait has a notification-producing parent wake')
+}
+
 function checkCapabilities() {
   const docs = read('docs/runtime-capabilities.md')
   const ids = new Set()
@@ -115,6 +137,7 @@ function main() {
   checkSkillSets()
   checkTriggers()
   checkSeparation()
+  checkCodexLavishWake()
   checkCapabilities()
   checkCodexConfig()
   console.log('\nruntime parity checks passed')

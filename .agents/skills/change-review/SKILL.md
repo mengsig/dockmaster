@@ -30,18 +30,39 @@ change; the PR-or-local decision and any pipeline come *after* approval.
    ```
    bin/dm-lavish.sh open <id>
    ```
-   Then collect feedback with a yielded command session so waiting does not
-   consume model turns:
-   ```
-   bin/dm-lavish.sh poll <id>     # resume the yielded command when feedback arrives
-   ```
+   Then start the notification-producing wait described below. Do not run the
+   poll in an unattended command session.
+
+## Codex notification contract
+
+`bin/dm-lavish.sh poll <id>` is a long-running terminal command, but completion
+of a command session does **not** wake the dockmaster's collaboration mailbox.
+The dockmaster therefore delegates each approval wait to one dedicated Codex
+waiter with `spawn_agent(..., fork_turns="none")`.
+
+Give the waiter the absolute dockmaster directory, task id, and this exact job:
+
+1. Run `bin/dm-lavish.sh poll <id>` synchronously in the dockmaster directory.
+2. If the command yields a running session, keep resuming that same session
+   until it exits. The waiter must not return while the command is still live.
+3. Return the complete feedback, layout warning, session-end result, or visible
+   command failure. Do not modify files, act on feedback, or address the operator.
+
+The waiter's completion is delivered to the parent mailbox. Use `wait_agent`
+while the approval goal is active; when the waiter completes, reconcile the
+review and relay actionable feedback to the implementation crewmate. Never
+treat a raw background or yielded terminal session as a parent wake source.
+Keep the waiter id for this review session. If dispatch fails because no thread
+slot is available, remain attached to the poll or surface the capacity blocker;
+never silently fall back to an unattended terminal wait.
 
 3. **Back-and-forth.** Feedback from the poll is relayed by the dockmaster to the
    crewmate as one clear instruction. The crewmate revises the code, updates the
-   artifact, and signals `review-ready` again. Repeat until the operator
-   approves. (Crewmates never talk to the operator directly; the dockmaster
-   mediates — but the operator's annotations on the lavish surface are
-   authoritative input.)
+   artifact, and signals `review-ready` again. Re-arm the same idle waiter with
+   `followup_task` for the next poll instead of consuming another thread. Repeat
+   until the operator approves. (Crewmates never talk to the operator directly;
+   the dockmaster mediates — but the operator's annotations on the lavish
+   surface are authoritative input.)
 
 4. **Approval → decide how it lands.** Once the operator approves, end the
    session (`bin/dm-lavish.sh end <id>`) and ask the operator one plain question:

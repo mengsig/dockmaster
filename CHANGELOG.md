@@ -8,6 +8,11 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Codex Lavish waits now wake reliably.** A dedicated no-fork waiter owns the
+  long poll through terminal completion; its collaboration completion wakes the
+  parent mailbox. Raw command sessions are explicitly attached-only, with a
+  negative regression that rejects loss of the waiter wake contract. Claude's
+  existing background-notification path is unchanged.
 - **Honest onboarding docs and one dependency contract.** The README and
   `dm-doctor` now state the tool contract identically in three tiers: `git`/`jq`
   required for anything, `gh` (or `gh-axi`) required for the PR flow, and the

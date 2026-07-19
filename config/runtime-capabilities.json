@@ -98,7 +98,7 @@
       "id": "bounded-ci-wait",
       "requirement": "Scheduled and CI waits are bounded and visible",
       "claude": "Monitor or scheduled wake plus dm-pr await-checks",
-      "codex": "yielded command wait or scheduled task plus dm-pr await-checks",
+      "codex": "attached command wait, dedicated waiter, or scheduled task plus dm-pr await-checks",
       "evidence": ["bin/dm-pr.sh", ".claude/skills/supervision/SKILL.md", ".agents/skills/supervision/SKILL.md"]
     },
     {
@@ -112,8 +112,8 @@
       "id": "change-review",
       "requirement": "Lavish approval and feedback loop before delivery",
       "claude": "background poll and worker message",
-      "codex": "yielded poll session and worker follow-up",
-      "evidence": ["bin/dm-lavish.sh", ".claude/skills/change-review/SKILL.md", ".agents/skills/change-review/SKILL.md"]
+      "codex": "no-fork waiter owns the poll; its mailbox completion wakes the parent for worker follow-up",
+      "evidence": ["bin/dm-lavish.sh", ".claude/skills/change-review/SKILL.md", ".agents/skills/change-review/SKILL.md", "tests/check-runtime-parity.js"]
     },
     {
       "id": "pr-gates",

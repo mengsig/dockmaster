@@ -52,7 +52,7 @@ claude -p --permission-mode plan --max-turns 2 --output-format json \
 grep -q 'RUNTIME_OK' "$EVIDENCE/claude-live.json"
 
 codex exec -C "$ROOT" --ephemeral --sandbox read-only --json \
-  "Do not use tools or modify files. Load the task-lifecycle skill from this project. Reply exactly RUNTIME_OK if the project contract says the dockmaster delegates project work into isolated worktrees and the skill covers dispatch through delivery; otherwise reply RUNTIME_FAIL." \
+  "Do not use tools or modify files. Load the task-lifecycle and change-review skills from this project. Reply exactly RUNTIME_OK only if task-lifecycle covers isolated dispatch through delivery AND change-review says a no-fork waiter owns the Lavish poll until exit so its completion wakes the parent, never assuming a raw terminal session will wake it; otherwise reply RUNTIME_FAIL." \
   > "$EVIDENCE/codex-live.jsonl"
 grep -q 'RUNTIME_OK' "$EVIDENCE/codex-live.jsonl"
 

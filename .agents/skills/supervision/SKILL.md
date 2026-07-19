@@ -42,16 +42,33 @@ Handle events by kind:
 - **paused** — a bounded external wait expected to clear on its own; leave it,
   but re-check if it has been quiet unusually long.
 
+## Notification-producing waits
+
+A yielded terminal command has no collaboration identity, so its exit does not
+produce a parent-mailbox wake. It is safe only while the current agent remains
+attached and resumes it explicitly. Never leave a raw background or yielded
+command session behind and assume its completion will wake the dockmaster.
+
+When an external wait must wake the dockmaster after the current turn—especially
+`dm-lavish.sh poll` during operator approval—spawn one dedicated waiter subagent
+with `fork_turns="none"`. Give it the complete command and working directory. It
+must run the command synchronously, resume any yielded session until terminal,
+and return only the result or visible failure. The waiter completion reaches the
+parent mailbox; `wait_agent` then provides the native wake path. Keep this waiter
+read-only and single-purpose, and do not count it as a second owner of the task.
+
 ## External waits
 
 For state changes with no completion notification — CI turning green, an external
 deploy, a remote queue — do not busy-wait:
 
-- **Active-session wait** — run `bin/dm-pr.sh await-checks <id>
+- **Attached active-session wait** — run `bin/dm-pr.sh await-checks <id>
   [--timeout-secs N] [--interval-secs N]` through the command tool. If it yields
   a running session, resume that session with the runtime wait/write tool. The
   script polls until the rollup is terminal (`passing`/`failing`/`none`) or it
-  times out, exiting 0 on passing/none and non-zero on failing/timeout.
+  times out, exiting 0 on passing/none and non-zero on failing/timeout. Use this
+  only while the current agent stays attached. If the result must wake a later
+  parent turn, delegate the same bounded command to a dedicated waiter instead.
 - **Long or recurring wait** — use a Codex scheduled task or thread automation
   in the desktop/web surface for a periodic check-in or fleet sweep. Codex CLI
   has no Scheduled management UI; in CLI-only operation, keep an active bounded

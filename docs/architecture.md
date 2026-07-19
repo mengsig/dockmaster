@@ -22,7 +22,7 @@ preserving one lifecycle and one toolbelt.
 | per-task worker | one task / one worktree | background `Agent` | `spawn_agent`, `fork_turns="none"` |
 | supervision | durable state + no daemon | completion notification, task controls | mailbox, `wait_agent`, collaboration controls |
 | follow-up / steering | same worker identity | `SendMessage` | `send_message` / `followup_task` |
-| external wait | bounded `dm-pr.sh await-checks` | `Monitor` or schedule | yielded command wait or scheduled task |
+| external wait | bounded command + native wake | `Monitor` or schedule | attached command, waiter subagent, or scheduled task |
 | nested domain crew | root → secondmate → worker | native nested agents | `agents.max_depth=2`, six-thread cap |
 | worktree isolation | `bin/dm-worktree.sh` | worktree-aware agent | brief-pinned existing worktree |
 | durable backlog | `state/backlog.json` + rendered markdown | task list mirror | thread list mirror |
@@ -32,7 +32,7 @@ preserving one lifecycle and one toolbelt.
 | delivery modes | modular **PR pipeline** (ordered gates) per repo | shared | shared |
 | no-mistakes gate | review/test/security gates + optional runner | Claude reviewers | Codex fresh subagents; focused fallback if optional review skill absent |
 | right-sizing | task shape, review tier, focused context | per-agent model/effort where available | agent count and prompt scope; no unproved per-spawn selector |
-| review surface | lavish-axi | shared CLI | shared CLI |
+| review surface | lavish-axi | background poll notification | no-fork waiter completion notification |
 | self-update / fleet sync | guarded fast-forward via `bin/` | shared | shared |
 | stacked sub-PRs | recorded parent base + guarded PR open | shared | shared |
 
@@ -158,6 +158,9 @@ Every requested change follows one canonical flow. The crewmate implements in
 its worktree and renders the change as a **lavish review artifact**; the operator
 approves it (with back-and-forth, all mediated by the dockmaster); only then does
 the dockmaster ask **PR or local**. See the active runtime's `change-review` skill.
+Codex approval polls run inside a dedicated no-fork waiter: the waiter owns any
+yielded terminal session through exit, and its subagent completion wakes the
+dockmaster mailbox. A raw terminal session is never treated as a wake source.
 
 On the PR path, delivery is an **ordered list of named gates** declared per repo
 in `config/pr-pipeline.<repo>.json` (falling back to

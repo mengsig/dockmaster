@@ -14,9 +14,9 @@ trigger, adapter, or evidence path drifts.
 | `followup-and-steering` | same-worker correction | `SendMessage`/task controls | message/follow-up/interrupt/list controls | supervision + recovery adapters |
 | `background-supervision` | no polling daemon | completion notification | mailbox + efficient agent wait | supervision adapters |
 | `recovery` | same task/work survives restart | reconcile and relaunch ladder | list/message/interrupt then same-copy relaunch | session-start + stuck-worker + smoke |
-| `bounded-ci-wait` | terminal CI rollup | Monitor/schedule + `await-checks` | yielded command/schedule + `await-checks` | dm-pr + supervision adapters |
+| `bounded-ci-wait` | terminal CI rollup | Monitor/schedule + `await-checks` | attached command, dedicated waiter, or schedule + `await-checks` | dm-pr + supervision adapters |
 | `scheduled-fleet-sweep` | recurring PR health | runtime schedule/cron | desktop/web scheduled task; CLI prepares it | `dm-pr sweep` + supervision adapters |
-| `change-review` | pre-delivery approval loop | background Lavish poll | yielded Lavish poll | dm-lavish + change-review adapters |
+| `change-review` | pre-delivery approval loop | background Lavish poll | no-fork waiter owns poll; mailbox completion wakes parent | dm-lavish + adapters + parity regression |
 | `pr-gates` | fast/default/rigorous gates | fresh reviewers | fresh no-fork reviewers; focused fallback | pr-workflow + configs + drift test |
 | `post-pr-review` | review comments/red CI tail | shared skill | shared skill | both post-pr-review skills |
 | `github-tooling` | PR API/checks/merge | gh-axi/gh | gh-axi/gh or plugin tools | dm-pr + smoke |
@@ -58,7 +58,9 @@ Codex collaboration names in Claude adapters.
   therefore right-sizes tiers, task shape, prompt scope, and agent count and does
   not claim a selector it did not invoke.
 - Scheduled-task management exists in desktop/web, not the CLI. CLI sessions use
-  bounded yielded waits or prepare a scheduled prompt for the supported surface.
+  bounded attached waits, a dedicated no-fork waiter when parent notification is
+  required, or prepare a scheduled prompt for the supported surface. A raw
+  command session never counts as a collaboration wake source.
 - The optional deterministic runner needs a host that injects its workflow API.
   Both runtimes retain a complete native `pr-workflow` path when it is absent.
 
