@@ -859,6 +859,28 @@ check "gate refuses 'failing'"                          '[ "$(gate failing 0 0)"
 check "gate refuses 'pending'"                          '[ "$(gate pending 0 0)" = "refuse-pending" ]'
 check "gate refuses an unknown rollup"                  '[ "$(gate bogus 0 0)" = "refuse-unknown" ]'
 
+echo "== await-checks: pure head-terminality predicate + poll gate (#75) =="
+# Pure like dm_merge_gate, testable offline. dm_await_needs_head answers "is this
+# rollup terminal for the current head SHA?" — i.e. must the caller verify the
+# rolled-up head before trusting it. dm_await_gate maps a head-reconciled
+# observation to pass/fail/dirty/wait; the caller downgrades a stale/mismatched
+# head to a non-terminal rollup BEFORE the gate, so a DIFFERENT-sha rollup can
+# never be terminal (the end-to-end stale-head path is covered under #75 below).
+needshead() { ( . "$ROOT/bin/dm-lib.sh"; if dm_await_needs_head "$1" "$2" "$3"; then echo yes; else echo no; fi ); }
+awgate()    { ( . "$ROOT/bin/dm-lib.sh"; dm_await_gate "$1" "$2" "$3" ); }
+check "needs-head verifies a passing rollup"            '[ "$(needshead passing clean 1)" = yes ]'
+check "needs-head verifies a failing rollup"            '[ "$(needshead failing clean 1)" = yes ]'
+check "needs-head verifies dirty over any rollup"       '[ "$(needshead pending dirty 1)" = yes ] && [ "$(needshead unknown dirty 0)" = yes ]'
+check "needs-head verifies none only on a CI-less repo" '[ "$(needshead none clean 0)" = yes ] && [ "$(needshead none clean 1)" = no ]'
+check "needs-head skips pending/unknown"                '[ "$(needshead pending clean 1)" = no ] && [ "$(needshead unknown clean 1)" = no ]'
+check "gate passes a matching-head green"               '[ "$(awgate passing clean 1)" = pass ]'
+check "gate fails a matching-head red"                  '[ "$(awgate failing clean 1)" = fail ]'
+check "gate short-circuits dirty over any rollup"       '[ "$(awgate passing dirty 1)" = dirty ] && [ "$(awgate failing dirty 0)" = dirty ]'
+check "gate keeps a downgraded stale-head rollup non-terminal" '[ "$(awgate pending unknown 1)" = wait ]'
+check "gate waits on a CI repo reporting none"          '[ "$(awgate none clean 1)" = wait ]'
+check "gate passes none only on a confirmed CI-less repo" '[ "$(awgate none clean 0)" = pass ]'
+check "gate waits on pending and unknown"               '[ "$(awgate pending clean 1)" = wait ] && [ "$(awgate unknown clean 1)" = wait ]'
+
 echo "== dispatch right-sizing: dm_recommended_model is a pure advisory tier (#77) =="
 # Pure like dm_merge_gate: risk signals -> opus, scout/mechanical -> haiku, else
 # sonnet. Case-insensitive substring match; risk dominates the scout kind.

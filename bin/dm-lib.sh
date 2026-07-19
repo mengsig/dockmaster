@@ -500,6 +500,49 @@ EOF
   printf 'refuse\n'
 }
 
+# --- await-checks decision: bind terminality to the PR's CURRENT head --------
+# dm-pr.sh await-checks polls a PR's CI rollup and must never end the wait on a
+# rollup that belongs to an OLDER head: right after a push GitHub can still
+# report the previous head's finished run (a stale green/red), and a
+# merge-conflicted (dirty) PR never gets workflow runs at all. Both decisions
+# are pure so they are testable offline, like dm_merge_gate.
+#
+# dm_await_needs_head answers the brief's question "is this rollup terminal for
+# THIS head SHA?" — i.e. is the current observation a candidate-terminal one
+# whose trust hinges on the rolled-up head matching the PR's live head, so the
+# caller must verify the head before acting. It is the single source of truth
+# for that relevance (the caller's I/O guard and the terminal mapping both read
+# it), so they cannot drift. Exit 0 = must verify the head; 1 = keep polling.
+dm_await_needs_head() {
+  # dm_await_needs_head <rollup> <merge_state> <has_ci:0|1>
+  local rollup="$1" merge_state="$2" has_ci="$3"
+  if [ "$merge_state" = "dirty" ]; then return 0; fi
+  case "$rollup" in
+    passing|failing) return 0 ;;
+    none) if [ "$has_ci" = "0" ]; then return 0; fi ;;
+  esac
+  return 1
+}
+
+# dm_await_gate maps a head-RECONCILED observation to a poll action. The caller
+# resolves the head first and, on a stale/unverifiable head, downgrades the
+# rollup/merge_state to a non-terminal value (pending/unknown) BEFORE calling
+# this — so a mismatched head can never reach a terminal verdict here. `dirty`
+# outranks the rollup (a conflict cannot produce merge checks); `none` is
+# terminal only on a confirmed CI-less repo (has_ci=0), matching dm_merge_gate.
+# Prints: pass | fail | dirty | wait.
+dm_await_gate() {
+  # dm_await_gate <rollup> <merge_state> <has_ci:0|1>
+  local rollup="$1" merge_state="$2" has_ci="$3"
+  if [ "$merge_state" = "dirty" ]; then printf 'dirty\n'; return 0; fi
+  case "$rollup" in
+    passing) printf 'pass\n' ;;
+    failing) printf 'fail\n' ;;
+    none)    if [ "$has_ci" = "0" ]; then printf 'pass\n'; else printf 'wait\n'; fi ;;
+    *)       printf 'wait\n' ;;
+  esac
+}
+
 # --- all task ids: the "$DM_TASKS/*.meta glob -> id" idiom -------------------
 # Prints, one per line, every task id that has a meta file. Single owner of the
 # glob + existence-guard (protects against a literal no-match glob when
