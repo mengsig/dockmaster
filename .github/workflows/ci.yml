@@ -114,7 +114,8 @@ jobs:
           node-version: '14'
       - name: Check documented minimum Node syntax and tests
         run: |
-          node --check workflows/pr-pipeline.js
+          { printf '%s\n' 'export async function __syntax(args, agent, parallel, log) {'; sed 's/^export const meta =/const meta =/' workflows/pr-pipeline.js; printf '%s\n' '}'; } \
+            | node --input-type=module --check
           node tests/check-gate-drift.js
           node tests/check-pr-runner.js
           node tests/check-runtime-parity.js
