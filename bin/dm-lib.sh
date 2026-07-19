@@ -194,6 +194,25 @@ dm_tracked_dirty() {
 # cruft), so operations that DISCARD a worktree (teardown) fail closed on them.
 dm_untracked() { git -C "$1" ls-files --others --exclude-standard 2>/dev/null; }
 
+# Is <relpath> provably-disposable build/tool cruft that teardown may discard
+# without --force? Deliberately TIGHT: only well-known regenerable artifacts.
+# Never node_modules/dist/build/.env/venv — those can hide real work. Matches
+# both git's expanded-file form and its trailing-slash directory form; a
+# directory-family name counts only as a real path SEGMENT (slash after it),
+# never a bare file of the same name. Exit 0 = disposable, 1 = keep (fail closed).
+dm_is_disposable_cruft() {
+  local rel="$1" base
+  [ -n "$rel" ] || return 1
+  base="${rel%/}"; base="${base##*/}"
+  case "$base" in
+    uv.lock|.coverage|coverage.xml|*.pyc) return 0 ;;
+  esac
+  case "/$rel" in
+    */__pycache__/*|*/.pytest_cache/*|*/.ruff_cache/*|*/.mypy_cache/*|*/htmlcov/*) return 0 ;;
+  esac
+  return 1
+}
+
 # --- git helpers -------------------------------------------------------------
 # Resolve a repo's default branch: origin/HEAD -> main/master (local or remote)
 # -> current branch -> "main". Always prints exactly one line.
