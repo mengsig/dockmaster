@@ -28,6 +28,73 @@ one runtime never has to interpret the other's tool calls. See
 Installed-runtime and performance proof is recorded in
 [runtime validation](docs/runtime-validation.md).
 
+## How it works
+
+One conversation on the surface; a small, gated pipeline underneath.
+
+```mermaid
+flowchart TB
+    subgraph OP["Operator's view — one conversation"]
+        direction LR
+        A["Ask for a change"] --> B["Review & approve"] --> C["Merged PR<br/>or landed change"]
+    end
+
+    subgraph HOOD["Under the hood"]
+        D["Intake"] --> E{"Classify"}
+        E -->|scout| S["Investigate, plan, or audit<br/>report.md — no code touched"]
+        E -->|ship| F["Isolated worktree"]
+        F --> G["Crewmate builds"]
+        G --> H["Lavish review gate<br/>operator approves"]
+        H --> I["PR pipeline<br/>coldstart review, fix, tests,<br/>merge-gate review, fix, tests"]
+        I --> J{"Merge authority<br/>never / ask / yolo"}
+        J --> K["Land"]
+        K --> L["Teardown worktree"]
+    end
+
+    A -.-> D
+    H -.-> B
+    K -.-> C
+```
+
+A scout never touches project code — a diagnosis is never an authorization to
+implement. A ship ends torn down: the worktree disappears, the change lives on
+in the repo.
+
+### The safety model
+
+Every change passes the same operator-controlled gates, in order:
+
+```mermaid
+flowchart TD
+    W["Worktree isolation<br/>one task = one worktree,<br/>repos/ stays read-only"]
+    B["Frozen scope via briefs<br/>each crewmate's brief pins its task"]
+    R["Lavish review gate<br/>operator approves before PR or local"]
+    G["Never merge red<br/>checks must be green, no bypass"]
+    MA{"merge_authority<br/>per repo"}
+    N["never<br/>operator merges on GitHub"]
+    K["ask — default<br/>merges only on explicit word"]
+    Y["yolo<br/>auto-merges low/medium risk;<br/>high risk still asks"]
+    NX["operator-granted exception<br/>merge_allowed_bases —<br/>named branches only, never default"]
+
+    W --> B --> R --> G --> MA
+    MA --> N --> NX
+    MA --> K
+    MA --> Y
+```
+
+### Capabilities at a glance
+
+- **Parallel autonomous workers** — independent tasks dispatch in bounded
+  waves, each in its own worktree, so they never collide.
+- **Two-pass reviews** — coldstart then merge-gate, each followed by a fix and
+  a test run, before a PR is even opened.
+- **Campaigns across repos** — one intent ("bump this dependency everywhere")
+  fans out to one ordinary, gated child task per repo.
+- **Persistent memory** — per-repo knowledge commits with the work that
+  produced it; operator and fleet-wide facts stay in global memory.
+- **Scout reports** — investigations end in a written report, never an
+  unauthorized change.
+
 ## What it does
 
 - **One liaison.** You talk only to the dockmaster; it delegates, supervises, and
