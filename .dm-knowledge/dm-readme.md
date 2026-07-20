@@ -1,0 +1,1 @@
+- **[convention]** Mermaid blocks in README/docs can be syntax-checked without mmdc/puppeteer: npm install mermaid + jsdom, call mermaid.parse() in a minimal DOM (see this task's approach) — much faster than the full mermaid-cli render pipeline.  _(2026-07-20T10:47:24Z)_
