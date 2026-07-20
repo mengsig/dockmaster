@@ -44,6 +44,20 @@ assert_isolated() {
   printf '%s\n' "$top"
 }
 
+require_managed_worktree() {
+  local id="$1" recorded expected recorded_real expected_real
+  recorded="$(dm_require_worktree "$id")"
+  expected="$DM_WT/$id"
+  [ -d "$expected" ] || dm_die "REFUSED: managed worktree path does not exist for $id: $expected"
+  recorded_real="$(cd "$recorded" 2>/dev/null && pwd -P)" \
+    || dm_die "REFUSED: cannot canonicalize recorded worktree path for $id: $recorded"
+  expected_real="$(cd "$expected" 2>/dev/null && pwd -P)" \
+    || dm_die "REFUSED: cannot canonicalize managed worktree path for $id: $expected"
+  [ "$recorded_real" = "$expected_real" ] \
+    || dm_die "REFUSED: recorded worktree path for $id does not match managed path $expected_real: $recorded_real"
+  printf '%s\n' "$expected_real"
+}
+
 # --- tangle detection: named non-default branch checked out in primary -------
 tangle_check() {
   local repo="$1" dir def cur
@@ -190,36 +204,45 @@ case "$cmd" in
       esac
     done
     [ -n "$id" ] || dm_die "usage: dm-worktree.sh remove <id> [--force]"
-    wt="$(dm_require_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
+    wt="$(require_managed_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
     kind="$(dm_meta_get "$id" kind)"
     if [ "$force" -eq 0 ]; then
-      # Committed work must be landed (ship only; a scout worktree is scratch).
-      if [ "$kind" != "scout" ] && ! "$0" landed "$id" >/dev/null 2>&1; then
-        dm_die "REFUSED: $id has unlanded work. Confirm it landed, or pass --force only with explicit discard authority."
+      if [ "$kind" = "scout" ] && [ ! -f "$DM_DATA/$id/report.md" ]; then
+        dm_die "REFUSED: scout $id has no report at data/$id/report.md. Produce the report, or pass --force only with explicit discard authority."
+      fi
+      if ! landed_out="$("$0" landed "$id" 2>&1)"; then
+        dm_die "REFUSED: $id has unlanded work. ${landed_out:-Unable to verify landed state.} Pass --force only with explicit discard authority."
       fi
       # Untracked non-ignored files could be forgotten work; fail closed UNLESS
       # every one is provably-disposable tool cruft (dm_is_disposable_cruft) —
       # then teardown discards only regenerable artifacts and needs no --force.
+      if ! untracked="$(dm_untracked "$wt")"; then
+        dm_die "REFUSED: cannot inspect untracked files for $id; worktree preserved."
+      fi
       undisposable=""
       while IFS= read -r u; do
         [ -n "$u" ] || continue
         dm_is_disposable_cruft "$u" && continue
         if [ -z "$undisposable" ]; then undisposable="$u"; else undisposable="$undisposable
 $u"; fi
-      done < <(dm_untracked "$wt")
+      done <<<"$untracked"
       if [ -n "$undisposable" ]; then
         dm_die "REFUSED: $id worktree has untracked files (forgotten work, or build cruft the repo should ignore). Review/clean them, or pass --force. Files:
 $undisposable"
       fi
     fi
     dir="$(dm_repo_dir "$repo")"
-    git -C "$dir" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
-    git -C "$dir" worktree prune 2>/dev/null || true
+    assert_isolated "$wt" "$repo" >/dev/null
+    if ! remove_out="$(git -C "$dir" worktree remove --force "$wt" 2>&1)"; then
+      dm_die "REFUSED: git worktree remove failed for $id; directory and metadata preserved. ${remove_out:-No error detail from git.}"
+    fi
+    if ! prune_out="$(git -C "$dir" worktree prune 2>&1)"; then
+      dm_warn "worktree removed for $id, but git worktree prune failed: ${prune_out:-no error detail from git}"
+    fi
     dm_meta_set "$id" worktree ""
     # Operator discard (#69): without a terminal event the task would stay
     # 'working' forever. Written here, not via dm-task.sh event, to bar forgery.
-    if [ "$force" -eq 1 ] && [ "$kind" != "scout" ] \
-       && [ "$(dm_meta_get "$id" pr_state)" != "MERGED" ] \
+    if [ "$force" -eq 1 ] && [ "$(dm_meta_get "$id" pr_state)" != "MERGED" ] \
        && ! grep -qE '^[^ ]+ merged: ' "$(dm_status_path "$id")" 2>/dev/null; then
       dm_status_append "$id" discarded "worktree force-removed with operator discard authority"
     fi

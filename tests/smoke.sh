@@ -1079,6 +1079,9 @@ check "scout brief omits the ship branch flow" '! grep -q "Create a branch" "$DM
 printf '# findings\n' > "$DM_HOME/data/sc-1/report.md"
 check "scout state done once report exists"  'OUT="$(b dm-task.sh state sc-1)"; grep -q done <<<"$OUT"'
 
+echo "== scout cleanup safety (#100) =="
+check "scout cleanup matrix passes" 'bash "$ROOT/tests/scout-cleanup.sh" >/dev/null 2>&1'
+
 echo "== repo remove guards =="
 b dm-repo.sh add rmtest "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
 printf 'dirty\n' > "$DM_HOME/repos/rmtest/DIRTY.txt"   # uncommitted change in the clone
@@ -2174,11 +2177,11 @@ b dm-worktree.sh remove disc-1 --force >/dev/null 2>&1
 check "force-remove records terminal discarded"  'OUT="$(b dm-task.sh state disc-1)"; grep -q "^state: discarded" <<<"$OUT"'
 check "archive accepts a discarded task"         'b dm-task.sh archive disc-1 >/dev/null'
 check "repo remove passes over a discarded task" 'b dm-repo.sh remove disctest >/dev/null 2>&1'
-# A scout worktree is scratch: force-removing it must NOT brand the task discarded.
+# Forced scout cleanup also needs a terminal record when no report exists.
 b dm-task.sh new disc-sc --kind scout --repo demo >/dev/null
 b dm-worktree.sh create disc-sc demo >/dev/null
 b dm-worktree.sh remove disc-sc --force >/dev/null 2>&1
-check "scout force-remove records no discard"    'OUT="$(b dm-task.sh state disc-sc)"; ! grep -q discarded <<<"$OUT"'
+check "scout force-remove records terminal discarded" 'OUT="$(b dm-task.sh state disc-sc)"; grep -q "^state: discarded" <<<"$OUT"'
 
 echo
 echo "== await-checks head-race guards (#75) =="
