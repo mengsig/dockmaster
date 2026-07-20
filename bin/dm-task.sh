@@ -34,7 +34,6 @@ case "$cmd" in
     id="${1:-}"; shift || true
     [ -n "$id" ] || dm_die "usage: dm-task.sh new <id> --kind ship|scout --repo R [--mode M] [--title T]"
     dm_require_id "$id"
-    [ -f "$(dm_meta_path "$id")" ] && dm_die "task '$id' already exists"
     kind=""; repo=""; mode=""; title=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -45,17 +44,14 @@ case "$cmd" in
         *) dm_die "unknown flag: $1" ;;
       esac
     done
-    case "$kind" in ship|scout) ;; *) dm_die "--kind must be ship|scout" ;; esac
+    # Name the flag the operator actually typed; dm_task_create re-checks both as
+    # the library-side boundary. Also keeps an empty repo out of the registry read.
+    dm_valid_task_kind "$kind" || dm_die "--kind must be ship|scout"
     [ -n "$repo" ] || dm_die "--repo is required"
     # inherit mode from the repo registry unless overridden
     [ -n "$mode" ] || mode="$(dm_registry_get "$repo" mode)"
     [ -n "$mode" ] || mode="pipeline"
-    dm_meta_set "$id" kind "$kind"
-    dm_meta_set "$id" repo "$repo"
-    dm_meta_set "$id" mode "$mode"
-    [ -n "$title" ] && dm_meta_set "$id" title "$title"
-    dm_meta_set "$id" created "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    dm_status_append "$id" created "$title"
+    dm_task_create "$id" "$kind" "$repo" "$mode" "$title"
     dm_info "created task $id (kind=$kind repo=$repo mode=$mode)"
     ;;
 
@@ -74,6 +70,7 @@ case "$cmd" in
     case "$key" in
       pr|pr_state|merge_state|pr_check_snapshot) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
       base) dm_die "'base' is recorded by dm-worktree.sh create --base; it must not be set by hand" ;;
+      worktree) dm_die "'worktree' is maintained by dm-worktree.sh create/remove; it must not be set by hand" ;;
     esac
     dm_meta_set "$id" "$key" "$value"
     ;;
@@ -100,6 +97,8 @@ case "$cmd" in
       # Appended only by dm-worktree.sh remove --force, so a crewmate cannot
       # flip its own live task terminal.
       discarded) dm_die "'discarded' is appended only by dm-worktree.sh remove --force (operator discard); dm-task.sh event must not forge it" ;;
+      working|review-ready|ready|done|blocked|needs-decision|failed|paused) ;;
+      *) dm_die "state must be working|review-ready|ready|done|blocked|needs-decision|failed|paused" ;;
     esac
     dm_status_append "$id" "$st" "$note"
     ;;
