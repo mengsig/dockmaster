@@ -28,6 +28,10 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_need git; dm_need jq
 dm_ensure_dirs
+# Every command here reads or writes the registry, so refuse a corrupt one up
+# front — before `add`/`create` spend a clone (or a GitHub repo) on work that
+# cannot be registered, and before any guard can misread corruption as "empty".
+dm_registry_require_valid
 
 cmd="${1:-}"; shift || true
 
@@ -45,6 +49,28 @@ require_valid_mode() {
   esac
 }
 
+# slot_obstruction_advice <dir> <hint> -> the recovery text for a path that
+# blocks a new repo slot. Names a destructive command ONLY for a directory this
+# has established holds nothing to lose (provably empty). Anything with content
+# — above all a git repo, which may hold commits or unlanded work that exist
+# nowhere else — gets inspect-then-move-aside instead. #112: the old blanket
+# `rm -rf` hint fired on live managed clones whenever the registry was corrupt.
+slot_obstruction_advice() {
+  local dir="$1" hint="$2"
+  if [ -d "$dir" ] && [ -z "$(ls -A "$dir" 2>/dev/null)" ]; then
+    printf "The directory is empty, so removing it loses nothing: rmdir '%s', then re-run." "$dir"
+    return 0
+  fi
+  if [ -d "$dir/.git" ]; then
+    printf "It is a GIT REPOSITORY and may hold commits or uncommitted work that exist nowhere else, so this tool will not tell you to delete it. Inspect it first:
+  git -C '%s' status --porcelain
+  git -C '%s' log --oneline -5
+If it belongs to a repo you already manage, it is not an orphan and the registry is what needs fixing (dm-doctor.sh check). Otherwise move it aside (mv '%s' '%s.bak') and re-run. (%s)" "$dir" "$dir" "$dir" "$dir" "$hint"
+    return 0
+  fi
+  printf "It is not empty and this tool cannot establish it is safe to delete, so inspect it (ls -la '%s') and move it aside (mv '%s' '%s.bak') before re-running. (%s)" "$dir" "$dir" "$dir" "$hint"
+}
+
 # guard_new_repo_slot <name> <orphan-hint> -> print the clone directory this
 # name would use, or die if <name> is already registered or its clone
 # directory exists unregistered (an orphan left by a partial add/create).
@@ -56,10 +82,12 @@ guard_new_repo_slot() {
   # entry under it would make the resolution ambiguous, so it can never be taken.
   [ "$name" != "$DM_DISTRO_REPO" ] \
     || dm_die "repo name '$name' is reserved for the dockmaster distro itself; choose another name"
-  jq -e --arg n "$name" '.repos[$n]' "$DM_REGISTRY" >/dev/null 2>&1 && dm_die "repo '$name' already registered"
+  # dm_registry_has, not `jq -e ... && dm_die`: a failed READ must never answer
+  # this question with a silent "not registered" (#112).
+  if dm_registry_has "$name"; then dm_die "repo '$name' already registered"; fi
   dir="$DM_REPOS/$name"
   [ -e "$dir" ] && dm_die "path already exists but '$name' is not registered: $dir
-This is an orphaned clone from a partial add/create ($hint). Recover, then re-run: remove it (rm -rf '$dir') or move it aside."
+$(slot_obstruction_advice "$dir" "$hint")"
   printf '%s\n' "$dir"
 }
 
@@ -219,7 +247,7 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
         printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$(dm_merge_authority "$name")" \
           "$(dm_registry_get "$name" mode)" "$(dm_registry_get "$name" default_branch)" \
           "$(dm_registry_get "$name" remote)"
-      done < <(jq -r '.repos | keys[]' "$DM_REGISTRY")
+      done < <(dm_registry_keys)
     } | column -t -s$'\t' 2>/dev/null || cat
     ;;
 
@@ -230,9 +258,10 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     # read used to return empty-SUCCESS, which is the "empty means here" shape of
     # #119: `p="$(dm-repo.sh get "$n" path)"; dir="$DM_HOME/$p"` collapses to
     # $DM_HOME for a typo. An absent FIELD on a registered repo is still an empty
-    # success — that is a real answer, not a missing subject.
-    jq -e --arg n "$name" '.repos[$n]' "$DM_REGISTRY" >/dev/null 2>&1 \
-      || dm_die "no such repo: $name"
+    # success — that is a real answer, not a missing subject. dm_registry_has,
+    # not raw `jq -e ... || dm_die`, so a corrupt registry reports corruption,
+    # not a misleading "no such repo" (#112).
+    dm_registry_has "$name" || dm_die "no such repo: $name"
     if [ -n "$field" ]; then dm_registry_get "$name" "$field"
     else jq -e --arg n "$name" '.repos[$n]' "$DM_REGISTRY"; fi
     ;;
@@ -240,7 +269,7 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
   set)
     name="${1:-}"; field="${2:-}"; value="${3:-}"
     [ -n "$name" ] && [ -n "$field" ] || dm_die "usage: dm-repo.sh set <name> <field> <value>"
-    jq -e --arg n "$name" '.repos[$n]' "$DM_REGISTRY" >/dev/null 2>&1 || dm_die "no such repo: $name"
+    dm_registry_has "$name" || dm_die "no such repo: $name"
     # Whitelist the settable fields. A free-form setter let a bad default_branch or
     # path silently misroute sync/merge; only known fields, validated, may change.
     # report_field/report_value default to what the caller named; the yolo alias

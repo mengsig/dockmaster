@@ -142,7 +142,7 @@ validate_fact() {
 
 require_registered() {
   dm_require_id "$1"
-  dm_registry_get "$1" >/dev/null 2>&1 || dm_die "repo '$1' is not registered; add it with dm-repo.sh add"
+  dm_registry_has "$1" || dm_die "repo '$1' is not registered; add it with dm-repo.sh add"
 }
 
 clone_dir() {

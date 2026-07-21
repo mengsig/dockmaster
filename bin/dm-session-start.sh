@@ -33,7 +33,7 @@ section "TOOLING"
 if "$here/dm-doctor.sh" check --runtime "$selected_runtime"; then ready=1; else ready=0; fi
 
 section "MANAGED REPOS"
-"$here/dm-repo.sh" list 2>/dev/null || echo "  (none registered)"
+"$here/dm-repo.sh" list || echo "  (repo listing unavailable — see TOOLING above)"
 
 if [ "$do_sync" -eq 1 ]; then
   section "CLONE SYNC (fast-forward only; STUCK = needs attention)"
