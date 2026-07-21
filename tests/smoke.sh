@@ -3221,7 +3221,21 @@ check "registry test_cmd round-trips"              '[ "$(DM_HOME="$RESTORE" "$RO
 check "task kind round-trips"                      '[ "$(DM_HOME="$RESTORE" "$ROOT/bin/dm-task.sh" get arch-wip kind)" = "$(b dm-task.sh get arch-wip kind)" ]'
 check "task repo round-trips"                      '[ "$(DM_HOME="$RESTORE" "$ROOT/bin/dm-task.sh" get arch-wip repo)" = "$(b dm-task.sh get arch-wip repo)" ]'
 check "task status log round-trips"                '[ "$(wc -l < "$RESTORE/state/tasks/arch-wip.status")" = "$(wc -l < "$DM_HOME/state/tasks/arch-wip.status")" ]'
-check "backlog items round-trip"                   '[ "$(jq -Sc ".items|map({id,title,status,repo})" "$RESTORE/state/backlog.json")" = "$(jq -Sc ".items|map({id,title,status,repo})" "$DM_HOME/state/backlog.json")" ]'
+# Split three ways so a failure says WHICH stage broke: carried, installed, equal.
+# The jq filter is SINGLE-quoted and evaluated outside `check`: a nested double
+# quote inside "$( )" inside an eval'd string is exactly where bash 3.2 parsing
+# differs, and an unquoted {a,b,c} would then brace-expand into bogus arguments.
+SP_BL_SRC="$(jq -Sc '.items|map({id,title,status,repo})' "$DM_HOME/state/backlog.json" 2>/dev/null || true)"
+SP_BL_DST="$(jq -Sc '.items|map({id,title,status,repo})' "$RESTORE/state/backlog.json" 2>/dev/null || true)"
+check "archive carries the backlog"                'grep -qx "state/backlog.json" <<<"$SP_PATHS"'
+check "backlog is installed on import"             '[ -s "$RESTORE/state/backlog.json" ]'
+check "backlog items round-trip"                   '[ "$SP_BL_SRC" = "$SP_BL_DST" ]'
+if [ "$SP_BL_SRC" != "$SP_BL_DST" ]; then
+  echo "    backlog diag: src bytes=$(wc -c < "$DM_HOME/state/backlog.json" 2>&1 | tr -d ' ') dst bytes=$(wc -c < "$RESTORE/state/backlog.json" 2>&1 | tr -d ' ')"
+  echo "    backlog diag: manifest state/ entries: $(grep "^state/" <<<"$SP_PATHS" | tr '\n' ' ')"
+  echo "    backlog diag: src=$SP_BL_SRC"
+  echo "    backlog diag: dst=$SP_BL_DST"
+fi
 check "private memory round-trips"                 'diff -q "$RESTORE/repos/demo/.dm/notes.md" "$DM_HOME/repos/demo/.dm/notes.md" >/dev/null'
 check "dockmaster-only memory round-trips"         'grep -q "dm-state round-trip probe" "$RESTORE/repos/demo/.dm/private.md"'
 check "fleet memory round-trips"                   'diff -q "$RESTORE/state/learnings.md" "$DM_HOME/state/learnings.md" >/dev/null'

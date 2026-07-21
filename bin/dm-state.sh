@@ -232,11 +232,14 @@ write_manifest() {
 # Only the default archive name is gitignored, so an --out inside the checkout
 # can be committed by accident - and the archive holds private memory.
 warn_if_output_inside_home() {
-  local dir
+  local dir home
   dir="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" \
     || dm_die "output directory does not exist: $(dirname "$1")"
+  # Resolve BOTH sides: `pwd -P` expands symlinks, and on macOS /var -> /private/var
+  # makes an unresolved $DM_HOME never match its own resolved subdirectory.
+  home="$(cd "$DM_HOME" 2>/dev/null && pwd -P)" || return 0
   case "$dir/" in
-    "$DM_HOME"/*) dm_warn "writing the archive inside the dockmaster checkout ($DM_HOME). It holds private and dockmaster-only memory - move it out, or confirm it is gitignored, before committing anything." ;;
+    "$home"/*) dm_warn "writing the archive inside the dockmaster checkout ($DM_HOME). It holds private and dockmaster-only memory - move it out, or confirm it is gitignored, before committing anything." ;;
   esac
 }
 
