@@ -2869,8 +2869,14 @@ check "fixture: healthy registry resolves the repo and its authority" \
 rg dm-task.sh new regint-task --kind ship --repo gadget >/dev/null
 rg dm-task.sh new regint-wt --kind ship --repo gadget >/dev/null
 DM_HOME="$REGINT" DM_NO_FETCH=1 "$ROOT/bin/dm-worktree.sh" create regint-task gadget >/dev/null 2>&1
+# Resolve both sides physically (cd into the worktree first so a RELATIVE
+# --git-common-dir resolves, then pwd -P) so a macOS /var->/private/var symlink
+# or a git that prints a relative common-dir cannot make this pass or fail
+# spuriously (#148 canonicalizes DM_HOME).
+REGINT_WT_COMMON="$(cd "$REGINT/state/worktrees/regint-task" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+REGINT_CLONE_GIT="$(cd "$REGINT/repos/gadget/.git" && pwd -P)"
 check "fixture: the worktree is attached to the managed clone, not the home root" \
-  '[ "$(git -C "$REGINT/state/worktrees/regint-task" rev-parse --git-common-dir 2>/dev/null | xargs -r dirname)" = "$REGINT/repos/gadget" ]'
+  '[ "$REGINT_WT_COMMON" = "$REGINT_CLONE_GIT" ]'
 
 # Missing and empty are legitimate FIRST-RUN states, not corruption.
 check "a missing registry is a first-run state" \
@@ -2926,25 +2932,35 @@ dm-test.sh regint-task
 EOF
 check "every registry consumer refuses a corrupt registry, by name$REGINT_FAILED" '[ -z "$REGINT_FAILED" ]'
 
-# The dm-lib accessors are the choke point every other script inherits.
+# The dm-lib accessors are the choke point every other script inherits. Two
+# fail-closed contracts: the REGISTRY accessors DIE on a corrupt read (they own
+# dm_registry_require_valid); the MERGE accessors fail closed to a SAFE value
+# per #119 — dm_merge_authority to `invalid` (the gate refuses) and
+# dm_merge_allowed_bases to empty (grants no exception) — so an unregistered
+# repo and a corrupt registry both fail the merge gate closed, and #119 stays
+# the single owner of that mapping (a die there would break its unknown-repo case).
 REGINT_LIB_FAILED=""
 for fn in "dm_registry_get gadget" "dm_registry_get gadget mode" "dm_registry_has gadget" \
-          "dm_registry_keys" "dm_merge_authority gadget" "dm_merge_allowed_bases gadget"; do
+          "dm_registry_keys"; do
   if DM_HOME="$REGINT" bash -c ". \"$ROOT/bin/dm-lib.sh\"; $fn" >/dev/null 2>&1; then
     REGINT_LIB_FAILED="$REGINT_LIB_FAILED [$fn]"
   fi
 done
-check "no dm-lib registry accessor answers from a corrupt registry$REGINT_LIB_FAILED" '[ -z "$REGINT_LIB_FAILED" ]'
+check "every registry accessor DIES on a corrupt registry$REGINT_LIB_FAILED" '[ -z "$REGINT_LIB_FAILED" ]'
 
-# A corrupt registry must never silently downgrade a `never` repo to the
-# permissive legacy default (it used to resolve to "ask"), and must say why
-# rather than dying on a bare jq exit code.
-REGINT_AUTH_OUT="$(DM_HOME="$REGINT" bash -c ". \"$ROOT/bin/dm-lib.sh\"; dm_merge_authority gadget" 2>"$TMP/regint-auth-err" || true)"
-check "a corrupt registry never resolves merge authority to a permissive default" \
-  '! grep -qE "^(ask|yolo)$" <<<"$REGINT_AUTH_OUT" && grep -q "does not parse" "$TMP/regint-auth-err"'
+# The merge accessors must fail closed to a safe value, never a permissive one.
+# Safe rc capture (rc=0; cmd || rc=$?): a nonzero return under dm-lib's set -e
+# would abort a `cmd; echo $?` subshell before the read.
+REGINT_MAUTH="$(DM_HOME="$REGINT" bash -c ". \"$ROOT/bin/dm-lib.sh\"; dm_merge_authority gadget" 2>/dev/null || true)"
+REGINT_MBASES="$(DM_HOME="$REGINT" bash -c ". \"$ROOT/bin/dm-lib.sh\"; dm_merge_allowed_bases gadget" 2>/dev/null || true)"
+check "corrupt registry: merge authority fails closed to invalid, not ask/yolo" \
+  '[ "$REGINT_MAUTH" = invalid ]'
+check "corrupt registry: merge allowed-bases fails closed to empty (no exception)" \
+  '[ -z "$REGINT_MBASES" ]'
 # Validation is memoized per process, so it can only vouch for the file as of
-# that check. An external write AFTER a warm memo must still refuse, not fall
-# through to the permissive legacy default for a `never` repo.
+# that check. dm_merge_authority maps a corrupt read to `invalid` (#119)
+# regardless of the memo, so an external write AFTER a warm memo still fails
+# closed for a `never` repo rather than the permissive legacy default.
 REGINT_WARM="$TMP/regint-warm"; mkdir -p "$REGINT_WARM/state"
 printf '{"repos":{"gadget":{"merge_authority":"never","path":"repos/gadget"}}}\n' > "$REGINT_WARM/state/repos.json"
 REGINT_WARM_OUT="$(DM_HOME="$REGINT_WARM" bash -c ". \"$ROOT/bin/dm-lib.sh\"
