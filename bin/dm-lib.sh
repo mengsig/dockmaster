@@ -142,6 +142,24 @@ dm_require_meta_key() {
   dm_valid_meta_key "$1" || dm_die "invalid meta key: '$1' (use [A-Za-z0-9._-], <= 64 chars)"
 }
 
+dm_valid_task_kind() { case "${1:-}" in ship|scout) return 0 ;; *) return 1 ;; esac; }
+dm_valid_task_mode() { case "${1:-}" in pipeline|direct-pr|local-only) return 0 ;; *) return 1 ;; esac; }
+
+dm_require_task_kind() {
+  dm_valid_task_kind "${1:-}" || dm_die "task kind must be ship|scout"
+}
+
+dm_require_task_mode() {
+  dm_valid_task_mode "${1:-}" || dm_die "task mode must be pipeline|direct-pr|local-only"
+}
+
+dm_require_single_line() {
+  # dm_require_single_line <label> <value>; arity checked so a one-arg call is a
+  # domain error, not an `unbound variable` abort under set -u.
+  [ "$#" -eq 2 ] || dm_die "dm_require_single_line requires <label> <value>"
+  case "$2" in *$'\n'*|*$'\r'*) dm_die "$1 must be single-line" ;; esac
+}
+
 dm_meta_get() {
   # dm_meta_get <id> <key>  -> prints value or empty. The key is matched as a
   # FIXED string (not a regex); value may itself contain '='; last line wins.
@@ -152,15 +170,87 @@ dm_meta_get() {
   awk -v k="$2" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) } END { print v }' "$f"
 }
 
+# Caller holds the task meta lock, so validation and the following mutation are
+# one transaction with respect to creation, archival, and other writers.
+dm_require_complete_task_locked() {
+  local id="$1" f kind repo mode created status
+  f="$(dm_meta_path "$id")"; status="$(dm_status_path "$id")"
+  [ -f "$f" ] || dm_die "no such active task: $id"
+  kind="$(dm_meta_get "$id" kind)"; repo="$(dm_meta_get "$id" repo)"
+  mode="$(dm_meta_get "$id" mode)"; created="$(dm_meta_get "$id" created)"
+  dm_valid_task_kind "$kind" || dm_die "incomplete or corrupt active task '$id': invalid kind"
+  [ -n "$repo" ] || dm_die "incomplete or corrupt active task '$id': missing repo"
+  dm_valid_task_mode "$mode" || dm_die "incomplete or corrupt active task '$id': invalid mode"
+  [ -n "$created" ] || dm_die "incomplete or corrupt active task '$id': missing created timestamp"
+  [ -f "$status" ] || dm_die "incomplete or corrupt active task '$id': missing status log"
+}
+
+# A .status with no .meta: an interrupted create (status commits first) or an
+# interrupted archive (meta moves first). Never suggest deleting it — it may be
+# an archived task's only history.
+dm_die_orphan_status() {
+  local id="$1" status="$2" arch_meta arch_status
+  arch_meta="$DM_STATE/archive/$id.meta"; arch_status="$DM_STATE/archive/$id.status"
+  if [ -e "$arch_meta" ] && [ ! -e "$arch_status" ]; then
+    dm_die "task '$id' is archived at $arch_meta but an interrupted archive left its status log behind; finish the archive to free the id: mv '$status' '$arch_status'"
+  fi
+  if [ -e "$arch_meta" ]; then
+    dm_die "task '$id' is already archived at $arch_meta and an unexpected status log remains active; inspect it, then move it aside to free the id: mv '$status' '$status.orphan'"
+  fi
+  dm_die "task '$id' has a status log with no meta, left by an interrupted create or archive; inspect it, then move it aside to free the id: mv '$status' '$status.orphan'"
+}
+
+dm_task_create() {
+  # dm_task_create <id> <kind> <repo> <mode> <title>
+  [ "$#" -eq 5 ] || dm_die "dm_task_create requires <id> <kind> <repo> <mode> <title>"
+  local id="$1" kind="$2" repo="$3" mode="$4" title="$5"
+  local meta status meta_tmp status_tmp created
+  dm_require_id "$id"; dm_require_task_kind "$kind"; dm_require_task_mode "$mode"
+  [ -n "$repo" ] || dm_die "task repo is required"
+  dm_require_single_line "task repo" "$repo"; dm_require_single_line "task title" "$title"
+  dm_ensure_dirs
+  meta="$(dm_meta_path "$id")"; status="$(dm_status_path "$id")"
+  dm_lock "$meta"
+  if [ -e "$meta" ]; then
+    dm_unlock "$meta"; dm_die "task '$id' already exists"
+  fi
+  if [ -e "$status" ]; then
+    dm_unlock "$meta"; dm_die_orphan_status "$id" "$status"
+  fi
+  meta_tmp="$(mktemp "$DM_TASKS/.meta.XXXXXX")" \
+    || { dm_unlock "$meta"; dm_die "mktemp failed for task '$id' meta"; }
+  status_tmp="$(mktemp "$DM_TASKS/.status.XXXXXX")" \
+    || { rm -f "$meta_tmp"; dm_unlock "$meta"; dm_die "mktemp failed for task '$id' status"; }
+  created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  {
+    printf 'kind=%s\nrepo=%s\nmode=%s\n' "$kind" "$repo" "$mode"
+    [ -z "$title" ] || printf 'title=%s\n' "$title"
+    printf 'created=%s\n' "$created"
+  } > "$meta_tmp" \
+    || { rm -f "$meta_tmp" "$status_tmp"; dm_unlock "$meta"; dm_die "failed writing task '$id' meta"; }
+  printf '%s created: %s\n' "$created" "$title" > "$status_tmp" \
+    || { rm -f "$meta_tmp" "$status_tmp"; dm_unlock "$meta"; dm_die "failed writing task '$id' status"; }
+  mv -f "$status_tmp" "$status" \
+    || { rm -f "$meta_tmp" "$status_tmp"; dm_unlock "$meta"; dm_die "failed committing task '$id' status"; }
+  mv -f "$meta_tmp" "$meta" \
+    || { rm -f "$meta_tmp" "$status"; dm_unlock "$meta"; dm_die "failed committing task '$id' meta"; }
+  dm_unlock "$meta"
+}
+
 dm_meta_set() {
   # dm_meta_set <id> <key> <value>  (value must be single-line). The key is
   # matched as a FIXED string (not a regex) when dropping the old line.
   dm_require_id "$1"
   dm_require_meta_key "$2"
+  dm_require_single_line "meta value for '$2'" "$3"
+  case "$2" in
+    kind) dm_require_task_kind "$3" ;;
+    mode) dm_require_task_mode "$3" ;;
+  esac
   dm_ensure_dirs
   local f tmp; f="$(dm_meta_path "$1")"
-  case "$3" in *$'\n'*|*$'\r'*) dm_die "meta value for '$2' must be single-line" ;; esac
   dm_lock "$f"
+  dm_require_complete_task_locked "$1"
   tmp="$(mktemp "$DM_TASKS/.meta.XXXXXX")" || { dm_unlock "$f"; dm_die "mktemp failed for meta '$1'"; }
   # Build into $tmp; on any write failure remove the temp (no orphan) and fail
   # loudly. `|| true` on the read keeps a missing file from tripping set -e.
@@ -172,14 +262,22 @@ dm_meta_set() {
   dm_unlock "$f"
 }
 
-# --- status event log: append-only, best effort ------------------------------
+# --- status event log: append-only -------------------------------------------
 # A status line is a WAKE EVENT, not current-state truth. Current state is
 # reconciled on demand (dm-task.sh state), never stored as a mutable field.
 dm_status_append() {
   # dm_status_append <id> <state> <note>
   dm_require_id "$1"
+  [ -n "$2" ] || dm_die "status state is required"
+  dm_require_single_line "status state" "$2"
+  dm_require_single_line "status note" "${3:-}"
   dm_ensure_dirs
-  printf '%s %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "${3:-}" >> "$(dm_status_path "$1")"
+  local meta status; meta="$(dm_meta_path "$1")"; status="$(dm_status_path "$1")"
+  dm_lock "$meta"
+  dm_require_complete_task_locked "$1"
+  printf '%s %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "${3:-}" >> "$status" \
+    || { dm_unlock "$meta"; dm_die "failed appending status for '$1'"; }
+  dm_unlock "$meta"
 }
 
 # --- git cleanliness ---------------------------------------------------------

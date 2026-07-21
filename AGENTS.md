@@ -235,6 +235,15 @@ invariants, pitfalls, routing. Curated — not append-forever._
 - **[invariant]** `dm-lib.sh` owns task-meta syntax: ids and keys are allowlisted,
   keys cannot contain `=`/line breaks, and values cannot contain CR/LF. Validate
   there before locking so every writer shares the same injection guard.
+- **[invariant]** Task records are created and mutated as COMPLETE units — a
+  typo'd id fails visibly (#101). `dm_task_create` is the sole creator:
+  meta+status under the task lock, status first (`dm_all_task_ids` globs
+  `*.meta`, so a half-made task never enumerates; an interrupted create strands a
+  `.status`, named in the refusal). `dm_meta_set`/`dm_status_append` refuse
+  without a complete record (valid `kind`/`mode`, non-empty `repo`/`created`,
+  status log), checked INSIDE the lock so archive cannot race into
+  resurrection. `event` allowlists `working|review-ready|ready|done|blocked|
+  needs-decision|failed|paused`; `set` also reserves `worktree` (dm-worktree).
 - **[invariant]** Landing/PR fields (`pr`, `pr_state`, `merge_state`, the atomic
   `pr_check_snapshot`, and the `merged` status event) are written ONLY by
   `dm-pr`/`dm-merge` (directly via `dm_meta_set`/`dm_status_append`);

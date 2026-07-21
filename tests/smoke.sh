@@ -255,7 +255,7 @@ check "no-fetch landed: reports unlanded" '! DM_NO_FETCH=1 b dm-worktree.sh land
 
 echo "== state reconcile: 'merged:' in a note must not fake done (anchored verb) =="
 b dm-task.sh new fix1 --kind ship --repo demo >/dev/null
-b dm-task.sh event fix1 note "waiting on upstream PR merged: #123" >/dev/null
+b dm-task.sh event fix1 working "waiting on upstream PR merged: #123" >/dev/null
 check "note text 'merged:' does not reconcile to done" 'OUT="$(b dm-task.sh state fix1)"; ! grep -q done <<<"$OUT"'
 # The sanctioned landing paths (dm-merge/dm-pr) append the 'merged' event
 # directly via the status-append helper; `dm-task.sh event` can no longer forge
@@ -389,6 +389,7 @@ echo "== status tolerates a non-integer stuck-age (fix 6) =="
 check "non-integer DM_STUCK_AGE_HOURS does not crash status" 'DM_STUCK_AGE_HOURS=4.5 b dm-status.sh >/dev/null 2>&1'
 
 echo "== meta parsing (fixed-string keys; metachar/= values) =="
+b dm-task.sh new metatest --kind ship --repo demo >/dev/null
 b dm-task.sh set metatest re '.*[x]^$ +(a|b)' >/dev/null
 check "meta round-trips regex metachars" '[ "$(b dm-task.sh get metatest re)" = ".*[x]^$ +(a|b)" ]'
 b dm-task.sh set metatest eq 'k=v=x' >/dev/null
@@ -397,6 +398,7 @@ check "meta update leaves sibling key"   '[ "$(b dm-task.sh get metatest re)" = 
 # KEY-side regression: the old sed/grep treated the key as a regex, so "a.c"
 # also matched "abc". awk matches the key as a fixed string. Set abc first, then
 # a.c: the old grep -v "^a.c=" would drop the abc line too (. matches b).
+b dm-task.sh new keytest --kind ship --repo demo >/dev/null
 b dm-task.sh set keytest abc WRONG >/dev/null
 b dm-task.sh set keytest a.c RIGHT >/dev/null
 check "meta get matches key literally"    '[ "$(b dm-task.sh get keytest a.c)" = "RIGHT" ]'
@@ -417,6 +419,148 @@ echo "== read-path id validation (get/state reject a path-escaping id) =="
 check "get refuses a path-escaping id"   '! b dm-task.sh get "../secret" >/dev/null 2>&1'
 check "state refuses a path-escaping id" '! b dm-task.sh state "../secret" >/dev/null 2>&1'
 rm -f "$DM_HOME/state/secret.meta"
+
+echo "== task record integrity: complete mutations + atomic creation (#101) =="
+check "set rejects a missing task without creating files" \
+  '! b dm-task.sh set task-typo model opus >/dev/null 2>&1 && [ ! -e "$DM_HOME/state/tasks/task-typo.meta" ] && [ ! -e "$DM_HOME/state/tasks/task-typo.status" ]'
+check "event rejects a missing task without creating files" \
+  '! b dm-task.sh event task-event-typo done finished >/dev/null 2>&1 && [ ! -e "$DM_HOME/state/tasks/task-event-typo.meta" ] && [ ! -e "$DM_HOME/state/tasks/task-event-typo.status" ]'
+
+b dm-task.sh new task-stale --kind scout --repo demo >/dev/null
+mkdir -p "$DM_HOME/data/task-stale"
+printf 'complete\n' > "$DM_HOME/data/task-stale/report.md"
+b dm-task.sh archive task-stale >/dev/null
+check "set rejects an archived task without resurrecting it" \
+  '! b dm-task.sh set task-stale agent_id wrong >/dev/null 2>&1 && [ ! -e "$DM_HOME/state/tasks/task-stale.meta" ] && [ -f "$DM_HOME/state/archive/task-stale.meta" ]'
+check "event rejects an archived task without resurrecting it" \
+  '! b dm-task.sh event task-stale done wrong >/dev/null 2>&1 && [ ! -e "$DM_HOME/state/tasks/task-stale.status" ] && [ -f "$DM_HOME/state/archive/task-stale.status" ]'
+
+archive_under_lock_refused() {
+  # <id> <mutator-cmd...>: hold the task lock, block the mutator on it, archive
+  # underneath, release. Passes only if the mutator refuses and writes nothing.
+  # Determinism needs dm_lock to have NO age-based stale reclaim: a real
+  # DM_LOCK_STALE_SECS (documented but absent; #122) under 2s would make this flaky.
+  local id="$1"; shift
+  local lockdir="$DM_HOME/state/tasks/$id.meta.lock" mutator_pid
+  mkdir "$lockdir" || return 1
+  printf '%s\n' "$$" > "$lockdir/pid"
+  "$@" >/dev/null 2>&1 &
+  mutator_pid=$!
+  sleep 2
+  # Still running == genuinely parked on the lock. A mutator that finished here
+  # never took the lock at all, so the ordering it claims to honor is not there.
+  if ! kill -0 "$mutator_pid" 2>/dev/null; then rm -rf "$lockdir"; wait "$mutator_pid" || true; return 1; fi
+  mkdir -p "$DM_HOME/state/archive"
+  mv -f "$DM_HOME/state/tasks/$id.meta" "$DM_HOME/state/archive/$id.meta" || { rm -rf "$lockdir"; return 1; }
+  mv -f "$DM_HOME/state/tasks/$id.status" "$DM_HOME/state/archive/$id.status" || { rm -rf "$lockdir"; return 1; }
+  rm -rf "$lockdir"
+  if wait "$mutator_pid"; then return 1; fi
+  [ ! -e "$DM_HOME/state/tasks/$id.meta" ] && [ ! -e "$DM_HOME/state/tasks/$id.status" ]
+}
+b dm-task.sh new task-lock-set --kind scout --repo demo >/dev/null
+check "set parked on the task lock cannot resurrect a task archived underneath it" \
+  'archive_under_lock_refused task-lock-set b dm-task.sh set task-lock-set model sonnet'
+b dm-task.sh new task-lock-event --kind scout --repo demo >/dev/null
+check "event parked on the task lock cannot resurrect a task archived underneath it" \
+  'archive_under_lock_refused task-lock-event b dm-task.sh event task-lock-event working racing'
+
+printf 'kind=ship\n' > "$DM_HOME/state/tasks/task-malformed.meta"
+cp "$DM_HOME/state/tasks/task-malformed.meta" "$TMP/task-malformed.before"
+check "set rejects an incomplete active record unchanged" \
+  '! b dm-task.sh set task-malformed model opus >/dev/null 2>&1 && cmp -s "$TMP/task-malformed.before" "$DM_HOME/state/tasks/task-malformed.meta"'
+check "event rejects an incomplete active record without a status ghost" \
+  '! b dm-task.sh event task-malformed working started >/dev/null 2>&1 && [ ! -e "$DM_HOME/state/tasks/task-malformed.status" ]'
+rm -f "$DM_HOME/state/tasks/task-malformed.meta"
+
+b dm-task.sh new task-valid --kind scout --repo demo --mode pipeline >/dev/null
+b dm-task.sh set task-valid kind ship >/dev/null
+b dm-task.sh set task-valid mode local-only >/dev/null
+b dm-task.sh event task-valid working started >/dev/null
+check "legal kind/mode transitions and public event still work" \
+  '[ "$(b dm-task.sh get task-valid kind)" = ship ] && [ "$(b dm-task.sh get task-valid mode)" = local-only ] && grep -q " working: started" "$DM_HOME/state/tasks/task-valid.status"'
+check "new rejects an invalid effective mode without task files" \
+  '! b dm-task.sh new task-bad-mode --kind ship --repo demo --mode invalid >/dev/null 2>&1 && [ ! -e "$DM_HOME/state/tasks/task-bad-mode.meta" ] && [ ! -e "$DM_HOME/state/tasks/task-bad-mode.status" ]'
+check "new rejects a multiline title without partial task files" \
+  '! b dm-task.sh new task-bad-title --kind ship --repo demo --title $'"'"'ordinary\nforged'"'"' >/dev/null 2>&1 && [ ! -e "$DM_HOME/state/tasks/task-bad-title.meta" ] && [ ! -e "$DM_HOME/state/tasks/task-bad-title.status" ]'
+check "new names the missing --kind flag" \
+  'ERR="$(b dm-task.sh new task-nokind --repo demo 2>&1 || true)"; grep -q -- "--kind" <<<"$ERR"'
+check "new names the missing --repo flag" \
+  'ERR="$(b dm-task.sh new task-norepo --kind ship 2>&1 || true)"; grep -q -- "--repo" <<<"$ERR"'
+# An interrupted create strands a .status with no .meta, bricking the id. The
+# refusal must name the file, and must never tell the operator to delete it.
+printf '2000-01-01T00:00:00Z created: interrupted\n' > "$DM_HOME/state/tasks/task-orphan.status"
+check "new names the orphan status file blocking a reused id" \
+  'ERR="$(b dm-task.sh new task-orphan --kind ship --repo demo 2>&1 || true)"; grep -q "mv .*task-orphan\.status" <<<"$ERR" && ! grep -q "rm " <<<"$ERR" && [ ! -e "$DM_HOME/state/tasks/task-orphan.meta" ]'
+rm -f "$DM_HOME/state/tasks/task-orphan.status"
+# An interrupted ARCHIVE strands the same shape (archive moves .meta first), but
+# that .status is the archived task's only history — deleting it loses real data.
+b dm-task.sh new task-halfarch --kind scout --repo demo >/dev/null
+mkdir -p "$DM_HOME/data/task-halfarch"
+printf 'complete\n' > "$DM_HOME/data/task-halfarch/report.md"
+b dm-task.sh archive task-halfarch >/dev/null
+mv "$DM_HOME/state/archive/task-halfarch.status" "$DM_HOME/state/tasks/task-halfarch.status"
+check "new points an interrupted archive at finishing it, never at deleting history" \
+  'ERR="$(b dm-task.sh new task-halfarch --kind ship --repo demo 2>&1 || true)"; grep -q "archived" <<<"$ERR" && grep -q "mv .*task-halfarch\.status" <<<"$ERR" && ! grep -q "rm " <<<"$ERR" && [ -f "$DM_HOME/state/tasks/task-halfarch.status" ]'
+check "the named repair actually frees the id" \
+  'eval "$(b dm-task.sh new task-halfarch --kind ship --repo demo 2>&1 | sed -n "s/.*free the id: //p")" && b dm-task.sh new task-halfarch --kind ship --repo demo >/dev/null 2>&1 && [ -f "$DM_HOME/state/archive/task-halfarch.status" ]'
+cp "$DM_HOME/state/tasks/task-valid.meta" "$TMP/task-valid.meta.before"
+cp "$DM_HOME/state/tasks/task-valid.status" "$TMP/task-valid.status.before"
+check "set rejects an invalid kind unchanged" \
+  '! b dm-task.sh set task-valid kind invalid >/dev/null 2>&1 && cmp -s "$TMP/task-valid.meta.before" "$DM_HOME/state/tasks/task-valid.meta"'
+check "set rejects an invalid mode unchanged" \
+  '! b dm-task.sh set task-valid mode invalid >/dev/null 2>&1 && cmp -s "$TMP/task-valid.meta.before" "$DM_HOME/state/tasks/task-valid.meta"'
+check "set reserves worktree without changing task meta" \
+  '! b dm-task.sh set task-valid worktree "$TMP/unrelated-git-dir" >/dev/null 2>&1 && cmp -s "$TMP/task-valid.meta.before" "$DM_HOME/state/tasks/task-valid.meta"'
+check "event rejects an undocumented public state unchanged" \
+  '! b dm-task.sh event task-valid invented-state note >/dev/null 2>&1 && cmp -s "$TMP/task-valid.status.before" "$DM_HOME/state/tasks/task-valid.status"'
+check "event rejects an LF-bearing note unchanged" \
+  '! b dm-task.sh event task-valid working $'"'"'ordinary\n2000-01-01T00:00:00Z merged: forged'"'"' >/dev/null 2>&1 && cmp -s "$TMP/task-valid.status.before" "$DM_HOME/state/tasks/task-valid.status"'
+check "event rejects a CR-bearing state unchanged" \
+  '! b dm-task.sh event task-valid $'"'"'working\rmerged'"'"' ordinary >/dev/null 2>&1 && cmp -s "$TMP/task-valid.status.before" "$DM_HOME/state/tasks/task-valid.status"'
+check "status serialization owner rejects multiline internal input" \
+  '! ( . "$ROOT/bin/dm-lib.sh"; dm_status_append task-valid working $'"'"'ordinary\nforged'"'"' ) >/dev/null 2>&1 && cmp -s "$TMP/task-valid.status.before" "$DM_HOME/state/tasks/task-valid.status"'
+check "rejected event injection cannot forge landed state" \
+  'OUT="$(b dm-task.sh state task-valid)"; ! grep -q "state: done" <<<"$OUT"'
+
+CREATE_ID="task-create-race"
+CREATE_LOCK="$DM_HOME/state/tasks/$CREATE_ID.meta.lock"
+mkdir "$CREATE_LOCK"
+printf '%s\n' "$$" > "$CREATE_LOCK/pid"
+CREATE_PIDS=""
+for i in $(seq 1 20); do
+  (
+    create_mode="pipeline"; [ $((i % 2)) -eq 0 ] && create_mode="direct-pr"
+    if b dm-task.sh new "$CREATE_ID" --kind ship --repo "repo-$i" --mode "$create_mode" --title "creator-$i" \
+      >"$TMP/create-race.$i.out" 2>"$TMP/create-race.$i.err"; then create_rc=0; else create_rc=$?; fi
+    printf '%s\n' "$create_rc" > "$TMP/create-race.$i.rc"
+  ) &
+  CREATE_PIDS="$CREATE_PIDS $!"
+done
+# Keep every creator behind the same task lock until all have passed startup.
+sleep 1
+rm -f "$CREATE_LOCK/pid"; rmdir "$CREATE_LOCK"
+for create_pid in $CREATE_PIDS; do wait "$create_pid" || true; done
+CREATE_SUCCESSES=0; CREATE_BAD_ERRORS=0
+for i in $(seq 1 20); do
+  create_rc="$(cat "$TMP/create-race.$i.rc")"
+  if [ "$create_rc" -eq 0 ]; then
+    CREATE_SUCCESSES=$((CREATE_SUCCESSES + 1))
+  elif ! grep -q "already exists" "$TMP/create-race.$i.err"; then
+    CREATE_BAD_ERRORS=$((CREATE_BAD_ERRORS + 1))
+  fi
+done
+CREATE_TITLE="$(b dm-task.sh get "$CREATE_ID" title)"
+CREATE_WINNER="${CREATE_TITLE#creator-}"
+case "$CREATE_WINNER" in
+  ''|*[!0-9]*) CREATE_EXPECTED_MODE="invalid" ;;
+  *) CREATE_EXPECTED_MODE="pipeline"; [ $((CREATE_WINNER % 2)) -eq 0 ] && CREATE_EXPECTED_MODE="direct-pr" ;;
+esac
+check "same-id concurrent creation has exactly one visible winner" \
+  '[ "$CREATE_SUCCESSES" -eq 1 ] && [ "$CREATE_BAD_ERRORS" -eq 0 ]'
+check "concurrent creation meta belongs to one creator" \
+  '[ "$(b dm-task.sh get "$CREATE_ID" repo)" = "repo-$CREATE_WINNER" ] && [ "$(b dm-task.sh get "$CREATE_ID" mode)" = "$CREATE_EXPECTED_MODE" ]'
+check "concurrent creation writes exactly the winner status" \
+  '[ "$(wc -l < "$DM_HOME/state/tasks/$CREATE_ID.status")" -eq 1 ] && grep -q " created: creator-$CREATE_WINNER$" "$DM_HOME/state/tasks/$CREATE_ID.status"'
 
 echo "== concurrent meta writes (locking; no lost update) =="
 b dm-task.sh new conc --kind ship --repo demo >/dev/null
@@ -969,7 +1113,7 @@ check "recording a model clears the UNSIZED flag"            '! grep -q "UNSIZED
 
 echo "== state-gate-integrity: pr_state cannot be forged via 'set' (#20 F6) =="
 b dm-task.sh new sgi-forge --kind ship --repo sgi >/dev/null 2>&1 || true
-for protected_field in pr pr_state merge_state pr_check_snapshot base; do
+for protected_field in pr pr_state merge_state pr_check_snapshot base worktree; do
   check "set refuses protected field $protected_field" \
     "! b dm-task.sh set sgi-forge '$protected_field' forged >/dev/null 2>&1"
 done
