@@ -250,7 +250,7 @@
     {
       "id": "plugins-and-fallbacks",
       "requirement": "External GitHub/browser/review capabilities either degrade explicitly or fail loudly at the point of use, never disappear silently",
-      "claude": "lavish-axi/chrome-devtools-axi degrade to direct review and no browser; GitHub mutations hard-require gh-axi and fail loudly naming the tool (#104)",
+      "claude": "GitHub mutations prefer gh-axi and fall back to plain gh with an identical task record (#104); lavish-axi/chrome-devtools-axi degrade to direct review and no browser",
       "codex": "plugins or local tools when installed; focused native/general-agent fallback contracts",
       "verification": "contract",
       "evidence": ["README.md", "bin/dm-doctor.sh", ".agents/skills/pr-workflow/SKILL.md"]

@@ -21,9 +21,12 @@
 # duty one layer up, per AGENTS.md; this script enforces the never-stop and the
 # CI mechanics.
 #
-# GitHub access splits by need: parsed reads use `gh api`; the merge mutation
-# uses `gh-axi api` with the checked SHA; same-repo branch cleanup uses Git's
-# server-enforced force-with-lease so an advanced ref cannot be deleted.
+# GitHub access splits by need. Parsed reads always use plain `gh api` (real
+# JSON). Mutations — `pr create` and the SHA-checked merge PUT — go through
+# dm_require_github_cli: the operator's `gh-axi` wrapper when installed, else
+# plain `gh`, whose argv shape differs and is built per binary. Same-repo branch
+# cleanup uses Git's server-enforced force-with-lease so an advanced ref cannot
+# be deleted.
 #
 # Commands:
 #   open  <id> --title T (--body-file F | --body B) [--base B] [--draft]
@@ -45,9 +48,9 @@
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
-# git+jq are needed by every command (registry, worktree, diffs). The GitHub
-# tools (gh-axi/gh) are checked per-command below, so the local-only commands
-# (security-scan, url) run without them.
+# git+jq are needed by every command (registry, worktree, diffs). The GitHub CLI
+# is checked per-command below, so the local-only commands (security-scan, url)
+# run without one.
 dm_need git; dm_need jq
 dm_ensure_dirs
 
@@ -270,9 +273,21 @@ same_repo() {
 }
 
 atomic_merge_pull() {
-  local slug="$1" n="$2" head="$3" method="$4" out
-  out="$(gh-axi api PUT "/repos/$slug/pulls/$n/merge" \
-    --field "sha=$head" --field "merge_method=$method" 2>&1)" \
+  local slug="$1" n="$2" head="$3" method="$4" cli path out
+  local args=()
+  path="/repos/$slug/pulls/$n/merge"
+  cli="$(dm_require_github_cli)"
+  # One argv cannot serve both. gh-axi puts the HTTP method positionally and
+  # does NOT support --raw-field — it silently sends an EMPTY body, which would
+  # merge without the sha condition. gh needs --method, and --raw-field so the
+  # sha is unambiguously a string. Neither response is parsed (only echoed in
+  # the failure message), so the YAML/JSON split does not matter here.
+  if [ "$cli" = "gh-axi" ]; then
+    args=(api PUT "$path" --field "sha=$head" --field "merge_method=$method")
+  else
+    args=(api --method PUT "$path" --raw-field "sha=$head" --raw-field "merge_method=$method")
+  fi
+  out="$("$cli" "${args[@]}" 2>&1)" \
     || dm_die "REFUSED: atomic merge failed; PR head changed or GitHub rejected the merge: ${out:-no response}"
 }
 
@@ -315,7 +330,10 @@ case "$cmd" in
       esac
     done
     [ -n "$title" ] || dm_die "--title is required"
-    dm_need gh-axi
+    # `pr create` is a mutation with no jq-parsed response, so either binary
+    # serves. Resolve BEFORE the push so a missing GitHub CLI fails with nothing
+    # yet pushed.
+    gh_cli="$(dm_require_github_cli)"
     wt="$(dm_require_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || dm_die "worktree is on a detached HEAD; crewmate must create a branch first"
@@ -342,16 +360,23 @@ case "$cmd" in
     else args+=(--body ""); fi
     [ "$draft" -eq 1 ] && args+=(--draft)
     # stderr captured separately (not 2>&1) so the URL parse below only ever
-    # sees gh-axi's stdout, never a stray url from a warning line.
+    # sees the CLI's stdout, never a stray url from a warning line.
     errf="$(mktemp "$DM_STATE/.pr-open.XXXXXX")" || dm_die "mktemp failed opening PR for $id"
-    if out="$(gh-axi "${args[@]}" 2>"$errf")"; then
+    if out="$("$gh_cli" "${args[@]}" 2>"$errf")"; then
       rm -f "$errf"
     else
       err="$(cat "$errf" 2>/dev/null || true)"; rm -f "$errf"
-      dm_die "pr create failed: ${err:-${out:-no output from gh-axi}}"
+      dm_die "pr create failed: ${err:-${out:-no output from $gh_cli}}"
     fi
-    url="$(printf '%s\n' "$out" | grep -oE 'https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[0-9]+' | head -n1)"
-    [ -n "$url" ] || dm_die "could not determine PR url from output"
+    # `|| true` is load-bearing: a no-match grep exits 1, which under set -e
+    # aborted the whole command HERE — silently, before the guard below could
+    # say anything. -m1 replaces the `| head -n1` pipe (no SIGPIPE to trip
+    # pipefail).
+    url="$(grep -m1 -oE 'https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[0-9]+' <<<"$out" || true)"
+    # Both irreversible steps (push, create) already succeeded here, so a failed
+    # parse leaves a real PR the task record does not know about. Name the
+    # recovery instead of leaving the operator to discover `adopt`.
+    [ -n "$url" ] || dm_die "$gh_cli reported success but printed no PR url: branch '$branch' IS pushed and the PR probably exists. Find it on GitHub, then record it with: dm-pr.sh adopt $id <url>"
     dm_meta_set "$id" branch "$branch"
     dm_meta_set "$id" pr "$url"
     dm_status_append "$id" done "PR $url"
@@ -575,7 +600,9 @@ case "$cmd" in
       refuse-invalid) dm_die "REFUSED: repo $repo has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to merge. Set a valid one: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
       *) dm_die "REFUSED: repo $repo merge authority could not be resolved; refusing to merge" ;;
     esac
-    dm_need gh-axi; dm_need gh
+    # `gh` alone: merge's gates are jq-parsed reads, which only plain gh can
+    # serve. That also guarantees the mutation resolver below finds a CLI.
+    dm_need gh
     method="squash"; delete=0; allow_no_checks=0
     while [ "$#" -gt 0 ]; do
       case "$1" in

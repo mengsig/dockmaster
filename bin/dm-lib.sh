@@ -30,6 +30,38 @@ dm_info() { printf '%s\n' "$*"; }
 
 dm_need() { command -v "$1" >/dev/null 2>&1 || dm_die "required tool not found: $1"; }
 
+# --- GitHub CLI resolution ---------------------------------------------------
+# Plain `gh` is the SUPPORTED BASELINE for every GitHub call; `gh-axi` is the
+# operator's private wrapper (no public install path) and only ever a preferred
+# enhancement. Two rules keep the two apart:
+#   - MUTATIONS (pr create, repo create, the merge PUT) go through the resolver
+#     below and must handle both binaries' argv shapes at the call site.
+#   - READS PARSED BY jq always call `gh api` directly, never the resolver:
+#     `gh-axi api` emits YAML, so routing a parsed read through it would parse
+#     the wrong shape.
+dm_github_cli() {
+  # dm_github_cli -> print the mutation CLI (gh-axi preferred, else gh); exit 1
+  # when neither is installed.
+  if command -v gh-axi >/dev/null 2>&1; then printf 'gh-axi\n'; return 0; fi
+  command -v gh >/dev/null 2>&1 || return 1
+  printf 'gh\n'
+}
+
+dm_require_github_cli() {
+  # Same, but dies naming `gh` — the tool an adopter can actually install.
+  dm_github_cli && return 0
+  dm_die "required tool not found: gh (the GitHub CLI) — install it from https://cli.github.com, then run: gh auth login"
+}
+
+# dm_pr_delivery_gate <gh_present:0|1> <gh_authenticated:0|1> -> ready | no-cli |
+# no-auth. Pure so dm-doctor's verdict is testable offline (like dm_merge_gate):
+# doctor probes, this decides. gh-axi is deliberately NOT an input — it can
+# neither enable nor block the PR path.
+dm_pr_delivery_gate() {
+  case "$1" in 1) ;; *) printf 'no-cli\n'; return 0 ;; esac
+  case "$2" in 1) printf 'ready\n' ;; *) printf 'no-auth\n' ;; esac
+}
+
 # --- portable advisory lock: mkdir-based mutex -------------------------------
 # Serializes the read-modify-write of a shared-state file across concurrent
 # dm-* invocations (parallel crew is the design premise, so unlocked RMW loses

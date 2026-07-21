@@ -151,14 +151,21 @@ case "$cmd" in
       refs="$(git ls-remote --heads "$remote" 2>/dev/null)" || dm_die "cannot reach remote '$remote' (bad url or auth?)"
       [ -z "$refs" ] || dm_die "remote '$remote' already has branches; use 'dm-repo.sh add' to clone an existing repo"
     else
-      dm_need gh-axi
+      # `repo create` is a mutation whose output is only scanned for a url, so
+      # either binary serves (gh-axi preferred, plain gh the baseline) and the
+      # flags are identical between them.
+      gh_cli="$(dm_require_github_cli)"
       dm_info "creating GitHub repository '$name' ($visibility)"
       create_args=(repo create "$name" "--$visibility")
       [ -n "$description" ] && create_args+=(--description "$description")
-      out="$(gh-axi "${create_args[@]}" 2>&1)" || dm_die "gh repo create failed:
+      out="$("$gh_cli" "${create_args[@]}" 2>&1)" || dm_die "gh repo create failed:
 $out"
-      html="$(printf '%s\n' "$out" | grep -oE 'https://github\.com/[A-Za-z0-9._/-]+' | head -n1)"
-      [ -n "$html" ] || dm_die "could not parse the new repo url from gh output:
+      # `|| true` + -m1 instead of `| head -n1`: no match exits 1, and a
+      # multi-match SIGPIPEs head (141) under pipefail — either killed this
+      # command silently, AFTER the remote was really created, leaving the guard
+      # below unreachable. Same shape as dm-pr.sh open.
+      html="$(grep -m1 -oE 'https://github\.com/[A-Za-z0-9._/-]+' <<<"$out" || true)"
+      [ -n "$html" ] || dm_die "$gh_cli created the repository but printed no url to parse, so the remote cannot be resolved. A GitHub repo named '$name' now EXISTS (empty) and nothing was registered here. Either re-run supplying the remote explicitly: dm-repo.sh create $name <remote> ... — or delete it (gh repo delete). This tool never auto-deletes it. Output was:
 $out"
       slug="$(printf '%s' "$html" | sed -E 's#^https://github\.com/##; s#\.git$##')"
       case "$scheme" in

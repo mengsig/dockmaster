@@ -15,15 +15,26 @@ All notable changes to this project are documented here. The format follows
   existing background-notification path is unchanged.
 - **Honest onboarding docs and one dependency contract.** The README and
   `dm-doctor` now state the tool contract identically in three tiers: `git`/`jq`
-  required for anything; `gh` **and** `gh-axi` required for the PR flow (reads go
-  through `gh api`, but every GitHub mutation calls `gh-axi` and has no plain-`gh`
-  fallback — #104); `lavish-axi`/`chrome-devtools-axi` genuinely optional and
-  degrading cleanly. A green doctor verdict means local-only mode works, not that
-  the PR flow is available. The README documents the resulting limitation plainly:
-  `gh-axi` has no public install path, so a fresh clone gets local-only mode.
-  Added a numbered "Getting started" first-run path, a supported-platforms note
-  (macOS/Linux, bash 3.2+), and replaced the stale hand-maintained `bin/` list
-  with a pointer to `bin/dm help`.
+  required for anything; `gh` required for the PR flow; `gh-axi`/`lavish-axi`/
+  `chrome-devtools-axi` optional and degrading cleanly. Added a numbered
+  "Getting started" first-run path, a supported-platforms note (macOS/Linux,
+  bash 3.2+), and replaced the stale hand-maintained `bin/` list with a pointer
+  to `bin/dm help`.
+
+### Fixed
+
+- **The PR path no longer requires the maintainer's private `gh-axi` wrapper**
+  (#104). `dm-pr.sh open`, `dm-pr.sh merge`, and `dm-repo.sh create` hard-failed
+  without it, while the docs promised a plain-`gh` fallback that did not exist.
+  All three now resolve the CLI through `dm_require_github_cli` — `gh-axi` when
+  installed, plain `gh` otherwise — building per-binary argv, since the two take
+  the same request differently. Reads parsed by `jq` still call `gh api`
+  directly (`gh-axi api` emits YAML). `dm-doctor` stops overstating readiness:
+  a bare `READY` now means the PR flow really works, and a missing or
+  unauthenticated `gh` reports `READY (LOCAL-ONLY)` with the reason and the fix.
+  Also fixes a silent failure in `dm-pr.sh open` — the PR-url parse aborted
+  under `set -e` after the push and create had already succeeded; it now fails
+  loudly and names `dm-pr.sh adopt` as the recovery.
 - **Concise communication is now contract.** Reporting to the operator, and PR
   descriptions/commits/review comments, sacrifice grammar for concision.
 - **Memory recall is bounded and curatable.** Briefs inject a soft-capped slice
