@@ -106,9 +106,25 @@ lex_shell_command() {
             [ "$started" -eq 0 ] || append_token
             TOKENS+=(";"); DYNAMIC+=(0)
             ;;
-          ';'|'&'|'|'|'('|')')
+          '&')
+            # `&` inside a redirection (2>&1, >&2, &>log) belongs to the
+            # operator, NOT to a segment break. Splitting there stranded every
+            # later flag in a segment whose executable was `1` (#121).
+            if [ "$next" = "&" ]; then
+              [ "$started" -eq 0 ] || append_token
+              TOKENS+=("&&"); DYNAMIC+=(0); i=$((i + 1))
+            elif [ "$started" -eq 1 ] && { [ "${token%>}" != "$token" ] || [ "${token%<}" != "$token" ]; }; then
+              token+="$char"
+            elif [ "$started" -eq 0 ] && [ "$next" = ">" ]; then
+              token+="$char"; started=1
+            else
+              [ "$started" -eq 0 ] || append_token
+              TOKENS+=("&"); DYNAMIC+=(0)
+            fi
+            ;;
+          ';'|'|'|'('|')')
             [ "$started" -eq 0 ] || append_token
-            if { [ "$char" = "&" ] || [ "$char" = "|" ]; } && [ "$next" = "$char" ]; then
+            if [ "$char" = "|" ] && [ "$next" = "$char" ]; then
               TOKENS+=("$char$char"); DYNAMIC+=(0); i=$((i + 1))
             else
               TOKENS+=("$char"); DYNAMIC+=(0)
@@ -146,11 +162,16 @@ git_subcommand_index() {
   return 1
 }
 
+# Matches `--opt` AND `--opt=value`: git accepts both spellings, so testing only
+# the detached one let --exec=/--extcmd= execute (#121). `--force` still does not
+# match `--force-with-lease`, which stays permitted.
 has_arg() {
   local start="$1" end="$2" wanted="$3" i
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    [ "${TOKENS[$i]}" = "$wanted" ] && return 0
+    case "${TOKENS[$i]}" in
+      "$wanted"|"$wanted"=*) return 0 ;;
+    esac
     i=$((i + 1))
   done
   return 1
@@ -171,28 +192,73 @@ has_short_flag() {
   return 1
 }
 
-# `git push origin +main` forces without any flag.
-has_force_refspec() {
+# Refspecs that destroy without a flag: `+ref` forces, `:ref` (empty source)
+# DELETES the remote ref.
+has_destructive_refspec() {
   local start="$1" end="$2" i
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    case "${TOKENS[$i]}" in +*) return 0 ;; esac
+    case "${TOKENS[$i]}" in +*|:*) return 0 ;; esac
     i=$((i + 1))
   done
   return 1
 }
 
-# First non-flag token after the subcommand -- the verb of a two-level command
-# such as `remote remove` or `bisect run`. Empty when the subcommand is bare.
-subcommand_verb() {
-  local start="$1" end="$2" i
+# A conditional subcommand's verdict depends on its flags, so a token the guard
+# cannot read (expansion, substitution) makes it unclassifiable -- a dynamic
+# subcommand and executable were already refused, a dynamic FLAG was not.
+# Unconditional subcommands are unaffected: no flag changes their verdict, so
+# `git commit -m "$MSG"` stays fine.
+require_static_args() {
+  local start="$1" end="$2" subcommand="$3" i
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    case "${TOKENS[$i]}" in
-      -*) : ;;
-      *) printf '%s\n' "${TOKENS[$i]}"; return 0 ;;
-    esac
+    [ "${DYNAMIC[$i]}" -eq 0 ] \
+      || deny "git $subcommand has an argument the guard cannot read"
     i=$((i + 1))
+  done
+}
+
+# How an option preceding a verb consumes tokens: "value" takes the next token,
+# "flag" takes none, "unknown" cannot be modelled. Skipping an option WITHOUT
+# its value hands back the value as the verb -- `git notes --ref show remove`
+# read the verb as `show` and removed a note.
+verb_option_class() {
+  local subcommand="$1" option="$2"
+  case "$option" in *=*) printf 'flag\n'; return 0 ;; esac
+  case "$subcommand" in
+    notes) case "$option" in --ref) printf 'value\n'; return 0 ;; esac ;;
+    bisect) case "$option" in
+              --term-old|--term-new|--term-good|--term-bad) printf 'value\n'; return 0 ;;
+              --no-checkout|--first-parent) printf 'flag\n'; return 0 ;;
+            esac ;;
+    remote) case "$option" in -v|--verbose) printf 'flag\n'; return 0 ;; esac ;;
+    submodule) case "$option" in -q|--quiet|--cached) printf 'flag\n'; return 0 ;; esac ;;
+    stash) case "$option" in -q|--quiet) printf 'flag\n'; return 0 ;; esac ;;
+  esac
+  printf 'unknown\n'
+}
+
+# The verb of a two-level command such as `remote remove` or `bisect run`.
+# Empty when the subcommand is bare. An option the table cannot classify fails
+# closed rather than guessing how many tokens it eats.
+subcommand_verb() {
+  local subcommand="$1" start="$2" end="$3" i token class
+  i=$((start + 1))
+  while [ "$i" -lt "$end" ]; do
+    token="${TOKENS[$i]}"
+    if [ "$token" = "--" ]; then i=$((i + 1)); continue; fi
+    case "$token" in
+      -?*)
+        class="$(verb_option_class "$subcommand" "$token")"
+        case "$class" in
+          value) i=$((i + 2)) ;;
+          flag) i=$((i + 1)) ;;
+          *) deny "git $subcommand has an option the guard cannot classify: $token" ;;
+        esac
+        ;;
+      *) printf '%s\n' "$token"; return 0 ;;
+    esac
   done
   return 0
 }
@@ -208,14 +274,21 @@ require_verb() {
   deny "git $subcommand ${verb:-(bare)} is not on the permitted-subcommand list"
 }
 
-# Config keys whose VALUE Git executes as a command. Setting one on the command
-# line turns ANY permitted subcommand into arbitrary execution, so the allowlist
-# means nothing without this.
+# Config keys whose VALUE Git executes, or that redirect Git at attacker-chosen
+# code. Git config names are CASE-INSENSITIVE, so compare lowercased (bash 3.2
+# has no ${var,,}); match by pattern because the exact-name list was both
+# case-sensitive and materially incomplete. Known-incomplete by nature: Git
+# keeps adding executing keys, so this narrows the class, never closes it.
 config_key_executes() {
-  case "$1" in
-    core.pager|core.editor|core.sshCommand|core.hooksPath|core.fsmonitor|\
+  local key
+  key="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$key" in
+    core.pager|core.editor|core.sshcommand|core.hookspath|core.fsmonitor|\
+    core.askpass|core.alternaterefscommand|core.gitproxy|\
     diff.external|sequence.editor|credential.helper|\
-    uploadpack.packObjectsHook|filter.*) return 0 ;;
+    uploadpack.packobjectshook|init.templatedir|protocol.ext.allow|\
+    pager.*|filter.*|submodule.*.update|\
+    *.command|*.driver|*.textconv|*.askpass|*.cmd|*.program|*.helper) return 0 ;;
   esac
   return 1
 }
@@ -241,10 +314,14 @@ check_environment_aliases() {
   while [ "$i" -lt "$git_index" ]; do
     token="${TOKENS[$i]}"
     case "$token" in
-      # Env equivalents of the executing config keys, same reasoning.
+      # Env equivalents of the executing config keys. GIT_CONFIG_PARAMETERS is
+      # the generic -c channel and carries ANY key; GIT_EXEC_PATH repoints every
+      # subcommand at other binaries.
       GIT_EDITOR=*|GIT_PAGER=*|GIT_EXTERNAL_DIFF=*|GIT_SEQUENCE_EDITOR=*|\
-      GIT_SSH=*|GIT_SSH_COMMAND=*|GIT_PROXY_COMMAND=*)
-        deny "Git environment variable '${token%%=*}' has a value Git executes"
+      GIT_SSH=*|GIT_SSH_COMMAND=*|GIT_PROXY_COMMAND=*|GIT_ASKPASS=*|\
+      GIT_CONFIG_PARAMETERS=*|GIT_EXEC_PATH=*|GIT_CONFIG=*|\
+      GIT_CONFIG_GLOBAL=*|GIT_CONFIG_SYSTEM=*|GIT_TEMPLATE_DIR=*)
+        deny "Git environment variable '${token%%=*}' can redirect Git at other code"
         ;;
       GIT_CONFIG_COUNT=*)
         [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git config count cannot be safety-classified"
@@ -306,7 +383,7 @@ check_git_push() {
       || has_arg "$start" "$end" --mirror \
       || has_short_flag "$start" "$end" d || has_arg "$start" "$end" --delete \
       || has_arg "$start" "$end" --prune \
-      || has_force_refspec "$start" "$end"; then
+      || has_destructive_refspec "$start" "$end"; then
     deny "git push force/delete/prune form"
   fi
 }
@@ -326,7 +403,7 @@ check_git_branch() {
 # A plain `worktree remove` refuses a dirty worktree; forcing discards it.
 check_git_worktree() {
   local start="$1" end="$2" verb
-  verb="$(subcommand_verb "$start" "$end")"
+  verb="$(subcommand_verb worktree "$start" "$end")"
   require_verb worktree "$verb" "add list lock unlock move prune repair remove"
   [ "$verb" = "remove" ] || return 0
   if has_short_flag "$start" "$end" f || has_arg "$start" "$end" --force; then
@@ -372,15 +449,23 @@ check_git_tag() {
   fi
 }
 
-# Writing an alias.* key would let a later command shadow a permitted
-# subcommand, so config may not touch aliases at all.
+# `git config` can WRITE the very keys -c is refused from setting -- planting
+# core.hooksPath makes the next ordinary `git commit` run attacker code. Routed
+# through the same predicate, so the two channels cannot drift apart.
+# Read forms are refused too: `git config <key>` is itself a read, so splitting
+# read from write here means counting operands, and the reads are worthless.
 check_git_config() {
-  local start="$1" end="$2" i
+  local start="$1" end="$2" i token
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    case "${TOKENS[$i]}" in
-      alias.*|*=alias.*) deny "git config touching an alias" ;;
+    token="${TOKENS[$i]}"
+    token="${token#*=}"
+    case "$token" in
+      alias.*) deny "git config touching an alias" ;;
     esac
+    if config_key_executes "$token"; then
+      deny "git config touching a key whose value Git executes: $token"
+    fi
     i=$((i + 1))
   done
 }
@@ -427,6 +512,11 @@ check_git_subcommand() {
     add|stage|commit|commit-tree|write-tree|mktree|mktag|hash-object|\
     fetch|pull|merge|merge-file|mergetool|cherry-pick|revert|am|apply|\
     format-patch|mv|init|init-db|clone) return 0 ;;
+  esac
+  # Past here the verdict turns on a flag or a verb, so an argument the guard
+  # cannot read is not classifiable. Unknown subcommands reach the deny below.
+  require_static_args "$sub_index" "$end" "$subcommand"
+  case "$subcommand" in
     # Safe in the ordinary form, destructive in a specific one.
     push) check_git_push "$sub_index" "$end" ;;
     branch) check_git_branch "$sub_index" "$end" ;;
@@ -440,26 +530,26 @@ check_git_subcommand() {
     # Safe or destructive by verb. `bisect run` and `submodule foreach` execute
     # a command they are handed, so both are refused for the rebase -x reason.
     remote)
-      verb="$(subcommand_verb "$sub_index" "$end")"
+      verb="$(subcommand_verb remote "$sub_index" "$end")"
       require_verb remote "$verb" "<none> show get-url add rename set-head set-branches update" ;;
     submodule)
-      verb="$(subcommand_verb "$sub_index" "$end")"
+      verb="$(subcommand_verb submodule "$sub_index" "$end")"
       require_verb submodule "$verb" "<none> status init update sync summary add absorbgitdirs set-branch" ;;
     notes)
-      verb="$(subcommand_verb "$sub_index" "$end")"
+      verb="$(subcommand_verb notes "$sub_index" "$end")"
       require_verb notes "$verb" "<none> list show add append edit copy merge get-ref" ;;
     bisect)
-      verb="$(subcommand_verb "$sub_index" "$end")"
+      verb="$(subcommand_verb bisect "$sub_index" "$end")"
       require_verb bisect "$verb" "start good bad new old skip log view terms replay" ;;
     reflog)
-      verb="$(subcommand_verb "$sub_index" "$end")"
+      verb="$(subcommand_verb reflog "$sub_index" "$end")"
       require_verb reflog "$verb" "<none> show exists" ;;
     stash)
       # AGENTS.md forbids stashing; reading the list destroys nothing.
-      verb="$(subcommand_verb "$sub_index" "$end")"
+      verb="$(subcommand_verb stash "$sub_index" "$end")"
       require_verb stash "$verb" "list show" ;;
     sparse-checkout)
-      verb="$(subcommand_verb "$sub_index" "$end")"
+      verb="$(subcommand_verb sparse-checkout "$sub_index" "$end")"
       require_verb sparse-checkout "$verb" "list" ;;
     *) deny "git $subcommand is not on the permitted-subcommand list" ;;
   esac
@@ -507,9 +597,14 @@ check_shell_input() {
 # header: this table buys precision (so `timeout 5 git status` still passes),
 # NOT safety -- an omission falls through to check_stray_git_tokens and is
 # refused rather than allowed.
+# NOTE: xargs is deliberately ABSENT. It appends arguments read from stdin, so
+# the argument list the guard sees is never the one git runs
+# (`echo --force | xargs git push ...`). Unwrapped it would be classified on
+# incomplete input; left unlisted it falls to check_stray_git_tokens and is
+# refused, which is the correct verdict for an unknowable argv.
 is_command_wrapper() {
   case "$1" in
-    env|sudo|doas|command|timeout|nohup|setsid|nice|ionice|stdbuf|xargs) return 0 ;;
+    env|sudo|doas|command|timeout|nohup|setsid|nice|ionice|stdbuf) return 0 ;;
   esac
   return 1
 }
@@ -524,9 +619,6 @@ wrapper_option_takes_value() {
     timeout) case "$option" in -s|--signal|-k|--kill-after) return 0 ;; esac ;;
     nice|ionice) case "$option" in -n|-c|-p|--adjustment|--class|--classdata) return 0 ;; esac ;;
     stdbuf) case "$option" in -i|-o|-e|--input|--output|--error) return 0 ;; esac ;;
-    xargs) case "$option" in
-             -I|-i|-n|-L|-P|-s|-E|-d|-a|--replace|--max-args|--max-lines|--max-procs|--delimiter|--arg-file) return 0 ;;
-           esac ;;
   esac
   return 1
 }
@@ -580,12 +672,16 @@ argument_inert() {
 # Fail closed: an unrecognized executable holding a bare `git` token may be a
 # wrapper we do not model (find -exec, parallel, a local script), which would
 # otherwise walk every rule past the guard (#121).
+# Matches a bare `git` token AND a quoted command string that STARTS with git
+# (`parallel "git push --force origin main"`), which is how such a wrapper is
+# normally invoked and is not a bare token.
 check_stray_git_tokens() {
-  local start="$1" end="$2" executable="$3" i
+  local start="$1" end="$2" executable="$3" i first
   argument_inert "$executable" && return 0
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    case "${TOKENS[$i]##*/}" in
+    first="${TOKENS[$i]%% *}"
+    case "${first##*/}" in
       git) deny "'$executable' may execute the git command in its arguments" ;;
     esac
     i=$((i + 1))
