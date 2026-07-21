@@ -14,7 +14,14 @@ set -euo pipefail
 
 # DM_HOME is the dockmaster distro root (this repo). Resolve from this file's
 # location so scripts work regardless of the caller's cwd.
-DM_HOME="${DM_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}"
+DM_HOME="${DM_HOME:-$(dirname "${BASH_SOURCE[0]}")/..}"
+# Canonicalized whenever it already exists: git records worktree paths
+# PHYSICALLY, so a symlinked DM_HOME (macOS /var -> /private/var, any symlinked
+# TMPDIR) makes every recorded-path-vs-git comparison miss. A first run creates
+# DM_HOME later via dm_ensure_dirs; by the time any path is recorded it exists,
+# so it is canonical from then on.
+if _dm_real_home="$(cd "$DM_HOME" 2>/dev/null && pwd -P)"; then DM_HOME="$_dm_real_home"; fi
+unset _dm_real_home
 export DM_HOME
 
 DM_STATE="$DM_HOME/state"
@@ -352,16 +359,56 @@ dm_status_append() {
 }
 
 # --- git cleanliness ---------------------------------------------------------
+# First line only. Git's failure modes are verbose — `git diff` on a non-repo
+# path exits 129 after ~130 lines of usage text — and a refusal that buries the
+# one useful line under a manual page does not name the thing at risk.
+dm_first_line() { printf '%s' "${1%%$'\n'*}"; }
+
 # Uncommitted changes to TRACKED files (staged or unstaged). This is what blocks
 # operations that act on the committed head (land, PR push): untracked files do
 # not participate in those and must not block them.
-dm_tracked_dirty() {
-  ! git -C "$1" diff --quiet 2>/dev/null || ! git -C "$1" diff --cached --quiet 2>/dev/null
+# Prints clean|dirty (exit 0) or a single-line `error: <detail>` (exit 2) — a
+# broken repo must not read as merely dirty. git diff --quiet: 1 = differences,
+# >1 = real error.
+dm_tracked_state() {
+  local dir="$1" out rc
+  rc=0; out="$(git -C "$dir" diff --quiet 2>&1)" || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    printf 'error: git diff failed (exit %s) in %s: %s\n' "$rc" "$dir" "$(dm_first_line "${out:-no detail from git}")"; return 2
+  fi
+  if [ "$rc" -eq 1 ]; then printf 'dirty\n'; return 0; fi
+  rc=0; out="$(git -C "$dir" diff --cached --quiet 2>&1)" || rc=$?
+  if [ "$rc" -gt 1 ]; then
+    printf 'error: git diff --cached failed (exit %s) in %s: %s\n' "$rc" "$dir" "$(dm_first_line "${out:-no detail from git}")"; return 2
+  fi
+  if [ "$rc" -eq 1 ]; then printf 'dirty\n'; return 0; fi
+  printf 'clean\n'
 }
 
-# Untracked, non-ignored files. These are ambiguous (forgotten source vs build
-# cruft), so operations that DISCARD a worktree (teardown) fail closed on them.
-dm_untracked() { git -C "$1" ls-files --others --exclude-standard 2>/dev/null; }
+# Fail-closed boolean: undeterminable counts as dirty, so a broken repo blocks
+# the action. Callers that must report the two apart use dm_tracked_state.
+dm_tracked_dirty() {
+  local state
+  state="$(dm_tracked_state "$1")" || return 0
+  [ "$state" = dirty ]
+}
+
+# Untracked, non-ignored files, one per line. These are ambiguous (forgotten
+# source vs build cruft), so operations that DISCARD a worktree (teardown) fail
+# closed on them. On git failure prints a single-line `error: <detail>` and
+# returns 1, so the caller's refusal can name the cause instead of guessing.
+dm_untracked() {
+  local out rc=0 err
+  # stderr stays OFF stdout on success: a git warning with exit 0 would
+  # otherwise read as an untracked filename and be cited as forgotten work.
+  out="$(git -C "$1" ls-files --others --exclude-standard 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    err="$(git -C "$1" ls-files --others --exclude-standard 2>&1 >/dev/null)" || true
+    printf 'error: git ls-files failed (exit %s) in %s: %s\n' "$rc" "$1" "$(dm_first_line "${err:-no detail from git}")"
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
 
 # Is <relpath> provably-disposable build/tool cruft that teardown may discard
 # without --force? Deliberately TIGHT: only well-known regenerable artifacts.
