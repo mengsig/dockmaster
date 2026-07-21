@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "base_commit": "c4a4276",
-  "shared_agents_bytes": 26634,
+  "base_commit": "#129",
+  "shared_agents_bytes": 12736,
   "claude_settings_bytes": 1579,
   "claude_skill_bytes": 84130,
   "claude_skill_description_bytes": 4603,

@@ -243,8 +243,10 @@ data/                    per-task artifacts (scout reports), gitignored
 ```
 
 This distro is itself a managed repo: its own shared memory is the committed
-`.dm-knowledge/` note files plus the legacy `dm:knowledge` section still carried
-in this `AGENTS.md` (recall unions both, so nothing is stranded mid-migration).
+`.dm-knowledge/` note files. Its `AGENTS.md` no longer carries a `dm:knowledge`
+block — that migration is finished here (#129), and `AGENTS.md` keeps only the
+operating contract plus an index into the notes. Recall still unions the legacy
+block for managed repos that have not migrated, so nothing is stranded.
 
 `state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
 tracked surface (`AGENTS.md`, `bin/`, both runtime adapters, `.codex/`,
