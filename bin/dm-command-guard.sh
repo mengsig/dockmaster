@@ -36,6 +36,15 @@
 # GIT_DIR, GIT_WORK_TREE, PATH, LD_PRELOAD, DYLD_* (check_environment_prefixes).
 # An unrecognized pre-subcommand option fails closed, like the subcommand list.
 #
+# `-C <dir>` is a DELIBERATE EXCEPTION, not coverage: it reaches another
+# repository (hence another config and hooks) exactly as --git-dir does, but the
+# toolbelt uses it constantly, so refusing it is not viable. The class is
+# narrowed here too, not closed.
+#
+# ENV FALLBACKS: guarding only the GIT_* spelling is the same bug in a second
+# place -- Git falls back to plain PAGER/EDITOR/VISUAL/SSH_ASKPASS, all verified
+# executing. Adding a GIT_* rule means checking for an unprefixed fallback.
+#
 # WHAT THIS GUARD IS FOR: raising the cost of an ACCIDENTAL destructive command
 # and catching the forms an agent actually emits -- which is most of the real
 # risk, since the usual failure is a confused agent, not a hostile one. It does
@@ -397,8 +406,16 @@ check_environment_prefixes() {
       GIT_EDITOR=*|GIT_PAGER=*|GIT_EXTERNAL_DIFF=*|GIT_SEQUENCE_EDITOR=*|\
       GIT_SSH=*|GIT_SSH_COMMAND=*|GIT_PROXY_COMMAND=*|GIT_ASKPASS=*|\
       GIT_CONFIG_PARAMETERS=*|GIT_EXEC_PATH=*|GIT_CONFIG=*|\
-      GIT_CONFIG_GLOBAL=*|GIT_CONFIG_SYSTEM=*|GIT_TEMPLATE_DIR=*)
+      GIT_CONFIG_GLOBAL=*|GIT_CONFIG_SYSTEM=*|GIT_TEMPLATE_DIR=*|\
+      GIT_MAN_VIEWER=*)
         deny "Git environment variable '${token%%=*}' can redirect Git at other code"
+        ;;
+      # Git falls back to the PLAIN-spelled variable when the GIT_* one is
+      # unset, so guarding only the prefixed spelling left the same execution
+      # open. PAGER/EDITOR/VISUAL/SSH_ASKPASS each verified executing a payload
+      # against git 2.54; MANPAGER is the same family, unproven here.
+      PAGER=*|EDITOR=*|VISUAL=*|SSH_ASKPASS=*|MANPAGER=*)
+        deny "environment variable '${token%%=*}' is a Git fallback whose value Git executes"
         ;;
       GIT_CONFIG_COUNT=*)
         [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git config count cannot be safety-classified"
@@ -760,25 +777,44 @@ argument_inert() {
 # Matches a bare `git` token AND a quoted command string that STARTS with git
 # (`parallel "git push --force origin main"`), which is how such a wrapper is
 # normally invoked and is not a bare token.
+# Does this string plausibly BEGIN a command rather than merely mention git in
+# prose? sh ignores leading whitespace, and the first word may legitimately be
+# an env assignment, a wrapper, or a shell -- so testing only for a literal
+# leading "git" missed ` git push --force` and `timeout 5 git push --force`.
+token_begins_a_command() {
+  local first="$1"
+  case "$first" in *=*) return 0 ;; esac
+  first="${first##*/}"
+  case "$first" in git|eval|busybox) return 0 ;; esac
+  is_command_wrapper "$first" && return 0
+  is_shell_executable "$first" && return 0
+  return 1
+}
+
 # A MULTI-WORD string is classified by re-entering the guard rather than refused
 # outright: refusing every token whose first word is "git" blocked ordinary prose
 # (`--body "git config write path now routed"`), and over-blocking is what gets a
-# guard switched off. A BARE token still refuses -- the wrapper's real argv is
-# the rest of the segment, which this token does not describe.
+# guard switched off. Re-entry hands the whole string to the normal segmentation
+# and wrapper handling, so a leading space, a tab, or a `sh -c`/`env`/`timeout`
+# prefix cannot walk past it. A BARE git token still refuses -- the wrapper's
+# real argv is the rest of the segment, which this token does not describe.
 check_stray_git_tokens() {
-  local start="$1" end="$2" executable="$3" i token first
+  local start="$1" end="$2" executable="$3" i token flat first
   argument_inert "$executable" && return 0
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    token="${TOKENS[$i]}"; first="${token%% *}"
-    case "${first##*/}" in
-      git)
-        case "$token" in
-          *" "*) DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token" ;;
-          *) deny "'$executable' may execute the git command in its arguments" ;;
-        esac
-        ;;
-    esac
+    token="${TOKENS[$i]}"
+    flat="${token//$'\t'/ }"; flat="${flat//$'\n'/ }"
+    while [ "${flat# }" != "$flat" ]; do flat="${flat# }"; done
+    first="${flat%% *}"
+    if token_begins_a_command "$first"; then
+      case "$flat" in
+        *" "*) DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token" ;;
+        *) case "${first##*/}" in
+             git) deny "'$executable' may execute the git command in its arguments" ;;
+           esac ;;
+      esac
+    fi
     i=$((i + 1))
   done
 }

@@ -216,6 +216,19 @@ check "guard permits prose that merely starts with the word git" \
   'all_allowed "$GUARD_PR_BODY" "gh pr create --body \"git log shows the bug\"" "git remote --help" "git worktree --help" "git push --help"'
 check "guard still refuses a quoted string that IS a destructive command" \
   'all_blocked "parallel \"git push --force origin main\"" "flock /tmp/l \"git reset --hard\"" "mywrap \"git status && git push --force origin main\""'
+# Git falls back to the PLAIN-spelled env vars, so guarding only the GIT_*
+# spelling left the same execution open. All four verified against git 2.54.
+check "guard refuses the unprefixed env fallbacks Git executes" \
+  'all_blocked "PAGER=/tmp/evil git log" "EDITOR=/tmp/evil git commit -a" "VISUAL=/tmp/evil git commit -a" "SSH_ASKPASS=/tmp/evil git fetch" "MANPAGER=/tmp/evil git help git" "GIT_MAN_VIEWER=/tmp/evil git help git" "env PAGER=/tmp/evil git log"'
+# The re-entry check tested only the literal first word, so anything sh skips
+# before the command -- whitespace, an env assignment, a wrapper -- walked past.
+TAB=$'\t'
+GUARD_REENTER_TAB="parallel \"git${TAB}push${TAB}--force origin main\""
+GUARD_REENTER_SH="parallel \"sh -c 'git push --force'\""
+check "guard re-enters a quoted command past whitespace, wrappers and shells" \
+  'all_blocked "parallel \" git push --force origin main\"" "$GUARD_REENTER_TAB" "$GUARD_REENTER_SH" "parallel \"env git push --force\"" "parallel \"timeout 5 git push --force\"" "parallel \"VAR=x git push --force\"" "parallel \"  nohup nice git reset --hard\""'
+check "guard still permits prose that merely mentions git mid-sentence" \
+  'all_allowed "gh pr create --body \"the git repo is broken\"" "gh pr create --body \"git log shows the bug\""'
 
 # --- dm_lock: a leaked reclaim marker must not wedge recovery (#122) ---------
 # Before the fix the marker was unstamped and untrapped, so ONE reclaimer killed

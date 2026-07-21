@@ -90,6 +90,17 @@ Git at another repository is not merely a scoping change — that repository
 supplies its own config and hooks. An unrecognized pre-subcommand option fails
 closed for the same reason the subcommand list does.
 
+**`-C <dir>` is a deliberate exception to that paragraph, not coverage.** It
+reaches another repository — and so another config and another set of hooks —
+exactly as `--git-dir` does, but the toolbelt uses it constantly and refusing it
+is not viable. This class is narrowed, not closed.
+
+The same both-spellings rule applies to the environment: Git falls back to the
+plain-spelled variable when the `GIT_*` one is unset, so `PAGER`, `EDITOR`,
+`VISUAL` and `SSH_ASKPASS` are refused alongside `GIT_PAGER`, `GIT_EDITOR` and
+`GIT_ASKPASS`. All four fallbacks were verified executing a payload against git
+2.54, not inferred.
+
 The guard also refuses the forms it knows would carry a refused command past the
 allowlist as an opaque string: `rebase --exec`, `bisect run`,
 `submodule foreach`, `difftool --extcmd`, an alias shadowing the invoked
@@ -119,6 +130,10 @@ the easy paths, not as an argument that no path remains.
 - `git <subcommand> --help`, which renders documentation and executes nothing.
 - a Git alias that is defined but never invoked.
 - text tools (`grep`, `echo`, `cat`, …) taking `git` as an argument.
+- `git -C <dir>` — see the exception noted above.
+- prose that merely mentions git (`--body "the git repo is broken"`). A quoted
+  string that *begins* a command is re-entered into the guard and classified on
+  its merits instead, so `parallel " git push --force"` is still refused.
 
 **Known limits.** The guard is a guardrail, not a sandbox, and should not be
 the only thing standing between an agent and a repository:

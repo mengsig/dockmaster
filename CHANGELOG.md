@@ -49,11 +49,20 @@ All notable changes to this project are documented here. The format follows
   redirection is refused in both spellings — `--exec-path`, `--git-dir`,
   `--work-tree` alongside `GIT_EXEC_PATH`, `GIT_DIR`, `GIT_WORK_TREE`, `PATH`,
   `LD_PRELOAD`, `DYLD_*` — and an unrecognized pre-subcommand option fails
-  closed. Over-blocking fixed in the same pass: `git <sub> --help` is permitted,
-  and a quoted multi-word string starting with "git" is classified by the guard
-  rather than refused on sight, so a PR body reading `--body "git log shows the
-  bug"` is no longer collateral. The execute-a-handed-string class is narrowed,
-  NOT closed, and the guard says so rather than implying a boundary.
+  closed. `-C` is documented as a deliberate exception to that rule, not as
+  coverage — it reaches another repo's config and hooks exactly as `--git-dir`
+  does, but the toolbelt depends on it. The same both-spellings rule applies to
+  the environment: Git falls back to plain `PAGER`, `EDITOR`, `VISUAL` and
+  `SSH_ASKPASS` when the `GIT_*` twin is unset, and all four were verified
+  executing a payload against git 2.54. Over-blocking fixed in the same pass:
+  `git <sub> --help` is permitted, and a quoted string is classified by
+  re-entering the guard rather than refused for starting with the word "git", so
+  a PR body reading `--body "git log shows the bug"` is no longer collateral —
+  while ` git push --force`, `env git push --force` and `timeout 5 git push
+  --force` inside such a string are still refused, since re-entry runs the
+  normal segmentation and wrapper handling instead of testing the first word.
+  The execute-a-handed-string class is narrowed, NOT closed, and the guard says
+  so rather than implying a boundary.
 - **A leaked reclaim marker no longer wedges `dm_lock` recovery** (#122). The
   marker was unstamped and untrapped, so one reclaimer killed mid-reclaim made
   every later dead-PID lock hard-fail at ~30s, permanently.
