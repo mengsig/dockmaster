@@ -18,10 +18,22 @@
 # shortlist: fail-closed is only tolerable if ordinary work does not keep
 # hitting it. A refusal names the subcommand, so widening it is a one-liner.
 #
-# EXECUTION VECTORS, refused because they would carry a refused form past the
-# allowlist as an opaque string: rebase -x, bisect run, submodule foreach,
-# difftool --extcmd, for-each-repo, an alias shadowing the invoked subcommand,
-# and any -c/GIT_* setting of a config key whose value Git executes.
+# EXECUTION VECTORS: a permitted subcommand that RUNS a string handed to it
+# carries any refused form straight past the allowlist. The known ones are
+# refused -- rebase --exec, bisect run, submodule foreach, difftool --extcmd,
+# for-each-repo, an alias shadowing the invoked subcommand, and -c/git
+# config/GIT_* settings of keys whose value Git executes.
+#
+# That class is NARROWED, NOT CLOSED, and the code must not be read as claiming
+# otherwise. Git keeps adding executing config keys; config_key_executes matches
+# a moving target by pattern; a subcommand that grows a new command-running
+# option gains it silently. These rules remove the easy paths.
+#
+# WHAT THIS GUARD IS FOR: raising the cost of an ACCIDENTAL destructive command
+# and catching the forms an agent actually emits -- which is most of the real
+# risk, since the usual failure is a confused agent, not a hostile one. It does
+# NOT resist someone who knows it is here. It parses ONE command; it does not
+# interpret a shell, and expansion/substitution resolve after it has decided.
 #
 # WRAPPERS: env/sudo/timeout/nohup/nice/xargs/... are unwrapped to the command
 # they run. That table is a PRECISION aid, not the safety boundary — an
@@ -36,8 +48,8 @@
 #   - a Git alias that is defined but never invoked.
 #   - `git rebase` / `merge` / `pull`: they refuse to run on a dirty tree.
 #
-# NOT A SANDBOX. It parses one shell command; a tool that emits no Bash hook
-# event is not covered. See SECURITY.md for the coverage statement.
+# NOT A SANDBOX. A tool that emits no Bash hook event is never seen at all.
+# See SECURITY.md for the coverage statement and the known limits.
 
 set -euo pipefail
 DM_GUARD_DEPTH="${DM_GUARD_DEPTH:-0}"

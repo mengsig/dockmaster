@@ -140,6 +140,51 @@ check "guard refuses config keys whose value Git executes" \
 check "guard refuses Git environment variables whose value Git executes" \
   'all_blocked "$GIT_EXEC_EDITOR" "GIT_SSH_COMMAND=evil git fetch" "GIT_EXTERNAL_DIFF=evil git diff"'
 
+# Merge-gate bypasses. Each reached a permit by matching a rule the guard
+# modelled too narrowly; several were verified against a real remote.
+# `&` inside a redirection used to END the segment, stranding every later flag
+# in a phantom segment whose executable was `1`.
+check "guard keeps a redirection in the segment instead of splitting on &" \
+  'all_blocked "git push origin main 2>&1 --force" "git branch feature 2>&1 -D other" "git rm . 2>&1 -rf" "git push origin HEAD:topic 2>&1 --force" "git push origin main >log 2>&1 --force" "git push origin main &>log --force" "git worktree remove /x 2>&1 --force" "git tag v1 2>&1 -d"'
+check "guard still segments on && and background &" \
+  'all_blocked "git status && git reset --hard" "git status & git reset --hard" "git status; git clean -fd" "git status | git reset --hard"'
+check "guard permits ordinary redirection" \
+  'all_allowed "git commit -m x 2>&1" "git log --oneline > out.txt" "git status 2>/dev/null" "git diff >/dev/null 2>&1"'
+# git accepts --opt=value and --opt; testing only one spelling left the other open.
+check "guard matches =-joined option values, not just detached ones" \
+  'all_blocked "git rebase --exec=evil main" "git difftool --extcmd=evil" "git push --force=x origin main"'
+check "guard still permits the lease form against the =-joined matcher" \
+  'all_allowed "git push --force-with-lease=main origin main" "git push --force-with-lease origin f"'
+# Git config names are case-insensitive; the exact-name list was neither.
+GUARD_CFG_CASE="git -c core.PAGER=evil log"
+GUARD_CFG_SUBUP="git -c submodule.x.update=\"!evil\" submodule update"
+check "guard lowercases config keys and matches the executing ones by pattern" \
+  'all_blocked "$GUARD_CFG_CASE" "git -c pager.log=evil log" "git -c core.askPass=evil fetch" "git -c gpg.program=evil log" "git -c core.alternateRefsCommand=evil log" "git -c trailer.x.command=evil commit" "git -c merge.x.driver=evil merge" "git -c diff.x.textconv=evil diff" "git -c browser.x.cmd=evil help" "$GUARD_CFG_SUBUP" "git -c init.templateDir=/evil init" "git -c protocol.ext.allow=always fetch"'
+check "guard refuses git config WRITING the keys -c may not set" \
+  'all_blocked "git config core.hooksPath /evil" "git config core.pager evil" "git config --global credential.helper evil"'
+check "guard refuses the env channels that carry any config key" \
+  'all_blocked "GIT_CONFIG_PARAMETERS=x git log" "GIT_ASKPASS=evil git fetch" "GIT_EXEC_PATH=/evil git status" "GIT_CONFIG_GLOBAL=/evil git log"'
+# A refspec destroys with no flag at all: `+ref` forces, `:ref` deletes.
+check "guard refuses a deleting refspec, not only a forcing one" \
+  'all_blocked "git push origin :branch" "git push origin +main" "git push origin :refs/heads/main"'
+# A dynamic subcommand and executable were refused; a dynamic FLAG was not.
+GUARD_DYN_FLAG="git push \$(printf -- --force) origin main"
+check "guard refuses an unreadable argument to a flag-conditional subcommand" \
+  'all_blocked "$GUARD_DYN_FLAG" "git push \$FLAG origin main" "git branch \$OPT feature"'
+check "guard still permits unreadable arguments where no flag changes the verdict" \
+  'all_allowed "git commit -m \"\$MSG\"" "git log --grep \"\$PATTERN\"" "git add \"\$FILE\""'
+# An unlisted wrapper is normally handed a quoted command string, not a bare token.
+GUARD_PARALLEL="parallel \"git push --force origin main\""
+check "guard refuses a quoted git command string, not just a bare git token" \
+  'all_blocked "$GUARD_PARALLEL" "flock /tmp/l \"git reset --hard\"" "foobarwrapper git push --force origin main"'
+check "guard refuses xargs-fed git, whose real argv comes from stdin" \
+  'all_blocked "echo --force | xargs git push origin main" "xargs git status" "xargs -n1 git reset --hard"'
+# Skipping an option without its value handed the value back as the verb.
+check "guard reads a verb past an option that consumes its value" \
+  'all_blocked "git notes --ref show remove HEAD" "git notes --ref=x remove HEAD" "git bisect --term-old start run evil"'
+check "guard permits a verb behind an option it can classify" \
+  'all_allowed "git notes --ref=x show" "git notes --ref x show" "git remote -v" "git submodule --quiet status"'
+
 # --- dm_lock: a leaked reclaim marker must not wedge recovery (#122) ---------
 # Before the fix the marker was unstamped and untrapped, so ONE reclaimer killed
 # mid-reclaim made every later dead-PID lock hard-fail at ~30s, forever.

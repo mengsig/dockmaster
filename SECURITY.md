@@ -23,22 +23,21 @@ Be explicit about the boundary, because the guardrails are narrower than they
 look:
 
 - **The destructive-command guard is a guardrail, not a security boundary.**
-  `bin/dm-command-guard.sh` (and the mirrored `.codex/rules/dockmaster.rules`)
-  parse shell commands and deny destructive Git forms. Read the script for the
-  current list, which is the authority — but understand its scope before relying
-  on it. As of this writing it denies only `git reset`, `clean`, `restore`,
-  `checkout`, and `switch` with a discard/force flag. It does **not** classify
-  `git push --force`, `branch -D`, `stash`, `reflog expire`, `gc --prune`,
-  `filter-branch`, `update-ref -d`, or `rm -rf`. Separately, it is a best-effort
-  parser over an unbounded language: a command reached through a wrapper
-  (`timeout`, `nohup`, `xargs`, `find -exec`, a shell indirection) evades every
-  rule, and a tool that emits no Bash hook event is never seen at all. Both gaps
-  are tracked in [#121](https://github.com/mengsig/dockmaster/issues/121).
+  `bin/dm-command-guard.sh` parses shell commands and refuses destructive Git
+  forms; the script is the authority and [Command guard](#command-guard) below
+  describes it. `.codex/rules/dockmaster.rules` is a **coarser second layer**,
+  not a mirror of it: seven argv-prefix rules against an allowlist that refuses
+  dozens more.
+
+  Be precise about what the guard is for. It raises the cost of an *accidental*
+  destructive command and catches the forms an agent actually emits — which is
+  most of the real risk, because the usual failure is a confused agent, not a
+  hostile one. It is **not** a sandbox and does not resist someone who knows it
+  is there: it parses one command rather than interpreting a shell, so
+  expansion and substitution resolve after it has already decided.
 
   Note what this means against the trust model above: "never rewrites history"
-  describes what the *dockmaster's own guarded paths* do. It is not a guarantee
-  the guard enforces on an agent's shell commands — a force-push or a
-  `reflog expire` issued directly is not currently blocked. Do not rely on the
+  describes what the *dockmaster's own guarded paths* do. Do not rely on the
   guard as the only thing standing between an agent and your repositories; the
   guarded toolbelt paths, worktree isolation, and the operating contract are the
   primary controls.
@@ -49,10 +48,6 @@ look:
 - **The review gate depends on you reading it.** Nothing merges without an
   explicit operator decision (`merge_authority`), but the content of a change is
   only as reviewed as you make it.
-
-That statement is about the **toolbelt**: `bin/dm-*.sh` is the enforcement, and
-it is auditable code. It is not a claim about every shell command a crewmate can
-type. Those are covered separately, and less completely, by the command guard.
 
 ## Command guard
 
@@ -76,15 +71,24 @@ delete/force, `tag` delete/force, forced `switch`, `worktree remove --force`,
 `submodule deinit`, `notes prune`/`remove`, `bisect reset`, and
 `sparse-checkout` anything but `list`.
 
-Wrappers do not help: `timeout`, `nohup`, `nice`, `xargs`, `env`, `sudo` and
-friends are unwrapped, and any unrecognized executable holding a bare `git`
-token is refused outright rather than assumed harmless.
+Wrappers do not help: `timeout`, `nohup`, `nice`, `env`, `sudo` and friends are
+unwrapped, and an unrecognized executable holding a `git` token — bare, or at
+the head of a quoted command string — is refused rather than assumed harmless.
+`xargs` is deliberately not unwrapped: it appends arguments from stdin, so the
+argv the guard sees is never the one Git runs, and it is refused instead.
 
-Forms that would carry a refused command past the allowlist as an opaque string
-are refused too: `rebase -x`, `bisect run`, `submodule foreach`,
-`difftool --extcmd`, an alias shadowing the invoked subcommand, and any
-`-c`/`GIT_*` setting of a config key whose value Git executes (`core.pager`,
-`core.editor`, `diff.external`, `credential.helper`, `filter.*`, …).
+The guard also refuses the forms it knows would carry a refused command past the
+allowlist as an opaque string: `rebase --exec`, `bisect run`,
+`submodule foreach`, `difftool --extcmd`, an alias shadowing the invoked
+subcommand, and any `-c`/`git config`/`GIT_*` setting of a config key whose
+value Git executes (`core.pager`, `core.editor`, `diff.external`,
+`credential.helper`, `pager.*`, `filter.*`, `*.command`, `*.driver`, …).
+
+**This class is narrowed, not closed** — say so plainly rather than reading the
+list as a boundary. Git keeps adding settings whose values it executes, the key
+list is matched by pattern against a moving target, and a subcommand that grows
+a new command-executing option gains it silently. Treat these rules as removing
+the easy paths, not as an argument that no path remains.
 
 **Deliberately permitted**, so this is a decision and not an oversight:
 
