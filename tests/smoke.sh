@@ -1079,8 +1079,17 @@ check "scout brief omits the ship branch flow" '! grep -q "Create a branch" "$DM
 printf '# findings\n' > "$DM_HOME/data/sc-1/report.md"
 check "scout state done once report exists"  'OUT="$(b dm-task.sh state sc-1)"; grep -q done <<<"$OUT"'
 
-echo "== scout cleanup safety (#100) =="
-check "scout cleanup matrix passes" 'bash "$ROOT/tests/scout-cleanup.sh" >/dev/null 2>&1'
+echo "== worktree cleanup safety matrix (#100/#117/#120/#127) =="
+SC_RC=0; SC_OUT="$(bash "$ROOT/tests/scout-cleanup.sh" 2>&1)" || SC_RC=$?
+SC_N="$(grep -cE '^  (ok|FAIL) ' <<<"$SC_OUT" || true)"
+check "cleanup safety matrix passes" '[ "$SC_RC" -eq 0 ]'
+# A matrix that ABORTS mid-run still reports a single red line while silently
+# skipping everything after it — #130 reserving `worktree` voided 21 checks
+# exactly that way. A floor on the executed count makes the loss visible.
+check "cleanup safety matrix runs every case" '[ "${SC_N:-0}" -ge 98 ]'
+printf '    matrix checks executed: %s\n' "$SC_N"
+# Surface which sub-suite cases moved; one pass/fail line hides the whole matrix.
+[ "$SC_RC" -eq 0 ] || printf '%s\n' "$SC_OUT" | sed 's/^/    /'
 
 echo "== repo remove guards =="
 b dm-repo.sh add rmtest "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1

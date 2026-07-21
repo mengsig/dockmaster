@@ -63,12 +63,14 @@ case "$cmd" in
     # to hand-set them here: `set pr_state MERGED` would otherwise forge a
     # terminal landing over unlanded work (the same forge the `event merged`
     # reservation blocks). The sanctioned writer uses dm_meta_set directly.
+    # `pr_head` too: dm-worktree.sh landed compares HEAD against it, so a
+    # hand-set value would make post-merge commits look landed and removable.
     # `base` gets the same protection: it feeds `gh pr create --base` (via
     # dm_pr_base_for), so a hand-forged value would silently retarget a sub-PR.
     # It is recorded only by `dm-worktree.sh create --base`, which also writes
     # directly via dm_meta_set and so is unaffected by this CLI-only guard.
     case "$key" in
-      pr|pr_state|merge_state|pr_check_snapshot) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
+      pr|pr_state|merge_state|pr_check_snapshot|pr_head) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
       base) dm_die "'base' is recorded by dm-worktree.sh create --base; it must not be set by hand" ;;
       worktree) dm_die "'worktree' is maintained by dm-worktree.sh create/remove; it must not be set by hand" ;;
     esac

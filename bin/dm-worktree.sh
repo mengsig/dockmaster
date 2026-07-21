@@ -18,8 +18,19 @@
 #                                    freshness guard used when --base is omitted.
 #   assert <path> <repo>            verify <path> is a real worktree root distinct
 #                                    from the primary clone (isolation invariant)
-#   landed <id>                     is the worktree's committed work landed? (exit 0/1)
-#   remove <id> [--force]           remove worktree; refuses on unlanded/dirty work
+#   landed <id>                     is the worktree's committed work landed?
+#                                    (exit 0 landed, 1 unlanded, 2 undeterminable)
+#   remove <id> [--force]           remove worktree; refuses on a missing scout
+#                                    report, unlanded work, an undeterminable
+#                                    git state, or untracked files. --force
+#                                    discards (explicit operator authority) and
+#                                    unsticks a task whose git worktree record is
+#                                    broken or whose directory is already gone.
+#                                    A discarded head that was not proven landed
+#                                    is parked at refs/dm-discarded/<id>/<sha> in
+#                                    the clone, so the commit survives gc — on
+#                                    both force paths, including the one that
+#                                    prunes a vanished worktree's admin record.
 #   list                            list task worktrees
 #   tangle <repo>                   is the primary clone tangled onto a feature branch?
 
@@ -56,6 +67,115 @@ require_managed_worktree() {
   [ "$recorded_real" = "$expected_real" ] \
     || dm_die "REFUSED: recorded worktree path for $id does not match managed path $expected_real: $recorded_real"
   printf '%s\n' "$expected_real"
+}
+
+# Normal removal: assert isolation, then let git drop its own admin record.
+# Both steps die on failure; the caller catches that via command substitution.
+git_remove_worktree() {
+  local wt="$1" repo="$2" dir="$3"
+  assert_isolated "$wt" "$repo" >/dev/null
+  git -C "$dir" worktree remove --force "$wt"
+}
+
+# Task ids allow `.`, so a legal id can still be an illegal ref component
+# (`a..b`, `x.lock`, `trail.`). Map everything outside [A-Za-z0-9_-] to `_` so
+# the work is preserved anyway; the sha below keeps distinct ids from colliding.
+ref_component() { printf '%s' "${1//[!A-Za-z0-9_-]/_}"; }
+
+# Park <sha> on a ref in the CLONE (shared object store) so a discarded commit
+# stays reachable and survives gc. Keyed by sha, not id alone: ids are reusable
+# and refs/dm-discarded/* gets no reflog, so a per-id ref would clobber an
+# earlier discard into unreachability. Prints the sha when parked, nothing
+# otherwise — every failure warns.
+park_discarded_head() {
+  local id="$1" dir="$2" head="$3" ref out
+  [ -n "$head" ] || return 0
+  # All-zeros is git's "no object" oid (unborn/corrupt HEAD). update-ref reads it
+  # as DELETE and exits 0, so parking would create nothing while the note claimed
+  # a ref. Length-agnostic so it holds for sha256 too.
+  case "$head" in
+    *[!0]*) ;;
+    *) dm_warn "cannot park $id's discarded head: git reports an unborn or unresolvable HEAD ($head); there is no commit to preserve"; return 0 ;;
+  esac
+  ref="refs/dm-discarded/$(ref_component "$id")/$head"
+  if ! git check-ref-format "$ref" 2>/dev/null; then
+    dm_warn "cannot park $id's discarded head $head: '$ref' is not a valid ref name; the commit may be unreachable after gc"
+    return 0
+  fi
+  if ! out="$(git -C "$dir" update-ref "$ref" "$head" 2>&1)"; then
+    dm_warn "could not park $id's discarded head $head on $ref ($(dm_first_line "${out:-no error detail from git}")); the commit may be unreachable after gc"
+    return 0
+  fi
+  printf '%s\n' "$head"
+}
+
+# HEAD that git's admin record still holds for a worktree at <path>. A vanished
+# DIRECTORY does not take the commit with it — the object lives in the clone and
+# the admin record is its last reference, so this must be read before pruning.
+admin_worktree_head() {
+  local dir="$1" path="$2"
+  git -C "$dir" worktree list --porcelain 2>/dev/null | awk -v p="$path" '
+    $1 == "worktree" { in_entry = (substr($0, 10) == p) }
+    in_entry && $1 == "HEAD" { print $2; exit }
+  '
+}
+
+# Work not proven landed is about to be deleted. A detached worktree's reflog
+# dies with its directory, so park HEAD before anything is removed.
+preserve_discarded_head() {
+  local id="$1" wt="$2" dir="$3" head
+  head="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null)" || head=""
+  [ -n "$head" ] \
+    || { dm_warn "cannot read HEAD of $id's worktree; discarding with no recovery ref"; return 0; }
+  park_discarded_head "$id" "$dir" "$head"
+}
+
+# --force recovery for an interrupted cleanup: the recorded directory is ALREADY
+# gone (crash between the rm and the meta clear), so there is nothing to inspect
+# or delete. Clears the stale record and prunes git's admin entry — the two
+# things that otherwise pin the task at `working` and its whole clone with it.
+# Deletes nothing, so it needs no path-confinement check. The prune DOES drop
+# the admin record's reference to the commit, so park it first.
+clear_missing_worktree() {
+  local id="$1" repo="$2" recorded="$3" dir head parked note prune_out
+  dir="$(dm_repo_dir "$repo")"
+  # Derived key first: $DM_WT/$id is canonical by construction, while a record
+  # written before DM_HOME was canonicalized holds a symlinked path that never
+  # string-matches git's physical entry. The directory is gone, so the stored
+  # path cannot be canonicalized at read time — only used as a fallback.
+  head="$(admin_worktree_head "$dir" "$DM_WT/$id")"
+  [ -n "$head" ] || head="$(admin_worktree_head "$dir" "$recorded")"
+  parked=""
+  [ -z "$head" ] || parked="$(park_discarded_head "$id" "$dir" "$head")"
+  if ! prune_out="$(git -C "$dir" worktree prune 2>&1)"; then
+    dm_warn "clearing $id's stale worktree record, but git worktree prune failed: $(dm_first_line "${prune_out:-no error detail from git}")"
+  fi
+  note="stale worktree record cleared with operator discard authority; directory was already absent: $recorded"
+  if [ -n "$parked" ]; then
+    note="$note; head $parked kept at refs/dm-discarded/$(ref_component "$id")/$parked in the clone"
+  elif [ -n "$head" ]; then
+    note="$note; head $head could NOT be preserved"
+  else
+    note="$note; no git record held a head"
+  fi
+  dm_meta_set "$id" worktree ""
+  dm_status_append "$id" discarded "$note"
+  dm_info "cleared stale worktree record for $id (directory was already absent: $recorded)"
+}
+
+# --force-only fallback when git can no longer remove the worktree (admin record
+# destroyed); without it the task pins at `working` forever. Managed path only.
+discard_managed_dir() {
+  local wt="$1" id="$2" repo="$3" wt_root primary
+  wt_root="$(cd "$DM_WT" 2>/dev/null && pwd -P)" \
+    || dm_die "REFUSED: managed worktree root does not exist: $DM_WT"
+  primary="$(cd "$(dm_repo_dir "$repo")" 2>/dev/null && pwd -P)" \
+    || dm_die "REFUSED: primary clone for '$repo' does not exist; refusing to delete $wt"
+  [ "$wt" = "$wt_root/$id" ] \
+    || dm_die "REFUSED: $wt is not the managed worktree path $wt_root/$id; refusing to delete it"
+  [ "$wt" != "$primary" ] \
+    || dm_die "REFUSED: $wt resolves to the primary clone of '$repo'; refusing to delete it"
+  rm -rf "$wt"
 }
 
 # --- tangle detection: named non-default branch checked out in primary -------
@@ -168,9 +288,12 @@ case "$cmd" in
     if dm_should_refresh_pr_state "$id"; then
       "$(dirname "${BASH_SOURCE[0]}")/dm-pr.sh" check "$id" >/dev/null 2>&1 || true
     fi
-    # Uncommitted changes to tracked files mean work is not committed => not landed.
-    # (Untracked files are handled separately at teardown, not here.)
-    ! dm_tracked_dirty "$wt" || { echo "unlanded: uncommitted changes to tracked files"; exit 1; }
+    # Uncommitted tracked changes => not committed => not landed. (Untracked
+    # files are handled at teardown.) Exit 2 keeps a git failure out of that.
+    if ! tracked_state="$(dm_tracked_state "$wt")"; then
+      echo "undetermined: cannot inspect tracked files: $tracked_state"; exit 2
+    fi
+    [ "$tracked_state" = clean ] || { echo "unlanded: uncommitted changes to tracked files"; exit 1; }
     dir="$(dm_repo_dir "$repo")"
     def="$(dm_default_branch "$dir")"
     # DM_NO_FETCH=1 reconciles from local refs only (dm-status.sh sets it so its
@@ -186,9 +309,20 @@ case "$cmd" in
        || git -C "$dir" merge-base --is-ancestor "$head" "$def" 2>/dev/null; then
       echo "landed"; exit 0
     fi
-    # A recorded, merged PR also counts as landed (squash-merge rewrites SHAs).
+    # Squash-merge rewrites SHAs, so ancestry above cannot see a merged PR. But
+    # "a PR merged" is not "THIS head merged": compare against pr_head (#120).
     pr_state="$(dm_meta_get "$id" pr_state)"
-    [ "$pr_state" = "MERGED" ] && { echo "landed: PR merged"; exit 0; }
+    if [ "$pr_state" = "MERGED" ]; then
+      merged_head="$(dm_meta_get "$id" pr_head)"
+      [ -n "$merged_head" ] \
+        || { echo "undetermined: PR recorded MERGED but no pr_head recorded; cannot prove HEAD is in the merged result"; exit 2; }
+      git -C "$wt" rev-parse --verify --quiet "$merged_head^{commit}" >/dev/null 2>&1 \
+        || { echo "undetermined: merged PR head $merged_head is not present in this worktree; cannot compare"; exit 2; }
+      if [ "$head" = "$merged_head" ] || git -C "$wt" merge-base --is-ancestor "$head" "$merged_head" 2>/dev/null; then
+        echo "landed: PR merged"; exit 0
+      fi
+      echo "unlanded: HEAD $head is not contained in the merged PR head $merged_head (commits added after the merge)"; exit 1
+    fi
     echo "unlanded: commits not in $def and no merged PR recorded"; exit 1
     ;;
 
@@ -204,20 +338,49 @@ case "$cmd" in
       esac
     done
     [ -n "$id" ] || dm_die "usage: dm-worktree.sh remove <id> [--force]"
-    wt="$(require_managed_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
+    repo="$(dm_meta_get "$id" repo)"
+    # An interrupted cleanup leaves a recorded path whose directory is already
+    # gone. require_managed_worktree dies on that before --force is ever
+    # consulted, which pins the task and its clone forever — handle it first.
+    recorded="$(dm_meta_get "$id" worktree)"
+    if [ -n "$recorded" ] && [ ! -d "$recorded" ]; then
+      [ "$force" -eq 1 ] || dm_die "REFUSED: $id's recorded worktree directory is already absent: $recorded
+Nothing remains to inspect, so the work cannot be proven landed — an interrupted cleanup leaves exactly this.
+If the path is merely unavailable (unmounted volume), restore it and retry. Otherwise re-run with --force (explicit discard authority) to clear the stale record."
+      clear_missing_worktree "$id" "$repo" "$recorded"
+      exit 0
+    fi
+    wt="$(require_managed_worktree "$id")"
     kind="$(dm_meta_get "$id" kind)"
+    # Runs for EVERY kind so a mutable `kind` cannot switch the gate off (#127),
+    # and under --force it decides whether a discard destroyed work (#120).
+    landed_rc=0; landed_out="$("$0" landed "$id" 2>&1)" || landed_rc=$?
     if [ "$force" -eq 0 ]; then
       if [ "$kind" = "scout" ] && [ ! -f "$DM_DATA/$id/report.md" ]; then
         dm_die "REFUSED: scout $id has no report at data/$id/report.md. Produce the report, or pass --force only with explicit discard authority."
       fi
-      if ! landed_out="$("$0" landed "$id" 2>&1)"; then
-        dm_die "REFUSED: $id has unlanded work. ${landed_out:-Unable to verify landed state.} Pass --force only with explicit discard authority."
+      # Three outcomes reported apart: a scout's tracked edits ARE the
+      # reproduction, and a git failure is never dirtiness (#84).
+      if [ "$landed_rc" -eq 1 ] && [ "$kind" = "scout" ]; then
+        dm_die "REFUSED: scout $id has investigation scratch that is not in git history; worktree preserved.
+${landed_out:-No detail from the landed check.}
+Scratch is expected for a reproduction — confirm data/$id/report.md captures the findings, then pass --force to discard it."
+      elif [ "$landed_rc" -eq 1 ]; then
+        dm_die "REFUSED: $id has unlanded work; worktree preserved.
+${landed_out:-No detail from the landed check.}
+Confirm it landed, or pass --force only with explicit discard authority."
+      elif [ "$landed_rc" -ne 0 ]; then
+        dm_die "REFUSED: cannot determine whether $id's work landed; worktree preserved.
+${landed_out:-No detail from the landed check.}
+Fix the git error above, or pass --force only with explicit discard authority."
       fi
       # Untracked non-ignored files could be forgotten work; fail closed UNLESS
       # every one is provably-disposable tool cruft (dm_is_disposable_cruft) —
       # then teardown discards only regenerable artifacts and needs no --force.
       if ! untracked="$(dm_untracked "$wt")"; then
-        dm_die "REFUSED: cannot inspect untracked files for $id; worktree preserved."
+        dm_die "REFUSED: cannot inspect untracked files for $id; worktree preserved.
+${untracked:-No detail from git.}
+Fix the git error above, or pass --force only with explicit discard authority."
       fi
       undisposable=""
       while IFS= read -r u; do
@@ -232,19 +395,43 @@ $undisposable"
       fi
     fi
     dir="$(dm_repo_dir "$repo")"
-    assert_isolated "$wt" "$repo" >/dev/null
-    if ! remove_out="$(git -C "$dir" worktree remove --force "$wt" 2>&1)"; then
-      dm_die "REFUSED: git worktree remove failed for $id; directory and metadata preserved. ${remove_out:-No error detail from git.}"
+    # Park the head BEFORE anything is deleted: after the directory is gone the
+    # sha is unrecoverable (detached worktree, its reflog goes with it).
+    discarded_head=""
+    if [ "$force" -eq 1 ] && [ "$landed_rc" -ne 0 ]; then
+      discarded_head="$(preserve_discarded_head "$id" "$wt" "$dir")"
+    fi
+    if ! remove_out="$(git_remove_worktree "$wt" "$repo" "$dir" 2>&1)"; then
+      if [ "$force" -eq 0 ]; then
+        dm_die "REFUSED: git could not remove $id's worktree; directory and metadata preserved.
+${remove_out:-No error detail from git.}
+Inspect $wt. If its git record is broken or the work is expendable, re-run with --force (explicit discard authority) to delete the managed directory."
+      fi
+      dm_warn "git could not remove $id's worktree (${remove_out:-no error detail from git}); discarding $wt under operator discard authority"
+      discard_managed_dir "$wt" "$id" "$repo"
     fi
     if ! prune_out="$(git -C "$dir" worktree prune 2>&1)"; then
       dm_warn "worktree removed for $id, but git worktree prune failed: ${prune_out:-no error detail from git}"
     fi
     dm_meta_set "$id" worktree ""
-    # Operator discard (#69): without a terminal event the task would stay
-    # 'working' forever. Written here, not via dm-task.sh event, to bar forgery.
-    if [ "$force" -eq 1 ] && [ "$(dm_meta_get "$id" pr_state)" != "MERGED" ] \
-       && ! grep -qE '^[^ ]+ merged: ' "$(dm_status_path "$id")" 2>/dev/null; then
-      dm_status_append "$id" discarded "worktree force-removed with operator discard authority"
+    # Written here, not via dm-task.sh event, to bar forgery. Skipped only when
+    # merge-signalled AND proven landed: else task pins (#69) or loss is silent (#120).
+    if [ "$force" -eq 1 ]; then
+      merge_signal=0
+      if [ "$(dm_meta_get "$id" pr_state)" = "MERGED" ] \
+         || grep -qE '^[^ ]+ merged: ' "$(dm_status_path "$id")" 2>/dev/null; then merge_signal=1; fi
+      discard_note="worktree force-removed with operator discard authority"
+      if [ "$landed_rc" -ne 0 ]; then
+        discard_note="$discard_note; work not proven landed: ${landed_out##*$'\n'}"
+        if [ -n "$discarded_head" ]; then
+          discard_note="$discard_note; head $discarded_head kept at refs/dm-discarded/$(ref_component "$id")/$discarded_head in the clone"
+        else
+          discard_note="$discard_note; head could NOT be preserved"
+        fi
+      fi
+      if [ "$merge_signal" -eq 0 ] || [ "$landed_rc" -ne 0 ]; then
+        dm_status_append "$id" discarded "$discard_note"
+      fi
     fi
     dm_info "removed worktree for $id"
     ;;
