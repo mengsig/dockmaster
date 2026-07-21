@@ -140,6 +140,71 @@ A fact about the *operator* or *the fleet as a whole* → global memory. Task-sc
 notes → the backlog item. Investigation findings → the scout report. This is the
 single source of truth per fact — no duplication that can drift.
 
+## State portability (backup and recovery)
+
+`state/` is the system of record and it is gitignored single-copy local files.
+Per-repo SHARED knowledge (`.dm-knowledge/`) is committed to each managed repo
+and merged PRs live on GitHub, but the registry, the task history, the backlog,
+and the operator/fleet/private memory exist on exactly one disk. `bin/dm-state.sh`
+is the export/import path (`export | verify | import`).
+
+**The record set** — what travels: `state/repos.json`; `state/tasks/*.meta` and
+`*.status`; `state/backlog.json` and `backlog.md`; `state/operator.md`;
+`state/learnings.md`; `state/secondmates.json`; `state/archive/*.meta|.status`;
+and the git-excluded per-repo memory sidecars `repos/<repo>/.dm/*.md`.
+`--with-artifacts` adds `data/**` and archived task dirs (briefs, scout reports,
+review pages). The set is an explicit allowlist, not a sweep: a file the toolbelt
+does not own is reported in the manifest as unrecognized and left behind, so a
+restore can never look more complete than it is. The unrecognized scan covers the
+top level of `state/` plus one level into `state/tasks/`, `state/archive/`, and
+each `repos/<repo>/.dm/` — the dirs that hold records — so a future record type
+added there surfaces as unrecognized instead of going silently missing from every
+backup. It does not recurse further.
+
+Native runtime `memory/` is global memory too, but it lives outside `$DM_HOME`
+and is owned by the runtime; it is not carried and must be backed up with the
+rest of your runtime configuration.
+
+**What is deliberately excluded, and the cost.** Managed clones under `repos/`
+are re-clonable from the registry's remotes, and live worktrees under
+`state/worktrees/` are checkouts off those clones — both are large and mostly
+reproducible, so neither is archived. The exception that matters: work committed
+in a worktree but never landed is single-copy and is *not* recoverable from an
+archive. Import says so explicitly and prints, per repo, how to re-establish the
+clone. Note it prints `git init` + `fetch` + `checkout` rather than `git clone`:
+the restored `.dm/` sidecar already occupies the directory, and `git clone`
+refuses a non-empty target.
+
+**Consistency: per-file, not point-in-time.** Every record file is copied while
+holding the same `dm_lock` advisory mutex its writers take, so no file in the
+archive is a torn mid-write copy. The archive is *not* an atomic snapshot —
+files are copied one at a time, so a write landing between two copies appears in
+one and not the other. Status logs and artifacts are copied without a lock (their
+writers are append-only or write-once). For a clean snapshot, export with no crew
+work in flight. Export is strictly read-only; import refuses a populated state
+root without `--force`, names every file it would replace, and never deletes
+files the archive does not carry. Import has **no rollback**: files are installed
+one at a time, so a mid-way failure (an unwritable path, a full disk) leaves the
+root partially restored — the error names how many files landed, and recovery is
+to fix the cause and re-run with `--force`.
+
+**Secrets.** An export changes who can read the state. The archive carries the
+DOCKMASTER-ONLY store (`repos/<repo>/.dm/private.md`) — which exists precisely so
+its contents are never relayed to a crewmate — plus operator preferences and,
+with `--with-artifacts`, briefs and scout reports. It is written mode 0600 and
+should be stored encrypted and treated as a secret. `.env` is never included.
+
+Integrity is checked before anything is installed. The manifest must describe the
+payload as an exact SET of paths — duplicates refuse, and a path present in one
+and not the other refuses, naming the difference. (Comparing counts instead would
+let one duplicated entry mask exactly one unlisted, never-checksummed file.) Any
+checksum mismatch, unknown format, non-regular payload member (a symlink is
+otherwise invisible to a regular-file scan), or path outside `state/`, `data/`,
+`repos/<repo>/.dm/` refuses. Extraction runs before validation and relies on
+`tar` rejecting absolute and `..` member paths — GNU tar and bsdtar both do —
+after which every installed file is taken from the verified manifest list rather
+than from whatever landed on disk.
+
 ## Supervision model
 
 There is no daemon. The dockmaster creates a background worker, records its

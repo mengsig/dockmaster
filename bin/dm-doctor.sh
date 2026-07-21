@@ -209,7 +209,7 @@ probe_state_json() {
   command -v jq >/dev/null 2>&1 || return 0
   if [ -f "$DM_REGISTRY" ] && ! jq . "$DM_REGISTRY" >/dev/null 2>&1; then
     printf '  FAIL state/repos.json is not valid JSON\n'
-    printf '       ^ restore from git or a backup, or reset to {"repos":{}}\n'
+    printf '       ^ restore with dm-state.sh import <archive>, or reset to {"repos":{}}\n'
     bad=$((bad + 1))
   fi
   # A registry entry under the distro's reserved name is shadowed by the alias:
@@ -226,7 +226,7 @@ probe_state_json() {
   backlog="$DM_STATE/backlog.json"
   if [ -f "$backlog" ] && ! jq . "$backlog" >/dev/null 2>&1; then
     printf '  FAIL state/backlog.json is not valid JSON\n'
-    printf '       ^ restore from git or a backup, or reset to {"items":[],"decisions":[]}\n'
+    printf '       ^ restore with dm-state.sh import <archive>, or reset to {"items":[],"decisions":[]}\n'
     bad=$((bad + 1))
   fi
   if [ -f "$DM_STATE/secondmates.json" ] && ! jq -e '

@@ -96,6 +96,9 @@ flowchart TD
   produced it; operator and fleet-wide facts stay in global memory.
 - **Scout reports** — investigations end in a written report, never an
   unauthorized change.
+- **Portable state** — the registry, task history, backlog, and memory export to
+  one checksummed archive and restore into a fresh checkout (see
+  [Backup and recovery](#backup-and-recovery)).
 
 ## What it does
 
@@ -199,6 +202,53 @@ proposes a test command and starter knowledge for a repo new to the fleet),
 `bin/dm-pr.sh merge` — each usable directly, or through the `bin/dm` dispatcher
 (`dm <sub> ...` runs `bin/dm-<sub>.sh ...`; `dm help` lists the subcommands).
 Run any script with no arguments for its usage.
+
+## Backup and recovery
+
+`state/` is the system of record — the registry, every task record, the backlog,
+and the memory that makes the fleet improve. It is gitignored local files, so
+back it up:
+
+```sh
+bin/dm-state.sh export --with-artifacts --out ~/backups/dockmaster-$(date -u +%Y%m%d).tar.gz
+bin/dm-state.sh verify ~/backups/dockmaster-20260721.tar.gz
+```
+
+To recover onto a new machine, clone this repo, then import. There is no target
+flag: the archive lands in `$DM_HOME` — the checkout you run it from, or an
+explicit `DM_HOME` you set. You choose the root; nothing inside the archive can
+redirect where its contents go.
+
+```sh
+bin/dm-state.sh import ~/backups/dockmaster-20260721.tar.gz
+```
+
+Import prints what it could not carry and how to re-establish it, then run
+`bin/dm-doctor.sh`. What you should know before relying on it:
+
+- **The archive is a secret.** It contains the dockmaster-only memory store
+  (`repos/<repo>/.dm/private.md`), operator preferences, and — with
+  `--with-artifacts` — briefs and scout reports. Exporting moves that past the
+  machine boundary it was written under. It is written mode 0600; store it
+  encrypted, and do not commit it to a repo without reviewing the contents.
+- **Managed clones and live worktrees are not in it.** Clones are re-clonable
+  from the registry's remotes (the import prints the command per repo). Work
+  committed in a worktree but never landed is single-copy and is *not* carried —
+  push it, or land it, if you want it to survive. Your runtime's native
+  `memory/` also lives outside `$DM_HOME` and is not carried; back it up with the
+  rest of your runtime configuration.
+- **Export is read-only** and never mutates `state/`. **Import never deletes**
+  files the archive does not carry, and refuses a populated state root unless you
+  pass `--force`, after naming every file it would replace.
+- **Import has no rollback.** Files are installed one at a time, so a failure
+  part-way (an unwritable path, a full disk) leaves the root partially restored.
+  The error says how many landed; fix the cause and re-run with `--force`.
+- **Consistency is per-file, not point-in-time.** Each record is copied while
+  holding the same lock its writers take, so nothing in the archive is a torn
+  mid-write file — but the archive is not one atomic snapshot. For a clean
+  snapshot, export when no crew work is in flight.
+
+`docs/architecture.md` has the full record set and the reasoning.
 
 ## Requirements
 
