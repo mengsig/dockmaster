@@ -1,0 +1,1 @@
+- **[pitfall]** tests/check-runtime-parity.js CAPABILITY_ASSERTIONS pins exact prose phrases in README.md/.codex/config.toml per capability id; rewording those docs fails the parity suite (and smoke, which runs it). Update the regex at the same time, and keep config/runtime-capabilities.json + the docs/runtime-capabilities.md row saying the same thing.  _(2026-07-21T04:47:36Z)_

@@ -36,7 +36,7 @@ an authenticated runtime/browser/mailbox observation. Current split: 13 direct,
 | `deterministic-workflow` | optional configured runner | Workflow host when available | compatible injected host; full native fallback | runner + gate drift test |
 | `merge-safety` | red/authority/unlanded guards | shared toolbelt | shared toolbelt + trusted rules/hook guardrails | dm-pr/dm-merge/rules/hook/smoke |
 | `right-sizing` | quality-aware resource use | per-agent model/effort and tiers | tiers, bounded count, focused no-fork prompts | **contract** + bounded runner test |
-| `plugins-and-fallbacks` | optional tools never silently vanish | installed tools/skills with plain fallback | plugins/local tools with focused fallback | **contract** + doctor assertions |
+| `plugins-and-fallbacks` | optional tools degrade or fail loudly, never silently vanish | lavish/browser degrade; GitHub mutations hard-require `gh-axi` and fail loudly | plugins/local tools with focused fallback | **contract** + doctor assertions |
 | `project-safety-config` | project policy | Claude settings allowlist | trusted config + tested rules/PreToolUse hook | configs + guard + runtime smoke |
 
 ## Clean separation
@@ -44,8 +44,8 @@ an authenticated runtime/browser/mailbox observation. Current split: 13 direct,
 The two discovery roots intentionally duplicate only skill content stored on
 disk. They do not add both contracts to either model's always-loaded prompt.
 Ten runtime-neutral skills must stay byte-identical. Eight adapters may
-differ because they contain native calls: `change-review`, `memory-routing`,
-`pr-workflow`, `secondmate`, `stuck-worker`, `supervision`, and
+differ because they contain native calls: `change-review`, `fleet-change`,
+`memory-routing`, `pr-workflow`, `secondmate`, `stuck-worker`, `supervision`, and
 `task-lifecycle`. The parity test forbids Claude tool names in Codex adapters and
 Codex collaboration names in Claude adapters.
 

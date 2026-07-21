@@ -4,7 +4,9 @@
 
 **Talk to one agent. Ship across every repo.**
 
-> v0.2.0 · MIT licensed · native adapters for Claude Code and OpenAI Codex
+> Latest release v0.2.0 · MIT licensed · Claude Code adapter released; the
+> OpenAI Codex adapter is on `main` but not yet in a tagged release
+> ([CHANGELOG](CHANGELOG.md))
 
 [![CI](https://github.com/mengsig/dockmaster/actions/workflows/ci.yml/badge.svg)](https://github.com/mengsig/dockmaster/actions/workflows/ci.yml)
 
@@ -104,11 +106,14 @@ flowchart TD
 - **Two task shapes.** *Ship* delivers a change (PR or approved local merge);
   *scout* investigates and leaves a report — a diagnosis is never an
   authorization to implement.
-- **Per-repo + global memory.** Memory is plain markdown, no bespoke tool: each
-  managed repo's shared knowledge lives in an `dm:knowledge` section of its own
-  `AGENTS.md` (committed, so it travels and reaches crewmates in every worktree),
-  with dockmaster-private notes in a git-excluded `.dm/`; operator and fleet-wide
-  knowledge live in the dockmaster's global memory. One owner per fact.
+- **Per-repo + global memory.** Memory is plain markdown, no bespoke tool. Each
+  managed repo gets three stores: shared knowledge as committed per-note files
+  under a tracked `.dm-knowledge/` directory (so it travels to every clone and
+  worktree, and two concurrent tasks never collide on one hot file); private
+  notes in a git-excluded `.dm/notes.md`, which stay out of project history but
+  *are* relayed into crewmate briefs; and dockmaster-only notes in `.dm/private.md`,
+  which are never relayed. Operator and fleet-wide knowledge live in the
+  dockmaster's global memory. One owner per fact.
 - **Lavish approval, then modular PR pipelines.** Every change is first rendered
   as a lavish artifact you approve (with back-and-forth); then you choose PR or
   local. (The artifact needs the optional `lavish-axi`; without it you approve
@@ -129,9 +134,8 @@ flowchart TD
 - **Fleet PR/health sweep.** A read-only sweep across every open PR reports its
   CI rollup and whether a reviewer requested changes, surfaced in the status
   snapshot — no per-repo polling.
-- **CI on every push and PR.** This distro's own smoke suite and syntax/lint
-  checks run on GitHub Actions across ubuntu and macOS on every push to main and
-  every pull request.
+- **CI on every PR and every push to main.** This distro's own smoke suite and
+  syntax/lint checks run on GitHub Actions across ubuntu and macOS.
 - **Persistent domain supervisors.** For large domains, delegate to a long-lived
   agent that owns a scope, keeps its own memory, and runs its own crew.
 
@@ -144,6 +148,7 @@ bin/                 the toolbelt; run `bin/dm help` for the full list (`bin/dm 
 .claude/skills/      Claude-native workflow adapters
 .agents/skills/      Codex-native workflow adapters
 .codex/              trusted-project Codex nesting and safety config
+.dm-knowledge/       this repo's own committed shared-memory notes
 workflows/           optional deterministic PR-pipeline runner
 config/              PR-pipeline defaults and per-repo overrides
 tests/               lifecycle, parity, runtime, and performance checks
@@ -184,8 +189,12 @@ PR ready for review: https://github.com/me/app/pull/57
 > merge it
 ```
 
-Under the hood that is `bin/dm-repo.sh add` (running the onboarding scout to
-propose a test command and starter knowledge for a repo new to the fleet),
+The PR half of that exchange needs `gh` and `gh-axi` (see Requirements); without
+them the same flow ends in an approved local landing instead of a PR.
+
+Under the hood that is `bin/dm-repo.sh add` (which clones and scaffolds the
+repo's memory, then prompts the dockmaster to dispatch an onboarding scout that
+proposes a test command and starter knowledge for a repo new to the fleet),
 `bin/dm-task.sh new`, `bin/dm-worktree.sh create`, the `pr-workflow` skill, and
 `bin/dm-pr.sh merge` — each usable directly, or through the `bin/dm` dispatcher
 (`dm <sub> ...` runs `bin/dm-<sub>.sh ...`; `dm help` lists the subcommands).
@@ -198,15 +207,28 @@ Supported platforms: macOS and Linux; the scripts run on bash 3.2+.
 - **Required for anything:** one authenticated runtime (Claude Code or Codex),
   plus `git` and `jq`. Select explicitly with `bin/dm-doctor.sh check --runtime
   claude|codex`; the default `auto` accepts either and never requires both.
-- **Required for the PR flow:** the GitHub CLI `gh`, authenticated with
-  `gh auth login` (or the `gh-axi` wrapper below). Without it the dockmaster
-  still runs in local-only mode — approved fast-forward landing, no PR.
-- **Optional enhancements — the operator's own tooling, not bundled with this
-  distro:** `gh-axi` (ergonomic GitHub wrapper), `lavish-axi` (the reviewable
-  approval artifact), and `chrome-devtools-axi` (browser tasks). Without them
-  the dockmaster degrades to a real, plainer mode: plain `gh` for GitHub, and
-  you review and approve each change directly rather than through a lavish
-  artifact.
+- **Local-only mode needs nothing further.** Worktree isolation, scouts, the
+  review gate, tests, and approved fast-forward landing all work with just the
+  above.
+- **Required for the PR flow:** the GitHub CLI `gh` (authenticated with
+  `gh auth login`) **and** `gh-axi`. Every GitHub *mutation* — opening a PR,
+  merging one, reverting one, creating a repo — calls `gh-axi` and fails without
+  it. The toolbelt's reads go through `gh api` (real JSON), but some skills also
+  read through `gh-axi` for human-readable output, so it is not a
+  mutations-only dependency.
+- **Optional:** `lavish-axi` (renders the review artifact; without it the
+  dockmaster prints the change and you approve directly) and
+  `chrome-devtools-axi` (browser tasks only). Both degrade cleanly.
+
+> **Known limitation — the PR path is not currently reachable from a fresh
+> clone.** `gh-axi` is the maintainer's own wrapper and has no public install
+> path, and the toolbelt has no plain-`gh` fallback for the mutations above
+> ([#104](https://github.com/mengsig/dockmaster/issues/104)). Until that lands,
+> a public adopter should expect local-only mode: everything works except
+> opening, merging, and reverting PRs from inside the dockmaster — **and
+> creating a new GitHub repo**, which is the path a "build me a new project"
+> request goes through. `bin/dm-doctor.sh` reports `gh-axi` as a PR-flow tool so
+> this surfaces before you rely on it.
 
 Per-repo memory is plain markdown — no extra tool to install. Run
 `bin/dm-doctor.sh` to see what you have and what each tool gates.

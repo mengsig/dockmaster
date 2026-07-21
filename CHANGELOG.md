@@ -15,15 +15,15 @@ All notable changes to this project are documented here. The format follows
   existing background-notification path is unchanged.
 - **Honest onboarding docs and one dependency contract.** The README and
   `dm-doctor` now state the tool contract identically in three tiers: `git`/`jq`
-  required for anything, `gh` (or `gh-axi`) required for the PR flow, and the
-  `gh-axi`/`lavish-axi`/`chrome-devtools-axi` axi wrappers as optional
-  enhancements — the operator's own tooling, not bundled with this distro.
-  Without them the dockmaster runs in a real, plainer mode (plain `gh` for
-  GitHub, operator-run review with no lavish artifact); a green doctor verdict
-  now needs only `git`+`jq`, matching what the README promises. Added a numbered
-  "Getting started" first-run path, a supported-platforms note (macOS/Linux,
-  bash 3.2+), and replaced the stale hand-maintained `bin/` list with a pointer
-  to `bin/dm help`.
+  required for anything; `gh` **and** `gh-axi` required for the PR flow (reads go
+  through `gh api`, but every GitHub mutation calls `gh-axi` and has no plain-`gh`
+  fallback — #104); `lavish-axi`/`chrome-devtools-axi` genuinely optional and
+  degrading cleanly. A green doctor verdict means local-only mode works, not that
+  the PR flow is available. The README documents the resulting limitation plainly:
+  `gh-axi` has no public install path, so a fresh clone gets local-only mode.
+  Added a numbered "Getting started" first-run path, a supported-platforms note
+  (macOS/Linux, bash 3.2+), and replaced the stale hand-maintained `bin/` list
+  with a pointer to `bin/dm help`.
 - **Concise communication is now contract.** Reporting to the operator, and PR
   descriptions/commits/review comments, sacrifice grammar for concision.
 - **Memory recall is bounded and curatable.** Briefs inject a soft-capped slice

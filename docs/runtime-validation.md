@@ -6,11 +6,22 @@ auth/session output existed only while each assertion ran and was then deleted.
 The mode-0700 evidence directory is removed on success or failure by default;
 `--keep-evidence` retains only sanitized statuses plus version/help output.
 
+> **Read this as a dated snapshot, not a standing guarantee.** Every absolute
+> number below (test counts, byte sizes, CLI versions, token counts) is what one
+> run measured on the date above, and nothing in CI pins this document to the
+> code — so these figures drift as the repo moves and are expected to be stale.
+> The before/after byte table is a record of one change's impact and is
+> deliberately *not* refreshed; rewriting "after" would destroy the delta it
+> documents. What *is* continuously enforced lives in the tests themselves: the
+> 32,768 B shared-instruction cap, the per-file Claude SHA-256 pins, the exact
+> 13/9/6 capability split, and the 18-skill parity checks all fail CI on drift.
+> To see current numbers, run the commands rather than trusting this table.
+
 ## Automated evidence
 
 | command | result |
 | --- | --- |
-| `bash tests/smoke.sh` | 501 passed, 0 failed; includes wrapper/alias guard probes, fail-closed supervisor status, ordered fleet ownership, runner-command mutation, recursive runtime inventory, and all prior lifecycle/safety regressions |
+| `bash tests/smoke.sh` | passed, 0 failed; includes wrapper/alias guard probes, fail-closed supervisor status, ordered fleet ownership, runner-command mutation, recursive runtime inventory, and all prior lifecycle/safety regressions |
 | `node tests/check-runtime-parity.js` | 18 exact skills/triggers; 28 capability-specific assertions classified as 13 direct, 9 contract, and 6 manual; vocabulary separation, durable identities, and executable rigorous fallbacks |
 | `node tests/check-pr-runner.js` | table-driven fast/default/rigorous order, capacity-bounded review/voter waves, full porcelain checks around every mutation/gate, every failure, skips, malformed PR, and unavailable-host paths |
 | `node tests/check-gate-drift.js` | all three built-in gate sequences match shipped configs |
