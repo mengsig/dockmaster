@@ -38,7 +38,7 @@ const CAPABILITY_ASSERTIONS = {
   'deterministic-workflow': ['workflows/pr-pipeline.js', /verify-findings[\s\S]*security/],
   'merge-safety': ['bin/dm-lib.sh', /dm_merge_gate/],
   'right-sizing': ['.agents/skills/task-lifecycle/SKILL.md', /at most three[\s\S]*reserving three/],
-  'plugins-and-fallbacks': ['README.md', /degrades to a real, plainer mode/i],
+  'plugins-and-fallbacks': ['README.md', /no plain-`gh` fallback/i],
   'project-safety-config': ['.codex/config.toml', /dm-command-guard\.sh/],
 }
 

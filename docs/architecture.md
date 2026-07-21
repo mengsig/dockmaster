@@ -81,8 +81,9 @@ The vocabulary below is framed as a working dockyard:
 ## Memory model (the centerpiece)
 
 Knowledge is routed to its **most specific durable owner**. Per-repo memory is **plain markdown** driven by `bin/dm-memory.sh` — no
-bespoke store, no query engine, nothing to install. It is a hybrid of two stores
-so contributor knowledge travels while dockmaster-private context stays local.
+bespoke store, no query engine, nothing to install. It is three stores, split by
+who may see a fact: contributor knowledge travels with the repo, private context
+stays local but reaches crewmates, and dockmaster-only context reaches neither.
 
 **Per-repo SHARED (committed `.dm-knowledge/<task-id>.md` note files):**
 - Contributor-relevant facts: build/test commands, invariants, conventions,
@@ -105,10 +106,18 @@ so contributor knowledge travels while dockmaster-private context stays local.
   touches the clone, so it stays pristine.
 
 **Per-repo PRIVATE (`repos/<repo>/.dm/notes.md`):**
-- Dockmaster-only context that must not enter the user's project history: fleet
-  strategy, sensitive routing, per-repo operator preferences.
+- Context that must not enter the user's project history: fleet strategy,
+  routing, per-repo operator preferences.
 - Git-excluded via the clone's `.git/info/exclude`, so it never shows as untracked
   or gets committed. Written with `bin/dm-memory.sh remember <repo> --private`.
+- **It IS relayed into every crewmate brief** for the worker's awareness. Private
+  means "never committed", not "never seen by a crewmate" — anything a worker
+  must not see belongs in the dockmaster-only store below.
+
+**Per-repo DOCKMASTER-ONLY (`repos/<repo>/.dm/private.md`):**
+- Git-excluded *and* never relayed: `recall` shows it to the dockmaster, but the
+  brief-facing `recall --crew` excludes it. Written with `remember <repo>
+  --dockmaster-only`. This is the only store a crewmate never reads.
 
 Before working, the dockmaster and every crewmate recall with
 `bin/dm-memory.sh recall <repo> [query]` instead of loading memory wholesale — and
@@ -219,6 +228,7 @@ bin/                     portable helper scripts (repo/worktree/pr/backlog/merge
 .claude/skills/          Claude-native workflow adapters
 .agents/skills/          Codex-native workflow adapters
 .codex/                  trusted-project Codex config/rules (including hooks)
+.dm-knowledge/           this repo's own committed shared-memory notes
 workflows/               optional Workflow runner for the PR pipeline (opt-in)
 config/                  pipeline defaults + per-repo overrides (committed defaults)
 tests/                   lifecycle, parity, runtime, and performance checks
@@ -232,8 +242,9 @@ repos/                   managed clones, gitignored, READ-ONLY to the dockmaster
 data/                    per-task artifacts (scout reports), gitignored
 ```
 
-This distro is itself a managed repo: its own per-repo memory is the
-`dm:knowledge` section of this `AGENTS.md`.
+This distro is itself a managed repo: its own shared memory is the committed
+`.dm-knowledge/` note files plus the legacy `dm:knowledge` section still carried
+in this `AGENTS.md` (recall unions both, so nothing is stranded mid-migration).
 
 `state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
 tracked surface (`AGENTS.md`, `bin/`, both runtime adapters, `.codex/`,

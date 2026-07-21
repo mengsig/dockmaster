@@ -20,8 +20,13 @@ covers the local-only lifecycle; the PR path has no automated coverage. Run it
 before every change to `bin/`, and add an assertion when you change a script's
 behavior.
 
-CI (`.github/workflows/ci.yml`) runs the smoke/parity suites plus bash/JS syntax and
-bash-3.2 lint checks on `ubuntu-latest` and `macos-latest` on every push and PR.
+CI (`.github/workflows/ci.yml`) runs on `ubuntu-latest` and `macos-latest` for
+every pull request and every push to `main` (a push to a feature branch with no
+open PR does not trigger it). Beyond the four commands above it also runs
+`tests/check-gate-drift.js`, `tests/check-pr-runner.js`, a deterministic
+waiter-child check, and `tests/runtime-codex-offline.sh` (which installs the
+pinned Codex CLI), plus bash/JS syntax and bash-3.2 lint checks. A separate
+`node14-compat` job re-runs the JS checks under Node 14 on ubuntu only.
 
 ## Portability
 

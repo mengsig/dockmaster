@@ -6,6 +6,17 @@ auth/session output existed only while each assertion ran and was then deleted.
 The mode-0700 evidence directory is removed on success or failure by default;
 `--keep-evidence` retains only sanitized statuses plus version/help output.
 
+> **Read this as a dated snapshot, not a standing guarantee.** Every absolute
+> number below (test counts, byte sizes, CLI versions, token counts) is what one
+> run measured on the date above, and nothing in CI pins this document to the
+> code — so these figures drift as the repo moves and are expected to be stale.
+> The before/after byte table is a record of one change's impact and is
+> deliberately *not* refreshed; rewriting "after" would destroy the delta it
+> documents. What *is* continuously enforced lives in the tests themselves: the
+> 32,768 B shared-instruction cap, the per-file Claude SHA-256 pins, the exact
+> 13/9/6 capability split, and the 18-skill parity checks all fail CI on drift.
+> To see current numbers, run the commands rather than trusting this table.
+
 ## Automated evidence
 
 | command | result |

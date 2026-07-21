@@ -15,8 +15,8 @@
 #   dm-doctor.sh [check] [--runtime auto|claude|codex|both]
 #
 # Exit 0 = required tools present. Exit 1 = a required tool is missing. A missing
-# PR-flow or optional tool warns and degrades a feature, but never fails the
-# check — so a green verdict means exactly what the README promises.
+# PR-flow or optional tool warns but never fails the check: a green verdict means
+# local-only mode works, NOT that the PR flow is available (see the PR-FLOW tier).
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -24,30 +24,31 @@ set -euo pipefail
 # Dependency contract, as (name, purpose) pairs, in three tiers:
 #   REQUIRED  — called directly by the toolbelt; without them nothing runs.
 #   PR-FLOW   — needed only for the PR delivery path; local-only mode works
-#               without them. gh (or the gh-axi wrapper) is the one tool here.
-#   OPTIONAL  — the operator's own axi tooling, NOT bundled with this distro.
-#               Absent, the dockmaster degrades to a real, plainer mode (plain
-#               gh for GitHub, operator-run review with no lavish artifact).
+#               without them. BOTH gh and gh-axi belong here: reads go through
+#               `gh api`, but every GitHub mutation calls gh-axi and there is
+#               no plain-gh fallback (#104).
+#   OPTIONAL  — genuinely degrade cleanly when absent.
 # Only REQUIRED tools gate the verdict; the other two tiers only warn.
 REQUIRED_TOOLS=(
   "git" "clone, worktree, and all git operations"
   "jq"  "registry and backlog JSON (single-owner parsers)"
 )
 PRFLOW_TOOLS=(
-  "gh"  "GitHub auth + API for the PR flow (or gh-axi); local-only mode needs neither"
+  "gh"     "GitHub auth + API reads for the PR flow; local-only mode needs neither"
+  "gh-axi" "GitHub mutations: pr create, merge, repo create (no plain-gh fallback)"
 )
 OPTIONAL_TOOLS=(
-  "gh-axi"              "ergonomic GitHub wrapper (operator tooling, not bundled)"
-  "lavish-axi"          "reviewable approval artifact (operator tooling, not bundled)"
-  "chrome-devtools-axi" "browser automation for web tasks (operator tooling, not bundled)"
+  "lavish-axi"          "reviewable approval artifact; without it, review the change directly"
+  "chrome-devtools-axi" "browser automation for web tasks"
 )
 
 tool_hint() {
   case "$1" in
     git|jq)  printf 'install with your package manager (e.g. apt install %s / brew install %s)' "$1" "$1" ;;
     gh)      printf 'https://cli.github.com' ;;
-    gh-axi|lavish-axi|chrome-devtools-axi)
-             printf 'operator tooling, not bundled — without it dockmaster uses plain gh and operator-run review' ;;
+    gh-axi)  printf 'maintainer tooling with no public install path — without it the PR flow is unavailable; use local-only mode (#104)' ;;
+    lavish-axi|chrome-devtools-axi)
+             printf 'operator tooling, not bundled — the feature it gates is skipped, nothing else changes' ;;
     *)       printf 'install %s and ensure it is on PATH' "$1" ;;
   esac
 }
