@@ -77,6 +77,213 @@ check "guard permits quoted spaced-path read-only Git" 'b dm-command-guard.sh ch
 check "guard ignores harmless Git words in argv text" 'b dm-command-guard.sh check "echo git reset --hard" >/dev/null && b dm-command-guard.sh check "printf %s \"git restore file\"" >/dev/null && b dm-command-guard.sh check "bash -c \"echo git clean -fd\"" >/dev/null'
 check "guard ignores uninvoked harmless alias text" 'b dm-command-guard.sh check "git -c alias.cleanup=\"!printf harmless\" status" >/dev/null'
 
+# --- guard is an allowlist, and wrappers do not bypass it (#105/#121) --------
+# Every form in the "blocks" checks below was ALLOWED before the inversion; the
+# "permits" checks pin what is deliberately left through so a later reader can
+# tell a decision from an oversight. Names the forms, unlike the old block.
+all_blocked() {
+  local c
+  for c in "$@"; do
+    if "$ROOT/bin/dm-command-guard.sh" check "$c" >/dev/null 2>&1; then
+      printf '       still allowed: %s\n' "$c" >&2; return 1
+    fi
+  done
+}
+all_allowed() {
+  local c
+  for c in "$@"; do
+    if ! "$ROOT/bin/dm-command-guard.sh" check "$c" >/dev/null 2>&1; then
+      printf '       wrongly blocked: %s\n' "$c" >&2; return 1
+    fi
+  done
+}
+ALIAS_SHADOW='git -c alias.status="!git reset --hard" status'
+CONFIG_ALIAS='git config alias.status "!git reset --hard"'
+check "guard blocks force/delete/prune push (#105)" \
+  'all_blocked "git push --force origin main" "git push -f origin main" "git push origin +main" "git push origin --delete main" "git push -d origin x" "git push --mirror origin" "git push --prune origin"'
+check "guard blocks history and ref destruction" \
+  'all_blocked "git stash" "git branch -D feature" "git branch -M main" "git tag -d v1" "git update-ref -d refs/heads/main" "git reflog expire --expire=now --all" "git gc --prune=now" "git filter-branch --force" "git worktree remove --force /tmp/x" "git rm -rf ." "git sparse-checkout set x" "git submodule deinit --force x"'
+check "guard fails closed on unknown and future subcommands" \
+  'all_blocked "git nosuchsubcommand --wat" "git remote set-url origin http://evil"'
+check "guard blocks an alias shadowing a permitted subcommand" \
+  'all_blocked "$ALIAS_SHADOW" "$CONFIG_ALIAS"'
+check "guard blocks destructive Git behind every wrapper (#121)" \
+  'all_blocked "timeout 5 git reset --hard" "nohup git reset --hard" "nice git reset --hard" "nice -n 5 git push --force" "xargs git reset --hard" "find . -exec git reset --hard {} +" "stdbuf -o0 git clean -fd" "setsid git reset --hard" "parallel git push --force" "env timeout 5 git reset --hard" "./wrapper.sh git reset --hard"'
+check "guard permits the crew workflow it must not break" \
+  'all_allowed "git status" "git add ." "git commit -m msg" "git push origin main" "git fetch origin" "git rebase origin/main" "git merge main" "git branch feature" "git branch -m old new" "git worktree add /tmp/x" "git switch main" "git switch -c feat" "timeout 60 git status" "nice -n 5 git log"'
+check "guard permits lease-pinned force push BY DECISION (#89)" \
+  'all_allowed "git push --force-with-lease origin feature" "git push --force-if-includes origin feature"'
+check "guard permits git tokens as text for tools that cannot execute them" \
+  'all_allowed "grep -rn git ." "echo git reset --hard"'
+
+# The allowlist is pre-populated from git's real subcommand list, so ordinary
+# work does not discover each refusal as an incident. Both directions are
+# pinned: the safe form stays permitted, the destructive form stays refused.
+check "guard permits plainly non-destructive subcommands" \
+  'all_allowed "git reflog" "git reflog show HEAD" "git stash list" "git remote -v" "git remote show origin" "git submodule status" "git notes show" "git bisect start" "git archive HEAD" "git fsck" "git show-ref" "git bundle create /tmp/b HEAD" "git worktree list" "git worktree prune" "git sparse-checkout list" "git config --get user.email" "git blame f" "git var GIT_AUTHOR_IDENT" "git difftool" "git mergetool"'
+check "guard permits the safe form where a subcommand splits" \
+  'all_allowed "git remote add up http://x" "git submodule update --init" "git notes add -m x" "git rm --cached f" "git rm -r --cached dir" "git branch -m old new"'
+check "guard refuses the destructive form of the same subcommand" \
+  'all_blocked "git reflog expire --all" "git reflog delete HEAD@{0}" "git stash" "git stash pop" "git stash drop" "git remote remove origin" "git remote set-url origin http://evil" "git submodule deinit --force x" "git notes prune" "git notes remove" "git bisect reset" "git rm -rf ." "git rm -r dir" "git sparse-checkout set x"'
+check "guard fails closed on an unknown verb of a permitted subcommand" \
+  'all_blocked "git remote nosuchverb" "git notes nosuchverb" "git bisect nosuchverb"'
+
+# A subcommand that RUNS a command it is handed would smuggle any refused form
+# past the allowlist as an opaque string. Same class as an alias shadowing.
+GIT_EXEC_PAGER="git -c core.pager=\"git reset --hard\" log"
+GIT_EXEC_EDITOR="GIT_EDITOR=\"git reset --hard\" git rebase -i"
+GIT_EXEC_REBASE="git rebase -x \"git reset --hard\" main"
+check "guard refuses Git forms that execute a command they are handed" \
+  'all_blocked "git bisect run git reset --hard" "git submodule foreach git reset --hard" "$GIT_EXEC_REBASE" "git rebase --exec x main" "git difftool -x x"'
+check "guard refuses config keys whose value Git executes" \
+  'all_blocked "$GIT_EXEC_PAGER" "git -c core.editor=evil rebase -i" "git -c diff.external=evil diff" "git -c credential.helper=evil fetch"'
+check "guard refuses Git environment variables whose value Git executes" \
+  'all_blocked "$GIT_EXEC_EDITOR" "GIT_SSH_COMMAND=evil git fetch" "GIT_EXTERNAL_DIFF=evil git diff"'
+
+# Merge-gate bypasses. Each reached a permit by matching a rule the guard
+# modelled too narrowly; several were verified against a real remote.
+# `&` inside a redirection used to END the segment, stranding every later flag
+# in a phantom segment whose executable was `1`.
+check "guard keeps a redirection in the segment instead of splitting on &" \
+  'all_blocked "git push origin main 2>&1 --force" "git branch feature 2>&1 -D other" "git rm . 2>&1 -rf" "git push origin HEAD:topic 2>&1 --force" "git push origin main >log 2>&1 --force" "git push origin main &>log --force" "git worktree remove /x 2>&1 --force" "git tag v1 2>&1 -d"'
+check "guard still segments on && and background &" \
+  'all_blocked "git status && git reset --hard" "git status & git reset --hard" "git status; git clean -fd" "git status | git reset --hard"'
+check "guard permits ordinary redirection" \
+  'all_allowed "git commit -m x 2>&1" "git log --oneline > out.txt" "git status 2>/dev/null" "git diff >/dev/null 2>&1"'
+# git accepts --opt=value and --opt; testing only one spelling left the other open.
+check "guard matches =-joined option values, not just detached ones" \
+  'all_blocked "git rebase --exec=evil main" "git difftool --extcmd=evil" "git push --force=x origin main"'
+check "guard still permits the lease form against the =-joined matcher" \
+  'all_allowed "git push --force-with-lease=main origin main" "git push --force-with-lease origin f"'
+# Git config names are case-insensitive; the exact-name list was neither.
+GUARD_CFG_CASE="git -c core.PAGER=evil log"
+GUARD_CFG_SUBUP="git -c submodule.x.update=\"!evil\" submodule update"
+check "guard lowercases config keys and matches the executing ones by pattern" \
+  'all_blocked "$GUARD_CFG_CASE" "git -c pager.log=evil log" "git -c core.askPass=evil fetch" "git -c gpg.program=evil log" "git -c core.alternateRefsCommand=evil log" "git -c trailer.x.command=evil commit" "git -c merge.x.driver=evil merge" "git -c diff.x.textconv=evil diff" "git -c browser.x.cmd=evil help" "$GUARD_CFG_SUBUP" "git -c init.templateDir=/evil init" "git -c protocol.ext.allow=always fetch"'
+check "guard refuses git config WRITING the keys -c may not set" \
+  'all_blocked "git config core.hooksPath /evil" "git config core.pager evil" "git config --global credential.helper evil"'
+check "guard refuses the env channels that carry any config key" \
+  'all_blocked "GIT_CONFIG_PARAMETERS=x git log" "GIT_ASKPASS=evil git fetch" "GIT_EXEC_PATH=/evil git status" "GIT_CONFIG_GLOBAL=/evil git log"'
+# A refspec destroys with no flag at all: `+ref` forces, `:ref` deletes.
+check "guard refuses a deleting refspec, not only a forcing one" \
+  'all_blocked "git push origin :branch" "git push origin +main" "git push origin :refs/heads/main"'
+# A dynamic subcommand and executable were refused; a dynamic FLAG was not.
+GUARD_DYN_FLAG="git push \$(printf -- --force) origin main"
+check "guard refuses an unreadable argument to a flag-conditional subcommand" \
+  'all_blocked "$GUARD_DYN_FLAG" "git push \$FLAG origin main" "git branch \$OPT feature"'
+check "guard still permits unreadable arguments where no flag changes the verdict" \
+  'all_allowed "git commit -m \"\$MSG\"" "git log --grep \"\$PATTERN\"" "git add \"\$FILE\""'
+# An unlisted wrapper is normally handed a quoted command string, not a bare token.
+GUARD_PARALLEL="parallel \"git push --force origin main\""
+check "guard refuses a quoted git command string, not just a bare git token" \
+  'all_blocked "$GUARD_PARALLEL" "flock /tmp/l \"git reset --hard\"" "foobarwrapper git push --force origin main"'
+check "guard refuses xargs-fed git, whose real argv comes from stdin" \
+  'all_blocked "echo --force | xargs git push origin main" "xargs git status" "xargs -n1 git reset --hard"'
+# Skipping an option without its value handed the value back as the verb.
+check "guard reads a verb past an option that consumes its value" \
+  'all_blocked "git notes --ref show remove HEAD" "git notes --ref=x remove HEAD" "git bisect --term-old start run evil"'
+check "guard permits a verb behind an option it can classify" \
+  'all_allowed "git notes --ref=x show" "git notes --ref x show" "git remote -v" "git submodule --quiet status"'
+
+# A comment ends at end of LINE. The lexer ended it at end of INPUT, so a bare
+# `#` discarded every later newline-separated command, unguarded.
+GUARD_HASH_LEAD='#
+git push --force origin main'
+GUARD_HASH_TRAIL='true #
+git reset --hard HEAD~5'
+GUARD_HASH_INLINE='git status # note
+git clean -fd'
+check "guard resumes at the next line instead of ending at a comment" \
+  'all_blocked "$GUARD_HASH_LEAD" "$GUARD_HASH_TRAIL" "$GUARD_HASH_INLINE"'
+check "guard still permits a comment and a literal hash" \
+  'all_allowed "git status # just a note" "echo a#b" "git commit -m \"fix #121\""'
+# Redirecting the git process is refused in BOTH spellings: guarding only the
+# detached one left `--exec-path=DIR`, the twin of the refused GIT_EXEC_PATH.
+check "guard refuses process redirection in joined and detached spellings" \
+  'all_blocked "git --exec-path=/tmp/evil status" "git --exec-path /tmp/evil status" "git --exec-path=/tmp/evil mergetool" "git --git-dir=/tmp/x status" "git --git-dir /tmp/x status" "git --work-tree=/tmp/x status"'
+check "guard fails closed on an unknown pre-subcommand option" \
+  'all_blocked "git --nosuchfutureopt=x status" "git --nosuchfutureopt x status"'
+check "guard still permits the pre-subcommand options it can classify" \
+  'all_allowed "git --no-pager -C /tmp status" "git --exec-path" "git --version" "git -c user.name=x commit -m y"'
+# PATH/LD_PRELOAD pick which binary runs as git and what loads into it -- a more
+# direct redirect than GIT_TEMPLATE_DIR, which was already refused.
+check "guard refuses env prefixes that redirect the git process" \
+  'all_blocked "PATH=/tmp/evil git status" "LD_PRELOAD=/tmp/e.so git status" "LD_AUDIT=/e.so git status" "DYLD_INSERT_LIBRARIES=/e git status" "env PATH=/evil git status" "GIT_DIR=/tmp/x git status" "GIT_INDEX_FILE=/tmp/x git status" "GIT_ALTERNATE_OBJECT_DIRECTORIES=/x git log"'
+# Over-blocking is what gets a guard switched off. A quoted string is classified,
+# not refused for starting with the word "git".
+GUARD_PR_BODY='bin/dm-pr.sh open 121 --title "t" --body "git config write path now routed"'
+check "guard permits prose that merely starts with the word git" \
+  'all_allowed "$GUARD_PR_BODY" "gh pr create --body \"git log shows the bug\"" "git remote --help" "git worktree --help" "git push --help"'
+check "guard still refuses a quoted string that IS a destructive command" \
+  'all_blocked "parallel \"git push --force origin main\"" "flock /tmp/l \"git reset --hard\"" "mywrap \"git status && git push --force origin main\""'
+# Git falls back to the PLAIN-spelled env vars, so guarding only the GIT_*
+# spelling left the same execution open. All four verified against git 2.54.
+check "guard refuses the unprefixed env fallbacks Git executes" \
+  'all_blocked "PAGER=/tmp/evil git log" "EDITOR=/tmp/evil git commit -a" "VISUAL=/tmp/evil git commit -a" "SSH_ASKPASS=/tmp/evil git fetch" "MANPAGER=/tmp/evil git help git" "GIT_MAN_VIEWER=/tmp/evil git help git" "env PAGER=/tmp/evil git log"'
+# The re-entry check tested only the literal first word, so anything sh skips
+# before the command -- whitespace, an env assignment, a wrapper -- walked past.
+TAB=$'\t'
+GUARD_REENTER_TAB="parallel \"git${TAB}push${TAB}--force origin main\""
+GUARD_REENTER_SH="parallel \"sh -c 'git push --force'\""
+check "guard re-enters a quoted command past whitespace, wrappers and shells" \
+  'all_blocked "parallel \" git push --force origin main\"" "$GUARD_REENTER_TAB" "$GUARD_REENTER_SH" "parallel \"env git push --force\"" "parallel \"timeout 5 git push --force\"" "parallel \"VAR=x git push --force\"" "parallel \"  nohup nice git reset --hard\""'
+check "guard still permits prose that merely mentions git mid-sentence" \
+  'all_allowed "gh pr create --body \"the git repo is broken\"" "gh pr create --body \"git log shows the bug\""'
+# The merge-tool family runs `<tool>.path` as an executable, and include.path
+# injects a whole config file. `*.cmd` was covered; `*.path` was not.
+GUARD_TOOLPATH="git -c difftool.vimdiff.path=/tmp/evil difftool --tool=vimdiff -y HEAD~1 HEAD"
+GUARD_TOOLPATH_ENV="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=difftool.vimdiff.path GIT_CONFIG_VALUE_0=/tmp/evil git difftool"
+check "guard refuses config keys whose .path Git executes" \
+  'all_blocked "$GUARD_TOOLPATH" "$GUARD_TOOLPATH_ENV" "git -c mergetool.x.path=/tmp/evil mergetool" "git -c browser.x.path=/tmp/evil help" "git -c man.x.path=/tmp/evil help" "git config difftool.vimdiff.path /tmp/evil" "git -c DIFFTOOL.X.PATH=/evil difftool" "git -c include.path=/tmp/evil.cfg log"'
+# is_command_runner gates re-entry ONLY. These must never join is_command_wrapper:
+# unwrapping them would classify git on an argv the guard cannot see.
+check "guard re-enters a quoted string led by a non-unwrappable command runner" \
+  'all_blocked "parallel \"exec git push --force origin main\"" "parallel \"time git push --force origin main\"" "parallel \"xargs git push --force origin main\"" "parallel \"watch git push --force origin main\"" "parallel \"script git push --force origin main\"" "parallel \"unbuffer git push --force origin main\"" "parallel \"strace git push --force origin main\"" "parallel \"proot git push --force origin main\"" "parallel \"flock git push --force origin main\""'
+check "guard keeps unwrapping precision for the wrappers it does model" \
+  'all_allowed "timeout 5 git status" "nice -n 5 git log" "env git status" "stdbuf -o0 git status"'
+
+# --- dm_lock: a leaked reclaim marker must not wedge recovery (#122) ---------
+# Before the fix the marker was unstamped and untrapped, so ONE reclaimer killed
+# mid-reclaim made every later dead-PID lock hard-fail at ~30s, forever.
+LOCKFIX="$TMP/lockfix"; mkdir -p "$LOCKFIX"
+# Stage a lock held by a dead PID, plus a reclaim marker owned by <pid> ("" = none).
+stage_wedged_lock() {
+  local d="$LOCKFIX/$1" owner="$2"
+  rm -rf "$d"; mkdir -p "$d"; : > "$d/lk.meta"
+  mkdir "$d/lk.meta.lock"; printf '999999\n' > "$d/lk.meta.lock/pid"
+  mkdir "$d/lk.meta.lock.reclaim"
+  [ -z "$owner" ] || printf '%s\n' "$owner" > "$d/lk.meta.lock.reclaim/pid"
+  printf '%s\n' "$d"
+}
+# Exercise the marker rule directly so a live-owner case costs no 30s spin.
+reclaim_rc() { # <marker-dir> <stalled-spins> -> "rc=<n> marker=<present|cleared>"
+  local rc=0
+  bash -c '. "$1/bin/dm-lib.sh"; dm_lock_acquire_reclaim "$2" "$3"' _ "$ROOT" "$1" "$2" >/dev/null 2>&1 || rc=$?
+  printf 'rc=%s marker=%s\n' "$rc" "$([ -d "$1" ] && echo present || echo cleared)"
+}
+WEDGE_DEAD="$(stage_wedged_lock dead 999998)"
+WEDGE_LIVE="$(stage_wedged_lock live $$)"
+WEDGE_BARE="$(stage_wedged_lock bare '')"
+check "marker owned by a dead reclaimer is cleared" \
+  '[ "$(reclaim_rc "$WEDGE_DEAD/lk.meta.lock.reclaim" 0)" = "rc=1 marker=cleared" ]'
+check "marker owned by a LIVE reclaimer is never stolen" \
+  '[ "$(reclaim_rc "$WEDGE_LIVE/lk.meta.lock.reclaim" 999)" = "rc=1 marker=present" ]'
+check "unstamped marker is kept while a reclaim could still be in flight" \
+  '[ "$(reclaim_rc "$WEDGE_BARE/lk.meta.lock.reclaim" 0)" = "rc=1 marker=present" ]'
+check "unstamped marker is cleared once it has blocked far past any real reclaim" \
+  '[ "$(reclaim_rc "$WEDGE_BARE/lk.meta.lock.reclaim" 50)" = "rc=1 marker=cleared" ]'
+# End to end: the exact #122 reproduction must now heal instead of hard-failing.
+WEDGE_E2E="$(stage_wedged_lock e2e '')"
+LOCK_E2E="$(bash -c '. "$1/bin/dm-lib.sh"; dm_lock "$2" >/dev/null 2>&1 && { printf ACQUIRED; dm_unlock "$2"; }' _ "$ROOT" "$WEDGE_E2E/lk.meta" 2>/dev/null || true)"
+check "a leaked reclaim marker no longer wedges dead-lock recovery" '[ "$LOCK_E2E" = ACQUIRED ]'
+# A live-owned marker is correctly never stolen, so this reaches the timeout.
+# Stubbing sleep collapses the 300 spins to ~0s without weakening the path.
+LOCK_MSG="$(bash -c 'sleep() { :; }; . "$1/bin/dm-lib.sh"; dm_lock "$2"' _ "$ROOT" "$WEDGE_LIVE/lk.meta" 2>&1 || true)"
+check "the timeout message names the reclaim marker, not just the lock" \
+  "grep -q \"lk.meta.lock.reclaim'\" <<<\"\$LOCK_MSG\" && grep -q \"lk.meta.lock' \" <<<\"\$LOCK_MSG\""
+check "dm-lib documents no knob it does not implement" \
+  '! grep -q "DM_LOCK_STALE_SECS" "$ROOT/bin/dm-lib.sh"'
+
 # --- managed-worktree guard wiring (#83) -------------------------------------
 # The shipped Codex PreToolUse hook must resolve dm-command-guard.sh from the
 # distro root even when cwd is a managed clone/worktree, whose git-toplevel has

@@ -31,6 +31,22 @@ prefix_rule(
 )
 
 prefix_rule(
+    pattern = ["git", "push", ["-f", "--force", "--mirror", "--delete", "-d", "--prune"]],
+    decision = "forbidden",
+    justification = "Force/delete push destroys landed history for every clone; use --force-with-lease or let dm-pr.sh land the change.",
+    match = ["git push --force", "git push -f origin main", "git push --delete origin feature"],
+    not_match = ["git push origin main", "git push --force-with-lease origin feature"],
+)
+
+prefix_rule(
+    pattern = ["git", "stash"],
+    decision = "forbidden",
+    justification = "Stashing hides unlanded work from every status the dockmaster reconciles; commit it on the task branch instead.",
+    match = ["git stash", "git stash push -u", "git stash drop"],
+    not_match = ["git status", "git diff"],
+)
+
+prefix_rule(
     pattern = ["git", "switch", ["-f", "--force", "--discard-changes", "-C", "--force-create", "--orphan"]],
     decision = "forbidden",
     justification = "Do not switch branches by discarding edits; preserve the current worktree.",

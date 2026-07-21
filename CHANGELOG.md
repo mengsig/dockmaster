@@ -34,6 +34,44 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The command guard is an allowlist, and its parsers agree with each other**
+  (#121). A Git subcommand is now refused unless it is named permitted, so
+  unknown and future subcommands fail closed — the old denylist had silently
+  permitted force-push, stash, `reflog expire`, `gc --prune`, `filter-branch`,
+  `branch -D`, `update-ref -d`, and anything behind `timeout`/`nohup`/`xargs`.
+  The allowlist is walked against git's real subcommand list so ordinary work
+  does not discover each refusal as an incident. Closed on top of that: `&`
+  inside a redirection no longer ends the segment and strands later flags;
+  `--opt=value` is matched alongside the detached spelling (`--force-with-lease`
+  stays permitted); config keys are matched case-insensitively and by pattern;
+  a comment now ends at end of LINE rather than end of INPUT, which had
+  discarded every later newline-separated command unguarded. Process
+  redirection is refused in both spellings — `--exec-path`, `--git-dir`,
+  `--work-tree` alongside `GIT_EXEC_PATH`, `GIT_DIR`, `GIT_WORK_TREE`, `PATH`,
+  `LD_PRELOAD`, `DYLD_*` — and an unrecognized pre-subcommand option fails
+  closed. `-C` is documented as a deliberate exception to that rule, not as
+  coverage — it reaches another repo's config and hooks exactly as `--git-dir`
+  does, but the toolbelt depends on it. The same both-spellings rule applies to
+  the environment: Git falls back to plain `PAGER`, `EDITOR`, `VISUAL` and
+  `SSH_ASKPASS` when the `GIT_*` twin is unset, and all four were verified
+  executing a payload against git 2.54. Over-blocking fixed in the same pass:
+  `git <sub> --help` is permitted, and a quoted string is classified by
+  re-entering the guard rather than refused for starting with the word "git", so
+  a PR body reading `--body "git log shows the bug"` is no longer collateral —
+  while ` git push --force`, `env git push --force` and `timeout 5 git push
+  --force` inside such a string are still refused, since re-entry runs the
+  normal segmentation and wrapper handling instead of testing the first word.
+  Config keys whose `.path` Git executes (the `difftool`/`mergetool`/`browser`/
+  `man` tool family, plus `include.path`) are refused alongside `*.cmd`. The
+  re-entry trigger consults a second table, `is_command_runner`, kept separate
+  from the unwrapping table because the two fail in opposite directions —
+  widening the re-entry list is safety-neutral, while widening the unwrap list
+  would make the guard trust an argv it cannot see, which is exactly why `xargs`
+  stays out of it. The execute-a-handed-string class is narrowed, NOT closed,
+  and the guard says so rather than implying a boundary.
+- **A leaked reclaim marker no longer wedges `dm_lock` recovery** (#122). The
+  marker was unstamped and untrapped, so one reclaimer killed mid-reclaim made
+  every later dead-PID lock hard-fail at ~30s, permanently.
 - **The PR path no longer requires the maintainer's private `gh-axi` wrapper**
   (#104). `dm-pr.sh open`, `dm-pr.sh merge`, and `dm-repo.sh create` hard-failed
   without it, while the docs promised a plain-`gh` fallback that did not exist.
