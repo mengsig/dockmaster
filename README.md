@@ -220,29 +220,51 @@ explicit `DM_HOME` you set. You choose the root; nothing inside the archive can
 redirect where its contents go.
 
 ```sh
+bin/dm-state.sh import --dry-run ~/backups/dockmaster-20260721.tar.gz  # plan only
 bin/dm-state.sh import ~/backups/dockmaster-20260721.tar.gz
 ```
 
 Import prints what it could not carry and how to re-establish it, then run
 `bin/dm-doctor.sh`. What you should know before relying on it:
 
-- **The archive is a secret.** It contains the dockmaster-only memory store
-  (`repos/<repo>/.dm/private.md`), operator preferences, and — with
-  `--with-artifacts` — briefs and scout reports. Exporting moves that past the
-  machine boundary it was written under. It is written mode 0600; store it
-  encrypted, and do not commit it to a repo without reviewing the contents.
+- **The archive is operator-private — do not share it.** It contains the
+  dockmaster-only memory store (`repos/<repo>/.dm/private.md`), operator
+  preferences, and — with `--with-artifacts` — briefs and scout reports. It also
+  discloses the exporting machine's directory layout: the manifest records
+  `source_home` and task records carry absolute worktree paths, both as absolute
+  paths. That is deliberate — a restore needs them — but it means the archive is
+  a backup for *you*, not an artifact to hand to anyone or attach to an issue.
+  Exporting moves all of that past the machine boundary it was written under. It
+  is written mode 0600; store it encrypted, and never commit it to a repo.
 - **Managed clones and live worktrees are not in it.** Clones are re-clonable
   from the registry's remotes (the import prints the command per repo). Work
   committed in a worktree but never landed is single-copy and is *not* carried —
   push it, or land it, if you want it to survive. Your runtime's native
   `memory/` also lives outside `$DM_HOME` and is not carried; back it up with the
   rest of your runtime configuration.
-- **Export is read-only** and never mutates `state/`. **Import never deletes**
-  files the archive does not carry, and refuses a populated state root unless you
-  pass `--force`, after naming every file it would replace.
+- **Export is read-only** and never mutates `state/`. It also **verifies the
+  archive it just wrote** before reporting success, and deletes it if it fails —
+  a backup tool must never call an archive good that it would itself refuse to
+  restore.
+- **Symlinks are skipped, not followed.** `verify` refuses a non-regular member,
+  so `--with-artifacts` skips any symlink under `data/` (npm and playwright
+  leave them in `node_modules/.bin/`) and names each one in the export summary.
+  They are not dereferenced: following one would pull unrelated out-of-tree
+  content into your backup. Re-create them with the tool that made them.
+- **Import never deletes** files the archive does not carry, and refuses a
+  populated state root unless you pass `--force`, after naming every file it
+  would replace. Because `state/repos.json` is replaced wholesale, importing an
+  older archive can leave on-disk data it no longer references — use
+  `--dry-run` first if you are unsure.
+- **A stale archive will not silently overwrite newer state.** If a local file
+  is newer than the archive's copy of it — written after the export — `--force`
+  refuses and names it; add `--overwrite-newer` to replace it anyway. Every
+  replaced file is copied to `state/backups/pre-import-<UTC>/` before it is
+  overwritten, so nothing is discarded without a recoverable copy.
 - **Import has no rollback.** Files are installed one at a time, so a failure
   part-way (an unwritable path, a full disk) leaves the root partially restored.
-  The error says how many landed; fix the cause and re-run with `--force`.
+  The error says how many landed and where their pre-import copies are; fix the
+  cause and re-run with `--force`.
 - **Consistency is per-file, not point-in-time.** Each record is copied while
   holding the same lock its writers take, so nothing in the archive is a torn
   mid-write file — but the archive is not one atomic snapshot. For a clean

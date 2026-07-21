@@ -10,7 +10,8 @@
 # Commands:
 #   export [--out FILE] [--with-artifacts]   write a .tar.gz of the record set
 #   verify FILE                              check an archive without installing
-#   import FILE [--force]                    restore into THIS checkout ($DM_HOME)
+#   import FILE [--force] [--overwrite-newer] [--dry-run]
+#                                            restore into THIS checkout ($DM_HOME)
 #
 # Import has no target flag: it installs into $DM_HOME, the root the OPERATOR
 # chose (the checkout it runs from, or an explicit DM_HOME). The security
@@ -35,11 +36,30 @@
 #                            and repos/<repo>/.dm/ that the record set does not
 #                            name are listed in the manifest and skipped, so a
 #                            restore never looks more complete than it is
+#   symlinks, non-regular    verify refuses a non-regular payload member, so one
+#                            is skipped at EXPORT and named in the manifest's
+#                            omitted_non_regular (npm/playwright leave symlinks
+#                            under data/). Skipped, never dereferenced:
+#                            following one pulls in out-of-tree content and can
+#                            hang on a cycle
 # Per-repo SHARED knowledge (.dm-knowledge/) is committed to each managed repo,
 # so it already travels with git and is deliberately not duplicated here.
 #
+# EXPORT VERIFIES ITSELF: the written archive is re-read through the same checks
+# import runs before export reports success, and is deleted if it fails them. An
+# archive tool must never report success for an archive it would itself reject.
+#
+# IMPORT SAFETY: a populated state root needs --force. On top of that, a local
+# file NEWER than the archive's copy (written after the export) needs
+# --overwrite-newer, because replacing it discards state the archive predates.
+# Every replaced file is copied to state/backups/pre-import-<UTC>/ first, and
+# --dry-run reports the whole plan without writing. Import never DELETES a file
+# the archive does not carry, so a wholesale-replaced repos.json can still
+# orphan on-disk data it no longer references - --dry-run first if unsure.
+#
 # NO ROLLBACK on import: files are installed one at a time. A mid-way failure
-# leaves the state root partially restored; the error names how many landed.
+# leaves the state root partially restored; the error names how many landed
+# and where their pre-import copies are.
 #
 # CONSISTENCY - per-file, not point-in-time. Every record file is copied while
 # holding the same advisory lock its writers take (dm-lib's mkdir mutex), so no
@@ -48,12 +68,15 @@
 # copies appears in one and not the other. Append-only status logs and
 # write-once artifacts are copied without a lock.
 #
-# SECRETS - the archive is exactly as sensitive as state/ itself: it carries the
-# dockmaster-only memory store (repos/<repo>/.dm/private.md, which exists
+# SECRETS - the archive is OPERATOR-PRIVATE and must not be shared. It carries
+# the dockmaster-only memory store (repos/<repo>/.dm/private.md, which exists
 # precisely so it is never relayed), operator preferences, and, with
-# --with-artifacts, briefs and scout reports. Exporting moves that content past
-# the machine boundary it was written under - treat the archive as a secret,
-# store it encrypted, and see docs/architecture.md. It is written mode 0600.
+# --with-artifacts, briefs and scout reports. It also DISCLOSES THE EXPORTING
+# MACHINE'S LAYOUT: manifest.source_home and task-meta worktree paths are
+# absolute. Both are deliberate - a restore needs them - but they make the
+# archive unfit to hand to anyone. Exporting moves that content past the machine
+# boundary it was written under - treat the archive as a secret, store it
+# encrypted, and see docs/architecture.md. It is written mode 0600.
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -67,7 +90,13 @@ TAB="$(printf '\t')"
 # (not `local`) so the EXIT trap can still see it after the command returns, and
 # armed once here so a dm_lock subshell's own trap can never displace it.
 STAGE=''
-cleanup_stage() { if [ -n "$STAGE" ]; then rm -rf "$STAGE"; fi; }
+cleanup_stage() {
+  [ -n "$STAGE" ] || return 0
+  # A hostile archive can extract a mode-0644 dir; without u+x `rm -rf` fails and
+  # leaks the payload into TMPDIR. Best-effort repair; rm's own failure stays loud.
+  chmod -R u+rwX "$STAGE" 2>/dev/null || true
+  rm -rf "$STAGE"
+}
 trap cleanup_stage EXIT
 
 make_stage() {
@@ -183,17 +212,46 @@ stage_record() {
   cp -p "$src" "$dst" || dm_die "failed copying $rel"
 }
 
-stage_artifacts() {
-  local stage="$1" d name
+# Regular files ONLY. `find -P` (the default) does not follow symlinks, so
+# -type f both skips them and never descends a symlinked dir - no cycle to hang
+# on, and no out-of-tree content pulled in by dereferencing.
+copy_regular_tree() {
+  local src="$1" dst="$2" f rel
+  find "$src" -type f | LC_ALL=C sort | while IFS= read -r f; do
+    rel="${f#"$src"/}"
+    mkdir -p "$dst/$(dirname "$rel")" || dm_die "failed staging directory for $rel"
+    cp -p "$f" "$dst/$rel" || dm_die "failed copying $rel"
+  done
+}
+
+# Non-regular artifact members - npm/playwright leave symlinks under data/.
+# verify refuses them, so export must skip them AND name them; otherwise the
+# tool writes an archive its own verify rejects. Paths are archive-relative.
+list_non_regular_artifacts() {
+  local d name f
   if [ -d "$DM_DATA" ]; then
-    mkdir -p "$stage/payload/data"
-    cp -R "$DM_DATA/." "$stage/payload/data/" || dm_die "failed copying data/"
+    find "$DM_DATA" ! -type f ! -type d | LC_ALL=C sort | while IFS= read -r f; do
+      printf 'data/%s\n' "${f#"$DM_DATA"/}"
+    done
   fi
   for d in "$DM_STATE"/archive/*/; do
     [ -d "$d" ] || continue
     name="$(basename "$d")"
-    mkdir -p "$stage/payload/state/archive/$name"
-    cp -R "$d." "$stage/payload/state/archive/$name/" || dm_die "failed copying state/archive/$name"
+    find "$d" ! -type f ! -type d | LC_ALL=C sort | while IFS= read -r f; do
+      printf 'state/archive/%s/%s\n' "$name" "${f#"$d"}"
+    done
+  done
+}
+
+stage_artifacts() {
+  local stage="$1" d name
+  if [ -d "$DM_DATA" ]; then
+    copy_regular_tree "$DM_DATA" "$stage/payload/data"
+  fi
+  for d in "$DM_STATE"/archive/*/; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    copy_regular_tree "${d%/}" "$stage/payload/state/archive/$name"
   done
 }
 
@@ -211,21 +269,27 @@ payload_index() {
   done
 }
 
+# The file index goes in on STDIN, never as --arg: Linux caps a SINGLE argv
+# string at 128K (MAX_ARG_STRLEN), well under total ARG_MAX, and a real
+# --with-artifacts export blows past it - jq then dies "Argument list too long"
+# and no archive is written at all. Remaining --args are small and bounded.
 write_manifest() {
-  local stage="$1" artifacts="$2" index omitted
-  index="$(payload_index "$stage/payload")"
+  local stage="$1" artifacts="$2" omitted nonreg=''
   omitted="$(list_unrecognized)"
-  jq -n --arg format "$DM_STATE_FORMAT" \
+  if [ "$artifacts" -eq 1 ]; then nonreg="$(list_non_regular_artifacts)"; fi
+  payload_index "$stage/payload" \
+    | jq -R -s --arg format "$DM_STATE_FORMAT" \
         --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg source_home "$DM_HOME" \
         --arg artifacts "$artifacts" \
-        --arg index "$index" \
-        --arg omitted "$omitted" '
+        --arg omitted "$omitted" \
+        --arg nonreg "$nonreg" '
     def lines: split("\n") | map(select(length > 0));
     { format: $format, created: $created, source_home: $source_home,
       with_artifacts: ($artifacts == "1"),
       omitted_unrecognized: ($omitted | lines),
-      files: ($index | lines | map(split("\t") | {sha256: .[0], bytes: (.[1] | tonumber), path: .[2]})) }
+      omitted_non_regular: ($nonreg | lines),
+      files: (lines | map(split("\t") | {sha256: .[0], bytes: (.[1] | tonumber), path: .[2]})) }
   ' > "$stage/manifest.json" || dm_die "failed writing manifest"
 }
 
@@ -241,6 +305,17 @@ warn_if_output_inside_home() {
   case "$dir/" in
     "$home"/*) dm_warn "writing the archive inside the dockmaster checkout ($DM_HOME). It holds private and dockmaster-only memory - move it out, or confirm it is gitignored, before committing anything." ;;
   esac
+}
+
+# Export's postcondition: an archive tool must never report success for an
+# archive it would itself reject. Re-reads the written file through the very
+# checks import runs (verify_archive is defined below, resolved at call time).
+assert_archive_verifies() {
+  local out="$1" stage="$2"
+  mkdir -p "$stage/selfcheck" || dm_die "failed staging self-check directory"
+  ( verify_archive "$stage/selfcheck" "$out" >/dev/null ) && return 0
+  rm -f "$out"
+  dm_die "export produced an archive that fails its own verification (see the error above); removed $out rather than leave an unrestorable backup"
 }
 
 cmd_export() {
@@ -263,6 +338,7 @@ cmd_export() {
   write_manifest "$stage" "$artifacts"
   ( umask 077; tar -czf "$out" -C "$stage" . ) || dm_die "failed writing archive $out"
   chmod 600 "$out" || dm_die "failed restricting mode on $out"
+  assert_archive_verifies "$out" "$stage"
   count="$(jq -r '.files | length' "$stage/manifest.json")"
   bytes="$(jq -r '[.files[].bytes] | add // 0' "$stage/manifest.json")"
   dm_info "exported $count files ($bytes bytes of state) -> $out"
@@ -295,6 +371,7 @@ export_summary() {
   fi
   dm_info "  not carried: $clones managed clone(s) under repos/ (re-clonable), $wt local copy/copies under state/worktrees/ (unlanded work in one is NOT in this archive)"
   jq -r '.omitted_unrecognized[]? | "  unrecognized, NOT carried: " + .' "$stage/manifest.json"
+  jq -r '.omitted_non_regular[]? | "  symlink/non-regular, NOT carried: " + .' "$stage/manifest.json"
   dm_info "  the archive contains private and dockmaster-only memory - treat it as a secret"
 }
 
@@ -375,6 +452,18 @@ cmd_verify() {
 }
 
 # --- import ------------------------------------------------------------------
+count_lines() { printf '%s\n' "$1" | wc -l | tr -d ' '; }
+
+# Print a refusal list at most 20 entries long, then how many more there were.
+print_capped() {
+  local list="$1" n
+  n="$(count_lines "$list")"
+  # sed, not `head`: `head` closing the pipe early SIGPIPEs the producer, which
+  # pipefail then reports as a failure.
+  printf '%s\n' "$list" | sed -n '1,20s/^/  /p' >&2
+  if [ "$n" -gt 20 ]; then printf '  ... and %s more (first 20 shown)\n' "$((n - 20))" >&2; fi
+}
+
 import_conflicts() {
   local payload="$1" f rel
   find "$payload" -type f | LC_ALL=C sort | while IFS= read -r f; do
@@ -383,17 +472,77 @@ import_conflicts() {
   done
 }
 
+# Conflicts whose LOCAL copy is newer than the archive's. `cp -p` preserves
+# mtime at export, so the staged payload carries the source file's export-time
+# mtime - a local file newer than it was written after this archive was taken,
+# and replacing it silently discards that work. Reads the verified manifest,
+# not the payload dir. Same-second edits are invisible (mtime granularity).
+import_newer_conflicts() {
+  local stage="$1" rel
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ -e "$DM_HOME/$rel" ] || continue
+    if [ "$DM_HOME/$rel" -nt "$stage/payload/$rel" ]; then printf '%s\n' "$rel"; fi
+  done <<EOF
+$(jq -r '.files[].path' "$stage/manifest.json")
+EOF
+}
+
+# The two import gates: a populated root needs --force, and staler-archive-over-
+# newer-local needs --overwrite-newer on top. Refuses; never mutates.
+require_import_allowed() {
+  local conflicts="$1" newer="$2" force="$3" overwrite_newer="$4" n
+  if [ -n "$conflicts" ] && [ "$force" -eq 0 ]; then
+    n="$(count_lines "$conflicts")"
+    dm_warn "refusing to overwrite $n existing file(s) in $DM_HOME:"
+    print_capped "$conflicts"
+    if [ -n "$newer" ]; then
+      printf '  %s of those are NEWER locally than the archive copy\n' "$(count_lines "$newer")" >&2
+    fi
+    dm_die "state root is populated; re-run with --force to replace those $n file(s), or --dry-run to inspect first (import never deletes files the archive does not carry)"
+  fi
+  [ -n "$newer" ] || return 0
+  [ "$overwrite_newer" -eq 0 ] || return 0
+  n="$(count_lines "$newer")"
+  dm_warn "refusing: $n local file(s) are NEWER than this archive's copy, so the archive is stale for them and --force would discard the newer state:"
+  print_capped "$newer"
+  dm_die "re-run with --force --overwrite-newer to replace them anyway (every replaced file is backed up under state/backups/ first), or --dry-run to inspect"
+}
+
+import_dry_run_report() {
+  local stage="$1" conflicts="$2" newer="$3"
+  dm_info "dry run: nothing was written to $DM_HOME"
+  dm_info "  would install $(jq -r '.files | length' "$stage/manifest.json") file(s)"
+  if [ -n "$conflicts" ]; then
+    dm_info "  would replace $(count_lines "$conflicts") existing file(s) (needs --force; each backed up under state/backups/ first)"
+    printf '%s\n' "$conflicts" | sed -n '1,20s/^/    /p'
+  else
+    dm_info "  would replace nothing (state root is clean for these paths)"
+  fi
+  if [ -n "$newer" ]; then
+    dm_info "  of those, $(count_lines "$newer") are NEWER locally than the archive copy (needs --overwrite-newer):"
+    printf '%s\n' "$newer" | sed -n '1,20s/^/    /p'
+  fi
+  report_reestablish "$stage"
+}
+
 # Installs from the VERIFIED manifest list, never from whatever the payload dir
 # happens to hold. There is no rollback: a mid-way failure leaves the state root
 # partially restored, so say exactly how far it got.
 install_payload() {
-  local stage="$1" rel total done_n=0
+  local stage="$1" backup_dir="$2" rel total done_n=0
   total="$(jq -r '.files | length' "$stage/manifest.json")"
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     require_safe_relpath "$rel"
-    mkdir -p "$(dirname "$DM_HOME/$rel")" || install_failed "$rel" "$done_n" "$total"
-    cp -p "$stage/payload/$rel" "$DM_HOME/$rel" || install_failed "$rel" "$done_n" "$total"
+    # Back up BEFORE overwriting, and abort if the backup fails - a failed
+    # backup must never be followed by the destructive copy.
+    if [ -n "$backup_dir" ] && [ -e "$DM_HOME/$rel" ]; then
+      mkdir -p "$backup_dir/$(dirname "$rel")" || install_failed "$rel" "$done_n" "$total" "$backup_dir"
+      cp -p "$DM_HOME/$rel" "$backup_dir/$rel" || install_failed "$rel" "$done_n" "$total" "$backup_dir"
+    fi
+    mkdir -p "$(dirname "$DM_HOME/$rel")" || install_failed "$rel" "$done_n" "$total" "$backup_dir"
+    cp -p "$stage/payload/$rel" "$DM_HOME/$rel" || install_failed "$rel" "$done_n" "$total" "$backup_dir"
     done_n=$((done_n + 1))
   done <<EOF
 $(jq -r '.files[].path' "$stage/manifest.json")
@@ -402,7 +551,9 @@ EOF
 }
 
 install_failed() {
-  dm_die "failed installing '$1' after $2 of $3 file(s). $DM_HOME is now PARTIALLY restored and there is no rollback: fix the cause, then re-run with --force (a plain retry hits the populated-root refusal)."
+  local where=''
+  if [ -n "${4:-}" ]; then where=" Files replaced before the failure are in $4."; fi
+  dm_die "failed installing '$1' after $2 of $3 file(s). $DM_HOME is now PARTIALLY restored and there is no rollback: fix the cause, then re-run with --force (a plain retry hits the populated-root refusal).$where"
 }
 
 # Everything the archive could not carry, as a to-do list. A restore that looks
@@ -438,37 +589,46 @@ EOF
   jq -e '.with_artifacts' "$stage/manifest.json" >/dev/null \
     || dm_info "  briefs, scout reports, and review pages under data/ were not in this archive (exported without --with-artifacts)"
   jq -r '.omitted_unrecognized[]? | "  not carried (unrecognized at export): " + .' "$stage/manifest.json"
+  jq -r '.omitted_non_regular[]? | "  not carried (symlink/non-regular at export): " + .' "$stage/manifest.json"
   dm_info "  run bin/dm-doctor.sh to confirm the restored state is readable"
 }
 
+IMPORT_USAGE='usage: dm-state.sh import <archive.tar.gz> [--force] [--overwrite-newer] [--dry-run]'
+
 cmd_import() {
-  local archive='' force=0 stage conflicts n
+  local archive='' force=0 overwrite_newer=0 dry_run=0 stage conflicts newer backup_dir=''
   while [ $# -gt 0 ]; do
     case "$1" in
       --force) force=1; shift ;;
-      -*) dm_die "usage: dm-state.sh import <archive.tar.gz> [--force]" ;;
-      *) [ -z "$archive" ] || dm_die "usage: dm-state.sh import <archive.tar.gz> [--force]"
+      --overwrite-newer) overwrite_newer=1; shift ;;
+      --dry-run) dry_run=1; shift ;;
+      -*) dm_die "$IMPORT_USAGE" ;;
+      *) [ -z "$archive" ] || dm_die "$IMPORT_USAGE"
          archive="$1"; shift ;;
     esac
   done
-  [ -n "$archive" ] || dm_die "usage: dm-state.sh import <archive.tar.gz> [--force]"
+  [ -n "$archive" ] || dm_die "$IMPORT_USAGE"
   [ -f "$archive" ] || dm_die "no such archive: $archive"
   resolve_sha_cmd
   make_stage import; stage="$STAGE"
   verify_archive "$stage" "$archive"
   conflicts="$(import_conflicts "$stage/payload")"
-  if [ -n "$conflicts" ] && [ "$force" -eq 0 ]; then
-    n="$(printf '%s\n' "$conflicts" | wc -l | tr -d ' ')"
-    dm_warn "refusing to overwrite $n existing file(s) in $DM_HOME:"
-    # sed, not `head`: `head` closing the pipe early SIGPIPEs the producer,
-    # which pipefail then reports as a failure.
-    printf '%s\n' "$conflicts" | sed -n '1,20s/^/  /p' >&2
-    if [ "$n" -gt 20 ]; then printf '  ... and %s more (first 20 shown)\n' "$((n - 20))" >&2; fi
-    dm_die "state root is populated; re-run with --force to replace those $n file(s) (import never deletes files the archive does not carry)"
-  fi
+  newer="$(import_newer_conflicts "$stage")"
+  if [ "$dry_run" -eq 1 ]; then import_dry_run_report "$stage" "$conflicts" "$newer"; return 0; fi
+  require_import_allowed "$conflicts" "$newer" "$force" "$overwrite_newer"
   dm_ensure_dirs
-  install_payload "$stage"
+  if [ -n "$conflicts" ]; then
+    # mktemp, not a bare timestamp: two imports in the same second would share a
+    # directory and the second would overwrite the first's only copy.
+    mkdir -p "$DM_STATE/backups" || dm_die "failed creating $DM_STATE/backups"
+    backup_dir="$(mktemp -d "$DM_STATE/backups/pre-import-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")" \
+      || dm_die "failed creating a backup directory under $DM_STATE/backups"
+  fi
+  install_payload "$stage" "$backup_dir"
   dm_info "imported $(jq -r '.files | length' "$stage/manifest.json") files into $DM_HOME"
+  if [ -n "$backup_dir" ]; then
+    dm_info "  replaced $(count_lines "$conflicts") file(s); the previous copies are in $backup_dir"
+  fi
   report_reestablish "$stage"
 }
 
@@ -486,10 +646,19 @@ usage: dm-state.sh <command>
                                            --with-artifacts adds data/ and
                                            archived task dirs)
   verify FILE                              check format and checksums only
-  import FILE [--force]                    restore into $DM_HOME; refuses to
-                                           replace existing files without --force
+  import FILE [--force] [--overwrite-newer] [--dry-run]
+                                           restore into $DM_HOME; refuses to
+                                           replace existing files without
+                                           --force, and refuses to replace a
+                                           file newer than the archive's copy
+                                           without --overwrite-newer. Replaced
+                                           files are backed up under
+                                           state/backups/ first. --dry-run
+                                           reports and writes nothing.
 
-The archive carries private and dockmaster-only memory. Treat it as a secret.
+The archive is OPERATOR-PRIVATE: it carries private and dockmaster-only memory,
+and its manifest and task records disclose the exporting machine's absolute
+paths. Treat it as a secret and do not share it.
 USAGE
     exit 2
     ;;

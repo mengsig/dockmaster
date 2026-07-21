@@ -3181,6 +3181,16 @@ printf 'z\n' > "$DM_HOME/state/archive/stray.json"
 printf 'k\n' > "$DM_HOME/repos/demo/.dm/keys.txt"
 # A third memory store must be carried by the .dm/*.md glob, not silently dropped.
 printf '# extra\n' > "$DM_HOME/repos/demo/.dm/extra.md"
+# Symlinks under data/ are real: npm/playwright leave node_modules/.bin/ entries
+# behind. verify refuses a non-regular member, so an export that copied them
+# produced an archive its own verify rejected - success at backup time, hard
+# refusal at restore time. Cycle + broken + out-of-tree cover the copy hazards.
+mkdir -p "$DM_HOME/data/sp-artifacts/node_modules/.bin"
+printf 'real artifact\n' > "$DM_HOME/data/sp-artifacts/node_modules/pw.js"
+ln -s ../pw.js "$DM_HOME/data/sp-artifacts/node_modules/.bin/playwright"
+ln -s /etc/passwd "$DM_HOME/data/sp-artifacts/outside-link"
+ln -s /nonexistent-sp-target "$DM_HOME/data/sp-artifacts/broken-link"
+ln -s ../node_modules "$DM_HOME/data/sp-artifacts/node_modules/.bin/cycle-link"
 # The dockmaster-only store exists precisely so it is never relayed; an export
 # still has to carry it, so make sure the fixture has one.
 b dm-memory.sh remember demo --dockmaster-only --kind routing "dm-state round-trip probe" >/dev/null
@@ -3194,6 +3204,14 @@ check "export names the unrecognized entry"        'grep -q "unrecognized, NOT c
 check "export names uncarried local copies"        'grep -q "local copy/copies under state/worktrees/" <<<"$SP_EXPORT"'
 check "export warns the archive holds secrets"     'grep -q "treat it as a secret" <<<"$SP_EXPORT"'
 check "verify accepts a good archive"              'b dm-state.sh verify "$SP/full.tar.gz" >/dev/null'
+# The invariant that makes the above non-negotiable: export self-verifies, so it
+# can never report success for an archive verify would reject.
+SP_NONREG="$(tar -xzOf "$SP/full.tar.gz" ./manifest.json | jq -r '.omitted_non_regular[]')"
+check "export skips a symlink under data/"         'grep -qx "data/sp-artifacts/node_modules/.bin/playwright" <<<"$SP_NONREG"'
+check "export names every non-regular member"      'grep -qx "data/sp-artifacts/outside-link" <<<"$SP_NONREG" && grep -qx "data/sp-artifacts/broken-link" <<<"$SP_NONREG" && grep -qx "data/sp-artifacts/node_modules/.bin/cycle-link" <<<"$SP_NONREG"'
+check "export reports the skipped symlink"         'grep -q "symlink/non-regular, NOT carried: data/sp-artifacts" <<<"$SP_EXPORT"'
+# Dereferencing instead of skipping would suck /etc/passwd into the backup.
+check "an out-of-tree symlink is not followed"     '! tar -xzOf "$SP/full.tar.gz" 2>/dev/null | grep -q "root:x:0:0"'
 
 # What the archive deliberately omits.
 SP_PATHS="$(tar -xzOf "$SP/full.tar.gz" ./manifest.json | jq -r '.files[].path')"
@@ -3211,6 +3229,8 @@ check "unrecognized scan reaches .dm/ sidecars"    'grep -qx "repos/demo/.dm/key
 check "nested unrecognized files are not carried"  '! grep -qE "t1.report|subdir/|stray.json|keys.txt" <<<"$SP_PATHS"'
 check "archived task dirs are not 'unrecognized'"  '! grep -q "^state/archive/demo-1$" <<<"$SP_OMIT"'
 check "sidecar glob carries a third memory store"  'grep -qx "repos/demo/.dm/extra.md" <<<"$SP_PATHS"'
+check "no symlink reaches the payload"             '! grep -q "sp-artifacts/.*\.bin/" <<<"$SP_PATHS"'
+check "the file behind the symlink still travels"  'grep -qx "data/sp-artifacts/node_modules/pw.js" <<<"$SP_PATHS"'
 
 # Round trip into a clean state root, compared field by field (not by file hash).
 SP_IMPORT="$(DM_HOME="$RESTORE" "$ROOT/bin/dm-state.sh" import "$SP/full.tar.gz")"
@@ -3251,7 +3271,20 @@ SP_NFILES="$(tar -xzOf "$SP/full.tar.gz" ./manifest.json | jq -r '.files | lengt
 check "refusal counts every file it would replace" 'grep -q "refusing to overwrite $SP_NFILES existing file(s)" <<<"$SP_REFUSE"'
 check "refusal lists the conflicting paths"        '[ "$(grep -cE "^  (state|repos|data)/" <<<"$SP_REFUSE")" -ge 1 ]'
 check "refusal leaves the local edit intact"       'grep -q "local edit" "$RESTORE/state/learnings.md"'
-check "--force replaces the conflicting file"      'DM_HOME="$RESTORE" "$ROOT/bin/dm-state.sh" import "$SP/full.tar.gz" --force >/dev/null && ! grep -q "local edit" "$RESTORE/state/learnings.md"'
+# --dry-run reports the same plan and writes nothing.
+SP_DRY="$(DM_HOME="$RESTORE" "$ROOT/bin/dm-state.sh" import "$SP/full.tar.gz" --dry-run 2>&1)"
+check "dry run reports what it would replace"      'grep -q "would replace $SP_NFILES existing file(s)" <<<"$SP_DRY"'
+check "dry run flags the newer local file"         'grep -q "NEWER locally than the archive copy" <<<"$SP_DRY"'
+check "dry run writes nothing"                     'grep -q "local edit" "$RESTORE/state/learnings.md"'
+# The local edit was written AFTER the export, so the archive is stale for it and
+# --force alone must refuse: replacing it would silently discard the newer state.
+SP_STALE="$(DM_HOME="$RESTORE" "$ROOT/bin/dm-state.sh" import "$SP/full.tar.gz" --force 2>&1 || true)"
+check "--force refuses a newer local file"         '! DM_HOME="$RESTORE" "$ROOT/bin/dm-state.sh" import "$SP/full.tar.gz" --force >/dev/null 2>&1'
+check "the refusal names the newer file"           'grep -q "state/learnings.md" <<<"$SP_STALE"'
+check "the refused import kept the local edit"     'grep -q "local edit" "$RESTORE/state/learnings.md"'
+check "--overwrite-newer replaces the file"        'DM_HOME="$RESTORE" "$ROOT/bin/dm-state.sh" import "$SP/full.tar.gz" --force --overwrite-newer >/dev/null && ! grep -q "local edit" "$RESTORE/state/learnings.md"'
+# Nothing is discarded without a copy: the replaced content stays recoverable.
+check "replaced files are backed up"               '[ -n "$(grep -rl "local edit" "$RESTORE/state/backups" 2>/dev/null)" ]'
 check "import never deletes unarchived files"      '[ -f "$RESTORE/state/tasks/not-in-archive.meta" ]'
 
 # Integrity and path safety: an archive is untrusted input.
@@ -3296,7 +3329,25 @@ check "records-only export still carries records"  'grep -qx "state/repos.json" 
 check "records-only export says artifacts are out" 'grep -q "artifacts: NOT included" <<<"$SP_NOART"'
 SP_NOART_IMPORT="$(DM_HOME="$TMP/restore-records" "$ROOT/bin/dm-state.sh" import "$SP/records.tar.gz")"
 check "import reports the missing artifacts"       'grep -q "under data/ were not in this archive" <<<"$SP_NOART_IMPORT"'
-rm -rf "$DM_HOME/state/unknown-extra" "$DM_HOME/state/tasks/subdir"
+# A real --with-artifacts export indexes thousands of files. Linux caps a SINGLE
+# argv string at 128K (MAX_ARG_STRLEN, far below total ARG_MAX), so passing the
+# index to jq as --arg died with "Argument list too long" and wrote NO archive at
+# all - the recommended backup command, unusable on any real state root. Long
+# names reach the limit with few files, so the fixture stays fast.
+SP_BIG="$TMP/state-bigindex"
+mkdir -p "$SP_BIG/state" "$SP_BIG/data/big"
+printf '{"repos":{}}\n' > "$SP_BIG/state/repos.json"
+sp_i=0
+while [ "$sp_i" -lt 700 ]; do
+  printf 'x\n' > "$SP_BIG/data/big/$(printf 'f%0240d' "$sp_i")"
+  sp_i=$((sp_i + 1))
+done
+SP_BIG_INDEX_BYTES="$(cd "$SP_BIG" && find data -type f | awk '{n += length($0) + 72} END {print n}')"
+check "the big-index fixture exceeds 128K"          '[ "$SP_BIG_INDEX_BYTES" -gt 131072 ]'
+check "export survives a >128K file index"          'DM_HOME="$SP_BIG" "$ROOT/bin/dm-state.sh" export --out "$SP/bigindex.tar.gz" --with-artifacts >/dev/null 2>&1'
+check "the big-index archive verifies"              'DM_HOME="$SP_BIG" "$ROOT/bin/dm-state.sh" verify "$SP/bigindex.tar.gz" >/dev/null 2>&1'
+
+rm -rf "$DM_HOME/state/unknown-extra" "$DM_HOME/state/tasks/subdir" "$DM_HOME/data/sp-artifacts"
 rm -f "$DM_HOME/state/tasks/t1.report" "$DM_HOME/state/archive/stray.json" "$DM_HOME/repos/demo/.dm/keys.txt"
 
 echo

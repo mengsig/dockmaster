@@ -185,14 +185,57 @@ work in flight. Export is strictly read-only; import refuses a populated state
 root without `--force`, names every file it would replace, and never deletes
 files the archive does not carry. Import has **no rollback**: files are installed
 one at a time, so a mid-way failure (an unwritable path, a full disk) leaves the
-root partially restored — the error names how many files landed, and recovery is
-to fix the cause and re-run with `--force`.
+root partially restored — the error names how many files landed and where their
+pre-import copies are, and recovery is to fix the cause and re-run with `--force`.
+
+**Export verifies what it wrote.** Before reporting success, export re-reads the
+finished archive through the same `verify_archive` checks import runs, and
+deletes the file if they fail. This closes a whole bug class rather than one bug:
+a backup tool that reports success for an archive it would itself reject converts
+a silent export-time defect into total backup loss discovered at restore time.
+The concrete instance was symlinks — `verify` refuses a non-regular payload
+member, while `--with-artifacts` copied `data/` recursively and preserved the
+`node_modules/.bin/` symlinks npm and playwright leave behind, so a successful
+export produced an archive its own `verify` refused. Non-regular members are now
+skipped at export and named in `manifest.omitted_non_regular`. They are skipped
+rather than dereferenced deliberately: dereferencing would pull out-of-tree
+content (a link to `/etc/passwd`) into the archive and can hang on a symlink
+cycle, whereas the copy walk uses `find -P`, which neither follows a link nor
+descends a symlinked directory.
+
+Self-verification is what surfaced a second, larger defect in the same path: the
+manifest's file index was passed to `jq` as a command-line argument, and Linux
+caps a *single* argv string at 128K (`MAX_ARG_STRLEN`, far below total
+`ARG_MAX`). Any real `--with-artifacts` export — a few hundred files is enough —
+overflowed it, and `jq` died with "Argument list too long" before an archive was
+written at all. The index now goes in on stdin; only small, bounded values stay
+as `--arg`.
+
+**Import will not silently overwrite newer state.** `cp -p` preserves mtime, so
+the staged payload carries each file's export-time mtime; a local file newer than
+the archive's copy was written *after* the export, and replacing it discards
+state the archive predates. `--force` refuses those and names them, and
+`--overwrite-newer` is the explicit escalation. Every replaced file is copied to
+`state/backups/pre-import-<UTC>.<rand>/` before being overwritten (the random
+suffix keeps two imports in the same second from sharing a directory and
+clobbering the first one's only copy), and `--dry-run` reports the whole plan
+without writing. This bounds, but does not eliminate, the cost of importing a
+stale archive: `state/repos.json` is replaced wholesale, so a repo registered
+after the export disappears from the registry while its `.dm/` sidecar stays
+orphaned on disk. What is lost is the metadata that *finds* work, never the work
+itself — `state/worktrees/` is never written, so committed-unlanded work survives
+on disk regardless.
 
 **Secrets.** An export changes who can read the state. The archive carries the
 DOCKMASTER-ONLY store (`repos/<repo>/.dm/private.md`) — which exists precisely so
 its contents are never relayed to a crewmate — plus operator preferences and,
-with `--with-artifacts`, briefs and scout reports. It is written mode 0600 and
-should be stored encrypted and treated as a secret. `.env` is never included.
+with `--with-artifacts`, briefs and scout reports. It also discloses the
+exporting machine's directory layout: `manifest.source_home` and the `worktree`
+paths in task records are absolute. That is deliberate, because a restore needs
+them to report what is missing, but the consequence is that the archive is
+OPERATOR-PRIVATE — a backup for its owner, not something to share, attach to an
+issue, or hand to a third party. It is written mode 0600 and should be stored
+encrypted and treated as a secret. `.env` is never included.
 
 Integrity is checked before anything is installed. The manifest must describe the
 payload as an exact SET of paths — duplicates refuse, and a path present in one
