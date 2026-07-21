@@ -15,6 +15,9 @@
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_ensure_dirs
+# Resolves the repo's test_cmd from the registry; a corrupt one must refuse
+# rather than read as "no test command" and soft-skip the gate.
+dm_registry_require_valid
 
 id="${1:-}"; [ -n "$id" ] || { echo "usage: dm-test.sh <id>" >&2; exit 2; }
 dm_require_id "$id"

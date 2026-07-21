@@ -18,6 +18,9 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_need git
 dm_ensure_dirs
+# Same nested-substitution swallow as dm-worktree.sh: without this, `rebase`
+# resolves the clone to DM_HOME and rebases against the distro root's history.
+dm_registry_require_valid
 
 cmd="${1:-}"; shift || true
 case "$cmd" in

@@ -27,6 +27,9 @@
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_ensure_dirs
+# `new` inherits a task's mode from the repo registry; a corrupt registry must
+# not silently record an empty mode.
+dm_registry_require_valid
 
 cmd="${1:-}"; shift || true
 case "$cmd" in

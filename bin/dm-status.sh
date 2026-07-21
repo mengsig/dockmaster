@@ -18,6 +18,10 @@
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_ensure_dirs
+# A snapshot that cannot read the registry has nothing trustworthy to show, and
+# an empty repos table is indistinguishable from a healthy empty fleet (#114) —
+# refuse before printing anything rather than exit 0 on a plausible, wrong answer.
+dm_registry_require_valid
 # This snapshot must perform NO network sync. Its reconcile path transitively
 # reaches dm-worktree.sh landed, which otherwise fetches; DM_NO_FETCH=1 makes it
 # reconcile from local refs only. (Session-start does not set this and still syncs.)
@@ -66,13 +70,13 @@ human_age() {
 }
 
 section "MANAGED REPOS"
-"$here/dm-repo.sh" list 2>/dev/null || echo "  (none registered)"
+"$here/dm-repo.sh" list || echo "  (repo listing unavailable — see the error above)"
 # A primary clone left on a non-default branch means crew work tangled it; that
 # is a health signal worth surfacing (tangle_check prints only when tangled).
 while IFS= read -r name; do
   [ -n "$name" ] || continue
   "$here/dm-worktree.sh" tangle "$name" 2>/dev/null || true
-done < <(jq -r '.repos | keys[]' "$DM_REGISTRY" 2>/dev/null || true)
+done < <(dm_registry_keys)
 
 section "IN-FLIGHT WORK (reconciled; no sync)"
 tasks="$("$here/dm-task.sh" list 2>/dev/null || true)"

@@ -17,6 +17,9 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_need git; dm_need jq
 dm_ensure_dirs
+# A corrupt registry used to enumerate as zero repos, so `all` reported "no repos
+# registered" and silently synced nothing (#112's class on a read path).
+dm_registry_require_valid
 
 sync_one() {
   local name="$1" dir def cur rc=0
@@ -83,7 +86,7 @@ case "$cmd" in
     while IFS= read -r n; do
       [ -n "$n" ] || continue
       names+=("$n")
-    done < <(jq -r '.repos | keys[]' "$DM_REGISTRY" 2>/dev/null || true)
+    done < <(dm_registry_keys)
     [ "${#names[@]}" -eq 0 ] && { echo "no repos registered"; exit 0; }
     for n in "${names[@]}"; do sync_one "$n"; done
     ;;

@@ -2844,6 +2844,229 @@ check "fork head ref with slashes is resolved encoded" 'grep -q "repos/forker/r/
 check "fork branch is never deleted" '[ ! -s "$GHSTUB/git-push-calls" ] && grep -q "head belongs to fork forker/r" <<<"$FORKMERGE"'
 rm -rf "$DM_HOME/repos/mauth/.github"
 
+echo "== registry integrity: corruption never reads as an empty registry (#112, #114) =="
+# Everything here runs against its OWN throwaway DM_HOME: these cases deliberately
+# corrupt state/repos.json, which must never touch the suite's main home.
+REGINT="$TMP/regint"
+rg() { local s="$1"; shift; DM_HOME="$REGINT" "$ROOT/bin/$s" "$@"; }
+# DM_HOME must itself be a git repo with commits, exactly as the real distro root
+# is. That is load-bearing, not incidental: dm_repo_dir composes
+# "$DM_HOME/<path>", so a swallowed lookup degrades to DM_HOME, and the `.git`
+# probe meant to catch it PASSES there. A plain-directory fixture would hide the
+# whole failure mode.
+mkdir -p "$REGINT"
+git init -q "$REGINT"
+( cd "$REGINT"; printf 'distro\n' > README.md; git add README.md; git commit -qm "distro root" ) >/dev/null 2>&1
+git init -q --bare -b main "$TMP/regint-origin.git"
+git -C "$TMP/seed" push -q "$TMP/regint-origin.git" main
+rg dm-repo.sh add gadget "$TMP/regint-origin.git" --mode local-only --no-memory >/dev/null 2>&1
+rg dm-repo.sh set gadget merge_authority never >/dev/null
+check "fixture: healthy registry resolves the repo and its authority" \
+  '[ "$(rg dm-repo.sh get gadget mode)" = local-only ] && grep -q "never" <<<"$(rg dm-repo.sh list)"'
+# Task records and a real worktree, created while the registry is still healthy,
+# so the consumers below reach their registry read instead of dying earlier on a
+# missing task/worktree (which would make the enumeration prove nothing).
+rg dm-task.sh new regint-task --kind ship --repo gadget >/dev/null
+rg dm-task.sh new regint-wt --kind ship --repo gadget >/dev/null
+DM_HOME="$REGINT" DM_NO_FETCH=1 "$ROOT/bin/dm-worktree.sh" create regint-task gadget >/dev/null 2>&1
+# Resolve both sides physically (cd into the worktree first so a RELATIVE
+# --git-common-dir resolves, then pwd -P) so a macOS /var->/private/var symlink
+# or a git that prints a relative common-dir cannot make this pass or fail
+# spuriously (#148 canonicalizes DM_HOME).
+REGINT_WT_COMMON="$(cd "$REGINT/state/worktrees/regint-task" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+REGINT_CLONE_GIT="$(cd "$REGINT/repos/gadget/.git" && pwd -P)"
+check "fixture: the worktree is attached to the managed clone, not the home root" \
+  '[ "$REGINT_WT_COMMON" = "$REGINT_CLONE_GIT" ]'
+
+# Missing and empty are legitimate FIRST-RUN states, not corruption.
+check "a missing registry is a first-run state" \
+  'DM_HOME="$TMP/regint-missing" "$ROOT/bin/dm-repo.sh" list >/dev/null 2>&1'
+mkdir -p "$TMP/regint-empty/state"; : > "$TMP/regint-empty/state/repos.json"
+check "a zero-length registry is a first-run state and is re-seeded" \
+  'DM_HOME="$TMP/regint-empty" "$ROOT/bin/dm-repo.sh" list >/dev/null 2>&1 &&
+   [ "$(jq -c . "$TMP/regint-empty/state/repos.json")" = "{\"repos\":{}}" ]'
+# An object with no `.repos` is NOT an empty registry: dm_ensure_dirs always
+# seeds `{"repos":{}}`, so a document missing the key is hand-damaged, and
+# `{"other":1}` must not read as a healthy empty fleet.
+mkdir -p "$TMP/regint-norepos/state"; printf '{}\n' > "$TMP/regint-norepos/state/repos.json"
+check "an object with no .repos key is corruption, not an empty fleet" \
+  '! DM_HOME="$TMP/regint-norepos" "$ROOT/bin/dm-repo.sh" list >/dev/null 2>&1'
+
+printf '{"repos": {broken\n' > "$REGINT/state/repos.json"
+
+# ENUMERATED consumers. A corrupt registry must stop EVERY one of them: the bug
+# was a whole class (`jq -e ... && dm_die` short-circuits on a parse error), so
+# spot-checking two would let an unfixed consumer keep the class alive.
+REGINT_FAILED=""
+while IFS= read -r consumer; do
+  [ -n "$consumer" ] || continue
+  # shellcheck disable=SC2086
+  if DM_HOME="$REGINT" "$ROOT/bin/"$consumer >/dev/null 2>"$TMP/regint-err"; then
+    REGINT_FAILED="$REGINT_FAILED [exited 0: $consumer]"
+  elif [ ! -s "$TMP/regint-err" ]; then
+    REGINT_FAILED="$REGINT_FAILED [silent: $consumer]"
+  elif ! grep -q 'does not parse' "$TMP/regint-err"; then
+    REGINT_FAILED="$REGINT_FAILED [unnamed: $consumer]"
+  fi
+done <<EOF
+dm-repo.sh add gadget $TMP/regint-origin.git
+dm-repo.sh create fresh $TMP/regint-origin.git
+dm-repo.sh list
+dm-repo.sh get gadget
+dm-repo.sh get gadget mode
+dm-repo.sh set gadget mode local-only
+dm-repo.sh remove gadget
+dm-repo.sh seed gadget
+dm-status.sh
+dm-sync.sh all
+dm-sync.sh one gadget
+dm-memory.sh recall gadget
+dm-memory.sh seed gadget
+dm-task.sh new regint-1 --kind ship --repo gadget
+dm-worktree.sh create regint-wt gadget
+dm-worktree.sh tangle gadget
+dm-merge.sh rebase regint-task
+dm-merge.sh local regint-task
+dm-pr.sh check regint-task
+dm-test.sh regint-task
+EOF
+check "every registry consumer refuses a corrupt registry, by name$REGINT_FAILED" '[ -z "$REGINT_FAILED" ]'
+
+# The dm-lib accessors are the choke point every other script inherits. Two
+# fail-closed contracts: the REGISTRY accessors DIE on a corrupt read (they own
+# dm_registry_require_valid); the MERGE accessors fail closed to a SAFE value
+# per #119 — dm_merge_authority to `invalid` (the gate refuses) and
+# dm_merge_allowed_bases to empty (grants no exception) — so an unregistered
+# repo and a corrupt registry both fail the merge gate closed, and #119 stays
+# the single owner of that mapping (a die there would break its unknown-repo case).
+REGINT_LIB_FAILED=""
+for fn in "dm_registry_get gadget" "dm_registry_get gadget mode" "dm_registry_has gadget" \
+          "dm_registry_keys"; do
+  if DM_HOME="$REGINT" bash -c ". \"$ROOT/bin/dm-lib.sh\"; $fn" >/dev/null 2>&1; then
+    REGINT_LIB_FAILED="$REGINT_LIB_FAILED [$fn]"
+  fi
+done
+check "every registry accessor DIES on a corrupt registry$REGINT_LIB_FAILED" '[ -z "$REGINT_LIB_FAILED" ]'
+
+# The merge accessors must fail closed to a safe value, never a permissive one.
+# Safe rc capture (rc=0; cmd || rc=$?): a nonzero return under dm-lib's set -e
+# would abort a `cmd; echo $?` subshell before the read.
+REGINT_MAUTH="$(DM_HOME="$REGINT" bash -c ". \"$ROOT/bin/dm-lib.sh\"; dm_merge_authority gadget" 2>/dev/null || true)"
+REGINT_MBASES="$(DM_HOME="$REGINT" bash -c ". \"$ROOT/bin/dm-lib.sh\"; dm_merge_allowed_bases gadget" 2>/dev/null || true)"
+check "corrupt registry: merge authority fails closed to invalid, not ask/yolo" \
+  '[ "$REGINT_MAUTH" = invalid ]'
+check "corrupt registry: merge allowed-bases fails closed to empty (no exception)" \
+  '[ -z "$REGINT_MBASES" ]'
+# Validation is memoized per process, so it can only vouch for the file as of
+# that check. dm_merge_authority maps a corrupt read to `invalid` (#119)
+# regardless of the memo, so an external write AFTER a warm memo still fails
+# closed for a `never` repo rather than the permissive legacy default.
+REGINT_WARM="$TMP/regint-warm"; mkdir -p "$REGINT_WARM/state"
+printf '{"repos":{"gadget":{"merge_authority":"never","path":"repos/gadget"}}}\n' > "$REGINT_WARM/state/repos.json"
+REGINT_WARM_OUT="$(DM_HOME="$REGINT_WARM" bash -c ". \"$ROOT/bin/dm-lib.sh\"
+  dm_registry_require_valid
+  printf '{\"repos\": {broken\n' > \"\$DM_REGISTRY\"
+  dm_merge_authority gadget" 2>/dev/null || true)"
+check "a warm validation memo does not let a later corruption fail open to ask" \
+  '! grep -qE "^(ask|yolo)$" <<<"$REGINT_WARM_OUT"'
+
+REGINT_STATUS_OUT="$TMP/regint-status-out"; REGINT_STATUS_ERR="$TMP/regint-status-err"
+DM_HOME="$REGINT" "$ROOT/bin/dm-status.sh" >"$REGINT_STATUS_OUT" 2>"$REGINT_STATUS_ERR" && REGINT_STATUS_RC=0 || REGINT_STATUS_RC=$?
+check "dm-status on a corrupt registry exits non-zero with stderr, not an empty table (#114)" \
+  '[ "$REGINT_STATUS_RC" -ne 0 ] && [ -s "$REGINT_STATUS_ERR" ] && ! grep -q "MANAGED REPOS" "$REGINT_STATUS_OUT"'
+
+# The highest-consequence swallow: dm_repo_dir builds its path in a NESTED
+# command substitution, where bash does not propagate set -e. The refusal was
+# printed but discarded and the path fell back to DM_HOME — itself a git repo —
+# so a worker's copy attached to the distro root and `rebase` rebased against
+# the distro's own history. Assert on the filesystem, not just the exit code.
+# DM_NO_FETCH=1 is the load-bearing part: on the default path the pre-create
+# FF-sync shell-out happens to fail first and masks this, but offline mode (and
+# the --base stacked-child path) skips it and reaches the resolver directly.
+DM_HOME="$REGINT" DM_NO_FETCH=1 "$ROOT/bin/dm-worktree.sh" create regint-wt gadget >/dev/null 2>&1 || true
+DM_HOME="$REGINT" DM_NO_FETCH=1 "$ROOT/bin/dm-worktree.sh" create regint-wt2 gadget --base main >/dev/null 2>&1 || true
+REGINT_HOMEROOT_WT="$(git -C "$REGINT" worktree list 2>/dev/null | tail -n +2 || true)"
+check "a corrupt registry never attaches a worker copy to the home root" \
+  '[ -z "$REGINT_HOMEROOT_WT" ] && [ ! -e "$REGINT/state/worktrees/regint-wt" ]'
+check "a corrupt registry never leaves the pre-existing worktree half-rebased" \
+  '[ ! -d "$REGINT/state/worktrees/regint-task/.git/rebase-merge" ] &&
+   [ ! -d "$REGINT/state/worktrees/regint-task/.git/rebase-apply" ]'
+REGINT_CONCAT="$TMP/regint-concat"; mkdir -p "$REGINT_CONCAT/state"
+printf '{"other":1}\n{"repos":{}}\n' > "$REGINT_CONCAT/state/repos.json"
+check "concatenated JSON documents are corruption, not a healthy tail" \
+  '! DM_HOME="$REGINT_CONCAT" "$ROOT/bin/dm-repo.sh" list >/dev/null 2>&1'
+
+REGINT_ERR="$(DM_HOME="$REGINT" "$ROOT/bin/dm-repo.sh" add gadget "$TMP/regint-origin.git" 2>&1 || true)"
+check "the corrupt-registry refusal is actionable and names no destructive command" \
+  '! grep -qE "rm -rf|rm -r " <<<"$REGINT_ERR" && grep -q "CORRUPTION" <<<"$REGINT_ERR" &&
+   grep -q "repos.json" <<<"$REGINT_ERR" && grep -q "dm-doctor.sh check" <<<"$REGINT_ERR"'
+# A free repo name would otherwise clone to completion (network + disk) and only
+# then fail at registration, leaving a genuine orphan that blocks the retry.
+DM_HOME="$REGINT" "$ROOT/bin/dm-repo.sh" add newthing "$TMP/regint-origin.git" --no-memory >/dev/null 2>&1 || true
+check "a corrupt registry stops add BEFORE it spends a clone (no orphan left)" \
+  '[ ! -e "$REGINT/repos/newthing" ]'
+check "doctor still DIAGNOSES a corrupt registry instead of refusing to run" \
+  '! DM_HOME="$REGINT" "$ROOT/bin/dm-doctor.sh" check >"$TMP/regint-doc" 2>&1;
+   grep -q "state/repos.json is not valid JSON" "$TMP/regint-doc"'
+
+# Shapes that parse as JSON but are not a registry are corruption too.
+REGINT_SHAPE=""
+for shape in '{"repos": []}' '[1,2,3]' '"nope"'; do
+  mkdir -p "$TMP/regint-shape/state"; printf '%s\n' "$shape" > "$TMP/regint-shape/state/repos.json"
+  DM_HOME="$TMP/regint-shape" "$ROOT/bin/dm-repo.sh" list >/dev/null 2>&1 &&
+    REGINT_SHAPE="$REGINT_SHAPE [$shape]" || true
+done
+check "a well-formed JSON document of the wrong shape is corruption$REGINT_SHAPE" '[ -z "$REGINT_SHAPE" ]'
+
+echo "== registry integrity: add never advises destroying what it has not vetted (#112) =="
+# The `add` slot guard used to print a blanket `rm -rf '<dir>'` for ANY existing
+# path. With a corrupt registry that path was a LIVE managed clone.
+REGADV="$TMP/regadv"; mkdir -p "$REGADV/state" "$REGADV/repos"
+printf '{"repos":{}}\n' > "$REGADV/state/repos.json"
+mkdir -p "$REGADV/repos/emptydir"
+git init -q "$REGADV/repos/liveclone"
+( cd "$REGADV/repos/liveclone"; printf 'unlanded\n' > work.txt; git add .; git commit -qm work ) >/dev/null 2>&1
+mkdir -p "$REGADV/repos/notempty"; printf 'data\n' > "$REGADV/repos/notempty/file.txt"
+adv() { DM_HOME="$REGADV" "$ROOT/bin/dm-repo.sh" add "$1" "$TMP/regint-origin.git" 2>&1 || true; }
+ADV_EMPTY="$(adv emptydir)"; ADV_CLONE="$(adv liveclone)"; ADV_JUNK="$(adv notempty)"
+check "a git repo in the slot is never proposed for deletion" \
+  '! grep -qE "rm -rf|rm -r |rmdir" <<<"$ADV_CLONE" && grep -q "GIT REPOSITORY" <<<"$ADV_CLONE" &&
+   grep -q "mv " <<<"$ADV_CLONE" && grep -q "git -C" <<<"$ADV_CLONE"'
+check "an unvetted non-empty directory is never proposed for deletion" \
+  '! grep -qE "rm -rf|rm -r |rmdir" <<<"$ADV_JUNK" && grep -q "mv " <<<"$ADV_JUNK"'
+check "only a provably empty directory earns a removal suggestion, and it is rmdir" \
+  'grep -q "rmdir " <<<"$ADV_EMPTY" && ! grep -q "rm -rf" <<<"$ADV_EMPTY"'
+check "the live clone and its unlanded work are still on disk after every refusal" \
+  '[ -f "$REGADV/repos/liveclone/work.txt" ] && [ -f "$REGADV/repos/notempty/file.txt" ]'
+
+echo "== registry integrity: drift guards (a new consumer cannot reopen the class) =="
+# dm-lib owns the registry read path; dm-doctor deliberately reads it raw because
+# it is the diagnostic that REPORTS corruption and must not refuse to run.
+REGINT_RAW="$(grep -n 'jq .*DM_REGISTRY' "$ROOT"/bin/*.sh |
+  grep -v '/bin/dm-lib\.sh:' | grep -v '/bin/dm-doctor\.sh:' || true)"
+check "no consumer swallows a registry read failure into a silent answer" \
+  '! grep -qE "2>/dev/null \|\| true|&& dm_die|\|\| true\)" <<<"$REGINT_RAW"'
+# DERIVED, not hardcoded: the set is "every script that touches a registry
+# accessor", computed from the tree, so a NEW consumer added tomorrow is covered
+# without editing this test. dm-lib defines the accessors; dm-doctor reads the
+# registry raw on purpose (it diagnoses corruption and must still run).
+# Capture, then match: `check` evals its argument in THIS shell, so a bare
+# `exit 1` would kill the suite instead of failing one case; and piping a
+# producer into `grep -q` SIGPIPEs it, which pipefail reports as failure.
+REGINT_UNVALIDATED=""
+REGINT_ACCESSORS='dm_registry_get|dm_registry_has|dm_registry_keys|dm_merge_authority|dm_merge_allowed_bases|dm_repo_dir'
+for f in "$ROOT"/bin/dm-*.sh; do
+  s="$(basename "$f")"
+  case "$s" in dm-lib.sh|dm-doctor.sh) continue ;; esac
+  grep -qE "$REGINT_ACCESSORS" "$f" || continue
+  grep -q '^dm_registry_require_valid' "$f" || REGINT_UNVALIDATED="$REGINT_UNVALIDATED [$s]"
+done
+check "every registry-enumerating entry point validates in its own main shell$REGINT_UNVALIDATED" \
+  '[ -z "$REGINT_UNVALIDATED" ]'
+REGINT_RAWKEYS="$(grep -n 'repos | keys' "$ROOT"/bin/*.sh | grep -v '/bin/dm-lib\.sh:' || true)"
+check "the registry is never enumerated by a raw jq keys call outside dm-lib" \
+  '[ -z "$REGINT_RAWKEYS" ]'
+
 echo "== runtime parity + performance guards =="
 check "runtime parity suite passes" 'node "$ROOT/tests/check-runtime-parity.js" >/dev/null'
 EVIDENCE_PARENT="$TMP/evidence-parent"

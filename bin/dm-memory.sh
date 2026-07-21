@@ -55,6 +55,9 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_need git; dm_need jq
 dm_ensure_dirs
+# Per-repo stores resolve through the registry; refuse a corrupt one rather than
+# report "not registered" for a repo that is enrolled.
+dm_registry_require_valid
 
 DM_KNOWLEDGE_START='<!-- dm:knowledge:start -->'
 DM_KNOWLEDGE_END='<!-- dm:knowledge:end -->'
@@ -142,7 +145,7 @@ validate_fact() {
 
 require_registered() {
   dm_require_id "$1"
-  dm_registry_get "$1" >/dev/null 2>&1 || dm_die "repo '$1' is not registered; add it with dm-repo.sh add"
+  dm_registry_has "$1" || dm_die "repo '$1' is not registered; add it with dm-repo.sh add"
 }
 
 clone_dir() {
