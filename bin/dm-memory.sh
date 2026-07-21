@@ -146,9 +146,9 @@ require_registered() {
 }
 
 clone_dir() {
-  local p; p="$(dm_registry_get "$1" path)"
-  [ -n "$p" ] || dm_die "repo '$1' has no path in the registry"
-  printf '%s/%s\n' "$DM_HOME" "$p"
+  # Go through dm-lib's single owner rather than re-composing $DM_HOME/<path>:
+  # that duplicated construct is what produced #119.
+  dm_repo_dir_or_none "$1" || dm_die "repo '$1' has no path in the registry"
 }
 
 # --- shared-knowledge extraction ---------------------------------------------

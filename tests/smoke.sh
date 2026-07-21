@@ -15,7 +15,13 @@ export GIT_AUTHOR_NAME="dockmaster smoke" GIT_AUTHOR_EMAIL="smoke@dockmaster.tes
 export GIT_COMMITTER_NAME="dockmaster smoke" GIT_COMMITTER_EMAIL="smoke@dockmaster.test"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/dm-smoke.XXXXXX")"
+# Canonicalize the temp root so DM_HOME and every path derived from it are
+# PHYSICAL. dm-lib canonicalizes DM_HOME (pwd -P) and git records worktree paths
+# physically, so a symlinked TMPDIR (macOS /var -> /private/var) would make
+# resolver output (canonical) miss expectations built from a verbatim $TMP. This
+# is the "already-canonical temp dir" the dm-100-cleanup-safety note prescribes;
+# scout-cleanup.sh keeps its OWN symlinked root to exercise the canonicalization.
+TMP="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/dm-smoke.XXXXXX")" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
 export DM_HOME="$TMP/home"
 pass=0; fail=0
@@ -2170,6 +2176,411 @@ check "the wrapper mutation keeps its positional-method shape" \
 check "the wrapper path never sent the mutation through plain gh" '[ ! -f "$MFB_AXI/gh-mutations" ]'
 check "both CLIs reach the same landed task record" \
   '[ "$(b dm-task.sh get ghfb-axi pr_state)" = "$(b dm-task.sh get ghfb-plain pr_state)" ] && grep -q " merged: https://github.com/o/r/pull/8" "$DM_HOME/state/tasks/ghfb-axi.status"'
+echo "== repo resolver: an unregistered repo never resolves to a directory (#119) =="
+# Before the fix, `"$DM_HOME/$(dm_registry_get <unknown> path)"` composed to
+# $DM_HOME and the `.git` probe passed there (the distro root is a git repo), so
+# a typo'd name silently targeted the operator's own control plane. No test in
+# the suite drove a script with an unregistered name, which is why it survived.
+rdir()  { ( . "$ROOT/bin/dm-lib.sh"; dm_repo_dir "$1" ); }
+rdirn() { ( . "$ROOT/bin/dm-lib.sh"; dm_repo_dir_or_none "$1" ); }
+check "dm_repo_dir_or_none yields nothing for an unregistered repo" '[ -z "$(rdirn nosuchrepo 2>/dev/null || true)" ] && ! rdirn nosuchrepo >/dev/null 2>&1'
+check "dm_repo_dir_or_none yields nothing for an empty name"        '! rdirn "" >/dev/null 2>&1'
+check "dm_repo_dir_or_none still resolves a registered repo"        '[ "$(rdirn demo)" = "$DM_HOME/repos/demo" ]'
+check "dm_repo_dir dies on an unregistered repo"                    '! rdir nosuchrepo >/dev/null 2>&1'
+RESOLVEOUT="$(rdir nosuchrepo 2>&1 || true)"
+check "the resolver refusal names the repo and the fix"             'grep -q "nosuchrepo" <<<"$RESOLVEOUT" && grep -q "not registered" <<<"$RESOLVEOUT"'
+check "the resolver refusal never prints DM_HOME as the answer"     '! grep -qx "$DM_HOME" <<<"$RESOLVEOUT"'
+check "dm_repo_dir still resolves a registered repo"                '[ "$(rdir demo)" = "$DM_HOME/repos/demo" ]'
+
+# Every mutating entry point refuses an unregistered repo BY NAME.
+b dm-task.sh new unreg-1 --kind ship --repo nosuchrepo --mode local-only >/dev/null
+UNREGWT="$(b dm-worktree.sh create unreg-1 nosuchrepo 2>&1 || true)"
+check "worktree create refuses an unregistered repo"      '! b dm-worktree.sh create unreg-1 nosuchrepo >/dev/null 2>&1'
+check "the worktree refusal names the repo"               'grep -q "nosuchrepo" <<<"$UNREGWT"'
+check "no worktree was created for the unregistered repo" '[ ! -e "$DM_HOME/state/worktrees/unreg-1" ]'
+UNREGSYNC="$(b dm-sync.sh one nosuchrepo)"
+check "sync reports an unregistered repo, never syncs it" 'grep -q "SKIP: nosuchrepo (not a registered repo)" <<<"$UNREGSYNC" && ! grep -q "fast-forwarded" <<<"$UNREGSYNC"'
+# dm-merge.sh local: the authority gate fires first, and an unknown repo must not
+# inherit the permissive `ask` default.
+mauthr2() { ( . "$ROOT/bin/dm-lib.sh"; dm_merge_authority "$1" ); }
+check "merge authority of an unregistered repo is invalid, not ask" '[ "$(mauthr2 nosuchrepo)" = "invalid" ]'
+check "merge authority of an empty repo name is invalid"            '[ "$(mauthr2 "")" = "invalid" ]'
+check "merge authority of a registered repo is unchanged"           '[ "$(mauthr2 demo)" = "ask" ]'
+# A registry entry explicitly set to null is as unknown as an absent one.
+jq '.repos["nulled"] = null' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "merge authority of a null registry entry is invalid" '[ "$(mauthr2 nulled)" = "invalid" ]'
+jq 'del(.repos["nulled"])' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "local land refuses a task whose repo is unregistered" '! b dm-merge.sh local unreg-1 >/dev/null 2>&1'
+# A worktree can no longer exist for an unregistered repo, so reach dm-merge's
+# authority gate the way reality would: real work on a registered repo whose
+# registry entry then disappears (a removed/renamed repo, a typo'd rename).
+b dm-repo.sh add gonerepo "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-task.sh new gone-1 --kind ship --repo gonerepo --mode local-only >/dev/null
+GWT="$(b dm-worktree.sh create gone-1 gonerepo 2>/dev/null | tail -n1)"
+git -C "$GWT" checkout -q -b feat/x/gone-1
+printf 'g\n' > "$GWT/gone.txt"
+git -C "$GWT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$GWT" -c user.email=c@c.co -c user.name=c commit -qm "work" >/dev/null
+GONE_BEFORE="$(git -C "$DM_HOME/repos/gonerepo" rev-parse main)"
+GONE_ENTRY="$(jq -c '.repos["gonerepo"]' "$REG")"
+jq 'del(.repos["gonerepo"])' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+UNREGLAND="$(b dm-merge.sh local gone-1 2>&1 || true)"
+check "local land refuses once the repo is unregistered" '! b dm-merge.sh local gone-1 >/dev/null 2>&1'
+check "the land refusal names the repo and the fix"      'grep -q "gonerepo" <<<"$UNREGLAND" && grep -qi "unregistered" <<<"$UNREGLAND"'
+check "the refused land did not advance the clone"       '[ "$(git -C "$DM_HOME/repos/gonerepo" rev-parse main)" = "$GONE_BEFORE" ]'
+# Re-registering restores the very same land, proving the refusal was about the
+# registry entry and nothing else.
+jq --argjson e "$GONE_ENTRY" '.repos["gonerepo"] = $e' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+check "the same land succeeds once the repo is registered again" 'b dm-merge.sh local gone-1 >/dev/null 2>&1'
+check "the restored land actually advanced the clone"            '[ "$(git -C "$DM_HOME/repos/gonerepo" rev-parse main)" != "$GONE_BEFORE" ]'
+b dm-worktree.sh remove gone-1 >/dev/null 2>&1
+
+echo "== distro guard: the distro's own lifecycle works, its mutation never does (#119) =="
+# THE PRODUCTION SHAPE. The real state/repos.json has no `dockmaster` entry, yet
+# many task records carry repo=dockmaster and live worktrees sit under
+# state/worktrees/ — the distro ships changes to ITSELF through these scripts,
+# unregistered. So the fixture is a distro-shaped DM_HOME (a git repo at the
+# root) driven by the RESERVED, UNREGISTERED name, exactly as production does.
+# Its origin is deliberately AHEAD, so a pre-fix sync genuinely fast-forwards it.
+DISTRO_ORIGIN="$TMP/distro-origin.git"
+DISTRO_HOME="$TMP/distro-home"
+git init -q --bare -b main "$DISTRO_ORIGIN"
+git init -q -b main "$DISTRO_HOME"
+( cd "$DISTRO_HOME"; git config user.email d@d.co; git config user.name d
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro init"
+  git remote add origin "$DISTRO_ORIGIN"; git push -q origin main ) >/dev/null 2>&1
+git clone -q "$DISTRO_ORIGIN" "$TMP/distro-upstream"
+( cd "$TMP/distro-upstream"; git config user.email d@d.co; git config user.name d
+  printf 'ahead\n' > upstream.txt; git add -A; git commit -qm "upstream advance"
+  git push -q origin main ) >/dev/null 2>&1
+d() { DM_HOME="$DISTRO_HOME" "$ROOT/bin/$@"; }
+dlib() { ( export DM_HOME="$DISTRO_HOME"; . "$ROOT/bin/dm-lib.sh"; "$@" ); }
+d dm-doctor.sh >/dev/null
+DISTRO_HEAD="$(git -C "$DISTRO_HOME" rev-parse main)"
+check "the distro fixture has no registry entry (as production has none)" \
+  '[ "$(jq -r ".repos | keys | length" "$DISTRO_HOME/state/repos.json")" = 0 ]'
+check "the distro fixture is genuinely behind its origin" \
+  'git -C "$DISTRO_HOME" fetch -q origin main && [ "$(git -C "$DISTRO_HOME" rev-parse origin/main)" != "$DISTRO_HEAD" ]'
+
+# A typo must still die at the resolver — the #119 fix, unchanged.
+check "a typo'd name does not resolve to the distro root" '! dlib dm_repo_dir dockmastr >/dev/null 2>&1'
+check "a typo'd name is not the reserved name"            '! dlib dm_repo_dir_or_none dockmastr >/dev/null 2>&1'
+TYPOSYNC="$(d dm-sync.sh one dockmastr)"
+check "sync of a typo'd name leaves the distro untouched" \
+  '[ "$(git -C "$DISTRO_HOME" rev-parse main)" = "$DISTRO_HEAD" ] && ! grep -q "fast-forwarded" <<<"$TYPOSYNC"'
+
+# THE EXEMPTION, by reserved name: the distro resolves so its own PR-path
+# lifecycle works. No environment variable, nothing a typo could reach.
+check "the reserved distro name resolves to DM_HOME"  '[ "$(dlib dm_repo_dir dockmaster)" = "$DISTRO_HOME" ]'
+check "the reserved name is refused as a new repo"    '! d dm-repo.sh add dockmaster "$DISTRO_ORIGIN" --no-memory >/dev/null 2>&1'
+RESERVEOUT="$(d dm-repo.sh add dockmaster "$DISTRO_ORIGIN" --no-memory 2>&1 || true)"
+check "the reserved-name refusal says why"            'grep -q "reserved for the dockmaster distro" <<<"$RESERVEOUT"'
+d dm-task.sh new self-1 --kind ship --repo dockmaster --mode local-only >/dev/null
+check "worktree create works for the distro's own task" 'd dm-worktree.sh create self-1 dockmaster feat/x/self-1 >/dev/null 2>&1'
+SELFDIR="$DISTRO_HOME/state/worktrees/self-1"
+check "the distro worktree is real and isolated" \
+  '[ -d "$SELFDIR" ] && [ "$(git -C "$SELFDIR" rev-parse --show-toplevel)" = "$SELFDIR" ] && [ "$(git -C "$SELFDIR" rev-parse --abbrev-ref HEAD)" = "feat/x/self-1" ]'
+check "assert accepts the distro worktree as isolated" 'd dm-worktree.sh assert "$SELFDIR" dockmaster >/dev/null 2>&1'
+printf 'self work\n' > "$SELFDIR/self.txt"
+git -C "$SELFDIR" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$SELFDIR" -c user.email=c@c.co -c user.name=c commit -qm "self work" >/dev/null
+check "the distro worktree commits without touching the distro head" '[ "$(git -C "$DISTRO_HOME" rev-parse main)" = "$DISTRO_HEAD" ]'
+check "landed answers honestly for the distro (unlanded, not a resolver death)" \
+  'OUT="$(d dm-worktree.sh landed self-1 2>&1 || true)"; grep -q "^unlanded" <<<"$OUT"'
+
+# What the exemption does NOT buy: mutating the distro. Both refuse.
+SELFSYNC="$(d dm-sync.sh one dockmaster)"
+check "sync refuses the distro"                     'grep -q "refusing to sync the control plane" <<<"$SELFSYNC"'
+check "the refused sync did not advance the distro" '[ "$(git -C "$DISTRO_HOME" rev-parse main)" = "$DISTRO_HEAD" ]'
+check "sync all skips the distro without dying"     'd dm-sync.sh all >/dev/null 2>&1'
+check "the distro merge authority is never, not ask"    '[ "$(dlib dm_merge_authority dockmaster)" = "never" ]'
+SELFLAND="$(d dm-merge.sh local self-1 2>&1 || true)"
+check "local land refuses the distro"                   '! d dm-merge.sh local self-1 >/dev/null 2>&1'
+check "the land refusal names the never posture"        'grep -q "merge_authority=never" <<<"$SELFLAND"'
+check "the land refusal points at the operator merging" 'grep -qi "operator merges" <<<"$SELFLAND"'
+check "the refused land did not advance the distro"     '[ "$(git -C "$DISTRO_HOME" rev-parse main)" = "$DISTRO_HEAD" ]'
+
+# Teardown completes the lifecycle: the distro worktree can be cleaned up.
+check "teardown of an unlanded distro worktree still refuses" '! d dm-worktree.sh remove self-1 >/dev/null 2>&1'
+check "forced teardown of a distro worktree succeeds"         'd dm-worktree.sh remove self-1 --force >/dev/null 2>&1'
+check "the distro worktree is gone"                           '[ ! -d "$SELFDIR" ]'
+check "the distro tree is unchanged by the whole sequence" \
+  '[ "$(git -C "$DISTRO_HOME" rev-parse main)" = "$DISTRO_HEAD" ] && [ -z "$(git -C "$DISTRO_HOME" status --porcelain -- AGENTS.md)" ] && [ ! -e "$DISTRO_HOME/upstream.txt" ] && [ ! -e "$DISTRO_HOME/self.txt" ]'
+
+# The CLASS guard, separate from the reserved name: a hand-edited registry path
+# that resolves to the distro root is caught by the assertion, not the resolver.
+# (dm-repo.sh can never write such a path — it hardcodes "repos/<name>" — so this
+# shape only ever arises from a hand edit, which is exactly what it guards.)
+DREG="$DISTRO_HOME/state/repos.json"
+jq '.repos["handedited"] = {remote:"none", path:".", default_branch:"main", mode:"local-only", merge_authority:"ask"}' \
+  "$DREG" > "$DREG.tmp" && mv "$DREG.tmp" "$DREG"
+check "a hand-edited distro-resolving path still resolves"   '[ "$(dlib dm_repo_dir handedited)" = "$DISTRO_HOME/." ]'
+check "dm_is_distro_dir recognizes a non-canonical root"      'dlib dm_is_distro_dir "$DISTRO_HOME/."'
+check "dm_is_distro_dir rejects a real managed clone"         '! ( . "$ROOT/bin/dm-lib.sh"; dm_is_distro_dir "$DM_HOME/repos/demo" )'
+check "sync refuses the hand-edited distro path"              'grep -q "refusing to sync the control plane" <<<"$(d dm-sync.sh one handedited)"'
+d dm-task.sh new hand-1 --kind ship --repo handedited --mode local-only >/dev/null
+HANDOUT="$(d dm-worktree.sh create hand-1 handedited feat/x/hand-1 2>&1 || true)"
+check "worktree create refuses a hand-edited distro path"     '! d dm-worktree.sh create hand-1 handedited feat/x/hand-1 >/dev/null 2>&1'
+check "that refusal names the distro, not the reserved name"  'grep -q "dockmaster distro itself" <<<"$HANDOUT"'
+check "no worktree was cut off the distro"                    '[ ! -e "$DISTRO_HOME/state/worktrees/hand-1" ]'
+check "the distro head survived the class-guard sequence"     '[ "$(git -C "$DISTRO_HOME" rev-parse main)" = "$DISTRO_HEAD" ]'
+
+echo "== teardown honesty: 'could not determine' is not 'unlanded' (#119) =="
+# A failed landed-check used to read as "not landed", so teardown refused with a
+# statement about the operator's WORK that was simply false. Distinguish them:
+# landed exits 2 for undeterminable, and --force must still be able to clean up.
+b dm-repo.sh add vanish "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-task.sh new vanish-1 --kind ship --repo vanish --mode local-only >/dev/null
+VWT="$(b dm-worktree.sh create vanish-1 vanish 2>/dev/null | tail -n1)"
+git -C "$VWT" checkout -q -b feat/x/vanish-1
+printf 'v\n' > "$VWT/v.txt"
+git -C "$VWT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$VWT" -c user.email=c@c.co -c user.name=c commit -qm "work" >/dev/null
+check "landed reports unlanded (exit 1) while the repo resolves" \
+  'b dm-worktree.sh landed vanish-1 >/dev/null 2>&1; [ "$?" = 1 ]'
+jq 'del(.repos["vanish"])' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+VLANDED="$(b dm-worktree.sh landed vanish-1 2>&1 || true)"
+check "landed exits 2 (undetermined) when the repo cannot resolve" \
+  'b dm-worktree.sh landed vanish-1 >/dev/null 2>&1; [ "$?" = 2 ]'
+check "landed says undetermined, never 'unlanded'" \
+  'grep -q "^undetermined" <<<"$VLANDED" && ! grep -q "^unlanded" <<<"$VLANDED"'
+VREMOVE="$(b dm-worktree.sh remove vanish-1 2>&1 || true)"
+check "teardown refuses without claiming the work is unlanded" \
+  'grep -qi "cannot determine" <<<"$VREMOVE" && ! grep -q "has unlanded work" <<<"$VREMOVE"'
+check "the refusal names the real reason"    'grep -q "vanish" <<<"$VREMOVE" && grep -qi "unregistered" <<<"$VREMOVE"'
+VFORCE="$(b dm-worktree.sh remove vanish-1 --force 2>&1 || true)"
+check "forced teardown still cleans up an unresolvable repo" '[ ! -d "$VWT" ]'
+# Merged with #148's discard machinery: an orphan (no clone) cannot park its
+# head, so the removal must SAY the commit could not be preserved, not imply it
+# was kept. And it must still record a discarded event (else the task pins).
+check "orphan force-removal warns the head could not be preserved" \
+  'grep -qi "could not be preserved" <<<"$VFORCE"'
+check "orphan force-removal records a discarded event" \
+  'grep -qE "^[^ ]+ discarded: " "$DM_HOME/state/tasks/vanish-1.status"'
+
+# The exit-2 contract binds EVERY consumer of `landed`, not just teardown. A
+# consumer that folds 2 onto 1 states "unlanded work" about a task whose repo
+# never resolved — the same false claim, one layer up.
+b dm-repo.sh add vanish2 "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-task.sh new vanish-2 --kind ship --repo vanish2 --mode local-only >/dev/null
+V2WT="$(b dm-worktree.sh create vanish-2 vanish2 2>/dev/null | tail -n1)"
+git -C "$V2WT" checkout -q -b feat/x/vanish-2
+printf 'v\n' > "$V2WT/v.txt"
+git -C "$V2WT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$V2WT" -c user.email=c@c.co -c user.name=c commit -qm "work" >/dev/null
+b dm-backlog.sh add vanish-2 "vanish two" --repo vanish2 --status done >/dev/null
+check "the backlog entry needed by the drift check exists" \
+  '[ "$(jq -r ".items[] | select(.id==\"vanish-2\") | .status" "$DM_HOME/state/backlog.json")" = done ]'
+V2_STATE_OK="$(b dm-task.sh state vanish-2 2>&1 || true)"
+check "task state reports unlanded work while the repo resolves" \
+  'grep -q "not yet landed" <<<"$V2_STATE_OK"'
+jq 'del(.repos["vanish2"])' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+V2_STATE="$(b dm-task.sh state vanish-2 2>&1 || true)"
+check "task state does not claim unlanded work it could not determine" \
+  '! grep -q "committed work not yet landed" <<<"$V2_STATE"'
+check "task state names the undetermined reason instead" \
+  'grep -qi "could not determine" <<<"$V2_STATE"'
+V2_STATUS="$(DM_NO_FETCH=1 b dm-status.sh 2>&1 || true)"
+check "status drift does not claim unlanded work it could not determine" \
+  '! grep -q "vanish-2 is done but its local copy holds unlanded work" <<<"$V2_STATUS"'
+check "status drift names the undetermined reason instead" \
+  'grep -q "vanish-2 is done but whether its local copy landed could not be determined" <<<"$V2_STATUS"'
+jq --argjson e "$(printf '{"remote":"%s","path":"repos/vanish2","default_branch":"main","mode":"local-only","merge_authority":"ask"}' "$TMP/origin.git")" \
+  '.repos["vanish2"] = $e' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
+b dm-worktree.sh remove vanish-2 --force >/dev/null 2>&1
+
+echo "== distro guard is not fail-open on empty input (#119) =="
+# Both call sites currently pass a dying dm_repo_dir result, so an empty dir is
+# unreachable today — but a guard whose empty-input default is "allow" points the
+# wrong way, and empty is exactly what a swallowed resolver failure produces.
+check "dm_assert_not_distro refuses an empty directory" \
+  '! ( . "$ROOT/bin/dm-lib.sh"; dm_assert_not_distro "" "test action" ) >/dev/null 2>&1'
+check "the empty-input refusal names it as a caller bug" \
+  'OUT="$( ( . "$ROOT/bin/dm-lib.sh"; dm_assert_not_distro "" "test action" ) 2>&1 || true)"; grep -qi "empty directory" <<<"$OUT"'
+check "dm_assert_not_distro still passes a real managed clone" \
+  '( . "$ROOT/bin/dm-lib.sh"; dm_assert_not_distro "$DM_HOME/repos/demo" "test action" )'
+check "dm_assert_not_distro still refuses the distro root" \
+  '! ( export DM_HOME="$DISTRO_HOME"; . "$ROOT/bin/dm-lib.sh"; dm_assert_not_distro "$DISTRO_HOME" "test action" ) >/dev/null 2>&1'
+
+echo "== resolver exit codes: a broken registry is never laundered into 'unknown repo' (#119) =="
+# dm_repo_dir_or_none exit 2 = no such repo (benign); anything else = the lookup
+# FAILED. Callers must not rewrite the latter into a reassuring skip — that is
+# how registry corruption would read as a healthy fleet.
+# Capture the resolver's rc through `|| rc=$?`, never `cmd; echo $?`: sourcing
+# dm-lib.sh turns on `set -e` inside this subshell, so a bare nonzero return
+# aborts it before `echo` runs — and WHETHER bash aborts there is version-
+# dependent (green locally, red in CI). `|| rc=$?` makes the exit code the tested
+# value on every bash.
+rdc() { ( . "$ROOT/bin/dm-lib.sh"; rc=0; dm_repo_dir_or_none "$1" >/dev/null 2>&1 || rc=$?; echo "$rc" ); }
+check "a resolvable repo exits 0"          '[ "$(rdc demo)" = 0 ]'
+check "an unknown repo exits 2, not 1"     '[ "$(rdc nosuchrepo)" = 2 ]'
+check "an empty name exits 2"              '[ "$(rdc "")" = 2 ]'
+check "the reserved distro name exits 0"   '[ "$(rdc dockmaster)" = 0 ]'
+# Guard the guard: the helper must actually SEE a nonzero code, not swallow it.
+# A resolver stubbed to always return 2 must make rdc echo 2, proving the capture
+# survives set -e rather than aborting to empty.
+check "rdc reports a nonzero rc rather than aborting to empty (guard the guard)" \
+  '[ "$( ( set -euo pipefail; f() { return 2; }; rc=0; f >/dev/null 2>&1 || rc=$?; echo "$rc" ) )" = 2 ]'
+# A registry that cannot be read must surface as a failure, not as "unknown repo".
+BROKEN_HOME="$TMP/broken-home"
+mkdir -p "$BROKEN_HOME/state"
+printf 'not json at all\n' > "$BROKEN_HOME/state/repos.json"
+# Same robust capture: a broken registry must read as lookup-FAILED (nonzero and
+# NOT 2), never accidental-empty. Before the `|| rc=$?` fix this passed for the
+# wrong reason — set -e aborted to empty, and "" != 2 is trivially true.
+check "an unreadable registry reads as lookup-failed, not 'no such repo'" \
+  'BRC="$( ( export DM_HOME="$BROKEN_HOME"; . "$ROOT/bin/dm-lib.sh"; rc=0; dm_repo_dir_or_none demo >/dev/null 2>&1 || rc=$?; echo "$rc" ) )"; [ "$BRC" != 2 ] && [ "$BRC" != 0 ]'
+check "dm_repo_dir names a broken registry, not a missing repo" \
+  'OUT="$( ( export DM_HOME="$BROKEN_HOME"; . "$ROOT/bin/dm-lib.sh"; dm_repo_dir demo ) 2>&1 || true)"; grep -qi "registry" <<<"$OUT" && ! grep -q "is not registered" <<<"$OUT"'
+# Composition, not luck: sync's SKIP branch must fire ONLY on exit 2. A dm_die
+# raised inside the resolver (registry corruption, e.g. #112's integrity check)
+# must propagate, never be rewritten into a reassuring "not a registered repo".
+BROKENSYNC="$(DM_HOME="$BROKEN_HOME" "$ROOT/bin/dm-sync.sh" one demo 2>&1 || true)"
+check "sync does not report a corrupt registry as an unknown repo" \
+  '! grep -q "not a registered repo" <<<"$BROKENSYNC"'
+check "sync fails loudly on a corrupt registry" \
+  '! DM_HOME="$BROKEN_HOME" "$ROOT/bin/dm-sync.sh" one demo >/dev/null 2>&1'
+# The resolver must DIE, not return a composed path, when its inner lookup fails
+# (#112 interlock). set -e does NOT propagate out of a `[ ]` argument, a `case`
+# word, or a nested substitution — verified below — so every resolver call site
+# assigns to a variable first and checks it, rather than nesting the call.
+# All four masking contexts, each verified real rather than assumed.
+check "set -e does not propagate out of a [ ] argument" \
+  '( set -e; f() { exit 1; }; if [ -d "$(f)/x" ]; then echo y; else echo n; fi ) 2>/dev/null | grep -q n'
+check "set -e does not propagate out of a case word" \
+  '( set -e; f() { exit 1; }; case "$(f)" in "") echo empty ;; *) echo other ;; esac ) 2>/dev/null | grep -q empty'
+check "local masks a failing substitution (rc 0, empty value)" \
+  '( set -e; f() { exit 1; }; g() { local x="$(f)"; printf "rc=%s val=[%s]" "$?" "$x"; }; g ) 2>/dev/null | grep -q "rc=0 val=\[\]"'
+# The pattern MUST live in a single-quoted variable: written inline inside the
+# double-quoted grep argument, `\$\(` collapses to `$(`, and ERE `$` is an
+# end-of-line anchor — the check then matches nothing and can never fail.
+# The `local` branch must not cross a `;` — otherwise `local dir; dir="$(...)"`,
+# the SAFE split this fix introduces everywhere, matches its own lint.
+NEST_PAT='\[[^]]*\$\(dm_repo_dir|\$\([^)]*\$\(dm_repo_dir|case[^)]*\$\(dm_repo_dir|local [^=;]*=[^=]*\$\(dm_repo_dir'
+# One planted line per hazard the comment claims to cover, so the lint can never
+# again cover fewer contexts than it advertises.
+NEST_SHAPES="$(printf '%s\n' \
+  '  [ -d "$(dm_repo_dir "$repo")/.github/workflows" ]' \
+  '  primary="$(cd "$(dm_repo_dir "$repo")" && pwd -P)"' \
+  '  case "$(dm_repo_dir "$repo")" in *) : ;; esac' \
+  '  local dir="$(dm_repo_dir "$repo")"')"
+check "the anti-nesting pattern matches all four masking contexts (guard the guard)" \
+  '[ "$(grep -cE "$NEST_PAT" <<<"$NEST_SHAPES")" = 4 ]'
+check "the anti-nesting pattern does not flag the safe split (guard the guard)" \
+  '! grep -qE "$NEST_PAT" <<<'"'"'  local dir; dir="$(dm_repo_dir "$repo")" || dm_die x'"'"''
+# Glob covers the extensionless dispatcher too — it is a bin/ script like any other.
+check "no resolver call is nested in a [ ] argument, case word, substitution, or local" \
+  '! grep -nE "$NEST_PAT" "$ROOT"/bin/dm-*.sh "$ROOT"/bin/dm'
+check "a broken registry never yields a composed path" \
+  '[ -z "$( ( export DM_HOME="$BROKEN_HOME"; . "$ROOT/bin/dm-lib.sh"; dm_repo_dir_or_none demo ) 2>/dev/null )" ]'
+# A decoy git repo with a recognizable origin, used as the CWD by the two tests
+# below. Pre-fix, a failed resolve left `git -C ""` reading whatever repo the
+# CWD happened to be — so the wrong-repo access only becomes observable when the
+# CWD IS a git repo with a distinguishable remote.
+DECOY="$TMP/decoy-repo"
+git init -q -b main "$DECOY"
+git -C "$DECOY" remote add origin "https://github.com/decoy-owner/decoy-repo.git"
+
+# task_has_ci must REFUSE rather than answer "no CI" — that answer is what
+# --allow-no-checks consumes (dm_merge_gate none 1 0 -> allow), so a failed
+# lookup could unlock the bypass. Drive `await-checks`: it reaches task_has_ci
+# directly, with no repo_slug resolution before it, so this exercises the real
+# code rather than dying at an earlier gate.
+b dm-repo.sh add hasci "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-task.sh new hasci-1 --kind ship --repo hasci >/dev/null
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set hasci-1 pr "https://github.com/o/r/pull/9" ) >/dev/null 2>&1
+HASCI_OK="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks hasci-1 --timeout-secs 0 2>&1 || true)"
+check "await-checks reaches CI detection while the clone resolves" \
+  '! grep -qi "cannot determine CI" <<<"$HASCI_OK"'
+rm -rf "$DM_HOME/repos/hasci"
+# The resolver's own "no clone" message goes to stderr in BOTH versions, so
+# matching it proves nothing. The discriminator is whether execution CONTINUED:
+# pre-fix, has_ci silently became 0 and await-checks went on to poll (calling
+# gh); post-fix it refuses before any poll.
+: > "$GHSTUB/gh-calls"
+HASCI_BAD="$(cd "$DECOY" && PATH="$GHSTUB:$PATH" DM_HOME="$DM_HOME" "$ROOT/bin/dm-pr.sh" await-checks hasci-1 --timeout-secs 2 --interval-secs 1 2>&1 || true)"
+check "CI detection refuses rather than answering 'no CI'" \
+  'grep -qi "cannot determine CI configuration" <<<"$HASCI_BAD"'
+check "the refusal stops the poll instead of proceeding with has_ci=0" \
+  '! grep -q "decoy" "$GHSTUB/gh-calls"'
+
+# repo_slug: nested in `git -C`, a failed resolve left `git -C ""` reading the
+# CWD repo — in production the distro — so `check` wrote real landing fields
+# (pr_state, checks, pr_check_snapshot) sourced from the WRONG repository.
+b dm-repo.sh add slugtest "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-task.sh new slug-1 --kind ship --repo slugtest >/dev/null
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set slug-1 pr "https://github.com/o/r/pull/7" ) >/dev/null 2>&1
+rm -rf "$DM_HOME/repos/slugtest"
+# Run from the decoy repo: pre-fix, `git -C ""` read THAT repo and check queried
+# it, so the wrong-repo access shows up in the stub's call log — the defect
+# itself, not just its error text (the resolver's own message goes to stderr in
+# BOTH versions, so matching on it proves nothing).
+: > "$GHSTUB/gh-calls"
+SLUGOUT="$(cd "$DECOY" && PATH="$GHSTUB:$PATH" DM_HOME="$DM_HOME" "$ROOT/bin/dm-pr.sh" check slug-1 2>&1 || true)"
+check "check never queries the CWD repo when the slug cannot be derived" \
+  '! grep -q "decoy" "$GHSTUB/gh-calls"'
+check "check reports no PR verdict when the slug cannot be derived" \
+  '! grep -q "^pr: " <<<"$SLUGOUT"'
+check "the slug refusal names the repo and refuses the CWD fallback" \
+  'grep -q "slugtest" <<<"$SLUGOUT" && grep -qi "current directory" <<<"$SLUGOUT"'
+check "no landing field was written from the wrong repo" \
+  '[ -z "$(b dm-task.sh get slug-1 pr_state)" ] && [ -z "$(b dm-task.sh get slug-1 pr_check_snapshot)" ] && [ -z "$(b dm-task.sh get slug-1 checks)" ]'
+
+echo "== reserved distro name: a pre-existing registry entry is surfaced, not silently shadowed (#119) =="
+# dm-repo.sh blocks NEW registrations, but dm_repo_dir_or_none short-circuits
+# before the registry read — so an entry that predates the reserved name would
+# resolve to $DM_HOME with authority `never`, silently. doctor must say so.
+DOCHOME="$TMP/doctor-reserved"
+mkdir -p "$DOCHOME"
+DM_HOME="$DOCHOME" b dm-doctor.sh >/dev/null 2>&1
+DOCREG="$DOCHOME/state/repos.json"
+check "doctor is clean before the shadowed entry exists" 'DM_HOME="$DOCHOME" b dm-doctor.sh check >/dev/null 2>&1'
+jq '.repos["dockmaster"] = {remote:"none", path:"repos/dockmaster", default_branch:"main", mode:"local-only", merge_authority:"ask"}' \
+  "$DOCREG" > "$DOCREG.tmp" && mv "$DOCREG.tmp" "$DOCREG"
+DOCOUT="$(DM_HOME="$DOCHOME" b dm-doctor.sh check 2>&1 || true)"
+check "doctor fails on a registry entry under the reserved name" \
+  '! DM_HOME="$DOCHOME" b dm-doctor.sh check >/dev/null 2>&1'
+check "doctor names the shadowing and the remedy" \
+  'grep -q "reserved distro name" <<<"$DOCOUT" && grep -qi "shadowed" <<<"$DOCOUT"'
+
+echo "== single owner: no script re-composes \$DM_HOME/<registry path> (#119) =="
+# The duplicated concatenation is what produced this issue; dm_repo_dir_or_none
+# is the only place allowed to build it.
+# Guard the FIELD ACCESS, not the composition shape. Matching `$DM_HOME/$(...)`
+# only catches the inline form: main's dm-memory.sh built the same path with
+# `printf '%s/%s\n' "$DM_HOME" "$p"`, and `${DM_HOME}/$(...)` and a two-step
+# variable are equally invisible to a shape pattern. Every one of those must
+# first READ the registry `path` field — so that read is the chokepoint, and
+# dm_repo_dir_or_none is its only legitimate site.
+COMPOSE_PAT='dm_registry_get[^)]*[" ]path\b'
+check "only dm-lib.sh reads the registry path field" \
+  '[ -z "$(grep -lE "$COMPOSE_PAT" "$ROOT"/bin/dm-*.sh "$ROOT"/bin/dm 2>/dev/null | grep -v "dm-lib\.sh$" || true)" ]'
+check "dm-lib.sh reads it exactly once (inside dm_repo_dir_or_none)" \
+  '[ "$(grep -cE "$COMPOSE_PAT" "$ROOT/bin/dm-lib.sh")" = 1 ]'
+# The lint is a partial proxy — it cannot see a field passed as a variable. So the
+# other half is closing routes at the source: `get <unknown> <field>` used to
+# return empty-SUCCESS, the same "empty means here" shape as #119 itself
+# (`p="$(dm-repo.sh get "$n" path)"; dir="$DM_HOME/$p"` -> $DM_HOME).
+check "get <unregistered> <field> fails like its no-field sibling" \
+  '! b dm-repo.sh get nosuchrepo path >/dev/null 2>&1'
+check "the field refusal names the repo"  'OUT="$(b dm-repo.sh get nosuchrepo path 2>&1 || true)"; grep -q "no such repo: nosuchrepo" <<<"$OUT"'
+check "it prints nothing on refusal"      '[ -z "$(b dm-repo.sh get nosuchrepo path 2>/dev/null || true)" ]'
+check "a registered repo still returns its field" '[ "$(b dm-repo.sh get demo path)" = "repos/demo" ]'
+# An ABSENT FIELD on a REGISTERED repo stays an empty success — a real answer
+# about a known subject, not a missing subject. (Relied on by the yolo-alias tests.)
+check "an absent field on a registered repo is still empty-success" \
+  'b dm-repo.sh get demo no_such_field >/dev/null 2>&1 && [ -z "$(b dm-repo.sh get demo no_such_field)" ]'
+COMPOSE_SHAPES="$(printf '%s\n' \
+  'dir="$DM_HOME/$(dm_registry_get "$name" path)"' \
+  'dir="${DM_HOME}/$(dm_registry_get "$repo" path)"' \
+  '  local p; p="$(dm_registry_get "$1" path)"' \
+  '  printf "%s/%s\n" "$DM_HOME" "$(dm_registry_get "$1" path)"')"
+check "the field guard catches every historic composition shape (guard the guard)" \
+  '[ "$(grep -cE "$COMPOSE_PAT" <<<"$COMPOSE_SHAPES")" = 4 ]'
+check "the composition pattern would catch the original form (guard the guard)" \
+  'grep -qE "$COMPOSE_PAT" <<<'"'"'dir="$DM_HOME/$(dm_registry_get "$name" path)"'"'"''
+check "dm-memory still resolves a registered repo through the shared owner" \
+  '[ -n "$(b dm-memory.sh recall demo 2>/dev/null || true)" ] || b dm-memory.sh recall demo >/dev/null 2>&1'
 
 echo "== discarded terminal state (operator discard, issue #69) =="
 b dm-repo.sh add disctest "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1

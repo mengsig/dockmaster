@@ -72,6 +72,30 @@ All notable changes to this project are documented here. The format follows
 - **A leaked reclaim marker no longer wedges `dm_lock` recovery** (#122). The
   marker was unstamped and untrapped, so one reclaimer killed mid-reclaim made
   every later dead-PID lock hard-fail at ~30s, permanently.
+- **A mistyped repo name no longer turns the toolbelt on the distro itself**
+  (#119). `dm_repo_dir` built `"$DM_HOME/$(registry path)"`; for an unregistered
+  repo that path was empty, so it composed to `$DM_HOME` — and the guard meant to
+  catch it tested `$DM_HOME/.git`, which always exists. A typo resolved to the
+  operator's control plane, and `dm-sync` fast-forwarded it, `dm-worktree` cut
+  worktrees off it, and `dm-merge local` landed on its own main. Resolution and
+  mutation are now separate: `dm_repo_dir_or_none` solely owns the composition
+  and refuses an empty path, with exit codes as contract (2 = no such repo;
+  anything else = the lookup failed, never laundered into "unknown repo"). The
+  distro resolves by the RESERVED name `dockmaster` — unregistered, refused by
+  `dm-repo.sh`, flagged by `dm-doctor` if an entry predates it — so its own
+  self-ship lifecycle works while a typo still dies. Mutating it stays refused
+  with no bypass: authority is `never`, `dm-sync` SKIPs, `dm_assert_not_distro`
+  catches hand-edited paths.
+  Also removes a false landing signal: `set -e` does not escape a `[ ]` argument,
+  a `case` word, or a nested substitution, so a failed lookup left `git -C ""`
+  reading the *current directory's* repo — `dm-pr.sh check` wrote `pr_state`,
+  `checks` and `pr_check_snapshot` from the wrong repository (observed reporting
+  `MERGED`), and `adopt`'s cross-repo guard compared against that same wrong
+  slug. `task_has_ci` likewise answered "no CI", which with `--allow-no-checks`
+  makes the merge gate return `allow`. And `dm-worktree.sh landed` now exits 2
+  for "could not determine" — distinct from 1 for "not landed" — so teardown,
+  `dm-task.sh state` and `dm-status.sh` report the real reason instead of
+  claiming the operator has unlanded work.
 - **The PR path no longer requires the maintainer's private `gh-axi` wrapper**
   (#104). `dm-pr.sh open`, `dm-pr.sh merge`, and `dm-repo.sh create` hard-failed
   without it, while the docs promised a plain-`gh` fallback that did not exist.

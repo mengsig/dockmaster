@@ -212,6 +212,17 @@ probe_state_json() {
     printf '       ^ restore from git or a backup, or reset to {"repos":{}}\n'
     bad=$((bad + 1))
   fi
+  # A registry entry under the distro's reserved name is shadowed by the alias:
+  # dm_repo_dir_or_none short-circuits before the registry read, so such a repo
+  # silently resolves to $DM_HOME with authority `never`. dm-repo.sh blocks new
+  # ones; a PRE-EXISTING entry can only be surfaced, so say so rather than let it
+  # redirect quietly.
+  if [ -f "$DM_REGISTRY" ] && jq -e --arg n "$DM_DISTRO_REPO" '.repos[$n]' "$DM_REGISTRY" >/dev/null 2>&1; then
+    printf '  FAIL registry has an entry named %s, the reserved distro name\n' "$DM_DISTRO_REPO"
+    printf '       ^ it is shadowed: the name resolves to the distro root, not its clone.\n'
+    printf '         Rename it (dm-repo.sh remove %s, then re-add under another name).\n' "$DM_DISTRO_REPO"
+    bad=$((bad + 1))
+  fi
   backlog="$DM_STATE/backlog.json"
   if [ -f "$backlog" ] && ! jq . "$backlog" >/dev/null 2>&1; then
     printf '  FAIL state/backlog.json is not valid JSON\n'

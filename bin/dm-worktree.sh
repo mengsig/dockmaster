@@ -16,6 +16,9 @@
 #                                    is fetched fresh and recorded as the task's
 #                                    `base` meta, in place of the default-branch
 #                                    freshness guard used when --base is omitted.
+#                                    Refuses a <repo> resolving to the distro root;
+#                                    the reserved name `dockmaster` is the one
+#                                    exemption, for its own PR path (#119).
 #   assert <path> <repo>            verify <path> is a real worktree root distinct
 #                                    from the primary clone (isolation invariant)
 #   landed <id>                     is the worktree's committed work landed?
@@ -44,9 +47,14 @@ mkdir -p "$DM_WT"
 
 # --- isolation assertion: the load-bearing safety invariant ------------------
 assert_isolated() {
-  local path="$1" repo="$2" primary top
+  local path="$1" repo="$2" primary primary_dir top
   path="$(cd "$path" 2>/dev/null && pwd -P)" || dm_die "worktree path does not exist: $1"
-  primary="$(cd "$(dm_repo_dir "$repo")" && pwd -P)"
+  # Resolve in its own step: nested in the `cd` substitution, a resolver dm_die
+  # does not propagate — it yielded an empty primary, and an empty primary can
+  # never equal $top, so the isolation assertion would PASS on a lookup failure.
+  primary_dir="$(dm_repo_dir "$repo")" \
+    || dm_die "cannot verify isolation: repo '$repo' did not resolve"
+  primary="$(cd "$primary_dir" && pwd -P)" || dm_die "primary clone path does not exist: $primary_dir"
   top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)"
   top="$(cd "$top" 2>/dev/null && pwd -P || true)"
   [ -n "$top" ] || dm_die "not inside a git worktree: $path"
@@ -166,15 +174,32 @@ clear_missing_worktree() {
 # --force-only fallback when git can no longer remove the worktree (admin record
 # destroyed); without it the task pins at `working` forever. Managed path only.
 discard_managed_dir() {
-  local wt="$1" id="$2" repo="$3" wt_root primary
+  local wt="$1" id="$2" repo="$3" wt_root primary primary_dir
   wt_root="$(cd "$DM_WT" 2>/dev/null && pwd -P)" \
     || dm_die "REFUSED: managed worktree root does not exist: $DM_WT"
-  primary="$(cd "$(dm_repo_dir "$repo")" 2>/dev/null && pwd -P)" \
+  # Resolve then cd, never nested: a dm_repo_dir die inside the cd substitution
+  # would not propagate, leaving primary=CWD and defeating the collision check.
+  primary_dir="$(dm_repo_dir "$repo")" \
+    || dm_die "REFUSED: cannot resolve primary clone for '$repo'; refusing to delete $wt"
+  primary="$(cd "$primary_dir" 2>/dev/null && pwd -P)" \
     || dm_die "REFUSED: primary clone for '$repo' does not exist; refusing to delete $wt"
   [ "$wt" = "$wt_root/$id" ] \
     || dm_die "REFUSED: $wt is not the managed worktree path $wt_root/$id; refusing to delete it"
   [ "$wt" != "$primary" ] \
     || dm_die "REFUSED: $wt resolves to the primary clone of '$repo'; refusing to delete it"
+  rm -rf "$wt"
+}
+
+# --force-only removal of a worktree whose repo no longer resolves (#119): there
+# is NO clone, so discard_managed_dir's primary-collision check is inapplicable
+# and would die at dm_repo_dir. The confined managed-path check is the essential
+# guard and needs no clone — keep it, drop only the clone comparison.
+discard_orphan_worktree() {
+  local wt="$1" id="$2" wt_root
+  wt_root="$(cd "$DM_WT" 2>/dev/null && pwd -P)" \
+    || dm_die "REFUSED: managed worktree root does not exist: $DM_WT"
+  [ "$wt" = "$wt_root/$id" ] \
+    || dm_die "REFUSED: $wt is not the managed worktree path $wt_root/$id; refusing to delete it"
   rm -rf "$wt"
 }
 
@@ -217,6 +242,15 @@ case "$cmd" in
     # kind). Fail closed and point at the record-creating command.
     [ -n "$(dm_meta_get "$id" kind)" ] || dm_die "no task record for '$id' (or it has no kind); create it first: dm-task.sh new $id --kind ship|scout --repo $repo"
     dir="$(dm_repo_dir "$repo")"
+    # THE ONE EXEMPTION to "never operate on the distro" (#119). Cutting a
+    # worktree off DM_HOME is exactly how dockmaster ships changes to itself
+    # (branch + worktree + its own PR), so the RESERVED distro name is allowed
+    # here — and only here. Anything else resolving to the distro root (a
+    # hand-edited registry path) is refused. It buys a worktree and nothing more:
+    # dm-sync's fast-forward and dm-merge's local land refuse the distro outright.
+    if [ "$repo" != "$DM_DISTRO_REPO" ]; then
+      dm_assert_not_distro "$dir" "creating a worktree for repo '$repo'"
+    fi
     wt="$DM_WT/$id"
     [ -e "$wt" ] && dm_die "worktree already exists: $wt"
     if [ -n "$base_ref" ]; then
@@ -294,7 +328,13 @@ case "$cmd" in
       echo "undetermined: cannot inspect tracked files: $tracked_state"; exit 2
     fi
     [ "$tracked_state" = clean ] || { echo "unlanded: uncommitted changes to tracked files"; exit 1; }
-    dir="$(dm_repo_dir "$repo")"
+    # Exit 2 = COULD NOT DETERMINE, distinct from exit 1 = not landed. `remove`,
+    # `dm-task.sh state`, and `dm-status.sh` drift rely on the difference:
+    # reporting a failed lookup as "unlanded work" misstates the reason (#84/#119).
+    dir="$(dm_repo_dir_or_none "$repo")" \
+      || { echo "undetermined: cannot resolve repo '$repo' (unregistered, or the registry is unreadable)"; exit 2; }
+    [ -d "$dir/.git" ] \
+      || { echo "undetermined: no clone for repo '$repo' (expected $dir)"; exit 2; }
     def="$(dm_default_branch "$dir")"
     # DM_NO_FETCH=1 reconciles from local refs only (dm-status.sh sets it so its
     # read-only snapshot performs no network). Session-start leaves it unset and
@@ -394,24 +434,37 @@ $u"; fi
 $undisposable"
       fi
     fi
-    dir="$(dm_repo_dir "$repo")"
-    # Park the head BEFORE anything is deleted: after the directory is gone the
-    # sha is unrecoverable (detached worktree, its reflog goes with it).
+    # Resolve the clone tolerantly: removal must not be held hostage by an
+    # unregistered/renamed repo, or the worktree is uncleanable even with --force
+    # and its task pins at `working` (#119). dm_repo_dir would die here.
     discarded_head=""
-    if [ "$force" -eq 1 ] && [ "$landed_rc" -ne 0 ]; then
-      discarded_head="$(preserve_discarded_head "$id" "$wt" "$dir")"
-    fi
-    if ! remove_out="$(git_remove_worktree "$wt" "$repo" "$dir" 2>&1)"; then
-      if [ "$force" -eq 0 ]; then
-        dm_die "REFUSED: git could not remove $id's worktree; directory and metadata preserved.
+    dir="$(dm_repo_dir_or_none "$repo")" || dir=""
+    if [ -n "$dir" ] && [ -d "$dir/.git" ]; then
+      # Park the head BEFORE anything is deleted: after the directory is gone the
+      # sha is unrecoverable (detached worktree, its reflog goes with it).
+      if [ "$force" -eq 1 ] && [ "$landed_rc" -ne 0 ]; then
+        discarded_head="$(preserve_discarded_head "$id" "$wt" "$dir")"
+      fi
+      if ! remove_out="$(git_remove_worktree "$wt" "$repo" "$dir" 2>&1)"; then
+        if [ "$force" -eq 0 ]; then
+          dm_die "REFUSED: git could not remove $id's worktree; directory and metadata preserved.
 ${remove_out:-No error detail from git.}
 Inspect $wt. If its git record is broken or the work is expendable, re-run with --force (explicit discard authority) to delete the managed directory."
+        fi
+        dm_warn "git could not remove $id's worktree (${remove_out:-no error detail from git}); discarding $wt under operator discard authority"
+        discard_managed_dir "$wt" "$id" "$repo"
       fi
-      dm_warn "git could not remove $id's worktree (${remove_out:-no error detail from git}); discarding $wt under operator discard authority"
-      discard_managed_dir "$wt" "$id" "$repo"
-    fi
-    if ! prune_out="$(git -C "$dir" worktree prune 2>&1)"; then
-      dm_warn "worktree removed for $id, but git worktree prune failed: ${prune_out:-no error detail from git}"
+      if ! prune_out="$(git -C "$dir" worktree prune 2>&1)"; then
+        dm_warn "worktree removed for $id, but git worktree prune failed: ${prune_out:-no error detail from git}"
+      fi
+    else
+      # No clone to park into, remove through, or prune. The commit lived only in
+      # that clone's object store, so it CANNOT be preserved — refuse without
+      # --force (the landed_rc=2 refusal above already covers the unforced path),
+      # then delete only after re-confirming the confined managed path (#119).
+      [ "$force" -eq 1 ] || dm_die "REFUSED: cannot resolve repo '$repo' to remove $id's worktree; its commit cannot be preserved without the clone. Re-run with --force (explicit discard authority) to discard the managed directory."
+      discard_orphan_worktree "$wt" "$id"
+      dm_warn "removed $id's worktree directly: repo '$repo' does not resolve, so no clone to park its head into or prune its admin entry; any discarded commit could not be preserved"
     fi
     dm_meta_set "$id" worktree ""
     # Written here, not via dm-task.sh event, to bar forgery. Skipped only when

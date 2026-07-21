@@ -24,6 +24,13 @@ if _dm_real_home="$(cd "$DM_HOME" 2>/dev/null && pwd -P)"; then DM_HOME="$_dm_re
 unset _dm_real_home
 export DM_HOME
 
+# The distro's own reserved repo name. It is NOT in the registry and must never
+# be added: dm_repo_dir_or_none resolves it to $DM_HOME explicitly, by name, so
+# dockmaster's self-ship lifecycle (worktree/assert/landed/remove) works while a
+# typo still dies at the resolver. Mutating the distro stays refused regardless
+# (dm_assert_not_distro), and its merge authority is `never`.
+DM_DISTRO_REPO="dockmaster"
+
 DM_STATE="$DM_HOME/state"
 DM_DATA="$DM_HOME/data"
 DM_REPOS="$DM_HOME/repos"
@@ -500,6 +507,12 @@ dm_registry_get() {
 
 # dm_merge_authority <name>  -> the repo's effective merge authority, one of
 # yolo|ask|never|invalid. Single owner of the value AND its legacy migration.
+#   - The reserved distro name returns `never`: the dockmaster may never merge or
+#     land the distro itself — its PRs are merged by the operator on GitHub.
+#     Stated explicitly so the refusal names the real posture, not a lookup miss.
+#   - Any OTHER unregistered repo (no registry entry, or a null one) returns
+#     `invalid`, never the permissive legacy default: an unknown repo must fail
+#     the merge gate closed, not inherit the most permissive posture (#119).
 #   - A stored `merge_authority` of yolo|ask|never is returned verbatim.
 #   - A stored `merge_authority` that is present but NOT one of those three is a
 #     corrupt/hand-broken value: it returns `invalid` so the merge/land gate can
@@ -518,9 +531,16 @@ dm_registry_get() {
 dm_merge_authority() {
   dm_ensure_dirs
   local name="$1" obj ma yolo
-  # Snapshot the repo object (compact, single line) with the sole file read. A
-  # missing repo yields "{}", which reads as the legacy default (ask) below.
-  obj="$(jq -c --arg n "$name" '.repos[$n] // {}' "$DM_REGISTRY" 2>/dev/null)"
+  [ "$name" != "$DM_DISTRO_REPO" ] || { printf 'never\n'; return 0; }
+  # Snapshot the repo object (compact, single line) with the sole file read. An
+  # absent key and a null entry both yield "null" — distinct from a registered
+  # entry that merely omits the field, so an unknown repo cannot fall through to
+  # the legacy `ask` default. An unreadable/corrupt registry yields "" and is
+  # treated the same way: fail closed.
+  obj="$(jq -c --arg n "$name" 'if (.repos // {}) | has($n) then .repos[$n] else null end' "$DM_REGISTRY" 2>/dev/null)" || obj=""
+  case "$obj" in
+    ''|null) printf 'invalid\n'; return 0 ;;
+  esac
   # Extract each field from the snapshot string, not the file — the exact decoded
   # value, validated whole. `$(...)` strips only a trailing newline, so an
   # embedded tab or newline survives into $ma and fails the exact match below.
@@ -552,14 +572,87 @@ dm_merge_allowed_bases() {
   printf '%s' "$obj" | jq -r '.merge_allowed_bases // [] | if type == "array" then .[] else empty end | select(type == "string")' 2>/dev/null || true
 }
 
-# dm_repo_dir <name>  -> print the managed clone's directory, or die if absent.
-# Single owner of "resolve a registered repo's clone path"; every script that
-# needs a repo's working tree goes through here so the error is identical.
+# dm_repo_dir_or_none <name>  -> print the repo's working-tree directory, or exit
+# nonzero with NO output. Single owner of the "$DM_HOME/<registry path>"
+# composition AND of the reserved distro-name alias.
+#
+# The empty path component is the whole point (#119): `"$DM_HOME/$(...)"` with an
+# unregistered name composed to $DM_HOME itself — the distro root — and the
+# `.git` probe that was meant to catch it always passes there, because the distro
+# IS a git repo. So a mistyped repo name resolved to the operator's control
+# plane and the toolbelt happily synced/merged it. Refuse the empty path BEFORE
+# building any directory; an absent path can never compose into a valid one.
+#
+# EXIT CODES ARE PART OF THE CONTRACT, so a caller can distinguish "no such repo"
+# from "the lookup itself failed" and never swallow the latter:
+#   0  resolved (path printed)
+#   2  no such repo — benign; a caller MAY continue (dm-sync's SKIP line)
+#   1 or other  the lookup FAILED (unreadable/corrupt registry, a dm_die raised
+#      inside this call). Callers must propagate it, never report it as "unknown
+#      repo": that would turn registry corruption into a benign skip.
+dm_repo_dir_or_none() {
+  local name="${1:-}" path
+  [ -n "$name" ] || return 2
+  # The distro resolves BY ITS RESERVED NAME, never by an empty path (see
+  # DM_DISTRO_REPO). It has no registry entry and must never gain one.
+  if [ "$name" = "$DM_DISTRO_REPO" ]; then printf '%s\n' "$DM_HOME"; return 0; fi
+  path="$(dm_registry_get "$name" path)" || return 1
+  [ -n "$path" ] || return 2
+  printf '%s/%s\n' "$DM_HOME" "$path"
+}
+
+# dm_repo_dir <name>  -> print the repo's working-tree directory, or die. Every
+# script that needs a repo's working tree goes through here so the error is
+# identical — and so an unknown repo and a broken registry read differently.
 dm_repo_dir() {
-  local name="$1" dir
-  dir="$DM_HOME/$(dm_registry_get "$name" path)"
+  local name="${1:-}" dir rc=0
+  dir="$(dm_repo_dir_or_none "$name")" || rc=$?
+  case "$rc" in
+    0) : ;;
+    2) dm_die "repo '$name' is not registered (no registry entry, or no path recorded); check the name with dm-repo.sh list, or register it with dm-repo.sh add" ;;
+    *) dm_die "repo '$name': could not resolve its directory — the registry could not be read. Fix state/repos.json before retrying." ;;
+  esac
   [ -d "$dir/.git" ] || dm_die "no clone for repo '$name' (expected $dir); add it with dm-repo.sh add"
   printf '%s\n' "$dir"
+}
+
+# --- the distro is never a managed repo --------------------------------------
+# DM_HOME holds the operating contract, the toolbelt, the skills every crewmate
+# runs from, and the live orchestration state. #119 showed sanctioned commands
+# (dm-sync fast-forward, dm-merge local land) acting on it because a bad repo
+# name resolved there. dm_repo_dir_or_none closes that ROUTE; this closes the
+# CLASS for any other way a repo path could resolve to the DISTRO ROOT (a
+# hand-edited registry path of "." or "repos/..", or a clone symlinked AT the
+# distro). SCOPE, precisely: this protects $DM_HOME only. A registry path
+# pointing OUTSIDE DM_HOME — e.g. repos/<name> symlinked to an unrelated git
+# repo elsewhere — still resolves and is still operated on; containment of
+# repos/ as a whole is a separate, unclosed gap, tracked in #141.
+#
+# This guards MUTATION, not resolution. The distro legitimately resolves (by its
+# reserved name) so its own worktree lifecycle works; what it may never do is
+# fast-forward its clone (dm-sync) or land onto its default branch (dm-merge
+# local) — the tracked surface ships through this repo's own PR path.
+#
+# dm_is_distro_dir is the pure comparison (both sides resolved physically, so a
+# symlink or a non-canonical DM_HOME cannot sneak past); dm_assert_not_distro is
+# the refusing wrapper for mutating call sites. A nonexistent directory is not
+# the distro (DM_HOME exists), so it is reported as "not the distro" and the
+# caller's own existence checks handle it.
+dm_is_distro_dir() {
+  # dm_is_distro_dir <dir>  -- exit 0 if <dir> IS the distro root
+  local resolved home
+  resolved="$(cd "${1:-}" 2>/dev/null && pwd -P)" || return 1
+  home="$(cd "$DM_HOME" 2>/dev/null && pwd -P)" || return 1
+  [ "$resolved" = "$home" ]
+}
+
+dm_assert_not_distro() {
+  # dm_assert_not_distro <dir> <action-description>
+  # Empty input is a CALLER BUG, not a pass: an empty dir is exactly what a
+  # swallowed resolver failure produces, and defaulting a guard to "allow" there
+  # points it the wrong way. Refuse independently of what the callers happen to do.
+  [ -n "${1:-}" ] || dm_die "internal: dm_assert_not_distro called with an empty directory (${2:-unknown action}); the caller's repo resolution failed silently"
+  ! dm_is_distro_dir "$1" || dm_die "REFUSED: ${2:-this operation} would act on the dockmaster distro itself ($DM_HOME), not a managed repo. Check the repo name (dm-repo.sh list). The distro ships changes to itself through its own branch and PR, never through this path."
 }
 
 # dm_require_worktree <id>  -> print the task's recorded worktree path, or die

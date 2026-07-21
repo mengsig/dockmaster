@@ -52,6 +52,10 @@ require_valid_mode() {
 # local init) so the recovery message matches what actually happened.
 guard_new_repo_slot() {
   local name="$1" hint="$2" dir
+  # The distro's own name resolves to $DM_HOME by reservation (dm-lib). A registry
+  # entry under it would make the resolution ambiguous, so it can never be taken.
+  [ "$name" != "$DM_DISTRO_REPO" ] \
+    || dm_die "repo name '$name' is reserved for the dockmaster distro itself; choose another name"
   jq -e --arg n "$name" '.repos[$n]' "$DM_REGISTRY" >/dev/null 2>&1 && dm_die "repo '$name' already registered"
   dir="$DM_REPOS/$name"
   [ -e "$dir" ] && dm_die "path already exists but '$name' is not registered: $dir
@@ -222,8 +226,15 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
   get)
     name="${1:-}"; field="${2:-}"
     [ -n "$name" ] || dm_die "usage: dm-repo.sh get <name> [<field>]"
+    # An unknown repo fails the same way whether or not a field is named. A field
+    # read used to return empty-SUCCESS, which is the "empty means here" shape of
+    # #119: `p="$(dm-repo.sh get "$n" path)"; dir="$DM_HOME/$p"` collapses to
+    # $DM_HOME for a typo. An absent FIELD on a registered repo is still an empty
+    # success — that is a real answer, not a missing subject.
+    jq -e --arg n "$name" '.repos[$n]' "$DM_REGISTRY" >/dev/null 2>&1 \
+      || dm_die "no such repo: $name"
     if [ -n "$field" ]; then dm_registry_get "$name" "$field"
-    else jq -e --arg n "$name" '.repos[$n]' "$DM_REGISTRY" || dm_die "no such repo: $name"; fi
+    else jq -e --arg n "$name" '.repos[$n]' "$DM_REGISTRY"; fi
     ;;
 
   set)
