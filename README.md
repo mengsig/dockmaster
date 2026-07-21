@@ -134,9 +134,8 @@ flowchart TD
 - **Fleet PR/health sweep.** A read-only sweep across every open PR reports its
   CI rollup and whether a reviewer requested changes, surfaced in the status
   snapshot — no per-repo polling.
-- **CI on every push and PR.** This distro's own smoke suite and syntax/lint
-  checks run on GitHub Actions across ubuntu and macOS on every push to main and
-  every pull request.
+- **CI on every PR and every push to main.** This distro's own smoke suite and
+  syntax/lint checks run on GitHub Actions across ubuntu and macOS.
 - **Persistent domain supervisors.** For large domains, delegate to a long-lived
   agent that owns a scope, keeps its own memory, and runs its own crew.
 
@@ -149,6 +148,7 @@ bin/                 the toolbelt; run `bin/dm help` for the full list (`bin/dm 
 .claude/skills/      Claude-native workflow adapters
 .agents/skills/      Codex-native workflow adapters
 .codex/              trusted-project Codex nesting and safety config
+.dm-knowledge/       this repo's own committed shared-memory notes
 workflows/           optional deterministic PR-pipeline runner
 config/              PR-pipeline defaults and per-repo overrides
 tests/               lifecycle, parity, runtime, and performance checks
@@ -211,9 +211,11 @@ Supported platforms: macOS and Linux; the scripts run on bash 3.2+.
   review gate, tests, and approved fast-forward landing all work with just the
   above.
 - **Required for the PR flow:** the GitHub CLI `gh` (authenticated with
-  `gh auth login`) **and** `gh-axi`. Reads go through `gh api`; every GitHub
-  *mutation* — opening a PR, merging one, creating a repo — calls `gh-axi` and
-  fails without it.
+  `gh auth login`) **and** `gh-axi`. Every GitHub *mutation* — opening a PR,
+  merging one, reverting one, creating a repo — calls `gh-axi` and fails without
+  it. The toolbelt's reads go through `gh api` (real JSON), but some skills also
+  read through `gh-axi` for human-readable output, so it is not a
+  mutations-only dependency.
 - **Optional:** `lavish-axi` (renders the review artifact; without it the
   dockmaster prints the change and you approve directly) and
   `chrome-devtools-axi` (browser tasks only). Both degrade cleanly.
@@ -222,9 +224,11 @@ Supported platforms: macOS and Linux; the scripts run on bash 3.2+.
 > clone.** `gh-axi` is the maintainer's own wrapper and has no public install
 > path, and the toolbelt has no plain-`gh` fallback for the mutations above
 > ([#104](https://github.com/mengsig/dockmaster/issues/104)). Until that lands,
-> a public adopter should expect local-only mode: everything except opening and
-> merging PRs from inside the dockmaster works. `bin/dm-doctor.sh` reports
-> `gh-axi` as a PR-flow tool so this surfaces before you rely on it.
+> a public adopter should expect local-only mode: everything works except
+> opening, merging, and reverting PRs from inside the dockmaster — **and
+> creating a new GitHub repo**, which is the path a "build me a new project"
+> request goes through. `bin/dm-doctor.sh` reports `gh-axi` as a PR-flow tool so
+> this surfaces before you rely on it.
 
 Per-repo memory is plain markdown — no extra tool to install. Run
 `bin/dm-doctor.sh` to see what you have and what each tool gates.

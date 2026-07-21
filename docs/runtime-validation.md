@@ -21,7 +21,7 @@ The mode-0700 evidence directory is removed on success or failure by default;
 
 | command | result |
 | --- | --- |
-| `bash tests/smoke.sh` | 501 passed, 0 failed; includes wrapper/alias guard probes, fail-closed supervisor status, ordered fleet ownership, runner-command mutation, recursive runtime inventory, and all prior lifecycle/safety regressions |
+| `bash tests/smoke.sh` | passed, 0 failed; includes wrapper/alias guard probes, fail-closed supervisor status, ordered fleet ownership, runner-command mutation, recursive runtime inventory, and all prior lifecycle/safety regressions |
 | `node tests/check-runtime-parity.js` | 18 exact skills/triggers; 28 capability-specific assertions classified as 13 direct, 9 contract, and 6 manual; vocabulary separation, durable identities, and executable rigorous fallbacks |
 | `node tests/check-pr-runner.js` | table-driven fast/default/rigorous order, capacity-bounded review/voter waves, full porcelain checks around every mutation/gate, every failure, skips, malformed PR, and unavailable-host paths |
 | `node tests/check-gate-drift.js` | all three built-in gate sequences match shipped configs |
