@@ -2849,6 +2849,14 @@ echo "== registry integrity: corruption never reads as an empty registry (#112, 
 # corrupt state/repos.json, which must never touch the suite's main home.
 REGINT="$TMP/regint"
 rg() { local s="$1"; shift; DM_HOME="$REGINT" "$ROOT/bin/$s" "$@"; }
+# DM_HOME must itself be a git repo with commits, exactly as the real distro root
+# is. That is load-bearing, not incidental: dm_repo_dir composes
+# "$DM_HOME/<path>", so a swallowed lookup degrades to DM_HOME, and the `.git`
+# probe meant to catch it PASSES there. A plain-directory fixture would hide the
+# whole failure mode.
+mkdir -p "$REGINT"
+git init -q "$REGINT"
+( cd "$REGINT"; printf 'distro\n' > README.md; git add README.md; git commit -qm "distro root" ) >/dev/null 2>&1
 git init -q --bare -b main "$TMP/regint-origin.git"
 git -C "$TMP/seed" push -q "$TMP/regint-origin.git" main
 rg dm-repo.sh add gadget "$TMP/regint-origin.git" --mode local-only --no-memory >/dev/null 2>&1
@@ -2956,6 +2964,11 @@ check "dm-status on a corrupt registry exits non-zero with stderr, not an empty 
 # printed but discarded and the path fell back to DM_HOME — itself a git repo —
 # so a worker's copy attached to the distro root and `rebase` rebased against
 # the distro's own history. Assert on the filesystem, not just the exit code.
+# DM_NO_FETCH=1 is the load-bearing part: on the default path the pre-create
+# FF-sync shell-out happens to fail first and masks this, but offline mode (and
+# the --base stacked-child path) skips it and reaches the resolver directly.
+DM_HOME="$REGINT" DM_NO_FETCH=1 "$ROOT/bin/dm-worktree.sh" create regint-wt gadget >/dev/null 2>&1 || true
+DM_HOME="$REGINT" DM_NO_FETCH=1 "$ROOT/bin/dm-worktree.sh" create regint-wt2 gadget --base main >/dev/null 2>&1 || true
 REGINT_HOMEROOT_WT="$(git -C "$REGINT" worktree list 2>/dev/null | tail -n +2 || true)"
 check "a corrupt registry never attaches a worker copy to the home root" \
   '[ -z "$REGINT_HOMEROOT_WT" ] && [ ! -e "$REGINT/state/worktrees/regint-wt" ]'
