@@ -510,6 +510,13 @@ dm_json_update() {
 # Every registry read goes through the accessors below, so no consumer can opt
 # out. Validated once per process: an invocation reads this lock-protected file
 # many times, and dm_json_update writes only jq's own (valid) output.
+#
+# Scripts whose clone path flows through dm_repo_dir must ALSO call
+# dm_registry_require_valid in their MAIN shell. dm_repo_dir builds its path in
+# a nested command substitution, and bash does not propagate set -e out of one:
+# the refusal is printed but swallowed, and the path degrades to DM_HOME — which
+# is itself a git repo, so the `.git` probe passes and the caller silently
+# operates on the distro root.
 DM_REGISTRY_VALID=0
 
 dm_registry_require_valid() {
@@ -521,10 +528,14 @@ dm_registry_require_valid() {
   local detail
   # Capture jq's stderr only (2>&1 before >/dev/null redirects the diagnostic
   # into the capture, then discards the boolean on stdout).
-  detail="$(jq -e 'type == "object" and ((.repos // {}) | type == "object")' \
+  # `-s` slurps the whole file into an array so `length == 1` rejects CONCATENATED
+  # documents; without it `-e` judges only the last value in the stream, and a
+  # healthy-looking tail would mask a corrupt head.
+  detail="$(jq -e -s 'length == 1
+      and (.[0] | type == "object" and has("repos") and (.repos | type == "object"))' \
     "$DM_REGISTRY" 2>&1 >/dev/null)" \
     || dm_die "the repo registry does not parse: $DM_REGISTRY
-  ${detail:-not a JSON object with a .repos object}
+  ${detail:-not a single JSON object with a .repos object (expected {\"repos\":{…}})}
 This is CORRUPTION, not an empty registry. Every repo you enrolled is still enrolled and every clone under repos/ is untouched; nothing has been changed. Restore the file from a backup or from your last known-good copy, or inspect it with: jq . '$DM_REGISTRY'
 Do NOT delete anything under repos/ to recover from this — a clone may hold work that exists nowhere else. dm-doctor.sh check reports the same fault."
   DM_REGISTRY_VALID=1
@@ -537,7 +548,7 @@ Do NOT delete anything under repos/ to recover from this — a clone may hold wo
 dm_registry_has() {
   dm_registry_require_valid
   local rc=0
-  jq -e --arg n "$1" '(.repos // {}) | has($n)' "$DM_REGISTRY" >/dev/null 2>&1 || rc=$?
+  jq -e --arg n "$1" '.repos | has($n)' "$DM_REGISTRY" >/dev/null 2>&1 || rc=$?
   case "$rc" in
     0) return 0 ;;
     1) return 1 ;;
@@ -554,7 +565,7 @@ This is a read failure, not an answer — refusing to treat it as 'not registere
 # subshell, which would leave the caller looping over nothing.
 dm_registry_keys() {
   dm_registry_require_valid
-  jq -r '(.repos // {}) | keys[]' "$DM_REGISTRY" \
+  jq -r '.repos | keys[]' "$DM_REGISTRY" \
     || dm_die "could not enumerate the registry: $DM_REGISTRY"
 }
 
@@ -593,16 +604,16 @@ dm_registry_get() {
 # a valid-looking prefix and pass. Every merge/landing path and the `list` display
 # read authority through here.
 dm_merge_authority() {
-  # Validate first: an unreadable registry must never silently resolve a `never`
-  # repo to the permissive legacy default (ask).
-  dm_registry_require_valid
+  dm_ensure_dirs
   local name="$1" obj ma yolo
   [ "$name" != "$DM_DISTRO_REPO" ] || { printf 'never\n'; return 0; }
   # Snapshot the repo object (compact, single line) with the sole file read. An
   # absent key and a null entry both yield "null" — distinct from a registered
   # entry that merely omits the field, so an unknown repo cannot fall through to
   # the legacy `ask` default. An unreadable/corrupt registry yields "" and is
-  # treated the same way: fail closed.
+  # treated the same way: fail closed to `invalid` (#119). Every real merge path
+  # validates the registry in its main shell first (dm_registry_require_valid),
+  # so this is the belt-and-suspenders backstop, not the only guard.
   obj="$(jq -c --arg n "$name" 'if (.repos // {}) | has($n) then .repos[$n] else null end' "$DM_REGISTRY" 2>/dev/null)" || obj=""
   case "$obj" in
     ''|null) printf 'invalid\n'; return 0 ;;
@@ -632,8 +643,11 @@ dm_merge_authority() {
 # grants nothing); a whitespace-containing entry survives here but can never
 # match in dm_merge_base_exception, which refuses whitespace bases.
 dm_merge_allowed_bases() {
-  dm_registry_require_valid
+  dm_ensure_dirs
   local obj
+  # Fail closed like dm_merge_authority: a read failure yields no bases, so the
+  # never-repo merge exception grants nothing. The main shell validates the
+  # registry loudly (dm_registry_require_valid) before any real merge path.
   obj="$(jq -c --arg n "$1" '.repos[$n] // {}' "$DM_REGISTRY" 2>/dev/null)" || return 0
   printf '%s' "$obj" | jq -r '.merge_allowed_bases // [] | if type == "array" then .[] else empty end | select(type == "string")' 2>/dev/null || true
 }

@@ -53,6 +53,9 @@ set -euo pipefail
 # run without one.
 dm_need git; dm_need jq
 dm_ensure_dirs
+# Merge/landing decisions read the registry (authority, allowed bases, clone
+# path); a corrupt one must stop them before any gate is consulted.
+dm_registry_require_valid
 
 # await-checks polling defaults (named once): wait up to ~10 minutes, re-checking
 # every ~15s. GitHub Actions runs are minutes long, so a short interval mostly

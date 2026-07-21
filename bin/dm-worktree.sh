@@ -41,6 +41,11 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_need git
 dm_ensure_dirs
+# Validate in the MAIN shell: dm_repo_dir resolves the clone through a nested
+# command substitution, where a dm_die exits only the inner subshell — the
+# refusal would be printed, swallowed, and `dir` would fall back to DM_HOME
+# (itself a git repo), attaching a worker's copy to the distro root.
+dm_registry_require_valid
 
 DM_WT="$DM_STATE/worktrees"
 mkdir -p "$DM_WT"

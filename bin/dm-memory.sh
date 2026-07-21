@@ -55,6 +55,9 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_need git; dm_need jq
 dm_ensure_dirs
+# Per-repo stores resolve through the registry; refuse a corrupt one rather than
+# report "not registered" for a repo that is enrolled.
+dm_registry_require_valid
 
 DM_KNOWLEDGE_START='<!-- dm:knowledge:start -->'
 DM_KNOWLEDGE_END='<!-- dm:knowledge:end -->'
