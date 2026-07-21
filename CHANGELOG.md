@@ -8,6 +8,17 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **`AGENTS.md` is now the contract, not the manual** (#129). Cut roughly in half
+  (28680 → 12736 bytes) by retiring two blocks that did not need to be re-read on
+  every session and in every crewmate brief. The commandments mirror is gone — the
+  `coding-guidelines` skill is the single canonical copy, and `dm-brief.sh` already
+  bakes that same file verbatim into every brief, so crewmates are unaffected; the
+  main agent loads it at its trigger. The `dm:knowledge` block moved to committed
+  `.dm-knowledge/` area notes (`toolbelt`, `lifecycle`, `merge-safety`,
+  `runtime-and-tests`), read on demand and indexed from `AGENTS.md`. Recall still
+  unions the legacy block for repos that have not migrated. The performance
+  baseline is re-set to the curated size, and `base_commit` now names the change
+  (`#129`) instead of a SHA that squash-merge made unresolvable on arrival.
 - **Codex Lavish waits now wake reliably.** A dedicated no-fork waiter owns the
   long poll through terminal completion; its collaboration completion wakes the
   parent mailbox. Raw command sessions are explicitly attached-only, with a
