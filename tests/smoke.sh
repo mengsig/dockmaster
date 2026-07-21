@@ -351,6 +351,165 @@ check "pr open surfaces gh-axi's real stderr on create failure" \
 check "no leftover temp file after the failure" '[ -z "$(find "$DM_HOME/state" -maxdepth 1 -name ".pr-open.*")" ]'
 b dm-worktree.sh remove pr-ghaxi-fail --force >/dev/null 2>&1
 
+echo "== GitHub CLI resolution: plain gh is the baseline, gh-axi only preferred (#104) =="
+# The resolver is pure and PATH-driven, and uses only builtins (command -v,
+# printf), so a stub-only PATH exercises every combination hermetically.
+ghcli() { ( . "$ROOT/bin/dm-lib.sh"; PATH="$1"; dm_github_cli ); }
+ghreq() { ( . "$ROOT/bin/dm-lib.sh"; PATH="$1"; dm_require_github_cli ); }
+prgate() { ( . "$ROOT/bin/dm-lib.sh"; dm_pr_delivery_gate "$1" "$2" ); }
+CLI_BOTH="$TMP/cli-both"; CLI_GH="$TMP/cli-gh"; CLI_AXI="$TMP/cli-axi"; CLI_NONE="$TMP/cli-none"
+mkdir -p "$CLI_BOTH" "$CLI_GH" "$CLI_AXI" "$CLI_NONE"
+printf '#!/bin/sh\nexit 0\n' > "$CLI_BOTH/gh"
+cp "$CLI_BOTH/gh" "$CLI_BOTH/gh-axi"; cp "$CLI_BOTH/gh" "$CLI_GH/gh"; cp "$CLI_BOTH/gh" "$CLI_AXI/gh-axi"
+chmod +x "$CLI_BOTH/gh" "$CLI_BOTH/gh-axi" "$CLI_GH/gh" "$CLI_AXI/gh-axi"
+check "both installed prefers the gh-axi wrapper" '[ "$(ghcli "$CLI_BOTH")" = "gh-axi" ]'
+check "plain gh alone resolves to gh"             '[ "$(ghcli "$CLI_GH")" = "gh" ]'
+check "gh-axi alone still resolves"               '[ "$(ghcli "$CLI_AXI")" = "gh-axi" ]'
+check "neither installed fails, never defaults"   '! ghcli "$CLI_NONE" >/dev/null 2>&1'
+CLI_NONE_OUT="$(ghreq "$CLI_NONE" 2>&1 || true)"
+check "the missing-CLI error points at installable gh" 'grep -q "cli.github.com" <<<"$CLI_NONE_OUT"'
+check "the missing-CLI error never demands the private wrapper" '! grep -q "gh-axi" <<<"$CLI_NONE_OUT"'
+check "dm_pr_delivery_gate: gh installed + authenticated is ready" '[ "$(prgate 1 1)" = "ready" ]'
+check "dm_pr_delivery_gate: no gh is no-cli"                       '[ "$(prgate 0 1)" = "no-cli" ]'
+check "dm_pr_delivery_gate: unauthenticated gh is no-auth"         '[ "$(prgate 1 0)" = "no-auth" ]'
+check "dm_pr_delivery_gate: neither is no-cli"                     '[ "$(prgate 0 0)" = "no-cli" ]'
+check "dm_pr_delivery_gate fails closed on a garbage probe"        '[ "$(prgate yes yes)" = "no-cli" ]'
+
+# A "plain gh only" run must be deterministic on an operator machine that HAS
+# the wrapper installed, so drop every PATH entry providing gh-axi. Prepending a
+# stub cannot do this — command -v would still find the real wrapper.
+path_without_ghaxi() {
+  local out="" d tool real shim="$TMP/noaxi-shims"
+  mkdir -p "$shim"
+  while IFS= read -r d; do
+    if [ -n "$d" ] && [ ! -x "$d/gh-axi" ]; then out="$out:$d"; fi
+  done <<<"$(printf '%s' "$PATH" | tr ':' '\n')"
+  out="${out#:}"
+  # Dropping a directory takes its unrelated tools with it — gh-axi ships in an
+  # nvm bin that also holds node and codex. Re-provide anything that vanished so
+  # the filter removes exactly the wrapper, even on a nvm-only machine.
+  for tool in git jq node claude codex; do
+    real="$(command -v "$tool" 2>/dev/null)" || continue
+    if ! ( PATH="$out"; command -v "$tool" >/dev/null 2>&1 ); then ln -sf "$real" "$shim/$tool"; fi
+  done
+  printf '%s\n' "$shim:$out"
+}
+NOAXI_PATH="$(path_without_ghaxi)"
+check "the no-wrapper PATH really resolves no gh-axi" '( PATH="$NOAXI_PATH"; ! command -v gh-axi >/dev/null 2>&1 )'
+check "the no-wrapper PATH keeps every tool the filter is not aiming at" \
+  '( PATH="$NOAXI_PATH"; for t in git jq node; do command -v "$t" >/dev/null 2>&1 || exit 1; done )'
+
+echo "== pr open success path: plain gh alone, and gh-axi preferred (#104) =="
+# The success path was previously untested: it pushes and creates (both
+# irreversible) before parsing a url out of stdout. Both binaries print the url
+# the same way, so the stubs differ only in which name gets invoked.
+open_task() {
+  # open_task <id> <branch> -> commit a file on a fresh branch in a new worktree
+  local id="$1" branch="$2" wt
+  b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
+  wt="$(b dm-worktree.sh create "$id" demo | tail -n1)"
+  git -C "$wt" checkout -q -b "$branch"
+  printf 'x = 1\n' > "$wt/$id.py"
+  git -C "$wt" add -A >/dev/null
+  git -C "$wt" commit -qm "work for $id" >/dev/null
+}
+PR_GH_STUB="$TMP/pr-open-gh"; mkdir -p "$PR_GH_STUB"
+cat > "$PR_GH_STUB/gh" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$PR_GH_STUB/gh-calls"
+printf 'https://github.com/o/r/pull/321\n'
+STUB
+chmod +x "$PR_GH_STUB/gh"
+open_task pr-gh-only feat/x/pr-gh-only
+PR_GH_OUT="$(PATH="$PR_GH_STUB:$NOAXI_PATH" b dm-pr.sh open pr-gh-only --title "plain gh" --body body 2>&1 || true)"
+check "pr open succeeds with only plain gh installed" 'grep -q "https://github.com/o/r/pull/321" <<<"$PR_GH_OUT"'
+check "plain gh received the pr create call"          'grep -q "^pr create -R " "$PR_GH_STUB/gh-calls"'
+check "pr open records the PR url on the task"        '[ "$(b dm-task.sh get pr-gh-only pr)" = "https://github.com/o/r/pull/321" ]'
+check "pr open records the branch on the task"        '[ "$(b dm-task.sh get pr-gh-only branch)" = "feat/x/pr-gh-only" ]'
+check "pr open appends the done event"                'grep -q "done: PR https://github.com/o/r/pull/321" "$DM_HOME/state/tasks/pr-gh-only.status"'
+check "pr open really pushed the branch to origin"    'git -C "$TMP/origin.git" rev-parse --verify --quiet refs/heads/feat/x/pr-gh-only >/dev/null'
+
+# Wrapper present: it must be preferred, and plain gh must not be used for the
+# create — the task record that results is otherwise identical.
+PR_AXI_STUB="$TMP/pr-open-axi"; mkdir -p "$PR_AXI_STUB"
+cat > "$PR_AXI_STUB/gh-axi" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$PR_AXI_STUB/axi-calls"
+printf 'https://github.com/o/r/pull/321\n'
+STUB
+cat > "$PR_AXI_STUB/gh" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$PR_AXI_STUB/gh-calls"
+printf 'https://github.com/o/r/pull/999\n'
+STUB
+chmod +x "$PR_AXI_STUB/gh-axi" "$PR_AXI_STUB/gh"
+open_task pr-axi-pref feat/x/pr-axi-pref
+PATH="$PR_AXI_STUB:$NOAXI_PATH" b dm-pr.sh open pr-axi-pref --title "wrapper" --body body >/dev/null 2>&1 || true
+check "the wrapper handled the create when installed" 'grep -q "^pr create -R " "$PR_AXI_STUB/axi-calls"'
+check "plain gh was not used for the create"          '[ ! -f "$PR_AXI_STUB/gh-calls" ]'
+check "both CLIs record the same PR url"       '[ "$(b dm-task.sh get pr-axi-pref pr)" = "$(b dm-task.sh get pr-gh-only pr)" ]'
+check "both CLIs record their own branch"      '[ "$(b dm-task.sh get pr-axi-pref branch)" = "feat/x/pr-axi-pref" ]'
+check "both CLIs append the same done event"   'grep -q "done: PR https://github.com/o/r/pull/321" "$DM_HOME/state/tasks/pr-axi-pref.status"'
+
+# A create that SUCCEEDS but prints no url leaves a pushed branch and a real PR
+# the task record knows nothing about. The only recovery is `adopt`, so the
+# failure has to name it.
+PR_NOURL_STUB="$TMP/pr-open-nourl"; mkdir -p "$PR_NOURL_STUB"
+printf '#!/bin/sh\nprintf "created something\\n"\n' > "$PR_NOURL_STUB/gh"
+chmod +x "$PR_NOURL_STUB/gh"
+open_task pr-nourl feat/x/pr-nourl
+check "an unparseable create url fails visibly" \
+  '! PATH="$PR_NOURL_STUB:$NOAXI_PATH" b dm-pr.sh open pr-nourl --title x >/dev/null 2>&1'
+PR_NOURL_OUT="$(PATH="$PR_NOURL_STUB:$NOAXI_PATH" b dm-pr.sh open pr-nourl --title x 2>&1 || true)"
+check "the unparseable-url failure names adopt as the remedy" 'grep -q "dm-pr.sh adopt pr-nourl" <<<"$PR_NOURL_OUT"'
+check "the failure says the branch is already pushed"         'grep -q "IS pushed" <<<"$PR_NOURL_OUT"'
+check "the push really did happen before the parse"           'git -C "$TMP/origin.git" rev-parse --verify --quiet refs/heads/feat/x/pr-nourl >/dev/null'
+check "no PR url is recorded after the failed parse"          '[ -z "$(b dm-task.sh get pr-nourl pr)" ]'
+check "no leftover temp file after the parse failure"         '[ -z "$(find "$DM_HOME/state" -maxdepth 1 -name ".pr-open.*")" ]'
+b dm-worktree.sh remove pr-gh-only --force >/dev/null 2>&1
+b dm-worktree.sh remove pr-axi-pref --force >/dev/null 2>&1
+b dm-worktree.sh remove pr-nourl --force >/dev/null 2>&1
+
+echo "== repo create reaches plain gh instead of demanding the wrapper (#104) =="
+# The remote-creating branch of `create` needs network past this point, so stop
+# at the gh call: what regressed was the hard `dm_need gh-axi` before it.
+RC_STUB="$TMP/repo-create-gh"; mkdir -p "$RC_STUB"
+cat > "$RC_STUB/gh" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$RC_STUB/gh-calls"
+printf 'gh: repository creation refused (smoke stub)\n' >&2
+exit 1
+STUB
+chmod +x "$RC_STUB/gh"
+RC_OUT="$(PATH="$RC_STUB:$NOAXI_PATH" b dm-repo.sh create ghonlynew --mode local-only --no-memory 2>&1 || true)"
+check "repo create invokes plain gh when no wrapper exists" 'grep -q "^repo create ghonlynew --private" "$RC_STUB/gh-calls"'
+check "repo create no longer hard-requires gh-axi"          '! grep -q "required tool not found: gh-axi" <<<"$RC_OUT"'
+check "repo create still surfaces the real gh failure"       'grep -q "gh repo create failed" <<<"$RC_OUT"'
+check "the failed create registered nothing"                 '! jq -e ".repos[\"ghonlynew\"]" "$DM_HOME/state/repos.json" >/dev/null 2>&1'
+
+# The stub above makes gh FAIL, so it never reaches the url parse. That parse
+# had the same set -e abort as dm-pr.sh open, and worse consequences: the GitHub
+# repo is really created first, then the script died with no message at all.
+RC_NOURL="$TMP/repo-create-nourl"; mkdir -p "$RC_NOURL"
+printf '#!/bin/sh\nprintf "Created repository somewhere\\n"\n' > "$RC_NOURL/gh"
+chmod +x "$RC_NOURL/gh"
+RC_NOURL_OUT="$(PATH="$RC_NOURL:$NOAXI_PATH" b dm-repo.sh create ghnourl --mode local-only --no-memory 2>&1 || true)"
+check "an unparseable create url fails visibly, not silently" 'grep -q "printed no url to parse" <<<"$RC_NOURL_OUT"'
+check "the failure warns the remote now really exists"        'grep -q "now EXISTS" <<<"$RC_NOURL_OUT"'
+check "the failure names both recoveries"                     'grep -q "dm-repo.sh create ghnourl <remote>" <<<"$RC_NOURL_OUT" && grep -q "gh repo delete" <<<"$RC_NOURL_OUT"'
+check "the unparseable create registered nothing"             '! jq -e ".repos[\"ghnourl\"]" "$DM_HOME/state/repos.json" >/dev/null 2>&1'
+# Multi-match: a cheap regression guard on first-match selection, NOT a repro of
+# the SIGPIPE mode. Measured: two matches never SIGPIPE (grep finishes before
+# head exits); it takes ~50k matches to hit 141, which is buffer-size dependent
+# and too flaky to assert. Removing the pipe entirely is what kills that class.
+RC_MULTI="$TMP/repo-create-multi"; mkdir -p "$RC_MULTI"
+printf '#!/bin/sh\nprintf "https://github.com/o/ghmulti\\nsee also https://github.com/o/other\\n"\n' > "$RC_MULTI/gh"
+chmod +x "$RC_MULTI/gh"
+RC_MULTI_OUT="$(PATH="$RC_MULTI:$NOAXI_PATH" b dm-repo.sh create ghmulti --mode local-only --no-memory 2>&1 || true)"
+check "multi-match parses and reaches the push" 'grep -q "publishing initial commit" <<<"$RC_MULTI_OUT"'
+check "multi-match takes the first url"         'grep -q "o/ghmulti" <<<"$RC_MULTI_OUT" && ! grep -q "printed no url to parse" <<<"$RC_MULTI_OUT"'
+rm -rf "$DM_HOME/repos/ghnourl" "$DM_HOME/repos/ghmulti"
+
 echo "== status drift lint (three-source reconciliation) =="
 # demo-1 is marked done in the backlog above, but its work is committed and not
 # yet landed (state reconciles to working) — a real three-source disagreement.
@@ -947,16 +1106,47 @@ b dm-repo.sh create tbinit "$TMP/tb-init.git" --mode local-only --branch trunk -
 check "create registers with requested branch" '[ "$(b dm-repo.sh get tbinit default_branch)" = "trunk" ]'
 check "clone HEAD is the requested branch"      '[ "$(git -C "$DM_HOME/repos/tbinit" rev-parse --abbrev-ref HEAD)" = "trunk" ]'
 check "requested branch exists in the clone"    'git -C "$DM_HOME/repos/tbinit" rev-parse --verify --quiet refs/heads/trunk >/dev/null'
-# === docs-doctor tests (#24) ===
-echo "== doctor tool tiers (#24) =="
-DOCF="$(b dm-doctor.sh 2>&1 || true)"   # capture once (grep -q + pipefail)
-check "doctor verdict is READY with only git+jq required" 'grep -q "READY:" <<<"$DOCF"'
-check "doctor lists chrome-devtools-axi"                  'grep -q "chrome-devtools-axi" <<<"$DOCF"'
+# === docs-doctor tests (#24, #104) ===
+echo "== doctor tool tiers and honest verdict (#24, #104) =="
+# gh presence/auth now qualifies the verdict, so stub gh rather than inheriting
+# the developer's (or a CI runner's) real login state. NOAXI_PATH additionally
+# makes "no axi tooling installed" true rather than machine-dependent.
+DOC_GH_OK="$TMP/doctor-gh-ok"; DOC_GH_NOAUTH="$TMP/doctor-gh-noauth"
+mkdir -p "$DOC_GH_OK" "$DOC_GH_NOAUTH"
+printf '#!/bin/sh\nexit 0\n' > "$DOC_GH_OK/gh"
+printf '#!/bin/sh\ncase "$1" in auth) exit 1 ;; esac\nexit 0\n' > "$DOC_GH_NOAUTH/gh"
+chmod +x "$DOC_GH_OK/gh" "$DOC_GH_NOAUTH/gh"
+DOCF="$(PATH="$DOC_GH_OK:$NOAXI_PATH" b dm-doctor.sh 2>&1 || true)"   # capture once (grep -q + pipefail)
+check "doctor verdict is a plain READY when the PR path works" 'grep -q "^  READY: " <<<"$DOCF"'
+check "doctor lists chrome-devtools-axi"                       'grep -q "chrome-devtools-axi" <<<"$DOCF"'
 # The axi wrappers must never read as required: a fresh clone without them still
 # gets a green verdict, matching the README contract.
 AXILINES="$(grep -E 'gh-axi|lavish-axi|chrome-devtools-axi' <<<"$DOCF" || true)"
 check "doctor does not mark axi tools required"           '! grep -qi "required" <<<"$AXILINES"'
-check "check mode still exits 0 without axi tools"        'b dm-doctor.sh check >/dev/null'
+check "doctor names what each axi tool degrades"          'grep -q "plain gh does the same work" <<<"$AXILINES" && grep -q "review the change directly" <<<"$AXILINES"'
+# Tiering is the operator-visible half of the #104 contract, and it drifted once
+# already: gh-axi sat in the PR-FLOW tier while the README called it optional.
+# Assert the tier LABEL doctor prints against gh-axi, not just its presence.
+check "gh-axi sits in the optional tier, not PR-flow" \
+  'CTX="$(grep -A1 "^  warn     gh-axi" <<<"$DOCF")"; grep -q "\^ optional —" <<<"$CTX" && ! grep -q "needed for the PR flow" <<<"$CTX"'
+check "the gh line claims the whole PR flow, reads and mutations" \
+  'grep -qE "^  ok       gh .*reads and mutations" <<<"$DOCF"'
+# The README sentence the parity suite pins must actually be there; parity
+# catches rewording, this catches the two drifting apart.
+check "the README states the plain-gh baseline parity pins" \
+  'grep -q "Every GitHub call the toolbelt makes runs" "$ROOT/README.md"'
+check "check mode still exits 0 without axi tools"        'PATH="$DOC_GH_OK:$NOAXI_PATH" b dm-doctor.sh check >/dev/null'
+# The honesty defect (#104): doctor used to print a bare READY in a home where
+# delivery could not work, so an adopter learned it at their first PR.
+DOC_NOAUTH="$(PATH="$DOC_GH_NOAUTH:$NOAXI_PATH" b dm-doctor.sh 2>&1 || true)"
+check "an unauthenticated gh never gets a plain READY"    '! grep -q "^  READY: " <<<"$DOC_NOAUTH"'
+check "the qualified verdict names the local-only reality" 'grep -q "READY (LOCAL-ONLY)" <<<"$DOC_NOAUTH"'
+check "the qualified verdict names the unreachable path"   'grep -q "PR DELIVERY UNAVAILABLE" <<<"$DOC_NOAUTH"'
+check "the qualified verdict names the fix"                'grep -q "gh auth login" <<<"$DOC_NOAUTH"'
+check "the qualified verdict still exits 0 (local-only is real)" \
+  'PATH="$DOC_GH_NOAUTH:$NOAXI_PATH" b dm-doctor.sh >/dev/null 2>&1'
+check "the tooling section flags pr-delivery in both modes" \
+  'OUT="$(PATH="$DOC_GH_NOAUTH:$NOAXI_PATH" b dm-doctor.sh check 2>&1 || true)"; grep -q "pr-delivery.*UNAVAILABLE" <<<"$OUT"'
 # === memory-context tests (#22) ===
 # Relevance caps (F1), curation verbs (F2), fleet reach + dockmaster-only store
 # (F3/F5), silent-failure surfacing (F4), multi-term recall (F6), and whole-line
@@ -1700,6 +1890,67 @@ b dm-repo.sh set mauth merge_allowed_bases "" >/dev/null
 NOEXC="$(b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "the no-list never refusal is unchanged"              'grep -q "merge_authority=never" <<<"$NOEXC" && grep -qi "operator merges" <<<"$NOEXC"'
 check "the no-list refusal does not mention the carve-out"  '! grep -q "merge_allowed_bases" <<<"$NOEXC"'
+
+echo "== merge mutation runs on plain gh, and on gh-axi, with the same outcome (#104) =="
+# The two binaries take the SAME request differently (gh-axi puts the method
+# positionally; gh needs --method and --raw-field), so the argv is asserted
+# per binary — a blind name swap would send a malformed request. A GitHub-shaped
+# but still-local origin keeps repo_slug resolvable and the post-merge sync
+# hermetic.
+b dm-repo.sh add ghfb "$TMP/origin.git" --mode pipeline --no-memory >/dev/null 2>&1
+mkdir -p "$DM_HOME/repos/ghfb/o"
+ln -s "$TMP/origin.git" "$DM_HOME/repos/ghfb/o/r.git"
+git -C "$DM_HOME/repos/ghfb" remote set-url origin o/r.git
+# One stub dir per case: gh answers every parsed read from a fixture file, and
+# whichever binary receives the merge PUT records its exact argv.
+merge_fixtures() {
+  local d="$1" n="$2"
+  printf '{"total_count":1,"check_runs":[{"head_sha":"abc123","status":"completed","conclusion":"success"}]}\n' > "$d/runs.json"
+  printf '{"total_count":0}\n' > "$d/status.json"
+  printf '{"object":{"sha":"abc123"}}\n' > "$d/ref.json"
+  printf '{"state":"open","merged":false,"head":{"sha":"abc123","ref":"fix/ghfb-%s","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$n" > "$d/pr.json"
+}
+gh_read_stub() {
+  cat <<STUB
+D="$1"
+case "\$*" in
+  *check-runs*) cat "\$D/runs.json"; exit 0 ;;
+  *commits*status*) cat "\$D/status.json"; exit 0 ;;
+  *git/ref/heads/*) cat "\$D/ref.json"; exit 0 ;;
+esac
+STUB
+}
+MFB_GH="$TMP/merge-fallback-gh"; mkdir -p "$MFB_GH"
+{ printf '#!/bin/sh\n'; gh_read_stub "$MFB_GH"
+  printf 'if [ "$1" = api ] && [ "$2" = --method ]; then printf "%%s\\n" "$*" >> "%s/mutations"; printf "{\\"merged\\":true}\\n"; exit 0; fi\n' "$MFB_GH"
+  printf 'cat "%s/pr.json"\n' "$MFB_GH"; } > "$MFB_GH/gh"
+chmod +x "$MFB_GH/gh"
+merge_fixtures "$MFB_GH" plain
+b dm-task.sh new ghfb-plain --kind ship --repo ghfb >/dev/null
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set ghfb-plain pr "https://github.com/o/r/pull/7" ) >/dev/null 2>&1
+MFB_GH_OUT="$(PATH="$MFB_GH:$NOAXI_PATH" b dm-pr.sh merge ghfb-plain 2>&1 || true)"
+check "merge completes with only plain gh installed" 'grep -q "^merged: https://github.com/o/r/pull/7$" <<<"$MFB_GH_OUT"'
+check "the plain-gh mutation uses gh's own argv shape" \
+  'grep -Fx "api --method PUT /repos/o/r/pulls/7/merge --raw-field sha=abc123 --raw-field merge_method=squash" "$MFB_GH/mutations" >/dev/null'
+check "plain gh records the landed task state"        '[ "$(b dm-task.sh get ghfb-plain pr_state)" = "MERGED" ]'
+check "plain gh appends the merged event"             'grep -q " merged: https://github.com/o/r/pull/7" "$DM_HOME/state/tasks/ghfb-plain.status"'
+
+MFB_AXI="$TMP/merge-fallback-axi"; mkdir -p "$MFB_AXI"
+{ printf '#!/bin/sh\n'; gh_read_stub "$MFB_AXI"
+  printf 'if [ "$1" = api ] && [ "$2" = --method ]; then printf "%%s\\n" "$*" >> "%s/gh-mutations"; exit 1; fi\n' "$MFB_AXI"
+  printf 'cat "%s/pr.json"\n' "$MFB_AXI"; } > "$MFB_AXI/gh"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/mutations"\nprintf "merged: true\\n"\n' "$MFB_AXI" > "$MFB_AXI/gh-axi"
+chmod +x "$MFB_AXI/gh" "$MFB_AXI/gh-axi"
+merge_fixtures "$MFB_AXI" wrapper
+b dm-task.sh new ghfb-axi --kind ship --repo ghfb >/dev/null
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set ghfb-axi pr "https://github.com/o/r/pull/8" ) >/dev/null 2>&1
+MFB_AXI_OUT="$(PATH="$MFB_AXI:$NOAXI_PATH" b dm-pr.sh merge ghfb-axi 2>&1 || true)"
+check "merge completes with the wrapper installed"    'grep -q "^merged: https://github.com/o/r/pull/8$" <<<"$MFB_AXI_OUT"'
+check "the wrapper mutation keeps its positional-method shape" \
+  'grep -Fx "api PUT /repos/o/r/pulls/8/merge --field sha=abc123 --field merge_method=squash" "$MFB_AXI/mutations" >/dev/null'
+check "the wrapper path never sent the mutation through plain gh" '[ ! -f "$MFB_AXI/gh-mutations" ]'
+check "both CLIs reach the same landed task record" \
+  '[ "$(b dm-task.sh get ghfb-axi pr_state)" = "$(b dm-task.sh get ghfb-plain pr_state)" ] && grep -q " merged: https://github.com/o/r/pull/8" "$DM_HOME/state/tasks/ghfb-axi.status"'
 
 echo "== discarded terminal state (operator discard, issue #69) =="
 b dm-repo.sh add disctest "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1

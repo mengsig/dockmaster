@@ -189,8 +189,8 @@ PR ready for review: https://github.com/me/app/pull/57
 > merge it
 ```
 
-The PR half of that exchange needs `gh` and `gh-axi` (see Requirements); without
-them the same flow ends in an approved local landing instead of a PR.
+The PR half of that exchange needs an authenticated `gh` (see Requirements);
+without it the same flow ends in an approved local landing instead of a PR.
 
 Under the hood that is `bin/dm-repo.sh add` (which clones and scaffolds the
 repo's memory, then prompts the dockmaster to dispatch an onboarding scout that
@@ -210,25 +210,29 @@ Supported platforms: macOS and Linux; the scripts run on bash 3.2+.
 - **Local-only mode needs nothing further.** Worktree isolation, scouts, the
   review gate, tests, and approved fast-forward landing all work with just the
   above.
-- **Required for the PR flow:** the GitHub CLI `gh` (authenticated with
-  `gh auth login`) **and** `gh-axi`. Every GitHub *mutation* — opening a PR,
-  merging one, reverting one, creating a repo — calls `gh-axi` and fails without
-  it. The toolbelt's reads go through `gh api` (real JSON), but some skills also
-  read through `gh-axi` for human-readable output, so it is not a
-  mutations-only dependency.
-- **Optional:** `lavish-axi` (renders the review artifact; without it the
-  dockmaster prints the change and you approve directly) and
-  `chrome-devtools-axi` (browser tasks only). Both degrade cleanly.
+- **Required for the PR flow:** the GitHub CLI `gh`, authenticated with
+  `gh auth login` — and nothing else. Every GitHub call the toolbelt makes runs
+  on plain `gh`: reads (`dm-pr.sh check`, `await-checks`, `sweep`) through
+  `gh api`, and all three mutations through it too — `dm-pr.sh open` uses
+  `gh pr create`, `dm-pr.sh merge` uses `gh api --method PUT`, and
+  `dm-repo.sh create` uses `gh repo create`.
+- **Optional, and none of it gates the PR flow:** `gh-axi` (the maintainer's
+  wrapper — when installed it is *preferred* for those three mutations, and the
+  task record it produces is identical either way), `lavish-axi` (renders the
+  review artifact; without it the dockmaster prints the change and you approve
+  directly), and `chrome-devtools-axi` (browser tasks only). All three degrade
+  cleanly.
 
-> **Known limitation — the PR path is not currently reachable from a fresh
-> clone.** `gh-axi` is the maintainer's own wrapper and has no public install
-> path, and the toolbelt has no plain-`gh` fallback for the mutations above
-> ([#104](https://github.com/mengsig/dockmaster/issues/104)). Until that lands,
-> a public adopter should expect local-only mode: everything works except
-> opening, merging, and reverting PRs from inside the dockmaster — **and
-> creating a new GitHub repo**, which is the path a "build me a new project"
-> request goes through. `bin/dm-doctor.sh` reports `gh-axi` as a PR-flow tool so
-> this surfaces before you rely on it.
+> **What you see without the maintainer's wrappers.** `bin/dm-doctor.sh` lists
+> all three under OPTIONAL with the feature each one gates, and the verdict stays
+> a plain `READY` — no toolbelt command depends on them. What *does* qualify the
+> verdict is `gh` itself: missing or unauthenticated, doctor reports
+> `READY (LOCAL-ONLY)`, names the reason and the fix, and still exits 0 because
+> local-only delivery is a real mode. One residue: three skill files still
+> *instruct* the dockmaster to reach for `gh-axi` — `pr view --comments`,
+> `pr revert`, and `repo create`. Plain `gh` accepts all three verbatim, so
+> nothing is unreachable; the wording is corrected in
+> [#133](https://github.com/mengsig/dockmaster/issues/133).
 
 Per-repo memory is plain markdown — no extra tool to install. Run
 `bin/dm-doctor.sh` to see what you have and what each tool gates.

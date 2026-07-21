@@ -36,7 +36,7 @@ an authenticated runtime/browser/mailbox observation. Current split: 13 direct,
 | `deterministic-workflow` | optional configured runner | Workflow host when available | compatible injected host; full native fallback | runner + gate drift test |
 | `merge-safety` | red/authority/unlanded guards | shared toolbelt | shared toolbelt + trusted rules/hook guardrails | dm-pr/dm-merge/rules/hook/smoke |
 | `right-sizing` | quality-aware resource use | per-agent model/effort and tiers | tiers, bounded count, focused no-fork prompts | **contract** + bounded runner test |
-| `plugins-and-fallbacks` | optional tools degrade or fail loudly, never silently vanish | lavish/browser degrade; GitHub mutations hard-require `gh-axi` and fail loudly | plugins/local tools with focused fallback | **contract** + doctor assertions |
+| `plugins-and-fallbacks` | optional tools degrade or fail loudly, never silently vanish | GitHub mutations prefer `gh-axi`, fall back to plain `gh`; lavish/browser degrade | plugins/local tools with focused fallback | **contract** + doctor assertions |
 | `project-safety-config` | project policy | Claude settings allowlist | trusted config + tested rules/PreToolUse hook | configs + guard + runtime smoke |
 
 ## Clean separation

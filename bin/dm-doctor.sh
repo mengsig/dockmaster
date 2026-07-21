@@ -15,8 +15,11 @@
 #   dm-doctor.sh [check] [--runtime auto|claude|codex|both]
 #
 # Exit 0 = required tools present. Exit 1 = a required tool is missing. A missing
-# PR-flow or optional tool warns but never fails the check: a green verdict means
-# local-only mode works, NOT that the PR flow is available (see the PR-FLOW tier).
+# PR-flow or optional tool warns but never fails the check: local-only delivery
+# is a real mode, not a readiness failure. The VERDICT still has to be true about
+# it — a plain "READY" is printed ONLY when the PR flow is actually available;
+# otherwise it reads "READY (LOCAL-ONLY)" and names what is missing, so an
+# adopter learns it here and not at their first PR.
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -24,31 +27,36 @@ set -euo pipefail
 # Dependency contract, as (name, purpose) pairs, in three tiers:
 #   REQUIRED  — called directly by the toolbelt; without them nothing runs.
 #   PR-FLOW   — needed only for the PR delivery path; local-only mode works
-#               without them. BOTH gh and gh-axi belong here: reads go through
-#               `gh api`, but every GitHub mutation calls gh-axi and there is
-#               no plain-gh fallback (#104).
-#   OPTIONAL  — genuinely degrade cleanly when absent.
-# Only REQUIRED tools gate the verdict; the other two tiers only warn.
+#               without them. Plain `gh` is the ONLY tool in this tier and the
+#               whole PR path: reads go through `gh api` and every mutation
+#               through `gh pr create` / `gh api --method PUT` / `gh repo create`
+#               (#104). No wrapper substitutes for it, and none is needed.
+#   OPTIONAL  — genuinely degrade cleanly when absent; each purpose line names
+#               exactly what degrades.
+# Only REQUIRED tools gate the verdict; the other two tiers only warn — but a
+# missing/unauthenticated gh does qualify the VERDICT (see report_pr_delivery).
 REQUIRED_TOOLS=(
   "git" "clone, worktree, and all git operations"
   "jq"  "registry and backlog JSON (single-owner parsers)"
 )
 PRFLOW_TOOLS=(
-  "gh"     "GitHub auth + API reads for the PR flow; local-only mode needs neither"
-  "gh-axi" "GitHub mutations: pr create, merge, repo create (no plain-gh fallback)"
+  "gh"  "GitHub auth + API for the whole PR flow, reads and mutations alike"
 )
 OPTIONAL_TOOLS=(
-  "lavish-axi"          "reviewable approval artifact; without it, review the change directly"
-  "chrome-devtools-axi" "browser automation for web tasks"
+  "gh-axi"              "preferred for the three GitHub mutations; plain gh does the same work without it"
+  "lavish-axi"          "reviewable approval artifact; without it, review the change directly in a browser"
+  "chrome-devtools-axi" "browser automation; without it browser-driving tasks are unavailable"
 )
 
 tool_hint() {
   case "$1" in
     git|jq)  printf 'install with your package manager (e.g. apt install %s / brew install %s)' "$1" "$1" ;;
     gh)      printf 'https://cli.github.com' ;;
-    gh-axi)  printf 'maintainer tooling with no public install path — without it the PR flow is unavailable; use local-only mode (#104)' ;;
-    lavish-axi|chrome-devtools-axi)
-             printf 'operator tooling, not bundled — the feature it gates is skipped, nothing else changes' ;;
+    gh-axi)  printf 'maintainer tooling with no public install path — not needed: plain gh opens, merges, and creates without it (#104)' ;;
+    lavish-axi)
+             printf 'operator tooling, not bundled — review the artifact HTML in a browser and give feedback in chat' ;;
+    chrome-devtools-axi)
+             printf 'operator tooling, not bundled — browser-driving tasks cannot run without it' ;;
     *)       printf 'install %s and ensure it is on PATH' "$1" ;;
   esac
 }
@@ -145,6 +153,26 @@ report_node() {
   fi
 }
 
+# Probe whether the PR delivery path can actually work and print its line. Only
+# plain gh decides: it is the baseline for both the parsed reads and the
+# mutations, so no axi wrapper can enable or block the path. Sets PR_DELIVERY,
+# which the verdict reads — the reason doctor's first signal is true.
+PR_DELIVERY="unknown"
+report_pr_delivery() {
+  local present=0 authed=0
+  if command -v gh >/dev/null 2>&1; then
+    present=1
+    if gh auth status >/dev/null 2>&1; then authed=1; fi
+  fi
+  PR_DELIVERY="$(dm_pr_delivery_gate "$present" "$authed")"
+  case "$PR_DELIVERY" in
+    ready)   printf '  ok       %-13s %s\n' "pr-delivery" "gh authenticated; PRs can be opened and merged" ;;
+    no-cli)  printf '  warn     %-13s %s\n' "pr-delivery" "UNAVAILABLE: gh is not installed; only local-only landing works" ;;
+    no-auth) printf '  warn     %-13s %s\n' "pr-delivery" "UNAVAILABLE: gh is not authenticated (gh auth login); only local-only landing works" ;;
+    *)       printf '  warn     %-13s %s\n' "pr-delivery" "UNAVAILABLE: status could not be resolved" ;;
+  esac
+}
+
 # report_tools <compact> -> prints one line per tool; returns the count of
 # missing REQUIRED tools (so a caller can gate on readiness).
 report_tools() {
@@ -164,14 +192,7 @@ report_tools() {
   report_node
   report_runtime "$selected_runtime" || runtime_miss=$?
   miss=$((miss + runtime_miss))
-  # GitHub auth only matters when gh is present.
-  if command -v gh >/dev/null 2>&1; then
-    if gh auth status >/dev/null 2>&1; then
-      printf '  ok       %-13s %s\n' "gh-auth" "authenticated"
-    else
-      printf '  warn     %-13s %s\n' "gh-auth" "run: gh auth login"
-    fi
-  fi
+  report_pr_delivery
   return "$miss"
 }
 
@@ -269,7 +290,22 @@ case "$mode" in
       printf '  NOT READY: %d state file(s) are not valid JSON (see above).\n' "$badjson"
       exit 1
     fi
-    printf '  READY: required tools present; state valid; home scaffolded.\n'
+    # The verdict must not overstate what works. A bare READY is reserved for a
+    # home where BOTH delivery paths run; otherwise it is qualified and names
+    # the missing piece, so the PR path never fails first at delivery time.
+    case "$PR_DELIVERY" in
+      ready)
+        printf '  READY: required tools present; state valid; home scaffolded.\n' ;;
+      no-cli)
+        printf '  READY (LOCAL-ONLY): required tools present; state valid; home scaffolded.\n'
+        printf '  PR DELIVERY UNAVAILABLE: gh is not installed (%s). Approved fast-forward landing works; opening or merging a PR does not.\n' "$(tool_hint gh)" ;;
+      no-auth)
+        printf '  READY (LOCAL-ONLY): required tools present; state valid; home scaffolded.\n'
+        printf '  PR DELIVERY UNAVAILABLE: gh is not authenticated (run: gh auth login). Approved fast-forward landing works; opening or merging a PR does not.\n' ;;
+      *)
+        printf '  NOT READY: PR delivery status could not be resolved.\n'
+        exit 1 ;;
+    esac
     ;;
 
   *)

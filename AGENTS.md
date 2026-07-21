@@ -73,8 +73,8 @@ digest: tooling + GitHub auth check, managed repos, fast-forward clone sync
 operator/fleet memory. Reconcile any STUCK clones and non-pending tasks before
 taking new work.
 
-Do not dispatch until required tools are present and GitHub auth is good. Use
-`gh-axi` for GitHub, `lavish-axi` for review surfaces and structured reports,
+Do not dispatch until required tools are present and GitHub auth is good. Plain
+`gh` for GitHub, `lavish-axi` for review surfaces and structured reports,
 `chrome-devtools-axi` for browser work.
 
 ## Doing the work — load the skill at its trigger
@@ -223,8 +223,9 @@ invariants, pitfalls, routing. Curated — not append-forever._
 - **[invariant]** Toolbelt scripts in `bin/` must run on bash 3.2 (macOS default):
   no `mapfile`/`readarray`, no `declare -A`, no `${var^^}`/`${var,,}`, no `&>>`.
   Use while-read loops and parallel indexed arrays instead.
-- **[convention]** GitHub access splits by need: reads parsed by `jq` use `gh api`
-  (real JSON); mutations use `gh-axi` (`gh-axi api` emits YAML, not JSON).
+- **[convention]** GitHub access splits by need: `jq`-parsed reads call plain
+  `gh api` (`gh-axi api` emits YAML); mutations go through
+  `dm_require_github_cli` (`.dm-knowledge/dm-104-gh-fallback`).
 - **[invariant]** Shared-state writes (registry, task meta, memory appends) are
   serialized with the mkdir-based mutex in `dm-lib.sh` (`dm_lock`/`dm_unlock`) —
   not `flock` (absent on macOS). Not reentrant; do not set your own EXIT/INT/TERM
@@ -304,9 +305,9 @@ invariants, pitfalls, routing. Curated — not append-forever._
   Open-PR fleet health → `dm-pr.sh sweep` (read-only; surfaced in `dm-status`).
   A new repo with no test command → the onboarding scout (project-management skill)
   proposes a `test_cmd` and initial `dm:knowledge`.
-- **[pitfall]** `tests/smoke.sh` covers only the local-only, offline lifecycle;
-  the PR path (`dm-pr`, `dm-merge` PR mode, gh-axi, `workflows/pr-pipeline.js`)
-  has no automated coverage. Under `set -euo pipefail`, piping verbose output to
+- **[pitfall]** `tests/smoke.sh` is offline: the PR path is covered only through
+  stubbed CLIs (not `workflows/pr-pipeline.js`), so no test hits real GitHub.
+  Under `set -euo pipefail`, piping output to
   `grep -q` SIGPIPEs the producer (exit 141) which pipefail reports as failure —
   capture once and match with a here-string (`grep -q pat <<<"$VAR"`).
 - **[pitfall]** `dm-repo.sh add` clones unconditionally and fails if
