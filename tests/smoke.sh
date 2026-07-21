@@ -185,6 +185,38 @@ check "guard reads a verb past an option that consumes its value" \
 check "guard permits a verb behind an option it can classify" \
   'all_allowed "git notes --ref=x show" "git notes --ref x show" "git remote -v" "git submodule --quiet status"'
 
+# A comment ends at end of LINE. The lexer ended it at end of INPUT, so a bare
+# `#` discarded every later newline-separated command, unguarded.
+GUARD_HASH_LEAD='#
+git push --force origin main'
+GUARD_HASH_TRAIL='true #
+git reset --hard HEAD~5'
+GUARD_HASH_INLINE='git status # note
+git clean -fd'
+check "guard resumes at the next line instead of ending at a comment" \
+  'all_blocked "$GUARD_HASH_LEAD" "$GUARD_HASH_TRAIL" "$GUARD_HASH_INLINE"'
+check "guard still permits a comment and a literal hash" \
+  'all_allowed "git status # just a note" "echo a#b" "git commit -m \"fix #121\""'
+# Redirecting the git process is refused in BOTH spellings: guarding only the
+# detached one left `--exec-path=DIR`, the twin of the refused GIT_EXEC_PATH.
+check "guard refuses process redirection in joined and detached spellings" \
+  'all_blocked "git --exec-path=/tmp/evil status" "git --exec-path /tmp/evil status" "git --exec-path=/tmp/evil mergetool" "git --git-dir=/tmp/x status" "git --git-dir /tmp/x status" "git --work-tree=/tmp/x status"'
+check "guard fails closed on an unknown pre-subcommand option" \
+  'all_blocked "git --nosuchfutureopt=x status" "git --nosuchfutureopt x status"'
+check "guard still permits the pre-subcommand options it can classify" \
+  'all_allowed "git --no-pager -C /tmp status" "git --exec-path" "git --version" "git -c user.name=x commit -m y"'
+# PATH/LD_PRELOAD pick which binary runs as git and what loads into it -- a more
+# direct redirect than GIT_TEMPLATE_DIR, which was already refused.
+check "guard refuses env prefixes that redirect the git process" \
+  'all_blocked "PATH=/tmp/evil git status" "LD_PRELOAD=/tmp/e.so git status" "LD_AUDIT=/e.so git status" "DYLD_INSERT_LIBRARIES=/e git status" "env PATH=/evil git status" "GIT_DIR=/tmp/x git status" "GIT_INDEX_FILE=/tmp/x git status" "GIT_ALTERNATE_OBJECT_DIRECTORIES=/x git log"'
+# Over-blocking is what gets a guard switched off. A quoted string is classified,
+# not refused for starting with the word "git".
+GUARD_PR_BODY='bin/dm-pr.sh open 121 --title "t" --body "git config write path now routed"'
+check "guard permits prose that merely starts with the word git" \
+  'all_allowed "$GUARD_PR_BODY" "gh pr create --body \"git log shows the bug\"" "git remote --help" "git worktree --help" "git push --help"'
+check "guard still refuses a quoted string that IS a destructive command" \
+  'all_blocked "parallel \"git push --force origin main\"" "flock /tmp/l \"git reset --hard\"" "mywrap \"git status && git push --force origin main\""'
+
 # --- dm_lock: a leaked reclaim marker must not wedge recovery (#122) ---------
 # Before the fix the marker was unstamped and untrapped, so ONE reclaimer killed
 # mid-reclaim made every later dead-PID lock hard-fail at ~30s, forever.

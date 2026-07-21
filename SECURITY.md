@@ -72,10 +72,23 @@ delete/force, `tag` delete/force, forced `switch`, `worktree remove --force`,
 `sparse-checkout` anything but `list`.
 
 Wrappers do not help: `timeout`, `nohup`, `nice`, `env`, `sudo` and friends are
-unwrapped, and an unrecognized executable holding a `git` token — bare, or at
-the head of a quoted command string — is refused rather than assumed harmless.
+unwrapped, and an unrecognized executable holding a bare `git` token is refused
+rather than assumed harmless — its real argv is whatever follows, which the
+guard cannot see. A quoted command string starting with `git`
+(`parallel "git push --force origin main"`) is re-entered into the guard and
+classified on its merits, so a destructive one is refused while ordinary prose
+that happens to begin with "git" is not.
 `xargs` is deliberately not unwrapped: it appends arguments from stdin, so the
 argv the guard sees is never the one Git runs, and it is refused instead.
+
+Redirection of the Git process itself is refused in both spellings, since an
+option guarded in only one of its two forms is a bypass: `--exec-path`,
+`--git-dir` and `--work-tree` (joined or detached) alongside the environment
+twins `GIT_EXEC_PATH`, `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and
+friends, plus `PATH`, `LD_PRELOAD` and the `DYLD_*` loader variables. Pointing
+Git at another repository is not merely a scoping change — that repository
+supplies its own config and hooks. An unrecognized pre-subcommand option fails
+closed for the same reason the subcommand list does.
 
 The guard also refuses the forms it knows would carry a refused command past the
 allowlist as an opaque string: `rebase --exec`, `bisect run`,
@@ -98,7 +111,12 @@ the easy paths, not as an argument that no path remains.
 - `git reflog` and `git stash list` — reading the recovery net destroys nothing,
   and `reflog` is the tool for recovering work someone else lost.
 - ordinary two-level work: `remote add`, `submodule update`, `notes add`,
-  `bisect start`, `rm --cached`, `worktree prune`, `git config --get`.
+  `bisect start`, `rm --cached`, `worktree prune`.
+- `git config` against a key Git does not execute, read or write
+  (`git config --get user.email`). For an executing key BOTH are refused —
+  `git config <key>` is itself a read, so splitting read from write would mean
+  counting operands.
+- `git <subcommand> --help`, which renders documentation and executes nothing.
 - a Git alias that is defined but never invoked.
 - text tools (`grep`, `echo`, `cat`, …) taking `git` as an argument.
 

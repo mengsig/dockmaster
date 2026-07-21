@@ -34,6 +34,29 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The command guard is an allowlist, and its parsers agree with each other**
+  (#121). A Git subcommand is now refused unless it is named permitted, so
+  unknown and future subcommands fail closed — the old denylist had silently
+  permitted force-push, stash, `reflog expire`, `gc --prune`, `filter-branch`,
+  `branch -D`, `update-ref -d`, and anything behind `timeout`/`nohup`/`xargs`.
+  The allowlist is walked against git's real subcommand list so ordinary work
+  does not discover each refusal as an incident. Closed on top of that: `&`
+  inside a redirection no longer ends the segment and strands later flags;
+  `--opt=value` is matched alongside the detached spelling (`--force-with-lease`
+  stays permitted); config keys are matched case-insensitively and by pattern;
+  a comment now ends at end of LINE rather than end of INPUT, which had
+  discarded every later newline-separated command unguarded. Process
+  redirection is refused in both spellings — `--exec-path`, `--git-dir`,
+  `--work-tree` alongside `GIT_EXEC_PATH`, `GIT_DIR`, `GIT_WORK_TREE`, `PATH`,
+  `LD_PRELOAD`, `DYLD_*` — and an unrecognized pre-subcommand option fails
+  closed. Over-blocking fixed in the same pass: `git <sub> --help` is permitted,
+  and a quoted multi-word string starting with "git" is classified by the guard
+  rather than refused on sight, so a PR body reading `--body "git log shows the
+  bug"` is no longer collateral. The execute-a-handed-string class is narrowed,
+  NOT closed, and the guard says so rather than implying a boundary.
+- **A leaked reclaim marker no longer wedges `dm_lock` recovery** (#122). The
+  marker was unstamped and untrapped, so one reclaimer killed mid-reclaim made
+  every later dead-PID lock hard-fail at ~30s, permanently.
 - **The PR path no longer requires the maintainer's private `gh-axi` wrapper**
   (#104). `dm-pr.sh open`, `dm-pr.sh merge`, and `dm-repo.sh create` hard-failed
   without it, while the docs promised a plain-`gh` fallback that did not exist.

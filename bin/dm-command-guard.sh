@@ -29,6 +29,13 @@
 # a moving target by pattern; a subcommand that grows a new command-running
 # option gains it silently. These rules remove the easy paths.
 #
+# PROCESS REDIRECTION: pointing Git at another repository, exec dir, or binary
+# is its own vector -- the target supplies config and hooks. Refused in BOTH
+# spellings (an option guarded in only one form is a bypass): --exec-path,
+# --git-dir, --work-tree (git_option_class) and the env twins GIT_EXEC_PATH,
+# GIT_DIR, GIT_WORK_TREE, PATH, LD_PRELOAD, DYLD_* (check_environment_prefixes).
+# An unrecognized pre-subcommand option fails closed, like the subcommand list.
+#
 # WHAT THIS GUARD IS FOR: raising the cost of an ACCIDENTAL destructive command
 # and catching the forms an agent actually emits -- which is most of the real
 # risk, since the usual failure is a confused agent, not a hostile one. It does
@@ -39,7 +46,9 @@
 # they run. That table is a PRECISION aid, not the safety boundary — an
 # unrecognized executable holding a bare `git` token is refused outright
 # (check_stray_git_tokens), so an unlisted wrapper fails closed rather than
-# bypassing. Text tools that provably never execute their argv are exempt so
+# bypassing. A quoted MULTI-WORD string starting with git is re-entered into the
+# guard and classified instead, so `--body "git log shows the bug"` is not
+# collateral. Text tools that provably never execute their argv are exempt so
 # `grep git .` still works; sed/awk/find/perl are deliberately NOT exempt.
 #
 # DELIBERATELY PERMITTED, each with a test that says so:
@@ -47,6 +56,8 @@
 #     uses lease-pinned force (dm-pr.sh) and #89 records it as intentional.
 #   - a Git alias that is defined but never invoked.
 #   - `git rebase` / `merge` / `pull`: they refuse to run on a dirty tree.
+#   - `git <sub> --help`: renders documentation, executes nothing.
+#   - `git config` on a key Git does not execute, read or write.
 #
 # NOT A SANDBOX. A tool that emits no Bash hook event is never seen at all.
 # See SECURITY.md for the coverage statement and the known limits.
@@ -109,7 +120,16 @@ lex_shell_command() {
             ;;
           '`') token+="$char"; dynamic=1; started=1 ;;
           '#')
-            if [ "$started" -eq 0 ]; then break; else token+="$char"; fi
+            # A comment ends at end of LINE, not end of input. `break` here
+            # discarded every later newline-separated command, unguarded (#121).
+            if [ "$started" -ne 0 ]; then
+              token+="$char"
+            else
+              while [ "$i" -lt "${#input}" ] && [ "${input:$i:1}" != $'\n' ]; do
+                i=$((i + 1))
+              done
+              TOKENS+=(";"); DYNAMIC+=(0)
+            fi
             ;;
           ' '|$'\t')
             [ "$started" -eq 0 ] || append_token
@@ -158,17 +178,50 @@ is_segment_end() {
   return 1
 }
 
+# How a PRE-subcommand git option consumes tokens, same fail-closed shape as
+# verb_option_class. The old `-*` catch-all skipped every option it did not
+# name, so `--exec-path=DIR` -- the flag spelling of the refused GIT_EXEC_PATH
+# env var -- walked straight past the guard (#121).
+git_option_class() {
+  case "$1" in
+    # Refused in BOTH spellings, matching the env twins GIT_EXEC_PATH / GIT_DIR
+    # / GIT_WORK_TREE: an option that only appears in one spelling is a bypass.
+    # Bare `--exec-path` merely PRINTS the path, so it stays a flag below.
+    --exec-path=*|--git-dir|--git-dir=*|--work-tree|--work-tree=*)
+      printf 'refused\n' ;;
+    -C|-c|--namespace|--super-prefix|--config-env|--attr-source)
+      printf 'value\n' ;;
+    -C?*|-c?*|--namespace=*|--super-prefix=*|--config-env=*|--attr-source=*)
+      printf 'flag\n' ;;
+    -h|--help|--version|--exec-path|--html-path|--man-path|--info-path|\
+    -p|--paginate|-P|--no-pager|--bare|--no-replace-objects|--no-lazy-fetch|\
+    --literal-pathspecs|--glob-pathspecs|--noglob-pathspecs|--icase-pathspecs|\
+    --no-optional-locks|--no-advice) printf 'flag\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# Sets GIT_SUBCOMMAND_INDEX rather than printing it: the caller reads the result
+# with `|| return 0`, which in a command substitution would swallow a deny's
+# exit and turn a refusal into a pass.
 git_subcommand_index() {
-  local start="$1" end="$2" i token
+  local start="$1" end="$2" i token class
+  GIT_SUBCOMMAND_INDEX=""
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
     token="${TOKENS[$i]}"
+    if [ "$token" = "--" ]; then i=$((i + 1)); continue; fi
     case "$token" in
-      -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env) i=$((i + 2)) ;;
-      -C*|-c*|--git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*) i=$((i + 1)) ;;
-      --) i=$((i + 1)) ;;
-      -*) i=$((i + 1)) ;;
-      *) printf '%s\n' "$i"; return 0 ;;
+      -?*)
+        class="$(git_option_class "$token")"
+        case "$class" in
+          value) i=$((i + 2)) ;;
+          flag) i=$((i + 1)) ;;
+          refused) deny "git option '${token%%=*}' repoints Git at another repository or binary" ;;
+          *) deny "git has a pre-subcommand option the guard cannot classify: $token" ;;
+        esac
+        ;;
+      *) GIT_SUBCOMMAND_INDEX="$i"; return 0 ;;
     esac
   done
   return 1
@@ -320,12 +373,24 @@ check_config_entry() {
   deny "invoked Git subcommand is redefined by an inline alias"
 }
 
-check_environment_aliases() {
+check_environment_prefixes() {
   local start="$1" git_index="$2" subcommand="$3" i j token suffix value found
   i="$start"
   while [ "$i" -lt "$git_index" ]; do
     token="${TOKENS[$i]}"
     case "$token" in
+      # Not Git-specific, but they pick WHICH binary runs as `git` and what code
+      # is loaded into it -- a more direct redirect than GIT_TEMPLATE_DIR.
+      PATH=*|LD_PRELOAD=*|LD_LIBRARY_PATH=*|LD_AUDIT=*|\
+      DYLD_INSERT_LIBRARIES=*|DYLD_LIBRARY_PATH=*)
+        deny "environment variable '${token%%=*}' can redirect Git at other code"
+        ;;
+      # Another repository supplies its own config and hooks, so repointing Git
+      # at one makes an ordinary commit run that repo's code.
+      GIT_DIR=*|GIT_WORK_TREE=*|GIT_COMMON_DIR=*|GIT_INDEX_FILE=*|\
+      GIT_OBJECT_DIRECTORY=*|GIT_ALTERNATE_OBJECT_DIRECTORIES=*)
+        deny "Git environment variable '${token%%=*}' repoints Git at another repository"
+        ;;
       # Env equivalents of the executing config keys. GIT_CONFIG_PARAMETERS is
       # the generic -c channel and carries ANY key; GIT_EXEC_PATH repoints every
       # subcommand at other binaries.
@@ -361,10 +426,11 @@ check_environment_aliases() {
 
 check_git_segment() {
   local start="$1" git_index="$2" end="$3" sub_index subcommand i token config
-  sub_index="$(git_subcommand_index "$git_index" "$end")" || return 0
+  git_subcommand_index "$git_index" "$end" || return 0
+  sub_index="$GIT_SUBCOMMAND_INDEX"
   [ "${DYNAMIC[$sub_index]}" -eq 0 ] || deny "dynamic Git subcommand cannot be safety-classified"
   subcommand="${TOKENS[$sub_index]}"
-  check_environment_aliases "$start" "$git_index" "$subcommand"
+  check_environment_prefixes "$start" "$git_index" "$subcommand"
   i=$((git_index + 1))
   while [ "$i" -lt "$sub_index" ]; do
     token="${TOKENS[$i]}"
@@ -464,8 +530,9 @@ check_git_tag() {
 # `git config` can WRITE the very keys -c is refused from setting -- planting
 # core.hooksPath makes the next ordinary `git commit` run attacker code. Routed
 # through the same predicate, so the two channels cannot drift apart.
-# Read forms are refused too: `git config <key>` is itself a read, so splitting
-# read from write here means counting operands, and the reads are worthless.
+# For an executing key the READ is refused alongside the write: `git config
+# <key>` is itself a read, so splitting the two means counting operands. Keys
+# Git does not execute stay readable and writable (`git config --get user.email`).
 check_git_config() {
   local start="$1" end="$2" i token
   i=$((start + 1))
@@ -509,6 +576,12 @@ check_git_switch() {
 #   for-each-repo                        runs a command per repo (see rebase -x)
 check_git_subcommand() {
   local sub_index="$1" end="$2" subcommand="$3" verb
+  # `git <sub> --help` renders documentation and executes nothing. Checked
+  # ahead of the verb tables, which classified it as unknown and refused
+  # `git remote --help`.
+  if [ $((sub_index + 1)) -lt "$end" ]; then
+    case "${TOKENS[$((sub_index + 1))]}" in -h|--help) return 0 ;; esac
+  fi
   case "$subcommand" in
     # Read-only inspection.
     status|log|show|diff|diff-files|diff-index|diff-tree|diff-pairs|\
@@ -687,14 +760,24 @@ argument_inert() {
 # Matches a bare `git` token AND a quoted command string that STARTS with git
 # (`parallel "git push --force origin main"`), which is how such a wrapper is
 # normally invoked and is not a bare token.
+# A MULTI-WORD string is classified by re-entering the guard rather than refused
+# outright: refusing every token whose first word is "git" blocked ordinary prose
+# (`--body "git config write path now routed"`), and over-blocking is what gets a
+# guard switched off. A BARE token still refuses -- the wrapper's real argv is
+# the rest of the segment, which this token does not describe.
 check_stray_git_tokens() {
-  local start="$1" end="$2" executable="$3" i first
+  local start="$1" end="$2" executable="$3" i token first
   argument_inert "$executable" && return 0
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
-    first="${TOKENS[$i]%% *}"
+    token="${TOKENS[$i]}"; first="${token%% *}"
     case "${first##*/}" in
-      git) deny "'$executable' may execute the git command in its arguments" ;;
+      git)
+        case "$token" in
+          *" "*) DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token" ;;
+          *) deny "'$executable' may execute the git command in its arguments" ;;
+        esac
+        ;;
     esac
     i=$((i + 1))
   done
