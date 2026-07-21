@@ -74,12 +74,15 @@ delete/force, `tag` delete/force, forced `switch`, `worktree remove --force`,
 Wrappers do not help: `timeout`, `nohup`, `nice`, `env`, `sudo` and friends are
 unwrapped, and an unrecognized executable holding a bare `git` token is refused
 rather than assumed harmless — its real argv is whatever follows, which the
-guard cannot see. A quoted command string starting with `git`
-(`parallel "git push --force origin main"`) is re-entered into the guard and
-classified on its merits, so a destructive one is refused while ordinary prose
-that happens to begin with "git" is not.
+guard cannot see. A quoted string that *begins a command* — whether with `git`
+itself, an env assignment, a wrapper, or a shell (`parallel " git push --force"`,
+`parallel "timeout 5 git push --force"`, `parallel "sh -c 'git push --force'"`) —
+is re-entered into the guard and classified by the normal segmentation, so a
+destructive one is refused while ordinary prose mentioning git is not.
 `xargs` is deliberately not unwrapped: it appends arguments from stdin, so the
-argv the guard sees is never the one Git runs, and it is refused instead.
+argv the guard sees is never the one Git runs. At top level it is refused,
+because it holds a bare `git` token that nothing can classify; inside a quoted
+string it is re-entered like any other command runner.
 
 Redirection of the Git process itself is refused in both spellings, since an
 option guarded in only one of its two forms is a bypass: `--exec-path`,
@@ -98,8 +101,9 @@ is not viable. This class is narrowed, not closed.
 The same both-spellings rule applies to the environment: Git falls back to the
 plain-spelled variable when the `GIT_*` one is unset, so `PAGER`, `EDITOR`,
 `VISUAL` and `SSH_ASKPASS` are refused alongside `GIT_PAGER`, `GIT_EDITOR` and
-`GIT_ASKPASS`. All four fallbacks were verified executing a payload against git
-2.54, not inferred.
+`GIT_ASKPASS`. Those four fallbacks were verified executing a payload against
+git 2.54, not inferred. `MANPAGER` and `GIT_MAN_VIEWER` are refused as the same
+family, but were not reproduced here and should be treated as unverified.
 
 The guard also refuses the forms it knows would carry a refused command past the
 allowlist as an opaque string: `rebase --exec`, `bisect run`,

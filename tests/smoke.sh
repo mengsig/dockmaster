@@ -229,6 +229,18 @@ check "guard re-enters a quoted command past whitespace, wrappers and shells" \
   'all_blocked "parallel \" git push --force origin main\"" "$GUARD_REENTER_TAB" "$GUARD_REENTER_SH" "parallel \"env git push --force\"" "parallel \"timeout 5 git push --force\"" "parallel \"VAR=x git push --force\"" "parallel \"  nohup nice git reset --hard\""'
 check "guard still permits prose that merely mentions git mid-sentence" \
   'all_allowed "gh pr create --body \"the git repo is broken\"" "gh pr create --body \"git log shows the bug\""'
+# The merge-tool family runs `<tool>.path` as an executable, and include.path
+# injects a whole config file. `*.cmd` was covered; `*.path` was not.
+GUARD_TOOLPATH="git -c difftool.vimdiff.path=/tmp/evil difftool --tool=vimdiff -y HEAD~1 HEAD"
+GUARD_TOOLPATH_ENV="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=difftool.vimdiff.path GIT_CONFIG_VALUE_0=/tmp/evil git difftool"
+check "guard refuses config keys whose .path Git executes" \
+  'all_blocked "$GUARD_TOOLPATH" "$GUARD_TOOLPATH_ENV" "git -c mergetool.x.path=/tmp/evil mergetool" "git -c browser.x.path=/tmp/evil help" "git -c man.x.path=/tmp/evil help" "git config difftool.vimdiff.path /tmp/evil" "git -c DIFFTOOL.X.PATH=/evil difftool" "git -c include.path=/tmp/evil.cfg log"'
+# is_command_runner gates re-entry ONLY. These must never join is_command_wrapper:
+# unwrapping them would classify git on an argv the guard cannot see.
+check "guard re-enters a quoted string led by a non-unwrappable command runner" \
+  'all_blocked "parallel \"exec git push --force origin main\"" "parallel \"time git push --force origin main\"" "parallel \"xargs git push --force origin main\"" "parallel \"watch git push --force origin main\"" "parallel \"script git push --force origin main\"" "parallel \"unbuffer git push --force origin main\"" "parallel \"strace git push --force origin main\"" "parallel \"proot git push --force origin main\"" "parallel \"flock git push --force origin main\""'
+check "guard keeps unwrapping precision for the wrappers it does model" \
+  'all_allowed "timeout 5 git status" "nice -n 5 git log" "env git status" "stdbuf -o0 git status"'
 
 # --- dm_lock: a leaked reclaim marker must not wedge recovery (#122) ---------
 # Before the fix the marker was unstamped and untrapped, so ONE reclaimer killed

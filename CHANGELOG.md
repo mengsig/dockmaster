@@ -61,8 +61,14 @@ All notable changes to this project are documented here. The format follows
   while ` git push --force`, `env git push --force` and `timeout 5 git push
   --force` inside such a string are still refused, since re-entry runs the
   normal segmentation and wrapper handling instead of testing the first word.
-  The execute-a-handed-string class is narrowed, NOT closed, and the guard says
-  so rather than implying a boundary.
+  Config keys whose `.path` Git executes (the `difftool`/`mergetool`/`browser`/
+  `man` tool family, plus `include.path`) are refused alongside `*.cmd`. The
+  re-entry trigger consults a second table, `is_command_runner`, kept separate
+  from the unwrapping table because the two fail in opposite directions —
+  widening the re-entry list is safety-neutral, while widening the unwrap list
+  would make the guard trust an argv it cannot see, which is exactly why `xargs`
+  stays out of it. The execute-a-handed-string class is narrowed, NOT closed,
+  and the guard says so rather than implying a boundary.
 - **A leaked reclaim marker no longer wedges `dm_lock` recovery** (#122). The
   marker was unstamped and untrapped, so one reclaimer killed mid-reclaim made
   every later dead-PID lock hard-fail at ~30s, permanently.

@@ -363,6 +363,11 @@ config_key_executes() {
     uploadpack.packobjectshook|init.templatedir|protocol.ext.allow|\
     pager.*|filter.*|submodule.*.update|\
     *.command|*.driver|*.textconv|*.askpass|*.cmd|*.program|*.helper) return 0 ;;
+    # The merge-tool family (difftool/mergetool/browser/man <tool>.path are all
+    # executables) plus include.path, which injects config. Blanket rather than
+    # enumerated so a future tool family is covered; the accepted cost is that
+    # benign `submodule.<name>.path` refuses too.
+    *.path) return 0 ;;
   esac
   return 1
 }
@@ -695,10 +700,9 @@ check_shell_input() {
   done
 }
 
-# Commands that execute another command taken from their own argv. See the
-# header: this table buys precision (so `timeout 5 git status` still passes),
-# NOT safety -- an omission falls through to check_stray_git_tokens and is
-# refused rather than allowed.
+# Commands safe to UNWRAP to the command they run. This table buys precision (so
+# `timeout 5 git status` still passes), NOT safety -- an omission falls through
+# to check_stray_git_tokens and is refused rather than allowed.
 # NOTE: xargs is deliberately ABSENT. It appends arguments read from stdin, so
 # the argument list the guard sees is never the one git runs
 # (`echo --force | xargs git push ...`). Unwrapped it would be classified on
@@ -707,6 +711,22 @@ check_shell_input() {
 is_command_wrapper() {
   case "$1" in
     env|sudo|doas|command|timeout|nohup|setsid|nice|ionice|stdbuf) return 0 ;;
+  esac
+  return 1
+}
+
+# Runs a command from its argv but must NOT be unwrapped -- either the real argv
+# is unknowable (xargs reads stdin) or unwrapping buys nothing. SEPARATE from
+# is_command_wrapper because the two lists fail in OPPOSITE directions: adding a
+# name here only widens what gets re-classified, while adding it above would
+# make segment_command_index trust an argv it cannot see.
+# At top level these already fail closed -- check_stray_git_tokens refuses the
+# bare `git` token they hold. That reasoning does NOT carry inside a quoted
+# string, where the token IS the whole command and nothing inspects it unless
+# re-entry fires, so the re-entry trigger must consult this list too.
+is_command_runner() {
+  case "$1" in
+    xargs|exec|time|watch|script|unbuffer|strace|ltrace|proot|parallel|flock) return 0 ;;
   esac
   return 1
 }
@@ -787,6 +807,7 @@ token_begins_a_command() {
   first="${first##*/}"
   case "$first" in git|eval|busybox) return 0 ;; esac
   is_command_wrapper "$first" && return 0
+  is_command_runner "$first" && return 0
   is_shell_executable "$first" && return 0
   return 1
 }
