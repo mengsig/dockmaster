@@ -116,6 +116,30 @@ check "guard permits lease-pinned force push BY DECISION (#89)" \
 check "guard permits git tokens as text for tools that cannot execute them" \
   'all_allowed "grep -rn git ." "echo git reset --hard"'
 
+# The allowlist is pre-populated from git's real subcommand list, so ordinary
+# work does not discover each refusal as an incident. Both directions are
+# pinned: the safe form stays permitted, the destructive form stays refused.
+check "guard permits plainly non-destructive subcommands" \
+  'all_allowed "git reflog" "git reflog show HEAD" "git stash list" "git remote -v" "git remote show origin" "git submodule status" "git notes show" "git bisect start" "git archive HEAD" "git fsck" "git show-ref" "git bundle create /tmp/b HEAD" "git worktree list" "git worktree prune" "git sparse-checkout list" "git config --get user.email" "git blame f" "git var GIT_AUTHOR_IDENT" "git difftool" "git mergetool"'
+check "guard permits the safe form where a subcommand splits" \
+  'all_allowed "git remote add up http://x" "git submodule update --init" "git notes add -m x" "git rm --cached f" "git rm -r --cached dir" "git branch -m old new"'
+check "guard refuses the destructive form of the same subcommand" \
+  'all_blocked "git reflog expire --all" "git reflog delete HEAD@{0}" "git stash" "git stash pop" "git stash drop" "git remote remove origin" "git remote set-url origin http://evil" "git submodule deinit --force x" "git notes prune" "git notes remove" "git bisect reset" "git rm -rf ." "git rm -r dir" "git sparse-checkout set x"'
+check "guard fails closed on an unknown verb of a permitted subcommand" \
+  'all_blocked "git remote nosuchverb" "git notes nosuchverb" "git bisect nosuchverb"'
+
+# A subcommand that RUNS a command it is handed would smuggle any refused form
+# past the allowlist as an opaque string. Same class as an alias shadowing.
+GIT_EXEC_PAGER="git -c core.pager=\"git reset --hard\" log"
+GIT_EXEC_EDITOR="GIT_EDITOR=\"git reset --hard\" git rebase -i"
+GIT_EXEC_REBASE="git rebase -x \"git reset --hard\" main"
+check "guard refuses Git forms that execute a command they are handed" \
+  'all_blocked "git bisect run git reset --hard" "git submodule foreach git reset --hard" "$GIT_EXEC_REBASE" "git rebase --exec x main" "git difftool -x x"'
+check "guard refuses config keys whose value Git executes" \
+  'all_blocked "$GIT_EXEC_PAGER" "git -c core.editor=evil rebase -i" "git -c diff.external=evil diff" "git -c credential.helper=evil fetch"'
+check "guard refuses Git environment variables whose value Git executes" \
+  'all_blocked "$GIT_EXEC_EDITOR" "GIT_SSH_COMMAND=evil git fetch" "GIT_EXTERNAL_DIFF=evil git diff"'
+
 # --- dm_lock: a leaked reclaim marker must not wedge recovery (#122) ---------
 # Before the fix the marker was unstamped and untrapped, so ONE reclaimer killed
 # mid-reclaim made every later dead-PID lock hard-fail at ~30s, forever.

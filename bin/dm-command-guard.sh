@@ -11,9 +11,17 @@
 #
 # THREE CLASSES OF GIT SUBCOMMAND (check_git_subcommand is the single owner):
 #   permitted    read-only inspection + additive/history-preserving workflow
-#   conditional  permitted, minus specific destructive flag forms
-#                (push, branch, tag, worktree, switch, config)
+#   conditional  permitted, minus a destructive FLAG (push --force, rm -rf) or a
+#                destructive VERB (remote remove, stash pop, bisect reset)
 #   refused      everything else, named or not
+# The permitted set is walked against git's real subcommand list, not a
+# shortlist: fail-closed is only tolerable if ordinary work does not keep
+# hitting it. A refusal names the subcommand, so widening it is a one-liner.
+#
+# EXECUTION VECTORS, refused because they would carry a refused form past the
+# allowlist as an opaque string: rebase -x, bisect run, submodule foreach,
+# difftool --extcmd, for-each-repo, an alias shadowing the invoked subcommand,
+# and any -c/GIT_* setting of a config key whose value Git executes.
 #
 # WRAPPERS: env/sudo/timeout/nohup/nice/xargs/... are unwrapped to the command
 # they run. That table is a PRECISION aid, not the safety boundary — an
@@ -174,13 +182,54 @@ has_force_refspec() {
   return 1
 }
 
-# An inline alias that SHADOWS the invoked subcommand makes that subcommand
-# something other than what it reads as, defeating the allowlist -- refuse
-# regardless of the alias body. An alias that is never invoked is untouched.
-check_alias_entry() {
-  local entry="$1" dynamic="$2" subcommand="$3" name
-  case "$entry" in alias.*=*) ;; *) return 0 ;; esac
-  name="${entry#alias.}"; name="${name%%=*}"
+# First non-flag token after the subcommand -- the verb of a two-level command
+# such as `remote remove` or `bisect run`. Empty when the subcommand is bare.
+subcommand_verb() {
+  local start="$1" end="$2" i
+  i=$((start + 1))
+  while [ "$i" -lt "$end" ]; do
+    case "${TOKENS[$i]}" in
+      -*) : ;;
+      *) printf '%s\n' "${TOKENS[$i]}"; return 0 ;;
+    esac
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# Permit <subcommand> only for the listed verbs. Same inversion as the top-level
+# allowlist: an unknown, new, or absent verb fails closed. `<none>` in the list
+# permits the bare form (e.g. `git remote` listing remotes).
+require_verb() {
+  local subcommand="$1" verb="$2" permitted=" $3 "
+  case "$permitted" in
+    *" ${verb:-<none>} "*) return 0 ;;
+  esac
+  deny "git $subcommand ${verb:-(bare)} is not on the permitted-subcommand list"
+}
+
+# Config keys whose VALUE Git executes as a command. Setting one on the command
+# line turns ANY permitted subcommand into arbitrary execution, so the allowlist
+# means nothing without this.
+config_key_executes() {
+  case "$1" in
+    core.pager|core.editor|core.sshCommand|core.hooksPath|core.fsmonitor|\
+    diff.external|sequence.editor|credential.helper|\
+    uploadpack.packObjectsHook|filter.*) return 0 ;;
+  esac
+  return 1
+}
+
+# An inline config entry is refused when it either executes its value, or is an
+# alias SHADOWING the invoked subcommand -- which makes that subcommand
+# something other than what it reads as. An uninvoked alias is untouched.
+check_config_entry() {
+  local entry="$1" dynamic="$2" subcommand="$3" key name
+  case "$entry" in *=*) ;; *) return 0 ;; esac
+  key="${entry%%=*}"
+  config_key_executes "$key" && deny "Git config key '$key' has a value Git executes"
+  case "$key" in alias.*) ;; *) return 0 ;; esac
+  name="${key#alias.}"
   [ "$name" = "$subcommand" ] || return 0
   [ "$dynamic" -eq 0 ] || deny "invoked Git alias has a dynamic definition"
   deny "invoked Git subcommand is redefined by an inline alias"
@@ -192,28 +241,29 @@ check_environment_aliases() {
   while [ "$i" -lt "$git_index" ]; do
     token="${TOKENS[$i]}"
     case "$token" in
+      # Env equivalents of the executing config keys, same reasoning.
+      GIT_EDITOR=*|GIT_PAGER=*|GIT_EXTERNAL_DIFF=*|GIT_SEQUENCE_EDITOR=*|\
+      GIT_SSH=*|GIT_SSH_COMMAND=*|GIT_PROXY_COMMAND=*)
+        deny "Git environment variable '${token%%=*}' has a value Git executes"
+        ;;
       GIT_CONFIG_COUNT=*)
         [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git config count cannot be safety-classified"
         ;;
       GIT_CONFIG_KEY_*=*)
         [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git config key cannot be safety-classified"
-        case "${token#*=}" in
-          alias.*)
-            suffix="${token%%=*}"; suffix="${suffix#GIT_CONFIG_KEY_}"
-            value=""; found=0; j="$start"
-            while [ "$j" -lt "$git_index" ]; do
-              case "${TOKENS[$j]}" in
-                GIT_CONFIG_VALUE_"$suffix"=*) value="${TOKENS[$j]#*=}"; found=1; break ;;
-              esac
-              j=$((j + 1))
-            done
-            if [ "$found" -eq 0 ]; then
-              check_alias_entry "${token#*=}=" 1 "$subcommand"
-            else
-              check_alias_entry "${token#*=}=$value" "${DYNAMIC[$j]}" "$subcommand"
-            fi
-            ;;
-        esac
+        suffix="${token%%=*}"; suffix="${suffix#GIT_CONFIG_KEY_}"
+        value=""; found=0; j="$start"
+        while [ "$j" -lt "$git_index" ]; do
+          case "${TOKENS[$j]}" in
+            GIT_CONFIG_VALUE_"$suffix"=*) value="${TOKENS[$j]#*=}"; found=1; break ;;
+          esac
+          j=$((j + 1))
+        done
+        if [ "$found" -eq 0 ]; then
+          check_config_entry "${token#*=}=" 1 "$subcommand"
+        else
+          check_config_entry "${token#*=}=$value" "${DYNAMIC[$j]}" "$subcommand"
+        fi
         ;;
     esac
     i=$((i + 1))
@@ -234,13 +284,13 @@ check_git_segment() {
         i=$((i + 1)); [ "$i" -lt "$sub_index" ] || deny "Git config option is missing a value"
         config="${TOKENS[$i]}"
         if [ "$token" = "--config-env" ]; then
-          check_alias_entry "$config" 1 "$subcommand"
+          check_config_entry "$config" 1 "$subcommand"
         else
-          check_alias_entry "$config" "${DYNAMIC[$i]}" "$subcommand"
+          check_config_entry "$config" "${DYNAMIC[$i]}" "$subcommand"
         fi
         ;;
-      -calias.*=*) check_alias_entry "${token#-c}" "${DYNAMIC[$i]}" "$subcommand" ;;
-      --config-env=alias.*=*) check_alias_entry "${token#--config-env=}" 1 "$subcommand" ;;
+      -c?*) check_config_entry "${token#-c}" "${DYNAMIC[$i]}" "$subcommand" ;;
+      --config-env=?*) check_config_entry "${token#--config-env=}" 1 "$subcommand" ;;
     esac
     i=$((i + 1))
   done
@@ -275,10 +325,42 @@ check_git_branch() {
 
 # A plain `worktree remove` refuses a dirty worktree; forcing discards it.
 check_git_worktree() {
-  local start="$1" end="$2"
-  has_arg "$start" "$end" remove || return 0
+  local start="$1" end="$2" verb
+  verb="$(subcommand_verb "$start" "$end")"
+  require_verb worktree "$verb" "add list lock unlock move prune repair remove"
+  [ "$verb" = "remove" ] || return 0
   if has_short_flag "$start" "$end" f || has_arg "$start" "$end" --force; then
     deny "git worktree remove --force"
+  fi
+}
+
+# `git rm -rf .` wipes tracked files, and the commands that would restore them
+# are themselves refused. Recursive is permitted only with --cached, which
+# untracks while leaving the files on disk.
+check_git_rm() {
+  local start="$1" end="$2"
+  if has_short_flag "$start" "$end" f || has_arg "$start" "$end" --force; then
+    deny "git rm --force"
+  fi
+  if has_short_flag "$start" "$end" r || has_short_flag "$start" "$end" R; then
+    has_arg "$start" "$end" --cached || deny "git rm -r without --cached"
+  fi
+}
+
+# `rebase -x` runs a command per commit, so it would smuggle any refused Git
+# form past the allowlist as an opaque string.
+check_git_rebase() {
+  local start="$1" end="$2"
+  if has_short_flag "$start" "$end" x || has_arg "$start" "$end" --exec; then
+    deny "git rebase --exec runs an unclassifiable command"
+  fi
+}
+
+# Same class as rebase --exec: difftool's external command is never inspected.
+check_git_difftool() {
+  local start="$1" end="$2"
+  if has_short_flag "$start" "$end" x || has_arg "$start" "$end" --extcmd; then
+    deny "git difftool --extcmd runs an unclassifiable command"
   fi
 }
 
@@ -313,29 +395,72 @@ check_git_switch() {
   fi
 }
 
-# The allowlist. Unknown and future subcommands land in the default case and are
-# refused: that is the point of the inversion (#121). Named refusals worth
-# recording: reset/clean/restore/checkout (discard worktree or index state),
-# stash (forbidden by AGENTS.md), reflog/gc/prune/repack (destroy the
-# dangling-commit recovery net), filter-branch/filter-repo (rewrite history),
-# update-ref/symbolic-ref/pack-refs (write refs directly), sparse-checkout and
-# submodule (remove working-tree files), rm (removes tracked files, and the
-# recovery commands are themselves refused), remote (repoints push targets).
+# The allowlist, walked against git's actual subcommand list rather than a
+# shortlist, so ordinary work does not have to discover each refusal as an
+# incident. Unknown and future subcommands land in the default case and are
+# refused: that is the point of the inversion (#121).
+#
+# REFUSED WITH NO CLEAN SPLIT, recorded so it reads as a decision:
+#   reset, clean, restore, checkout      discard worktree/index state
+#   gc, prune, prune-packed, repack      destroy the dangling-commit recovery net
+#   filter-branch, replay, fast-import   rewrite history
+#   update-ref, symbolic-ref, pack-refs, read-tree, update-index
+#                                        write refs/index directly
+#   replace, rerere, maintenance         plumbing with no safe-form boundary
+#   credential, daemon, send-email, imap-send, http-*, send-pack, receive-pack
+#                                        expose secrets or reach the network
+#   for-each-repo                        runs a command per repo (see rebase -x)
 check_git_subcommand() {
-  local sub_index="$1" end="$2" subcommand="$3"
+  local sub_index="$1" end="$2" subcommand="$3" verb
   case "$subcommand" in
-    status|log|diff|show|describe|blame|shortlog|grep|cherry|range-diff|\
+    # Read-only inspection.
+    status|log|show|diff|diff-files|diff-index|diff-tree|diff-pairs|\
+    blame|annotate|describe|shortlog|whatchanged|grep|cherry|range-diff|\
     ls-files|ls-tree|ls-remote|cat-file|rev-parse|rev-list|name-rev|\
-    for-each-ref|merge-base|diff-tree|diff-index|count-objects|\
-    check-ignore|check-attr|version|help) return 0 ;;
-    add|commit|fetch|pull|merge|rebase|cherry-pick|revert|am|apply|\
-    format-patch|mv|init|clone) return 0 ;;
+    for-each-ref|show-ref|show-branch|show-index|merge-base|merge-tree|\
+    count-objects|check-ignore|check-attr|check-mailmap|check-ref-format|\
+    verify-commit|verify-tag|verify-pack|fsck|fsck-objects|patch-id|\
+    request-pull|fast-export|archive|bundle|bugreport|diagnose|\
+    get-tar-commit-id|stripspace|interpret-trailers|mailinfo|mailsplit|\
+    fmt-merge-msg|column|var|version|help) return 0 ;;
+    # Additive or history-preserving workflow.
+    add|stage|commit|commit-tree|write-tree|mktree|mktag|hash-object|\
+    fetch|pull|merge|merge-file|mergetool|cherry-pick|revert|am|apply|\
+    format-patch|mv|init|init-db|clone) return 0 ;;
+    # Safe in the ordinary form, destructive in a specific one.
     push) check_git_push "$sub_index" "$end" ;;
     branch) check_git_branch "$sub_index" "$end" ;;
     tag) check_git_tag "$sub_index" "$end" ;;
     worktree) check_git_worktree "$sub_index" "$end" ;;
     config) check_git_config "$sub_index" "$end" ;;
     switch) check_git_switch "$sub_index" "$end" ;;
+    rm) check_git_rm "$sub_index" "$end" ;;
+    rebase) check_git_rebase "$sub_index" "$end" ;;
+    difftool) check_git_difftool "$sub_index" "$end" ;;
+    # Safe or destructive by verb. `bisect run` and `submodule foreach` execute
+    # a command they are handed, so both are refused for the rebase -x reason.
+    remote)
+      verb="$(subcommand_verb "$sub_index" "$end")"
+      require_verb remote "$verb" "<none> show get-url add rename set-head set-branches update" ;;
+    submodule)
+      verb="$(subcommand_verb "$sub_index" "$end")"
+      require_verb submodule "$verb" "<none> status init update sync summary add absorbgitdirs set-branch" ;;
+    notes)
+      verb="$(subcommand_verb "$sub_index" "$end")"
+      require_verb notes "$verb" "<none> list show add append edit copy merge get-ref" ;;
+    bisect)
+      verb="$(subcommand_verb "$sub_index" "$end")"
+      require_verb bisect "$verb" "start good bad new old skip log view terms replay" ;;
+    reflog)
+      verb="$(subcommand_verb "$sub_index" "$end")"
+      require_verb reflog "$verb" "<none> show exists" ;;
+    stash)
+      # AGENTS.md forbids stashing; reading the list destroys nothing.
+      verb="$(subcommand_verb "$sub_index" "$end")"
+      require_verb stash "$verb" "list show" ;;
+    sparse-checkout)
+      verb="$(subcommand_verb "$sub_index" "$end")"
+      require_verb sparse-checkout "$verb" "list" ;;
     *) deny "git $subcommand is not on the permitted-subcommand list" ;;
   esac
 }
