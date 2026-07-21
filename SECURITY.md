@@ -50,6 +50,48 @@ look:
   explicit operator decision (`merge_authority`), but the content of a change is
   only as reviewed as you make it.
 
+That statement is about the **toolbelt**: `bin/dm-*.sh` is the enforcement, and
+it is auditable code. It is not a claim about every shell command a crewmate can
+type. Those are covered separately, and less completely, by the command guard.
+
+## Command guard
+
+`bin/dm-command-guard.sh` is a PreToolUse hook (wired from `.codex/config.toml`)
+that parses a shell command and refuses Git forms that can lose work. It is an
+**allowlist**: a Git subcommand is refused unless it is named permitted, so an
+unrecognized or future subcommand fails closed.
+
+Refused: `reset`, `clean`, `restore`, `checkout`, forced `switch`, `stash`,
+`push` that forces/deletes/prunes a remote ref (including a bare `+refspec`),
+`branch` delete/force, `tag` delete/force, `worktree remove --force`, `reflog`,
+`gc`, `prune`, `repack`, `filter-branch`, `update-ref`, `sparse-checkout`,
+`submodule`, `rm`, `remote`, and `config` touching an alias. Wrappers do not
+help: `timeout`, `nohup`, `nice`, `xargs`, `env`, `sudo` and friends are
+unwrapped, and any unrecognized executable holding a bare `git` token is refused
+outright rather than assumed harmless.
+
+**Deliberately permitted**, so this is a decision and not an oversight:
+
+- `git push --force-with-lease` / `--force-if-includes` — the toolbelt itself
+  uses lease-pinned force (`dm-pr.sh`), and it cannot clobber an unseen ref.
+- `git rebase`, `merge`, `pull` — they refuse to run against a dirty tree.
+- a Git alias that is defined but never invoked.
+- text tools (`grep`, `echo`, `cat`, …) taking `git` as an argument.
+
+**Known limits.** The guard is a guardrail, not a sandbox, and should not be
+the only thing standing between an agent and a repository:
+
+- It only sees commands that emit a Bash tool event. A specialized tool that
+  writes files or calls an API directly is not parsed.
+- It parses one command with its own lexer. A shell can always interpret more
+  than a parser models; deeply obfuscated or dynamically constructed commands
+  are refused where detected, but detection is not a proof.
+- It does not restrict non-Git destruction (`rm -rf`, a build script, an
+  interpreter). Worktree isolation and the operating contract carry that.
+- It is enforced on the Codex runtime today; Claude-side wiring is #89.
+
+Guarded toolbelt paths and the operating contract remain the primary controls.
+
 ## Reporting a vulnerability
 
 Report privately — please do **not** open a public issue for a security problem.

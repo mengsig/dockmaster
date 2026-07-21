@@ -73,13 +73,48 @@ dm_pr_delivery_gate() {
 #
 # Crash-safety: a holder killed with SIGKILL cannot run its trap, so the lock
 # dir survives and would otherwise wedge every future write (~30s spin, then
-# hard death). To self-heal, the holder records its PID and an epoch timestamp
-# inside the lock dir; a waiter reclaims the lock only on POSITIVE evidence of
-# abandonment — the recorded PID is not alive, or the lock is older than
-# DM_LOCK_STALE_SECS. Genuine LIVE contention still blocks, then fails visibly.
+# hard death). To self-heal, the holder records its PID inside the lock dir; a
+# waiter reclaims it only on POSITIVE evidence of abandonment — the recorded PID
+# is not alive. There is no age-based reclaim: elapsed time is not evidence that
+# a holder is gone. Genuine LIVE contention still blocks, then fails visibly.
+
+# Spins (at 0.1s) a blocking reclaim marker must survive before it counts as
+# abandoned. A real reclaim is a few filesystem calls, so 5s is a vast margin.
+DM_LOCK_RECLAIM_STALL_SPINS=50
+
+# Acquire the reclaim mutex that serializes reclaimers, self-healing one leaked
+# by a reclaimer that died mid-reclaim. Before #122 this marker was unstamped
+# and untrapped, so ONE killed reclaimer disabled dead-lock recovery forever.
+# Two independent heals, because the marker must never be the permanent wedge:
+#   - a recorded PID that is not alive (positive evidence, as for the lock);
+#   - no usable PID, but the marker has blocked us for <stalled> spins. Age is
+#     valid evidence HERE and not for the lock itself: this critical section is
+#     bounded and tiny, so a marker outliving it by 5s cannot have a live owner.
+# Returns 0 holding the mutex; 1 otherwise (caller retries on the next spin).
+dm_lock_acquire_reclaim() {
+  local reclaim="$1" stalled="$2" rcpid
+  if mkdir "$reclaim" 2>/dev/null; then
+    printf '%s\n' "$$" > "$reclaim/pid" 2>/dev/null || true
+    return 0
+  fi
+  rcpid="$(cat "$reclaim/pid" 2>/dev/null || true)"
+  case "$rcpid" in
+    ''|*[!0-9]*)
+      [ "$stalled" -ge "$DM_LOCK_RECLAIM_STALL_SPINS" ] || return 1
+      dm_warn "clearing abandoned reclaim marker $(basename "$reclaim") (no live owner recorded)"
+      ;;
+    *)
+      if kill -0 "$rcpid" 2>/dev/null; then return 1; fi
+      dm_warn "clearing abandoned reclaim marker $(basename "$reclaim") (pid=$rcpid not alive)"
+      ;;
+  esac
+  rm -rf "$reclaim" 2>/dev/null || true
+  return 1
+}
+
 dm_lock() {
   # dm_lock <file>  -- acquire the advisory lock guarding <file>
-  local target="$1" lockdir reclaim waited=0 pid rpid
+  local target="$1" lockdir reclaim waited=0 stalled=0 pid rpid
   lockdir="$target.lock"; reclaim="$lockdir.reclaim"
   while ! mkdir "$lockdir" 2>/dev/null; do
     # The lock is held. Self-heal ONLY a lock abandoned by a crashed holder,
@@ -104,21 +139,25 @@ dm_lock() {
           # so removing it here cannot tear a live holder away. If another waiter
           # already reclaimed and a live holder took over, the re-read PID is now
           # live (or the dir is gone) and we leave it be.
-          if mkdir "$reclaim" 2>/dev/null; then
+          if dm_lock_acquire_reclaim "$reclaim" "$stalled"; then
+            stalled=0
             rpid="$(cat "$lockdir/pid" 2>/dev/null || true)"
             if [ -d "$lockdir" ] && [ "$rpid" = "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
               dm_warn "reclaiming stale lock on $(basename "$target") (holder pid=$pid not alive; previous holder likely crashed)"
               rm -rf "$lockdir" 2>/dev/null || true
             fi
-            rmdir "$reclaim" 2>/dev/null || true
+            rm -rf "$reclaim" 2>/dev/null || true
             continue
           fi
+          # Blocked by the reclaim marker, not by the lock: count it so an
+          # unstamped leak eventually heals instead of wedging recovery forever.
+          stalled=$((stalled + 1))
         fi
         ;;
     esac
     waited=$((waited + 1))
     if [ "$waited" -ge 300 ]; then
-      dm_die "could not acquire lock on $(basename "$target") after ~30s; if no dm-* process is running, remove the stale lock: rm -rf '$lockdir'"
+      dm_die "could not acquire lock on $(basename "$target") after ~30s; if no dm-* process is running, remove the stale lock AND its reclaim marker: rm -rf '$lockdir' '$reclaim'"
     fi
     sleep 0.1
   done

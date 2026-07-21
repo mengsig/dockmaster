@@ -77,6 +77,87 @@ check "guard permits quoted spaced-path read-only Git" 'b dm-command-guard.sh ch
 check "guard ignores harmless Git words in argv text" 'b dm-command-guard.sh check "echo git reset --hard" >/dev/null && b dm-command-guard.sh check "printf %s \"git restore file\"" >/dev/null && b dm-command-guard.sh check "bash -c \"echo git clean -fd\"" >/dev/null'
 check "guard ignores uninvoked harmless alias text" 'b dm-command-guard.sh check "git -c alias.cleanup=\"!printf harmless\" status" >/dev/null'
 
+# --- guard is an allowlist, and wrappers do not bypass it (#105/#121) --------
+# Every form in the "blocks" checks below was ALLOWED before the inversion; the
+# "permits" checks pin what is deliberately left through so a later reader can
+# tell a decision from an oversight. Names the forms, unlike the old block.
+all_blocked() {
+  local c
+  for c in "$@"; do
+    if "$ROOT/bin/dm-command-guard.sh" check "$c" >/dev/null 2>&1; then
+      printf '       still allowed: %s\n' "$c" >&2; return 1
+    fi
+  done
+}
+all_allowed() {
+  local c
+  for c in "$@"; do
+    if ! "$ROOT/bin/dm-command-guard.sh" check "$c" >/dev/null 2>&1; then
+      printf '       wrongly blocked: %s\n' "$c" >&2; return 1
+    fi
+  done
+}
+ALIAS_SHADOW='git -c alias.status="!git reset --hard" status'
+CONFIG_ALIAS='git config alias.status "!git reset --hard"'
+check "guard blocks force/delete/prune push (#105)" \
+  'all_blocked "git push --force origin main" "git push -f origin main" "git push origin +main" "git push origin --delete main" "git push -d origin x" "git push --mirror origin" "git push --prune origin"'
+check "guard blocks history and ref destruction" \
+  'all_blocked "git stash" "git branch -D feature" "git branch -M main" "git tag -d v1" "git update-ref -d refs/heads/main" "git reflog expire --expire=now --all" "git gc --prune=now" "git filter-branch --force" "git worktree remove --force /tmp/x" "git rm -rf ." "git sparse-checkout set x" "git submodule deinit --force x"'
+check "guard fails closed on unknown and future subcommands" \
+  'all_blocked "git nosuchsubcommand --wat" "git remote set-url origin http://evil"'
+check "guard blocks an alias shadowing a permitted subcommand" \
+  'all_blocked "$ALIAS_SHADOW" "$CONFIG_ALIAS"'
+check "guard blocks destructive Git behind every wrapper (#121)" \
+  'all_blocked "timeout 5 git reset --hard" "nohup git reset --hard" "nice git reset --hard" "nice -n 5 git push --force" "xargs git reset --hard" "find . -exec git reset --hard {} +" "stdbuf -o0 git clean -fd" "setsid git reset --hard" "parallel git push --force" "env timeout 5 git reset --hard" "./wrapper.sh git reset --hard"'
+check "guard permits the crew workflow it must not break" \
+  'all_allowed "git status" "git add ." "git commit -m msg" "git push origin main" "git fetch origin" "git rebase origin/main" "git merge main" "git branch feature" "git branch -m old new" "git worktree add /tmp/x" "git switch main" "git switch -c feat" "timeout 60 git status" "nice -n 5 git log"'
+check "guard permits lease-pinned force push BY DECISION (#89)" \
+  'all_allowed "git push --force-with-lease origin feature" "git push --force-if-includes origin feature"'
+check "guard permits git tokens as text for tools that cannot execute them" \
+  'all_allowed "grep -rn git ." "echo git reset --hard"'
+
+# --- dm_lock: a leaked reclaim marker must not wedge recovery (#122) ---------
+# Before the fix the marker was unstamped and untrapped, so ONE reclaimer killed
+# mid-reclaim made every later dead-PID lock hard-fail at ~30s, forever.
+LOCKFIX="$TMP/lockfix"; mkdir -p "$LOCKFIX"
+# Stage a lock held by a dead PID, plus a reclaim marker owned by <pid> ("" = none).
+stage_wedged_lock() {
+  local d="$LOCKFIX/$1" owner="$2"
+  rm -rf "$d"; mkdir -p "$d"; : > "$d/lk.meta"
+  mkdir "$d/lk.meta.lock"; printf '999999\n' > "$d/lk.meta.lock/pid"
+  mkdir "$d/lk.meta.lock.reclaim"
+  [ -z "$owner" ] || printf '%s\n' "$owner" > "$d/lk.meta.lock.reclaim/pid"
+  printf '%s\n' "$d"
+}
+# Exercise the marker rule directly so a live-owner case costs no 30s spin.
+reclaim_rc() { # <marker-dir> <stalled-spins> -> "rc=<n> marker=<present|cleared>"
+  local rc=0
+  bash -c '. "$1/bin/dm-lib.sh"; dm_lock_acquire_reclaim "$2" "$3"' _ "$ROOT" "$1" "$2" >/dev/null 2>&1 || rc=$?
+  printf 'rc=%s marker=%s\n' "$rc" "$([ -d "$1" ] && echo present || echo cleared)"
+}
+WEDGE_DEAD="$(stage_wedged_lock dead 999998)"
+WEDGE_LIVE="$(stage_wedged_lock live $$)"
+WEDGE_BARE="$(stage_wedged_lock bare '')"
+check "marker owned by a dead reclaimer is cleared" \
+  '[ "$(reclaim_rc "$WEDGE_DEAD/lk.meta.lock.reclaim" 0)" = "rc=1 marker=cleared" ]'
+check "marker owned by a LIVE reclaimer is never stolen" \
+  '[ "$(reclaim_rc "$WEDGE_LIVE/lk.meta.lock.reclaim" 999)" = "rc=1 marker=present" ]'
+check "unstamped marker is kept while a reclaim could still be in flight" \
+  '[ "$(reclaim_rc "$WEDGE_BARE/lk.meta.lock.reclaim" 0)" = "rc=1 marker=present" ]'
+check "unstamped marker is cleared once it has blocked far past any real reclaim" \
+  '[ "$(reclaim_rc "$WEDGE_BARE/lk.meta.lock.reclaim" 50)" = "rc=1 marker=cleared" ]'
+# End to end: the exact #122 reproduction must now heal instead of hard-failing.
+WEDGE_E2E="$(stage_wedged_lock e2e '')"
+LOCK_E2E="$(bash -c '. "$1/bin/dm-lib.sh"; dm_lock "$2" >/dev/null 2>&1 && { printf ACQUIRED; dm_unlock "$2"; }' _ "$ROOT" "$WEDGE_E2E/lk.meta" 2>/dev/null || true)"
+check "a leaked reclaim marker no longer wedges dead-lock recovery" '[ "$LOCK_E2E" = ACQUIRED ]'
+# A live-owned marker is correctly never stolen, so this reaches the timeout.
+# Stubbing sleep collapses the 300 spins to ~0s without weakening the path.
+LOCK_MSG="$(bash -c 'sleep() { :; }; . "$1/bin/dm-lib.sh"; dm_lock "$2"' _ "$ROOT" "$WEDGE_LIVE/lk.meta" 2>&1 || true)"
+check "the timeout message names the reclaim marker, not just the lock" \
+  "grep -q \"lk.meta.lock.reclaim'\" <<<\"\$LOCK_MSG\" && grep -q \"lk.meta.lock' \" <<<\"\$LOCK_MSG\""
+check "dm-lib documents no knob it does not implement" \
+  '! grep -q "DM_LOCK_STALE_SECS" "$ROOT/bin/dm-lib.sh"'
+
 # --- managed-worktree guard wiring (#83) -------------------------------------
 # The shipped Codex PreToolUse hook must resolve dm-command-guard.sh from the
 # distro root even when cwd is a managed clone/worktree, whose git-toplevel has
