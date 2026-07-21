@@ -32,13 +32,18 @@ case "$cmd" in
     case "$(dm_merge_authority_gate "$(dm_merge_authority "$repo")")" in
       allow) : ;;
       refuse-never) dm_die "REFUSED: repo $repo is merge_authority=never: the dockmaster may not land work; deliver it as a PR and the operator merges it on GitHub" ;;
-      refuse-invalid) dm_die "REFUSED: repo $repo has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to land. Set a valid one: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
+      refuse-invalid) dm_die "REFUSED: cannot resolve merge authority for repo '$repo': it is unregistered, or has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to land. Register it (dm-repo.sh add) or set a valid authority: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
       *) dm_die "REFUSED: repo $repo merge authority could not be resolved; refusing to land" ;;
     esac
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || dm_die "worktree on detached HEAD; nothing to land"
     ! dm_tracked_dirty "$wt" || dm_die "worktree has uncommitted changes to tracked files; commit before landing"
-    dir="$(dm_repo_dir "$repo")"; def="$(dm_default_branch "$dir")"
+    dir="$(dm_repo_dir "$repo")"
+    # No exemption here, ever: the distro's tracked surface ships through its own
+    # PR path, so landing onto DM_HOME's default branch is never legitimate.
+    # Refuse before the first git read of the clone (#119).
+    dm_assert_not_distro "$dir" "landing $id into repo '$repo'"
+    def="$(dm_default_branch "$dir")"
     cur="$(git -C "$dir" rev-parse --abbrev-ref HEAD)"
     [ "$cur" = "$def" ] || dm_die "clone is on '$cur', not default '$def'; return it before landing"
     [ -z "$(git -C "$dir" status --porcelain)" ] || dm_die "clone working tree is dirty; refusing to land"

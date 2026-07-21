@@ -58,3 +58,28 @@ gate here is deliberately pure and offline-testable, so keep new gates that way.
   `default_branch` is unset; `set default_branch` refuses a currently-listed
   name. `dm-merge.sh local` has NO exception: it always lands on the default
   branch, so `never` keeps hard-refusing there.
+- **[invariant]** `dm_merge_authority` fails CLOSED on anything it cannot vouch
+  for (#119): an unregistered repo, a null registry entry, or an unreadable
+  registry returns `invalid` (→ `refuse-invalid`), never the permissive legacy
+  `ask` default. The reserved distro name returns `never` — the dockmaster may
+  not merge or land the distro; the operator merges its PRs on GitHub. Only an
+  absent `merge_authority` FIELD on a REGISTERED repo still migrates via the
+  legacy `yolo` boolean.
+- **[consequence]** Because `dm-repo.sh` refuses the reserved distro name,
+  `merge_allowed_bases` can never be granted for the distro — its authority is
+  fixed at `never`. Deliberate: no code change should be able to relax it. If
+  the integration-branch workflow needs that carve-out for the distro, it is an
+  operator decision, not a code fix.
+- **[pitfall]** `has_ci` is an INPUT to the merge gate, so a wrong answer there
+  unlocks a bypass: `dm_merge_gate none 1 0` returns `allow`. `task_has_ci` used
+  to answer "no CI" whenever its repo lookup failed (the `set -e`-in-`[ ]`
+  swallow — see `toolbelt.md`), so an unresolvable repo silently satisfied
+  `--allow-no-checks`. It now refuses. Treat any "default to the permissive
+  value on error" in a gate input as the same bug.
+- **[pitfall]** `repo_slug` derives the GitHub slug from the clone's origin. When
+  its lookup failed, `git -C ""` read the CWD repo instead — in production the
+  distro — and `dm-pr.sh check` then WROTE `pr_state`/`checks`/`merge_state`/
+  `pr_head`/`pr_check_snapshot` from the wrong repository (observed returning
+  `MERGED`), while `adopt`'s cross-repo guard compared against that same wrong
+  slug. Any code deriving a remote/slug must resolve the directory first and
+  refuse on failure, never fall through to the working directory.

@@ -19,9 +19,25 @@ dm_need git; dm_need jq
 dm_ensure_dirs
 
 sync_one() {
-  local name="$1" dir def cur
-  dir="$DM_HOME/$(dm_registry_get "$name" path)"
+  local name="$1" dir def cur rc=0
+  # Resolve through dm-lib's single owner: an unregistered name used to compose
+  # to $DM_HOME and fast-forward the distro itself (#119). sync_one's contract is
+  # "always exit 0, report on stdout", so an unknown repo is reported, not fatal.
+  # ONLY exit 2 (no such repo) is benign. Any other failure — an unreadable or
+  # corrupt registry — is PROPAGATED, never rewritten into a reassuring SKIP.
+  dir="$(dm_repo_dir_or_none "$name")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -eq 2 ] || return "$rc"
+    echo "SKIP: $name (not a registered repo)"; return 0
+  fi
   [ -d "$dir/.git" ] || { echo "SKIP: $name (no clone)"; return 0; }
+  # Belt-and-braces against a registry path that still resolves to the distro
+  # (hand-edited "." / "repos/.."): the control plane is never synced unattended.
+  # A SKIP, not a STUCK — this is policy, not a broken clone, and `dm-worktree.sh
+  # create` reads a STUCK from here as fatal.
+  if dm_is_distro_dir "$dir"; then
+    echo "SKIP: $name resolves to the dockmaster distro itself ($DM_HOME); refusing to sync the control plane"; return 0
+  fi
   if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
     echo "SKIP: $name (no origin remote)"; return 0
   fi

@@ -214,9 +214,17 @@ if [ -f "$backlog" ] && command -v jq >/dev/null 2>&1; then
     fi
     if [ "$bstatus" = "done" ]; then
       bwt="$(dm_meta_get "$bid" worktree)"
-      if [ -n "$bwt" ] && [ -d "$bwt" ] && ! "$here/dm-worktree.sh" landed "$bid" >/dev/null 2>&1; then
-        printf '  DRIFT: backlog %s is done but its local copy holds unlanded work: %s\n' "$bid" "$bwt"
-        drift=$((drift + 1))
+      if [ -n "$bwt" ] && [ -d "$bwt" ]; then
+        # `! cmd` would fold rc=2 (could not determine) onto rc=1 (not landed) and
+        # state a fact about the operator's work that was never established (#119).
+        blrc=0; "$here/dm-worktree.sh" landed "$bid" >/dev/null 2>&1 || blrc=$?
+        if [ "$blrc" -eq 1 ]; then
+          printf '  DRIFT: backlog %s is done but its local copy holds unlanded work: %s\n' "$bid" "$bwt"
+          drift=$((drift + 1))
+        elif [ "$blrc" -ne 0 ]; then
+          printf '  DRIFT: backlog %s is done but whether its local copy landed could not be determined: %s\n' "$bid" "$bwt"
+          drift=$((drift + 1))
+        fi
       fi
     fi
   done < <(jq -r '.items[] | "\(.id)\t\(.status)"' "$backlog" 2>/dev/null || true)

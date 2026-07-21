@@ -76,7 +76,16 @@ repo_slug() {
   # repo_slug <repo>  -> owner/repo derived from the managed clone's origin
   # remote. Single owner (file-local) of a pattern repeated at every call site
   # that needs GitHub's owner/repo slug for a task's repo.
-  owner_repo "$(git -C "$(dm_repo_dir "$1")" remote get-url origin)"
+  #
+  # Resolve into a variable first. Nested in the `git -C` substitution, a resolver
+  # dm_die does not propagate, and `git -C ""` is a documented no-op that reads
+  # the CWD repo — in production the distro. `check` then wrote real landing
+  # fields (pr_state, checks, pr_check_snapshot) sourced from the WRONG repo, and
+  # `adopt`'s cross-repo guard compared against that same wrong slug.
+  local dir
+  dir="$(dm_repo_dir "$1")" \
+    || dm_die "cannot resolve repo '$1' to derive its GitHub slug; refusing to fall back to the current directory"
+  owner_repo "$(git -C "$dir" remote get-url origin)"
 }
 
 pr_number_from_url() {
@@ -99,7 +108,7 @@ task_has_ci() {
   # file added on the crewmate's branch but not yet in the managed clone still
   # counts, else the clone. Single owner of this detection so merge and
   # await-checks cannot drift apart on what "has CI" means.
-  local id="$1" repo wt
+  local id="$1" repo wt dir
   repo="$(dm_meta_get "$id" repo)"
   wt="$(dm_meta_get "$id" worktree)"
   # `if`, not a bare `[ ... ] && [ ... ] && return 0`: under set -e a false
@@ -108,7 +117,14 @@ task_has_ci() {
   if [ -n "$wt" ] && [ -d "$wt/.github/workflows" ]; then
     return 0
   fi
-  [ -d "$(dm_repo_dir "$repo")/.github/workflows" ]
+  # Resolve into a VARIABLE first, then test it. Nested inside the `[ ]`
+  # argument, a dm_die from the resolver does not propagate (set -e ignores a
+  # failed substitution there) — the test just saw an empty path and answered
+  # "no CI", which with --allow-no-checks makes dm_merge_gate ALLOW. An
+  # unresolvable repo must refuse, never silently unlock the bypass.
+  dir="$(dm_repo_dir "$repo")" \
+    || dm_die "cannot determine CI configuration for repo '$repo'; refusing to guess (a wrong answer here can unlock --allow-no-checks)"
+  [ -d "$dir/.github/workflows" ]
 }
 
 # verify_never_exception <repo> <slug> <n> <url> — decide the never-repo
@@ -599,7 +615,7 @@ case "$cmd" in
         dm_info "merge-authority exception: repo $repo is merge_authority=never, but PR base '$exception_base' is an operator-granted merge base (merge_allowed_bases); proceeding to the normal merge gates"
         never_exception=1
         ;;
-      refuse-invalid) dm_die "REFUSED: repo $repo has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to merge. Set a valid one: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
+      refuse-invalid) dm_die "REFUSED: cannot resolve merge authority for repo '$repo': it is unregistered, or has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to merge. Register it (dm-repo.sh add) or set a valid authority: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
       *) dm_die "REFUSED: repo $repo merge authority could not be resolved; refusing to merge" ;;
     esac
     # `gh` alone: merge's gates are jq-parsed reads, which only plain gh can
@@ -718,7 +734,12 @@ case "$cmd" in
     id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-pr.sh security-scan <id>"
     dm_require_id "$id"
     wt="$(dm_require_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
-    base="$(dm_default_branch "$(dm_repo_dir "$repo")")"
+    # Same nesting hazard: an unresolvable repo left $base empty, and the scan
+    # silently fell back to `git diff HEAD` — the wrong range, reported as a
+    # clean advisory result.
+    repo_dir="$(dm_repo_dir "$repo")" \
+      || dm_die "cannot resolve repo '$repo' to determine the diff base for the scan"
+    base="$(dm_default_branch "$repo_dir")"
     # Diff the branch against the default branch when that ref is reachable from
     # the worktree; otherwise fall back to the working diff against HEAD.
     if git -C "$wt" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
@@ -764,10 +785,13 @@ case "$cmd" in
       repo="$(dm_meta_get "$id" repo)"
       # A missing clone skips this PR (its slug/rollup are underivable) but must
       # not abort the whole sweep; surface it per-line, never a silent skip.
-      dir="$DM_HOME/$(dm_registry_get "$repo" path)"
-      if [ ! -d "$dir/.git" ]; then
+      # Only exit 2 (no such repo) may degrade to a skipped line; a failed
+      # registry read must not be laundered into "clone missing" (see dm-sync).
+      rdrc=0; dir="$(dm_repo_dir_or_none "$repo")" || rdrc=$?
+      [ "$rdrc" -eq 0 ] || [ "$rdrc" -eq 2 ] || dm_die "sweep: could not resolve repo '$repo' — the registry could not be read"
+      if [ "$rdrc" -ne 0 ] || [ ! -d "$dir/.git" ]; then
         missing=$((missing + 1))
-        printf '  %s  (repo clone missing: %s — skipped)  %s\n' "$id" "${repo:-?}" "$url"
+        printf '  %s  (repo unregistered or clone missing: %s — skipped)  %s\n' "$id" "${repo:-?}" "$url"
         continue
       fi
       if [ "$offline" -eq 1 ]; then

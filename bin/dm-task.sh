@@ -140,9 +140,18 @@ case "$cmd" in
     fi
     # 3b) Ship with committed work not yet landed is at least "working", even if
     #     the crewmate never emitted an event.
-    has_work=0
+    # `landed` distinguishes 1 (not landed) from 2 (could not determine). Collapsing
+    # them would assert "committed work not yet landed" about a task whose repo did
+    # not even resolve — a statement we cannot make (#119).
+    has_work=0; work_unknown=0
     if [ "$kind" = "ship" ] && [ -n "$wt" ] && [ -d "$wt" ]; then
-      "$(dirname "${BASH_SOURCE[0]}")/dm-worktree.sh" landed "$id" >/dev/null 2>&1 || has_work=1
+      landed_rc=0
+      "$(dirname "${BASH_SOURCE[0]}")/dm-worktree.sh" landed "$id" >/dev/null 2>&1 || landed_rc=$?
+      case "$landed_rc" in
+        0) : ;;
+        1) has_work=1 ;;
+        *) work_unknown=1 ;;
+      esac
     fi
     # 4) Otherwise fall back to the last event verb that maps to a real state.
     last="$(tail -n1 "$(dm_status_path "$id")" 2>/dev/null | sed -n 's/^[0-9TZ:-]* //p')"
@@ -167,6 +176,7 @@ case "$cmd" in
       ready|done)             echo "state: working · source: status-log · reported ready but not yet landed: $last" ;;
       ''|created)
         if [ "$has_work" -eq 1 ]; then echo "state: working · source: worktree · committed work not yet landed"
+        elif [ "$work_unknown" -eq 1 ]; then echo "state: working · source: worktree · could not determine whether its work landed (repo unresolvable)"
         else echo "state: pending · source: status-log · not yet dispatched"; fi ;;
       *)                      echo "state: working · source: status-log · $last" ;;
     esac

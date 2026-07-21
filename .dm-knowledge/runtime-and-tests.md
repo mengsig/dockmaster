@@ -21,6 +21,21 @@ test suite measures.
   Under `set -euo pipefail`, piping output to `grep -q` SIGPIPEs the producer
   (exit 141) which pipefail reports as failure — capture once and match with a
   here-string (`grep -q pat <<<"$VAR"`).
+- **[pitfall]** To capture a command's exit code in a test that SOURCES
+  `dm-lib.sh`, use `rc=0; cmd || rc=$?`, never `cmd; echo $?`. Sourcing turns on
+  `set -e` inside that subshell, so a bare nonzero return aborts it before the
+  `echo` — and WHETHER bash aborts there is version-dependent (green on a dev
+  box, red in CI). External-command exit checks inside `check`'s `if eval` are
+  safe (the `if` suspends `set -e`); the trap is only the sourced-lib subshell.
+- **[pitfall]** Any smoke test comparing a resolver/worktree path against an
+  expected value must run on a CANONICAL temp root — `smoke.sh` sets
+  `TMP="$(cd "$(mktemp -d …)" && pwd -P)"`. `dm-lib` canonicalizes `DM_HOME`
+  (`pwd -P`) and git records paths physically, so on a symlinked TMPDIR (macOS
+  `/var` -> `/private/var`) resolver output is canonical while a verbatim `$TMP`
+  expectation is not — the comparison misses only there, invisible on Linux.
+  Reproduce locally with `TMPDIR=<symlink> bash tests/smoke.sh`. (Distinct from
+  `scout-cleanup.sh`, which keeps a symlinked root on purpose to EXERCISE the
+  canonicalization — see `dm-100-cleanup-safety`.)
 - **[convention]** `tests/runtime-performance.js` caps `AGENTS.md` at
   `shared_agents_bytes + 2048` from
   `config/runtime-performance-baseline.json`. That allowance is a ratchet
