@@ -4,6 +4,9 @@
 /data/
 /.env
 
+# Default-named state exports (dm-state.sh export) - operator-private archives.
+/dockmaster-state-*.tar.gz
+
 # Local review surfaces and scratch.
 /.lavish/
 /out/

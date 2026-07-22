@@ -117,6 +117,45 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`bin/dm-state.sh` — export, verify, and import the orchestration state.**
+  `state/` was single-copy, gitignored local files with no backup path, so
+  machine loss destroyed the registry, every task record, the backlog, and the
+  memory that cannot be reconstructed from the repos. `export` writes one
+  checksummed `.tar.gz` of the record set (registry, task records + status logs,
+  backlog, global memory, secondmates, archived records, and the git-excluded
+  per-repo `.dm/` memory sidecars), `--with-artifacts` adds `data/`, `verify`
+  proves an archive's integrity, and `import` restores into `$DM_HOME`. Export
+  never mutates, and verifies the archive it just wrote before reporting success
+  (deleting it if it fails): a backup tool must never call an archive good that
+  it would itself refuse to restore. The manifest's file index is passed to `jq`
+  on stdin rather than as an argument — Linux caps a single argv string at 128K
+  (`MAX_ARG_STRLEN`), so a real `--with-artifacts` export overflowed it and died
+  with "Argument list too long", writing no archive at all. Non-regular members are skipped at export
+  and named — `verify` refuses them, so recursively copying the
+  `node_modules/.bin/` symlinks npm and playwright leave under `data/` produced a
+  successful export whose archive its own `verify` rejected at restore time. They
+  are skipped rather than dereferenced: following one would pull out-of-tree
+  content into the backup and can hang on a cycle. Import refuses a populated
+  state root without `--force`, names every file it would replace, and never
+  deletes what the archive does not carry; it additionally refuses to replace a
+  file NEWER than the archive's copy (state written after the export) without
+  `--overwrite-newer`, backs every replaced file up under
+  `state/backups/pre-import-<UTC>/` first, and takes `--dry-run` to report the
+  whole plan without writing.
+  Managed clones and live worktrees are deliberately excluded (re-clonable, and
+  huge); the import prints exactly how to re-establish each one and states
+  plainly that unlanded worktree work was not carried. Consistency is per-file —
+  each record is copied under the same advisory lock its writers take — not an
+  atomic point-in-time snapshot, and import has no rollback — a mid-way failure
+  says how far it got. An archive is untrusted input: `verify` compares manifest
+  and payload as path *sets* (a duplicated entry would otherwise mask an
+  unlisted, never-checksummed file), and refuses duplicates, checksum mismatches,
+  non-regular members, and paths outside the record set. Anything the record set
+  does not name — including one level into `state/tasks/`, `state/archive/`, and
+  `repos/<repo>/.dm/` — is reported as unrecognized and left behind, so a future
+  record type cannot go silently missing from every backup. The archive carries
+  dockmaster-only memory and is written mode 0600: treat it as a secret (see
+  `docs/architecture.md`).
 - **Complete OpenAI Codex runtime adapter** — all 18 workflow skills now have
   exact-name Codex discovery under `.agents/skills`, with runtime-native
   delegation, nesting, follow-up, supervision, waits, and recovery contracts.

@@ -140,6 +140,120 @@ A fact about the *operator* or *the fleet as a whole* → global memory. Task-sc
 notes → the backlog item. Investigation findings → the scout report. This is the
 single source of truth per fact — no duplication that can drift.
 
+## State portability (backup and recovery)
+
+`state/` is the system of record and it is gitignored single-copy local files.
+Per-repo SHARED knowledge (`.dm-knowledge/`) is committed to each managed repo
+and merged PRs live on GitHub, but the registry, the task history, the backlog,
+and the operator/fleet/private memory exist on exactly one disk. `bin/dm-state.sh`
+is the export/import path (`export | verify | import`).
+
+**The record set** — what travels: `state/repos.json`; `state/tasks/*.meta` and
+`*.status`; `state/backlog.json` and `backlog.md`; `state/operator.md`;
+`state/learnings.md`; `state/secondmates.json`; `state/archive/*.meta|.status`;
+and the git-excluded per-repo memory sidecars `repos/<repo>/.dm/*.md`.
+`--with-artifacts` adds `data/**` and archived task dirs (briefs, scout reports,
+review pages). The set is an explicit allowlist, not a sweep: a file the toolbelt
+does not own is reported in the manifest as unrecognized and left behind, so a
+restore can never look more complete than it is. The unrecognized scan covers the
+top level of `state/` plus one level into `state/tasks/`, `state/archive/`, and
+each `repos/<repo>/.dm/` — the dirs that hold records — so a future record type
+added there surfaces as unrecognized instead of going silently missing from every
+backup. It does not recurse further.
+
+Native runtime `memory/` is global memory too, but it lives outside `$DM_HOME`
+and is owned by the runtime; it is not carried and must be backed up with the
+rest of your runtime configuration.
+
+**What is deliberately excluded, and the cost.** Managed clones under `repos/`
+are re-clonable from the registry's remotes, and live worktrees under
+`state/worktrees/` are checkouts off those clones — both are large and mostly
+reproducible, so neither is archived. The exception that matters: work committed
+in a worktree but never landed is single-copy and is *not* recoverable from an
+archive. Import says so explicitly and prints, per repo, how to re-establish the
+clone. Note it prints `git init` + `fetch` + `checkout` rather than `git clone`:
+the restored `.dm/` sidecar already occupies the directory, and `git clone`
+refuses a non-empty target. That clone list is enumerated from the *restored*
+registry, which was installed byte-for-byte and so can itself be a corrupt
+`repos.json` the operator deliberately backed up to recover from (#112). A
+missing or empty registry is a legitimate first run (nothing to list); a
+corrupt one is NAMED in the report — never silently reported as zero clones,
+which would make an incomplete restore look complete — without failing the
+import, which already installed the file faithfully.
+
+**Consistency: per-file, not point-in-time.** Every record file is copied while
+holding the same `dm_lock` advisory mutex its writers take, so no file in the
+archive is a torn mid-write copy. The archive is *not* an atomic snapshot —
+files are copied one at a time, so a write landing between two copies appears in
+one and not the other. Status logs and artifacts are copied without a lock (their
+writers are append-only or write-once). For a clean snapshot, export with no crew
+work in flight. Export is strictly read-only; import refuses a populated state
+root without `--force`, names every file it would replace, and never deletes
+files the archive does not carry. Import has **no rollback**: files are installed
+one at a time, so a mid-way failure (an unwritable path, a full disk) leaves the
+root partially restored — the error names how many files landed and where their
+pre-import copies are, and recovery is to fix the cause and re-run with `--force`.
+
+**Export verifies what it wrote.** Before reporting success, export re-reads the
+finished archive through the same `verify_archive` checks import runs, and
+deletes the file if they fail. This closes a whole bug class rather than one bug:
+a backup tool that reports success for an archive it would itself reject converts
+a silent export-time defect into total backup loss discovered at restore time.
+The concrete instance was symlinks — `verify` refuses a non-regular payload
+member, while `--with-artifacts` copied `data/` recursively and preserved the
+`node_modules/.bin/` symlinks npm and playwright leave behind, so a successful
+export produced an archive its own `verify` refused. Non-regular members are now
+skipped at export and named in `manifest.omitted_non_regular`. They are skipped
+rather than dereferenced deliberately: dereferencing would pull out-of-tree
+content (a link to `/etc/passwd`) into the archive and can hang on a symlink
+cycle, whereas the copy walk uses `find -P`, which neither follows a link nor
+descends a symlinked directory.
+
+Self-verification is what surfaced a second, larger defect in the same path: the
+manifest's file index was passed to `jq` as a command-line argument, and Linux
+caps a *single* argv string at 128K (`MAX_ARG_STRLEN`, far below total
+`ARG_MAX`). Any real `--with-artifacts` export — a few hundred files is enough —
+overflowed it, and `jq` died with "Argument list too long" before an archive was
+written at all. The index now goes in on stdin; only small, bounded values stay
+as `--arg`.
+
+**Import will not silently overwrite newer state.** `cp -p` preserves mtime, so
+the staged payload carries each file's export-time mtime; a local file newer than
+the archive's copy was written *after* the export, and replacing it discards
+state the archive predates. `--force` refuses those and names them, and
+`--overwrite-newer` is the explicit escalation. Every replaced file is copied to
+`state/backups/pre-import-<UTC>.<rand>/` before being overwritten (the random
+suffix keeps two imports in the same second from sharing a directory and
+clobbering the first one's only copy), and `--dry-run` reports the whole plan
+without writing. This bounds, but does not eliminate, the cost of importing a
+stale archive: `state/repos.json` is replaced wholesale, so a repo registered
+after the export disappears from the registry while its `.dm/` sidecar stays
+orphaned on disk. What is lost is the metadata that *finds* work, never the work
+itself — `state/worktrees/` is never written, so committed-unlanded work survives
+on disk regardless.
+
+**Secrets.** An export changes who can read the state. The archive carries the
+DOCKMASTER-ONLY store (`repos/<repo>/.dm/private.md`) — which exists precisely so
+its contents are never relayed to a crewmate — plus operator preferences and,
+with `--with-artifacts`, briefs and scout reports. It also discloses the
+exporting machine's directory layout: `manifest.source_home` and the `worktree`
+paths in task records are absolute. That is deliberate, because a restore needs
+them to report what is missing, but the consequence is that the archive is
+OPERATOR-PRIVATE — a backup for its owner, not something to share, attach to an
+issue, or hand to a third party. It is written mode 0600 and should be stored
+encrypted and treated as a secret. `.env` is never included.
+
+Integrity is checked before anything is installed. The manifest must describe the
+payload as an exact SET of paths — duplicates refuse, and a path present in one
+and not the other refuses, naming the difference. (Comparing counts instead would
+let one duplicated entry mask exactly one unlisted, never-checksummed file.) Any
+checksum mismatch, unknown format, non-regular payload member (a symlink is
+otherwise invisible to a regular-file scan), or path outside `state/`, `data/`,
+`repos/<repo>/.dm/` refuses. Extraction runs before validation and relies on
+`tar` rejecting absolute and `..` member paths — GNU tar and bsdtar both do —
+after which every installed file is taken from the verified manifest list rather
+than from whatever landed on disk.
+
 ## Supervision model
 
 There is no daemon. The dockmaster creates a background worker, records its

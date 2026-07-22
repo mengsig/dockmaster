@@ -48,6 +48,17 @@ look:
 - **The review gate depends on you reading it.** Nothing merges without an
   explicit operator decision (`merge_authority`), but the content of a change is
   only as reviewed as you make it.
+- **A state archive is operator-private, and nothing encrypts it for you.** A
+  `bin/dm-state.sh export` archive is as sensitive as `state/` itself: it carries
+  the dockmaster-only memory store (the one that is never relayed to a crewmate),
+  operator preferences, and — with `--with-artifacts` — briefs and scout reports.
+  It additionally discloses your machine's directory layout: the manifest's
+  `source_home` and the worktree paths in task records are absolute. Both are
+  deliberate, because a restore needs them — but together they make the archive
+  unfit to share, attach to an issue, or hand to a third party. It is a backup
+  for you alone. Exporting moves that content past the machine boundary it was
+  written under. The archive is written mode 0600 and `.env` is never included,
+  but storing it encrypted, and keeping it out of any repository, is on you.
 
 ## Command guard
 
