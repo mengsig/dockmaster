@@ -269,28 +269,35 @@ payload_index() {
   done
 }
 
-# The file index goes in on STDIN, never as --arg: Linux caps a SINGLE argv
-# string at 128K (MAX_ARG_STRLEN), well under total ARG_MAX, and a real
-# --with-artifacts export blows past it - jq then dies "Argument list too long"
-# and no archive is written at all. Remaining --args are small and bounded.
+# Every UNBOUNDED list reaches jq as a FILE, never as an argv string: Linux caps
+# a single argv string at 128K (MAX_ARG_STRLEN, well under total ARG_MAX), and
+# each of the index, the unrecognized set, and the non-regular set scales with a
+# real state tree (thousands of npm/playwright symlinks alone overflow nonreg) -
+# jq would then die "Argument list too long" and write no archive. Index via
+# stdin (-s); the other two via --rawfile. The two list files live under $stage
+# and are removed here, BEFORE cmd_export tars $stage, so they never enter the
+# archive. Only small, bounded scalars stay as --arg.
 write_manifest() {
-  local stage="$1" artifacts="$2" omitted nonreg=''
-  omitted="$(list_unrecognized)"
-  if [ "$artifacts" -eq 1 ]; then nonreg="$(list_non_regular_artifacts)"; fi
+  local stage="$1" artifacts="$2" rc=0
+  list_unrecognized > "$stage/omitted.list"
+  if [ "$artifacts" -eq 1 ]; then list_non_regular_artifacts > "$stage/nonreg.list"
+  else : > "$stage/nonreg.list"; fi
   payload_index "$stage/payload" \
     | jq -R -s --arg format "$DM_STATE_FORMAT" \
         --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg source_home "$DM_HOME" \
         --arg artifacts "$artifacts" \
-        --arg omitted "$omitted" \
-        --arg nonreg "$nonreg" '
+        --rawfile omitted "$stage/omitted.list" \
+        --rawfile nonreg "$stage/nonreg.list" '
     def lines: split("\n") | map(select(length > 0));
     { format: $format, created: $created, source_home: $source_home,
       with_artifacts: ($artifacts == "1"),
       omitted_unrecognized: ($omitted | lines),
       omitted_non_regular: ($nonreg | lines),
       files: (lines | map(split("\t") | {sha256: .[0], bytes: (.[1] | tonumber), path: .[2]})) }
-  ' > "$stage/manifest.json" || dm_die "failed writing manifest"
+  ' > "$stage/manifest.json" || rc=$?
+  rm -f "$stage/omitted.list" "$stage/nonreg.list"
+  [ "$rc" -eq 0 ] || dm_die "failed writing manifest"
 }
 
 # Only the default archive name is gitignored, so an --out inside the checkout

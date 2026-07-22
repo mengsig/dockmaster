@@ -3346,6 +3346,29 @@ SP_BIG_INDEX_BYTES="$(cd "$SP_BIG" && find data -type f | awk '{n += length($0) 
 check "the big-index fixture exceeds 128K"          '[ "$SP_BIG_INDEX_BYTES" -gt 131072 ]'
 check "export survives a >128K file index"          'DM_HOME="$SP_BIG" "$ROOT/bin/dm-state.sh" export --out "$SP/bigindex.tar.gz" --with-artifacts >/dev/null 2>&1'
 check "the big-index archive verifies"              'DM_HOME="$SP_BIG" "$ROOT/bin/dm-state.sh" verify "$SP/bigindex.tar.gz" >/dev/null 2>&1'
+# The index is not the only unbounded jq input: the NON-REGULAR list (npm and
+# playwright leave symlink trees under data/) scales the same way and was still
+# passed as --arg. The big-index fixture above uses only regular files, so it
+# never exercised nonreg. A symlink-heavy tree pushes the non-regular list past
+# MAX_ARG_STRLEN; the old --arg overflowed and wrote no archive at all.
+SP_SYM="$TMP/state-symheavy"
+mkdir -p "$SP_SYM/state" "$SP_SYM/data/qa/node_modules/.bin"
+printf '{"repos":{}}\n' > "$SP_SYM/state/repos.json"
+printf 'x\n' > "$SP_SYM/data/qa/node_modules/real.js"
+sp_j=0
+while [ "$sp_j" -lt 700 ]; do
+  ln -s ../real.js "$SP_SYM/data/qa/node_modules/.bin/$(printf 'link%0200d' "$sp_j")"
+  sp_j=$((sp_j + 1))
+done
+# Exactly the string list_non_regular_artifacts emits (data/<relpath>, one per line).
+SP_SYM_NONREG_BYTES="$(cd "$SP_SYM" && find data -type l | LC_ALL=C sort | wc -c | tr -d ' ')"
+check "the symlink fixture's non-regular list exceeds 128K" '[ "$SP_SYM_NONREG_BYTES" -gt 131072 ]'
+check "export survives a >128K non-regular list"           'DM_HOME="$SP_SYM" "$ROOT/bin/dm-state.sh" export --out "$SP/symheavy.tar.gz" --with-artifacts >/dev/null 2>&1'
+check "the symlink-heavy archive verifies"                 'DM_HOME="$SP_SYM" "$ROOT/bin/dm-state.sh" verify "$SP/symheavy.tar.gz" >/dev/null 2>&1'
+SP_SYM_NONREG_COUNT="$(tar -xzOf "$SP/symheavy.tar.gz" ./manifest.json | jq -r '.omitted_non_regular | length')"
+check "every non-regular member is still named"            '[ "$SP_SYM_NONREG_COUNT" -eq 700 ]'
+# The temp list files jq reads must never ride along in the archive.
+check "manifest list temp files never enter the archive"   '! tar -tzf "$SP/symheavy.tar.gz" | grep -qE "omitted.list|nonreg.list"'
 
 # A corrupt repos.json is exactly the broken control plane an operator may want
 # to BACK UP for recovery (#112): export must archive it byte-for-byte and NOT
