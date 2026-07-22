@@ -556,12 +556,21 @@ install_failed() {
   dm_die "failed installing '$1' after $2 of $3 file(s). $DM_HOME is now PARTIALLY restored and there is no rollback: fix the cause, then re-run with --force (a plain retry hits the populated-root refusal).$where"
 }
 
-# Everything the archive could not carry, as a to-do list. A restore that looks
-# complete and is not is worse than one that refuses, so this always prints.
-report_reestablish() {
-  local stage="$1" name remote branch id wt missing_wt=0
-  dm_info ""
-  dm_info "re-establish (not carried by the archive):"
+# The restored registry drives the clone-reestablish list. It was installed
+# byte-for-byte, so it can legitimately be the corrupt file the operator backed
+# up to recover from (#112). Three states, matching dm-lib's registry contract:
+# missing/empty is a first-run registry (nothing to list); a parseable one is
+# enumerated; anything else is NAMED, never silently reported as zero clones -
+# a restore that looks complete and is not is worse than one that says so. Not
+# a die: the import already installed the file faithfully, so the report stays
+# honest and finishes rather than turning a good restore into a failure.
+report_missing_clones() {
+  local name remote branch repos_tsv
+  [ -s "$DM_REGISTRY" ] || return 0
+  if ! repos_tsv="$(jq -r '.repos | to_entries[] | "\(.key)\t\(.value.remote // "")\t\(.value.default_branch // "")"' "$DM_REGISTRY" 2>&1)"; then
+    dm_info "  the restored registry ($DM_REGISTRY) does NOT parse - its repos cannot be listed here. It was restored exactly as archived (backing up a corrupt registry to recover from is legitimate); run bin/dm-doctor.sh, then repair or restore it before re-establishing any clone."
+    return 0
+  fi
   while IFS="$TAB" read -r name remote branch; do
     [ -n "$name" ] || continue
     if [ -d "$DM_REPOS/$name/.git" ]; then continue; fi
@@ -572,8 +581,17 @@ report_reestablish() {
     dm_info "      && git -C repos/$name fetch origin && git -C repos/$name checkout ${branch:-main} \\"
     dm_info "      && bin/dm-memory.sh seed $name"
   done <<EOF
-$(jq -r '.repos // {} | to_entries[] | "\(.key)\t\(.value.remote // "")\t\(.value.default_branch // "")"' "$DM_REGISTRY" 2>/dev/null || true)
+$repos_tsv
 EOF
+}
+
+# Everything the archive could not carry, as a to-do list. A restore that looks
+# complete and is not is worse than one that refuses, so this always prints.
+report_reestablish() {
+  local stage="$1" id wt missing_wt=0
+  dm_info ""
+  dm_info "re-establish (not carried by the archive):"
+  report_missing_clones
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     wt="$(dm_meta_get "$id" worktree)"

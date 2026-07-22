@@ -173,7 +173,13 @@ in a worktree but never landed is single-copy and is *not* recoverable from an
 archive. Import says so explicitly and prints, per repo, how to re-establish the
 clone. Note it prints `git init` + `fetch` + `checkout` rather than `git clone`:
 the restored `.dm/` sidecar already occupies the directory, and `git clone`
-refuses a non-empty target.
+refuses a non-empty target. That clone list is enumerated from the *restored*
+registry, which was installed byte-for-byte and so can itself be a corrupt
+`repos.json` the operator deliberately backed up to recover from (#112). A
+missing or empty registry is a legitimate first run (nothing to list); a
+corrupt one is NAMED in the report — never silently reported as zero clones,
+which would make an incomplete restore look complete — without failing the
+import, which already installed the file faithfully.
 
 **Consistency: per-file, not point-in-time.** Every record file is copied while
 holding the same `dm_lock` advisory mutex its writers take, so no file in the

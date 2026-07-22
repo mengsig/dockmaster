@@ -3347,6 +3347,32 @@ check "the big-index fixture exceeds 128K"          '[ "$SP_BIG_INDEX_BYTES" -gt
 check "export survives a >128K file index"          'DM_HOME="$SP_BIG" "$ROOT/bin/dm-state.sh" export --out "$SP/bigindex.tar.gz" --with-artifacts >/dev/null 2>&1'
 check "the big-index archive verifies"              'DM_HOME="$SP_BIG" "$ROOT/bin/dm-state.sh" verify "$SP/bigindex.tar.gz" >/dev/null 2>&1'
 
+# A corrupt repos.json is exactly the broken control plane an operator may want
+# to BACK UP for recovery (#112): export must archive it byte-for-byte and NOT
+# refuse, but neither may a restore silently enumerate zero repos. The old
+# report_reestablish read the registry with `2>/dev/null || true`, so a corrupt
+# restored registry printed nothing and the restore looked complete. Fixed both
+# ways: export stays faithful; the import re-establish report NAMES the corruption.
+SP_CORRUPT="$TMP/state-corrupt-registry"
+mkdir -p "$SP_CORRUPT/state/tasks"
+# Truncated JSON - valid-looking head, no closing braces, so jq refuses to parse.
+printf '{"repos": {"demo": {"remote": "git@x:demo.git"\n' > "$SP_CORRUPT/state/repos.json"
+printf '# ops\n' > "$SP_CORRUPT/state/operator.md"
+check "the corrupt-registry fixture does not parse"  '! jq . "$SP_CORRUPT/state/repos.json" >/dev/null 2>&1'
+SP_CORRUPT_EXPORT_RC=0
+DM_HOME="$SP_CORRUPT" "$ROOT/bin/dm-state.sh" export --out "$SP/corrupt.tar.gz" >/dev/null 2>&1 || SP_CORRUPT_EXPORT_RC=$?
+check "export does not refuse a corrupt registry"    '[ "$SP_CORRUPT_EXPORT_RC" = 0 ]'
+# The assertion that guards the backup-a-broken-state capability against a future
+# "just validate up front" simplification: the raw file must travel intact.
+tar -xzOf "$SP/corrupt.tar.gz" ./payload/state/repos.json > "$SP/corrupt-archived.json"
+check "a corrupt registry is archived byte-faithfully" 'cmp -s "$SP_CORRUPT/state/repos.json" "$SP/corrupt-archived.json"'
+SP_CORRUPT_IMPORT_RC=0
+SP_CORRUPT_IMPORT="$(DM_HOME="$TMP/restore-corrupt" "$ROOT/bin/dm-state.sh" import "$SP/corrupt.tar.gz" 2>&1)" || SP_CORRUPT_IMPORT_RC=$?
+check "importing a corrupt registry still succeeds"   '[ "$SP_CORRUPT_IMPORT_RC" = 0 ]'
+check "the re-establish report names the corruption"  'grep -q "does NOT parse" <<<"$SP_CORRUPT_IMPORT"'
+check "a corrupt registry is not silently zero repos" '! grep -q "clone missing for" <<<"$SP_CORRUPT_IMPORT"'
+check "a corrupt registry restores byte-faithfully"   'cmp -s "$SP_CORRUPT/state/repos.json" "$TMP/restore-corrupt/state/repos.json"'
+
 rm -rf "$DM_HOME/state/unknown-extra" "$DM_HOME/state/tasks/subdir" "$DM_HOME/data/sp-artifacts"
 rm -f "$DM_HOME/state/tasks/t1.report" "$DM_HOME/state/archive/stray.json" "$DM_HOME/repos/demo/.dm/keys.txt"
 
