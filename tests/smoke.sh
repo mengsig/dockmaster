@@ -3379,6 +3379,139 @@ check "a corrupt registry restores byte-faithfully"   'cmp -s "$SP_CORRUPT/state
 rm -rf "$DM_HOME/state/unknown-extra" "$DM_HOME/state/tasks/subdir" "$DM_HOME/data/sp-artifacts"
 rm -f "$DM_HOME/state/tasks/t1.report" "$DM_HOME/state/archive/stray.json" "$DM_HOME/repos/demo/.dm/keys.txt"
 
+echo "== #126.2: dm-pr.sh check on an unknown task names the missing TASK, not a missing PR =="
+# Before: a typo'd id was misreported as "no PR recorded" — plausible and
+# wrong, since the task itself does not exist.
+CHECKNOTASK="$(b dm-pr.sh check no-such-task-xyz 2>&1 || true)"
+check "an unknown task id is reported as no such task"     'grep -q "no such task" <<<"$CHECKNOTASK"'
+check "an unknown task id is not misreported as a missing PR" '! grep -q "no PR recorded" <<<"$CHECKNOTASK"'
+# A real task with no PR yet keeps the original, correct message.
+b dm-task.sh new pr126-notask --kind ship --repo demo >/dev/null 2>&1
+CHECKNOPR="$(b dm-pr.sh check pr126-notask 2>&1 || true)"
+check "a real task with no PR still says no PR recorded"   'grep -q "no PR recorded" <<<"$CHECKNOPR"'
+
+echo "== #107: sweep issues ONE gh call per PR (was 4), reviews truncation fails closed =="
+# A GitHub-shaped, still-local origin so repo_slug resolves to o/r while every
+# fetch stays hermetic (same trick as the merge-base-exception fixtures above).
+b dm-repo.sh add prswp2 "$TMP/origin.git" --mode pipeline --no-memory >/dev/null 2>&1
+mkdir -p "$DM_HOME/repos/prswp2/o"
+ln -s "$TMP/origin.git" "$DM_HOME/repos/prswp2/o/r.git"
+git -C "$DM_HOME/repos/prswp2" remote set-url origin o/r.git
+b dm-task.sh new prswp2-a --kind ship --repo prswp2 >/dev/null 2>&1
+b dm-task.sh new prswp2-b --kind ship --repo prswp2 >/dev/null 2>&1
+( . "$ROOT/bin/dm-lib.sh"
+  dm_meta_set prswp2-a pr "https://github.com/o/r/pull/101"
+  dm_meta_set prswp2-b pr "https://github.com/o/r/pull/102" ) >/dev/null 2>&1
+
+GHSTUB107="$TMP/ghstub107"; mkdir -p "$GHSTUB107"
+cat > "$GHSTUB107/gh" <<STUB
+#!/bin/sh
+D="$GHSTUB107"
+printf '%s\n' "\$*" >> "\$D/gh-calls"
+case "\$*" in
+  *graphql*number=101*) cat "\$D/pr101.json"; exit 0 ;;
+  *graphql*number=102*) cat "\$D/pr102.json"; exit 0 ;;
+esac
+exit 1
+STUB
+chmod +x "$GHSTUB107/gh"
+# PR 101: one real CHANGES_REQUESTED review, page complete (hasNextPage=false)
+# — the ordinary case sweep must still catch.
+cat > "$GHSTUB107/pr101.json" <<'JSON'
+{"data":{"repository":{"pullRequest":{
+  "state":"OPEN","merged":false,"headRefOid":"aaa111",
+  "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]},
+  "reviews":{"pageInfo":{"hasNextPage":false},"nodes":[
+    {"state":"CHANGES_REQUESTED","submittedAt":"2026-01-01T00:00:00Z","author":{"login":"carol"}}
+  ]}
+}}}}
+JSON
+# PR 102: the #107 false-green — every VISIBLE review is APPROVED, but
+# hasNextPage=true says more reviews exist beyond this page (the shape a
+# >30-review PR takes once the reviews call is paginated). Naively trusting
+# only what came back would report "clean"; it must fail closed to "unknown".
+cat > "$GHSTUB107/pr102.json" <<'JSON'
+{"data":{"repository":{"pullRequest":{
+  "state":"OPEN","merged":false,"headRefOid":"bbb222",
+  "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]},
+  "reviews":{"pageInfo":{"hasNextPage":true},"nodes":[
+    {"state":"APPROVED","submittedAt":"2026-01-01T00:00:00Z","author":{"login":"dave"}}
+  ]}
+}}}}
+JSON
+SWEEP107="$(PATH="$GHSTUB107:$PATH" b dm-pr.sh sweep 2>&1)"
+check "sweep detects a real changes-requested review"        'grep -q "prswp2-a  state: OPEN  checks: passing  reviews: changes-requested" <<<"$SWEEP107"'
+check "a truncated review page is reported unknown, not clean (#107)" 'grep -q "prswp2-b  state: OPEN  checks: passing  reviews: unknown" <<<"$SWEEP107"'
+check "a truncated review page is NEVER reported clean (the false-green)" '! grep -q "prswp2-b  state: OPEN  checks: passing  reviews: clean" <<<"$SWEEP107"'
+check "the summary counts only the real changes-requested PR" 'grep -q "1 with changes requested" <<<"$SWEEP107"'
+check "sweep refreshes cached pr_state for an open PR"        '[ "$(b dm-task.sh get prswp2-a pr_state)" = "OPEN" ]'
+check "sweep refreshes cached checks for an open PR"          '[ "$(b dm-task.sh get prswp2-a checks)" = "passing" ]'
+# Round-trip count (#107): the old path cost 4 gh calls per PR (PR details,
+# check-runs, commit-status, reviews); one GraphQL call per PR replaces all 4.
+# Scoped to these two PR numbers specifically: the shared fixture DM_HOME this
+# late in the suite still carries other open-PR tasks from earlier sections
+# (e.g. mauth-exc), which this same sweep also visits and which fail closed —
+# harmlessly, but a raw total line count would double-count them.
+check "sweep issues exactly ONE gh call per PR, not 4 (#107)" \
+  '[ "$(grep -c "number=101" "$GHSTUB107/gh-calls")" -eq 1 ] && [ "$(grep -c "number=102" "$GHSTUB107/gh-calls")" -eq 1 ]'
+check "every call is a single graphql request"                '[ "$(grep -c graphql "$GHSTUB107/gh-calls")" -ge 2 ]'
+
+echo "== #107: bounded retry/backoff on a rate-limited or transient gh failure =="
+b dm-task.sh new prswp2-retry --kind ship --repo prswp2 >/dev/null 2>&1
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set prswp2-retry pr "https://github.com/o/r/pull/103" ) >/dev/null 2>&1
+GHRETRY="$TMP/ghretry107"; mkdir -p "$GHRETRY"
+# Every other still-open task in the shared fixture DM_HOME (mauth-exc,
+# prswp2-a/b, ...) is also visited by this sweep; only number=103 (this
+# section's task) gets the controlled fail/succeed behavior below — anything
+# else just fails immediately and harmlessly, like an unrelated PR always has.
+cat > "$GHRETRY/gh" <<STUB
+#!/bin/sh
+D="$GHRETRY"
+printf '%s\n' "\$*" >> "\$D/gh-calls"
+case "\$*" in
+  *number=103*)
+    N=\$(grep -c "number=103" "\$D/gh-calls")
+    FAILUNTIL=\$(cat "\$D/fail-until" 2>/dev/null || echo 0)
+    if [ "\$N" -le "\$FAILUNTIL" ]; then
+      if [ -f "\$D/transient" ]; then
+        echo "HTTP 429: API rate limit exceeded for user ID 123" >&2
+      else
+        echo "HTTP 404: Not Found" >&2
+      fi
+      exit 1
+    fi
+    cat "\$D/pr.json"; exit 0 ;;
+esac
+exit 1
+STUB
+chmod +x "$GHRETRY/gh"
+cat > "$GHRETRY/pr.json" <<'JSON'
+{"data":{"repository":{"pullRequest":{
+  "state":"OPEN","merged":false,"headRefOid":"ccc333",
+  "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]},
+  "reviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}
+}}}}
+JSON
+# Base delay 0 so the test does not actually sleep between attempts.
+rm -f "$GHRETRY/gh-calls"; printf '1\n' > "$GHRETRY/fail-until"; : > "$GHRETRY/transient"
+RETRYOUT="$(DM_GH_RETRY_MAX=3 DM_GH_RETRY_BASE_SECS=0 PATH="$GHRETRY:$PATH" b dm-pr.sh sweep 2>&1)"
+check "a transient failure is retried and eventually succeeds" 'grep -q "prswp2-retry  state: OPEN" <<<"$RETRYOUT"'
+check "retry stopped as soon as it succeeded (2 attempts, not the 3-attempt max)" \
+  '[ "$(grep -c "number=103" "$GHRETRY/gh-calls")" -eq 2 ]'
+
+rm -f "$GHRETRY/gh-calls"; printf '99\n' > "$GHRETRY/fail-until"; : > "$GHRETRY/transient"
+EXHAUSTOUT="$(DM_GH_RETRY_MAX=3 DM_GH_RETRY_BASE_SECS=0 PATH="$GHRETRY:$PATH" b dm-pr.sh sweep 2>&1)"
+check "exhausted retries surface a loud refusal" 'grep -q "could not read PR" <<<"$EXHAUSTOUT"'
+check "exhaustion never fakes a clean/passing result" '! grep -q "prswp2-retry  state: OPEN" <<<"$EXHAUSTOUT"'
+check "exhaustion stops at the bounded retry max (3 attempts, not unbounded)" \
+  '[ "$(grep -c "number=103" "$GHRETRY/gh-calls")" -eq 3 ]'
+
+rm -f "$GHRETRY/gh-calls" "$GHRETRY/transient"; printf '99\n' > "$GHRETRY/fail-until"
+PERMOUT="$(DM_GH_RETRY_MAX=3 DM_GH_RETRY_BASE_SECS=0 PATH="$GHRETRY:$PATH" b dm-pr.sh sweep 2>&1)"
+check "a permanent (non-rate-limit) failure is not retried" \
+  '[ "$(grep -c "number=103" "$GHRETRY/gh-calls")" -eq 1 ]'
+check "a permanent failure still refuses loudly, never a false clean" 'grep -q "could not read PR" <<<"$PERMOUT" && ! grep -q "prswp2-retry  state: OPEN" <<<"$PERMOUT"'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
