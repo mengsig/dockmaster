@@ -20,13 +20,23 @@ gate here is deliberately pure and offline-testable, so keep new gates that way.
   (#127) — before the fix, `dm-task.sh set <id> mode local-only` on a pipeline
   repo fast-forwarded unreviewed work onto that clone's default branch with no
   PR, no review and no operator word, then appended a real `merged` event so the
-  task reconciled to done. `dm-task.sh set` is the first gate (a mode may only be
-  re-synced to what the repo is registered as); the registry cross-check is the
-  load-bearing one, and it runs AFTER the authority gate so an unregistered repo
-  still refuses with the authority message that names it. Changing how a repo
-  delivers is `dm-repo.sh set <repo> mode` — an operator decision, in the
-  registry, and that is what `task-lifecycle` §4.3 and `change-review` §4 now
-  tell the dockmaster to do for a local landing on a pipeline repo.
+  task reconciled to done. The registry check runs AFTER the authority gate, so
+  an unregistered repo still refuses with the authority message that names it.
+  `dm-merge.sh local` does NOT read the task's `mode` at all, and `rebase` reads
+  the registry for its base choice for the same reason: the task copy is
+  inherited at CREATION, so it still says `pipeline` at exactly the moment the
+  operator records local-only delivery and lands. Gating on that stale copy made
+  the documented route fail and left FORGING it the only way through — a
+  precondition that only a forge can satisfy is not a gate. `dm-task.sh set`
+  still constrains `mode` to the registered value, as record hygiene, not as the
+  landing gate. Changing how a repo delivers is `dm-repo.sh set <repo> mode` — an
+  operator decision, in the registry, and that is what `task-lifecycle` §4.3 and
+  `change-review` §4 tell the dockmaster to do for a local landing.
+- **[pitfall]** A test for a "legitimate path" that runs AFTER an attack case in
+  the same fixture can pass on the attack's leftovers. The first version of the
+  #127 suite proved the documented local landing only on a task whose meta still
+  held a hand-forged `mode` — vacuous, and it hid exactly the bug above. A
+  legitimate-path case needs a record nothing in the test ever hand-wrote.
 - **[invariant]** Never merge red: `dm-pr.sh merge` refuses
   `failing`/`pending`/`unknown`, and refuses `none` (no checks reported) unless
   `--allow-no-checks` AND the repo has no CI (`has_ci=0`, from

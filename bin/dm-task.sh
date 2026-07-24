@@ -257,12 +257,18 @@ case "$cmd" in
     done
     [ -n "$reason" ] || dm_die "--reason is required: the record must say WHY this task ends with nothing landed"
     [ -f "$(dm_meta_path "$id")" ] || dm_die "no such task: $id"
-    # A live local copy may hold work nobody has looked at. Teardown inspects it
-    # (and refuses unlanded work without explicit discard authority); closing
-    # over it would bury that decision under a terminal state.
+    # ANY recorded worktree refuses, present or absent. A present one may hold
+    # work nobody has looked at, and teardown is what inspects it. An ABSENT one
+    # is the interrupted-cleanup shape that `dm-worktree.sh remove` refuses
+    # without --force precisely because nothing remains to prove the work landed
+    # — closing there would reach `discarded` with none of that discard
+    # authority, making this a weaker second writer of the same state.
     wt="$(dm_meta_get "$id" worktree)"
     if [ -n "$wt" ] && [ -d "$wt" ]; then
       dm_die "refusing to close '$id': its local copy is still present at $wt. Tear it down first (dm-worktree.sh remove $id) — that is what checks whether it holds work nobody has landed."
+    fi
+    if [ -n "$wt" ]; then
+      dm_die "refusing to close '$id': it still records a local copy at $wt whose directory is already absent, so nothing here can prove its work landed. Clear it where that costs explicit discard authority: dm-worktree.sh remove $id --force"
     fi
     st="$("$0" state "$id" | sed 's/ · .*//; s/^state: //')"
     case "$st" in

@@ -68,6 +68,13 @@ these are the constraints that are not obvious from the code you are editing.
   exit 2 "no such repo". Two narrow exemptions: the distro root (it lives AT
   `$DM_HOME`; the distro guards own that case and state the real posture) and a
   path that does not resolve (nothing to escape into; the `.git` probe refuses it).
+  `dm-repo.sh` composes `$DM_REPOS/<name>` itself at four sites rather than
+  resolving, so each carries its own `dm_assert_within_repos`. The assert's FIRST
+  LINE is the whole refusal, standalone, because `dm-worktree.sh remove` quotes
+  just that line: teardown resolves TOLERANTLY (a task whose clone escaped must
+  still be cleanable, or it pins at `working` — the #119 lesson), so it captures
+  the resolver's reason instead of letting a bare `REFUSED:` print from a command
+  that is about to exit 0, and reports it in its own warn.
 - **[invariant]** A corrupt registry must never read as an EMPTY one, and
   duplicate JSON keys are that corruption too (#151, after #112/#114/#150): a
   second `"repos"` key parses, passes the shape check, and silently discards

@@ -721,7 +721,11 @@ dm_assert_within_repos() {
   # Name where it actually LANDS, not just the path that was composed: with a
   # symlinked repos/<name> the two differ, and the target is the thing at risk.
   real="$(cd "$1" 2>/dev/null && pwd -P)" || real="$1"
-  dm_die "REFUSED: ${2:-this directory} lands on $real (via $1), OUTSIDE the managed clone root $DM_REPOS. A managed clone must live under repos/; a symlink or hand-edited registry path pointing at a repository elsewhere is never operated on. Check the entry with dm-repo.sh list, then replace the symlink with a real clone: dm-repo.sh add <name> <remote>."
+  # First line is the whole refusal, standalone: a caller on a tolerant path
+  # (dm-worktree teardown) quotes only that line into its own message.
+  dm_die "REFUSED: ${2:-this directory} lands on $real, OUTSIDE the managed clone root $DM_REPOS
+A managed clone must live under repos/; a symlink or hand-edited registry path pointing at a repository elsewhere is never operated on (composed path: $1).
+Check the entry with dm-repo.sh list, then replace the symlink with a real clone: dm-repo.sh add <name> <remote>."
 }
 
 # dm_repo_dir_or_none <name>  -> print the repo's working-tree directory, or exit
