@@ -895,7 +895,9 @@ CREATE_PIDS=""
 for i in $(seq 1 20); do
   (
     create_mode="pipeline"; [ $((i % 2)) -eq 0 ] && create_mode="direct-pr"
-    if b dm-task.sh new "$CREATE_ID" --kind ship --repo "repo-$i" --mode "$create_mode" --title "creator-$i" \
+    # One REGISTERED repo for every creator: `new` refuses an unregistered
+    # --repo (#124), and the winner is still identified by title and mode.
+    if b dm-task.sh new "$CREATE_ID" --kind ship --repo demo --mode "$create_mode" --title "creator-$i" \
       >"$TMP/create-race.$i.out" 2>"$TMP/create-race.$i.err"; then create_rc=0; else create_rc=$?; fi
     printf '%s\n' "$create_rc" > "$TMP/create-race.$i.rc"
   ) &
@@ -923,7 +925,7 @@ esac
 check "same-id concurrent creation has exactly one visible winner" \
   '[ "$CREATE_SUCCESSES" -eq 1 ] && [ "$CREATE_BAD_ERRORS" -eq 0 ]'
 check "concurrent creation meta belongs to one creator" \
-  '[ "$(b dm-task.sh get "$CREATE_ID" repo)" = "repo-$CREATE_WINNER" ] && [ "$(b dm-task.sh get "$CREATE_ID" mode)" = "$CREATE_EXPECTED_MODE" ]'
+  '[ "$(b dm-task.sh get "$CREATE_ID" repo)" = "demo" ] && [ "$(b dm-task.sh get "$CREATE_ID" mode)" = "$CREATE_EXPECTED_MODE" ]'
 check "concurrent creation writes exactly the winner status" \
   '[ "$(wc -l < "$DM_HOME/state/tasks/$CREATE_ID.status")" -eq 1 ] && grep -q " created: creator-$CREATE_WINNER$" "$DM_HOME/state/tasks/$CREATE_ID.status"'
 
@@ -1602,8 +1604,12 @@ check "offline sweep lists the open PR"    'grep -q "sweep-open" <<<"$SWEEP"'
 check "offline sweep omits the merged PR"  '! grep -q "sweep-merged" <<<"$SWEEP"'
 check "offline sweep marks output cached"  'grep -q "no fetch" <<<"$SWEEP"'
 check "offline sweep prints a summary"     'grep -q "open PR(s)" <<<"$SWEEP"'
-# A missing clone must be surfaced per-line, not abort the sweep.
-b dm-task.sh new sweep-noclone --kind ship --repo not-a-real-repo >/dev/null 2>&1 || true
+# A missing clone must be surfaced per-line, not abort the sweep. The repo is
+# REGISTERED and its clone then deleted: `new` refuses an unregistered --repo
+# (#124), so "no clone" is now the only way to reach this branch.
+b dm-repo.sh add sweepnoclone "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+rm -rf "$DM_HOME/repos/sweepnoclone"
+b dm-task.sh new sweep-noclone --kind ship --repo sweepnoclone >/dev/null 2>&1 || true
 ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set sweep-noclone pr "https://github.com/o/r/pull/9" ) >/dev/null 2>&1
 SWEEP2="$(DM_NO_FETCH=1 b dm-pr.sh sweep 2>&1 || true)"
 check "sweep flags a missing clone, keeps going" 'grep -q "clone missing" <<<"$SWEEP2" && grep -q "sweep-open" <<<"$SWEEP2"'
@@ -2185,8 +2191,11 @@ check "the resolver refusal names the repo and the fix"             'grep -q "no
 check "the resolver refusal never prints DM_HOME as the answer"     '! grep -qx "$DM_HOME" <<<"$RESOLVEOUT"'
 check "dm_repo_dir still resolves a registered repo"                '[ "$(rdir demo)" = "$DM_HOME/repos/demo" ]'
 
-# Every mutating entry point refuses an unregistered repo BY NAME.
-b dm-task.sh new unreg-1 --kind ship --repo nosuchrepo --mode local-only >/dev/null
+# Every mutating entry point refuses an unregistered repo BY NAME. The record
+# itself is created against a REGISTERED repo: `new` now refuses an unregistered
+# --repo outright (#124), so an unregistered name reaches the resolver only as an
+# argument, which is exactly how `dm-worktree.sh create` takes it.
+b dm-task.sh new unreg-1 --kind ship --repo demo --mode local-only >/dev/null
 UNREGWT="$(b dm-worktree.sh create unreg-1 nosuchrepo 2>&1 || true)"
 check "worktree create refuses an unregistered repo"      '! b dm-worktree.sh create unreg-1 nosuchrepo >/dev/null 2>&1'
 check "the worktree refusal names the repo"               'grep -q "nosuchrepo" <<<"$UNREGWT"'
@@ -2203,7 +2212,7 @@ check "merge authority of a registered repo is unchanged"           '[ "$(mauthr
 jq '.repos["nulled"] = null' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
 check "merge authority of a null registry entry is invalid" '[ "$(mauthr2 nulled)" = "invalid" ]'
 jq 'del(.repos["nulled"])' "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
-check "local land refuses a task whose repo is unregistered" '! b dm-merge.sh local unreg-1 >/dev/null 2>&1'
+check "new refuses a task against an unregistered repo" '! b dm-task.sh new unreg-2 --kind ship --repo nosuchrepo >/dev/null 2>&1'
 # A worktree can no longer exist for an unregistered repo, so reach dm-merge's
 # authority gate the way reality would: real work on a registered repo whose
 # registry entry then disappears (a removed/renamed repo, a typo'd rename).
@@ -3504,6 +3513,155 @@ check "a legacy non-canonical worktree record is NOT reported ORPHAN" \
   '! grep -q "ORPHAN.*worktrees/c147-task$" <<<"$C147_STATUS"'
 check "a genuine orphan is still reported ORPHAN" \
   'grep -q "ORPHAN.*worktrees/c147-genuine-orphan$" <<<"$C147_STATUS"'
+
+echo "== record integrity: a task cannot forge its own delivery route (#127) =="
+# `set <id> mode local-only` on a PIPELINE repo used to be accepted, and
+# `dm-merge.sh local` trusted that field: unreviewed work fast-forwarded straight
+# onto the managed clone's default branch — no PR, no review, no operator word —
+# and the real `merged` event it appended reconciled the task to done. Two gates
+# now, because either alone leaves the other half of the route open.
+b dm-repo.sh add ripipe "$TMP/origin.git" --mode pipeline --no-memory >/dev/null 2>&1
+b dm-task.sh new ri-forge --kind ship --repo ripipe >/dev/null
+cp "$DM_HOME/state/tasks/ri-forge.meta" "$TMP/ri-forge.meta.before"
+check "set refuses a mode the repo is not registered for" \
+  '! b dm-task.sh set ri-forge mode local-only >/dev/null 2>&1 && cmp -s "$TMP/ri-forge.meta.before" "$DM_HOME/state/tasks/ri-forge.meta"'
+RI_MODEOUT="$(b dm-task.sh set ri-forge mode local-only 2>&1 || true)"
+check "the mode refusal points at the registry, not the task" \
+  'grep -q "dm-repo.sh set ripipe mode local-only" <<<"$RI_MODEOUT"'
+check "set still re-syncs a task to its repo's registered mode" \
+  'b dm-task.sh set ri-forge mode pipeline >/dev/null 2>&1'
+check "set reserves the repo field, unchanged" \
+  '! b dm-task.sh set ri-forge repo demo >/dev/null 2>&1 && [ "$(b dm-task.sh get ri-forge repo)" = ripipe ]'
+check "set still writes an ordinary field (guard the guard)" \
+  'b dm-task.sh set ri-forge model sonnet >/dev/null 2>&1 && [ "$(b dm-task.sh get ri-forge model)" = sonnet ]'
+RIWT="$(b dm-worktree.sh create ri-forge ripipe | tail -n1)"
+git -C "$RIWT" checkout -q -b feat/x/ri-forge
+printf 'unreviewed\n' > "$RIWT/forged.txt"
+git -C "$RIWT" -c user.email=c@c.co -c user.name=c add -A >/dev/null
+git -C "$RIWT" -c user.email=c@c.co -c user.name=c commit -qm "unreviewed work" >/dev/null
+RI_BEFORE="$(git -C "$DM_HOME/repos/ripipe" rev-parse main)"
+# Stand in for a writer that got past the CLI guard (a hand-edited meta file):
+# the landing gate must not depend on the CLI guard holding.
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set ri-forge mode local-only ) >/dev/null
+check "the forged local-only mode is really in meta"   '[ "$(b dm-task.sh get ri-forge mode)" = local-only ]'
+check "local land refuses on a pipeline-registered repo" '! b dm-merge.sh local ri-forge >/dev/null 2>&1'
+RI_LANDOUT="$(b dm-merge.sh local ri-forge 2>&1 || true)"
+check "the land refusal names the registered mode"     'grep -q "registered for .pipeline. delivery" <<<"$RI_LANDOUT"'
+check "the refused land did not advance the clone"     '[ "$(git -C "$DM_HOME/repos/ripipe" rev-parse main)" = "$RI_BEFORE" ]'
+check "no merged event was appended"                   '! grep -qE "^[^ ]+ merged: " "$DM_HOME/state/tasks/ri-forge.status"'
+check "the task did not launder itself to done"        '! DM_NO_FETCH=1 b dm-task.sh state ri-forge | grep -q "state: done"'
+# The registry decides in BOTH directions: the very same land succeeds once the
+# operator records local-only delivery where that decision belongs.
+b dm-repo.sh set ripipe mode local-only >/dev/null
+check "the same land succeeds once the registry says local-only" 'b dm-merge.sh local ri-forge >/dev/null 2>&1'
+check "the sanctioned land actually advanced the clone"          '[ "$(git -C "$DM_HOME/repos/ripipe" rev-parse main)" != "$RI_BEFORE" ]'
+b dm-worktree.sh remove ri-forge >/dev/null 2>&1
+
+echo "== containment: a clone that escapes repos/ is never operated on (#141) =="
+# Containment used to stop at the DISTRO root: repos/<name> symlinked at any git
+# repository elsewhere on disk resolved fine, so the toolbelt cut a worktree in
+# that foreign repository and a crewmate could commit to its default branch.
+RI_FOREIGN="$TMP/foreign-repo"
+git init -q -b main "$RI_FOREIGN"
+( cd "$RI_FOREIGN"; printf 'theirs\n' > victim.txt; git add -A
+  git -c user.email=f@f.co -c user.name=f commit -qm "foreign init" ) >/dev/null 2>&1
+RI_FHEAD="$(git -C "$RI_FOREIGN" rev-parse main)"
+b dm-repo.sh add escapee "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-task.sh new esc-1 --kind ship --repo escapee --mode local-only >/dev/null
+rm -rf "$DM_HOME/repos/escapee"
+ln -s "$RI_FOREIGN" "$DM_HOME/repos/escapee"
+# ONE invocation, rc captured: re-running create to test the refusal would let a
+# regression pass on "worktree already exists" from the first, successful call.
+ESC_RC=0
+ESCOUT="$(b dm-worktree.sh create esc-1 escapee 2>&1)" || ESC_RC=$?
+check "worktree create refuses a clone symlinked outside repos/" '[ "$ESC_RC" -ne 0 ]'
+check "the refusal names where the clone actually lands" 'grep -qF "$RI_FOREIGN" <<<"$ESCOUT"'
+check "the refusal names the managed clone root"         'grep -qF "$DM_HOME/repos" <<<"$ESCOUT"'
+check "no worktree was cut in the foreign repository" \
+  '[ ! -e "$DM_HOME/state/worktrees/esc-1" ] && [ "$(git -C "$RI_FOREIGN" worktree list | wc -l)" -eq 1 ]'
+check "sync never fast-forwards an escaped clone"        '! b dm-sync.sh one escapee >/dev/null 2>&1'
+check "memory recall refuses an escaped clone"           '! b dm-memory.sh recall escapee >/dev/null 2>&1'
+check "the foreign repository is untouched"              '[ "$(git -C "$RI_FOREIGN" rev-parse main)" = "$RI_FHEAD" ]'
+ri_within() { ( . "$ROOT/bin/dm-lib.sh"; dm_within_repos "$1" ); }
+check "the containment predicate accepts a real managed clone" 'ri_within "$DM_HOME/repos/demo"'
+check "the containment predicate refuses the escaped clone"    '! ri_within "$DM_HOME/repos/escapee"'
+check "the containment predicate exempts the distro root"      'ri_within "$DM_HOME"'
+check "the assertion treats an empty directory as a caller bug" \
+  '! ( . "$ROOT/bin/dm-lib.sh"; dm_assert_within_repos "" "test subject" ) >/dev/null 2>&1'
+rm -f "$DM_HOME/repos/escapee"
+
+echo "== task records: an unregistered repo is refused at the record's birth (#124) =="
+# ONE invocation, rc captured: a second `new` with the same id would refuse with
+# "already exists" and hide a regression that accepted the first one.
+RI_NEW_RC=0
+RI_NEWOUT="$(b dm-task.sh new ri-unreg --kind ship --repo definitely-not-registered 2>&1)" || RI_NEW_RC=$?
+check "new refuses an unregistered repo" '[ "$RI_NEW_RC" -ne 0 ]'
+check "the refusal names the unregistered repo" \
+  'grep -q "definitely-not-registered. is not registered" <<<"$RI_NEWOUT"'
+check "the refusal names how to register it"    'grep -q "dm-repo.sh add" <<<"$RI_NEWOUT"'
+check "no half-written task record is left behind" \
+  '[ ! -e "$DM_HOME/state/tasks/ri-unreg.meta" ] && [ ! -e "$DM_HOME/state/tasks/ri-unreg.status" ]'
+check "the reserved distro name is still accepted (it has no entry by design)" \
+  'b dm-task.sh new ri-distro --kind ship --repo dockmaster >/dev/null 2>&1'
+
+echo "== registry integrity: duplicate keys are corruption, not an empty fleet (#151) =="
+# JSON lets an object repeat a key and a parser keeps just one. A second "repos"
+# key therefore PARSED, passed the shape check, and read as an empty fleet while
+# every real entry sat in the same file — the #112/#114 class, one level up.
+RIDUP="$TMP/dup-registry"
+mkdir -p "$RIDUP/state" "$RIDUP/repos"
+printf '{"repos":{"keeper":{"remote":"none","path":"repos/keeper","default_branch":"main","mode":"local-only","merge_authority":"ask"}},"repos":{}}\n' > "$RIDUP/state/repos.json"
+check "the duplicate-key fixture parses (so the shape check passes it)" \
+  'jq -e . "$RIDUP/state/repos.json" >/dev/null 2>&1'
+check "and a parser keeps only the empty copy" \
+  '[ "$(jq -r ".repos | keys | length" "$RIDUP/state/repos.json")" = 0 ]'
+DUPOUT="$(DM_HOME="$RIDUP" b dm-repo.sh list 2>&1 || true)"
+check "a duplicate-key registry refuses instead of listing nothing" \
+  '! DM_HOME="$RIDUP" b dm-repo.sh list >/dev/null 2>&1'
+check "the refusal names duplicate keys"                       'grep -q "DUPLICATE KEYS" <<<"$DUPOUT"'
+check "the refusal calls it corruption, not an empty registry" 'grep -q "CORRUPTION, not an empty registry" <<<"$DUPOUT"'
+check "the refusal forbids deleting anything under repos/"     'grep -q "Do NOT delete anything under repos/" <<<"$DUPOUT"'
+check "every registry consumer refuses it, not just list" \
+  '! DM_HOME="$RIDUP" b dm-status.sh >/dev/null 2>&1 && ! DM_HOME="$RIDUP" b dm-sync.sh all >/dev/null 2>&1'
+# The same corruption one level down: a repeated repo NAME inside .repos.
+printf '{"repos":{"keeper":{"path":"repos/keeper"},"keeper":{"path":"repos/other"}}}\n' > "$RIDUP/state/repos.json"
+check "a duplicated repo name is caught too" '! DM_HOME="$RIDUP" b dm-repo.sh list >/dev/null 2>&1'
+# Guard the guard: the same shape WITHOUT a repeat must still be usable, or the
+# check would just be refusing every registry.
+printf '{"repos":{"keeper":{"path":"repos/keeper"},"other":{"path":"repos/other"}}}\n' > "$RIDUP/state/repos.json"
+check "a healthy two-repo registry is not flagged" 'DM_HOME="$RIDUP" b dm-repo.sh list >/dev/null 2>&1'
+printf '{"repos":{}}\n' > "$RIDUP/state/repos.json"
+check "an empty registry is not flagged"           'DM_HOME="$RIDUP" b dm-repo.sh list >/dev/null 2>&1'
+
+echo "== a task that concludes 'do not build it' has a terminal state (#103) =="
+# Such a task had no reachable end: `state` derives done only from positive
+# landing evidence, so it reconciled to `working` forever unless it was
+# laundered into looking finished. `close` ends it and says why nothing landed.
+b dm-task.sh new ri-nobuild --kind ship --repo demo --title "add the widget" >/dev/null
+b dm-task.sh event ri-nobuild working "investigated the request" >/dev/null
+check "before closing, the task is not terminal" \
+  'DM_NO_FETCH=1 b dm-task.sh state ri-nobuild | grep -q "state: working"'
+check "close requires a recorded reason" '! b dm-task.sh close ri-nobuild >/dev/null 2>&1'
+b dm-worktree.sh create ri-nobuild demo >/dev/null
+check "close refuses while a local copy is still present" \
+  '! b dm-task.sh close ri-nobuild --reason "already provided upstream" >/dev/null 2>&1'
+b dm-worktree.sh remove ri-nobuild >/dev/null
+check "close ends the task once the local copy is gone" \
+  'b dm-task.sh close ri-nobuild --reason "already provided upstream" >/dev/null 2>&1'
+check "the reason is on the record" \
+  'grep -q "closed without landing work: already provided upstream" "$DM_HOME/state/tasks/ri-nobuild.status"'
+check "the closed task reconciles to a terminal state" \
+  'DM_NO_FETCH=1 b dm-task.sh state ri-nobuild | grep -q "^state: discarded"'
+check "closing never claims work landed" \
+  '! grep -qE "^[^ ]+ merged: " "$DM_HOME/state/tasks/ri-nobuild.status"'
+check "closing an already-terminal task is refused" \
+  '! b dm-task.sh close ri-nobuild --reason "again" >/dev/null 2>&1'
+check "a closed task can be archived"    'b dm-task.sh archive ri-nobuild >/dev/null 2>&1'
+b dm-task.sh new ri-nobuild2 --kind ship --repo demo >/dev/null
+check "the discarded verb stays barred from dm-task.sh event" \
+  '! b dm-task.sh event ri-nobuild2 discarded "forged" >/dev/null 2>&1'
+check "close refuses a task that does not exist" \
+  '! b dm-task.sh close ri-no-such-task --reason "x" >/dev/null 2>&1'
 
 echo
 echo "smoke: $pass passed, $fail failed"
