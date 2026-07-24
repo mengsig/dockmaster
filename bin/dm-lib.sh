@@ -112,10 +112,10 @@ DM_LOCK_HELD_TARGET=""
 DM_LOCK_HELD_TOKEN=""
 DM_LOCK_HELD_PID=""
 
-dm_current_pid() {
-  # Bash 3.2 keeps $$ from the parent inside (...) subshells. A child's PPID is
-  # the actual shell process holding this lock.
-  sh -c 'printf "%s\n" "$PPID"'
+dm_record_current_pid() {
+  # Direct-child PPID is the exact shell, including Bash 3.2 (...) subshells.
+  # Never call through command substitution: that inserts a short-lived helper.
+  /bin/sh -c 'printf "%s\n" "$PPID" > "$1"' _ "$1"
 }
 
 dm_lock_release_if_owner() {
@@ -143,10 +143,9 @@ dm_lock_trap_cleanup() {
 #     bounded and tiny, so a marker outliving it by 5s cannot have a live owner.
 # Returns 0 holding the mutex; 1 otherwise (caller retries on the next spin).
 dm_lock_acquire_reclaim() {
-  local reclaim="$1" stalled="$2" rcpid holder_pid
+  local reclaim="$1" stalled="$2" rcpid
   if mkdir "$reclaim" 2>/dev/null; then
-    holder_pid="$(dm_current_pid)"
-    printf '%s\n' "$holder_pid" > "$reclaim/pid" 2>/dev/null || true
+    dm_record_current_pid "$reclaim/pid" 2>/dev/null || true
     return 0
   fi
   rcpid="$(cat "$reclaim/pid" 2>/dev/null || true)"
@@ -214,14 +213,21 @@ dm_lock() {
     fi
     sleep 0.1
   done
-  holder_pid="$(dm_current_pid)"
+  dm_record_current_pid "$lockdir/pid" \
+    || { rm -rf "$lockdir"; dm_die "could not record holder PID for $(basename "$target")"; }
+  IFS= read -r holder_pid < "$lockdir/pid" \
+    || { rm -rf "$lockdir"; dm_die "could not read holder PID for $(basename "$target")"; }
+  case "$holder_pid" in
+    ''|*[!0-9]*)
+      rm -rf "$lockdir"
+      dm_die "could not record valid holder PID for $(basename "$target")"
+      ;;
+  esac
   owner_path="$(mktemp "$lockdir/owner.XXXXXX")" \
     || { rm -rf "$lockdir"; dm_die "could not create ownership token for $(basename "$target")"; }
   token="$(basename "$owner_path")"
   printf '%s:%s\n' "$holder_pid" "$token" > "$owner_path" \
     || { rm -rf "$lockdir"; dm_die "could not record ownership token for $(basename "$target")"; }
-  printf '%s\n' "$holder_pid" > "$lockdir/pid" \
-    || { rm -rf "$lockdir"; dm_die "could not record holder PID for $(basename "$target")"; }
   DM_LOCK_HELD_TARGET="$target"; DM_LOCK_HELD_TOKEN="$token"; DM_LOCK_HELD_PID="$holder_pid"
   trap 'dm_lock_trap_cleanup' EXIT
   trap 'dm_lock_trap_cleanup; exit 130' INT

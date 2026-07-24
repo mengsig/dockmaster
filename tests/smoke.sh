@@ -31,18 +31,26 @@ check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
 gate_start_race_has_one_winner() {
-  local id="gate-start-race" pids="" pid i winners=0
+  local id="gate-start-race" release="$TMP/gate-start-race.release"
+  local pids="" pid i winners=0
   b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
   b dm-worktree.sh create "$id" demo >/dev/null 2>&1
   b dm-task.sh approve "$id" default >/dev/null
+  rm -f "$release"
   for i in 1 2 3 4 5 6; do
     (
+      : > "$TMP/gate-start-race.$i.ready"
+      while [ ! -e "$release" ]; do :; done
       if b dm-task.sh gate "$id" claim coldstart-review "gate_claim_$i" >/dev/null 2>&1; then
         : > "$TMP/gate-start-race.$i.ok"
       fi
     ) &
     pids="$pids $!"
   done
+  for i in 1 2 3 4 5 6; do
+    while [ ! -e "$TMP/gate-start-race.$i.ready" ]; do :; done
+  done
+  : > "$release"
   for pid in $pids; do wait "$pid"; done
   for i in 1 2 3 4 5 6; do
     [ ! -e "$TMP/gate-start-race.$i.ok" ] || winners=$((winners + 1))
@@ -52,18 +60,26 @@ gate_start_race_has_one_winner() {
 }
 
 waiter_activation_race_has_one_winner() {
-  local id="waiter-activation-race" thread epoch pids="" pid i winners=0
+  local id="waiter-activation-race" release="$TMP/waiter-activation-race.release"
+  local thread epoch pids="" pid i winners=0
   b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
   thread="$(b dm-thread-name.sh "$id" review_waiter)"
   epoch="$(b dm-task.sh waiter "$id" prepare "$thread")"
+  rm -f "$release"
   for i in 1 2 3 4 5 6; do
     (
+      : > "$TMP/waiter-activation-race.$i.ready"
+      while [ ! -e "$release" ]; do :; done
       if b dm-task.sh waiter "$id" active "$thread" "$epoch" "agent-$i" >/dev/null 2>&1; then
         : > "$TMP/waiter-activation-race.$i.ok"
       fi
     ) &
     pids="$pids $!"
   done
+  for i in 1 2 3 4 5 6; do
+    while [ ! -e "$TMP/waiter-activation-race.$i.ready" ]; do :; done
+  done
+  : > "$release"
   for pid in $pids; do wait "$pid"; done
   for i in 1 2 3 4 5 6; do
     [ ! -e "$TMP/waiter-activation-race.$i.ok" ] || winners=$((winners + 1))
@@ -403,6 +419,26 @@ check "dm-lib documents no knob it does not implement" \
 LOCK_OWNER="$LOCKFIX/owner.meta"
 OWNER_PAIR="$(bash -c '. "$1/bin/dm-lib.sh"; dm_lock "$2"; printf "%s:%s\n" "$$" "$(cat "$2.lock/pid")"; dm_unlock "$2"' _ "$ROOT" "$LOCK_OWNER")"
 check "lock records the actual holder process" '[ "${OWNER_PAIR%%:*}" = "${OWNER_PAIR##*:}" ]'
+subshell_lock_records_holder() {
+  local target="$LOCKFIX/subshell.meta" ready="$LOCKFIX/subshell.ready"
+  local release="$LOCKFIX/subshell.release" holder recorded rc=0
+  (
+    . "$ROOT/bin/dm-lib.sh"
+    dm_lock "$target"
+    : > "$ready"
+    while [ ! -e "$release" ]; do :; done
+    dm_unlock "$target"
+  ) &
+  holder=$!
+  while [ ! -e "$ready" ] && kill -0 "$holder" 2>/dev/null; do :; done
+  [ -e "$ready" ] || { wait "$holder" || true; return 1; }
+  recorded="$(cat "$target.lock/pid")"
+  [ "$recorded" = "$holder" ] || rc=1
+  : > "$release"
+  wait "$holder" || rc=1
+  return "$rc"
+}
+check "subshell lock records its exact Bash 3.2 holder" 'subshell_lock_records_holder'
 mkdir -p "$LOCK_OWNER.lock"
 printf '222:successor\n' >"$LOCK_OWNER.lock/owner"
 printf '222\n' >"$LOCK_OWNER.lock/pid"
