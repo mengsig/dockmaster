@@ -241,14 +241,16 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     # the display and the enforcement paths share one migration rule (a legacy
     # yolo-only entry still shows the derived authority), rather than duplicating
     # the yolo->authority mapping inline in jq.
-    { printf 'NAME\tAUTH\tMODE\tBRANCH\tREMOTE\n'
+    rows="$(
+      printf 'NAME\tAUTH\tMODE\tBRANCH\tREMOTE\n'
       while IFS= read -r name; do
         [ -n "$name" ] || continue
         printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$(dm_merge_authority "$name")" \
           "$(dm_registry_get "$name" mode)" "$(dm_registry_get "$name" default_branch)" \
           "$(dm_registry_get "$name" remote)"
       done < <(dm_registry_keys)
-    } | column -t -s$'\t' 2>/dev/null || cat
+    )"
+    dm_print_tsv "$rows"
     ;;
 
   get)

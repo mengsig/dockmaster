@@ -98,6 +98,27 @@ git init -q -b main "$TMP/seed"
 cd "$ROOT"
 b() { "$ROOT/bin/$@"; }
 
+# Build a hermetic PATH with one executable omitted while retaining every other
+# first-match executable. Used to test real absence, not a failing stub.
+path_without_tool() {
+  local omitted="$1" dest="$2" old_ifs d candidate name
+  mkdir -p "$dest"
+  old_ifs="$IFS"; IFS=:
+  for d in $PATH; do
+    [ -d "$d" ] || continue
+    for candidate in "$d"/*; do
+      [ -x "$candidate" ] && [ ! -d "$candidate" ] || continue
+      name="${candidate##*/}"
+      [ "$name" = "$omitted" ] && continue
+      if [ ! -e "$dest/$name" ] && [ ! -L "$dest/$name" ]; then
+        ln -s "$candidate" "$dest/$name"
+      fi
+    done
+  done
+  IFS="$old_ifs"
+  printf '%s\n' "$dest"
+}
+
 echo "== Codex thread identity + command guard =="
 THREAD_A="$(b dm-thread-name.sh fix-login-412 worker)"
 THREAD_B="$(b dm-thread-name.sh fix.login-412 worker)"
@@ -486,6 +507,32 @@ b dm-task.sh new gate-blocker --kind scout --repo demo >/dev/null
 b dm-task.sh new gate-ready --kind ship --repo demo --mode pipeline >/dev/null
 check "approval exposes the first gate as ready" \
   'b dm-task.sh approve gate-ready fast >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*fast.*coldstart-review"'
+
+NO_COLUMN_PATH="$(path_without_tool column "$TMP/no-column-path")"
+check "no-column fixture omits column exactly" \
+  '( PATH="$NO_COLUMN_PATH"; ! command -v column >/dev/null 2>&1 )'
+NO_COLUMN_LIST="$(PATH="$NO_COLUMN_PATH" b dm-task.sh list </dev/null)"
+check "task list replays owned rows when column is absent" \
+  'grep -q "ID.*KIND.*REPO.*STATE" <<<"$NO_COLUMN_LIST" && grep -q "gate-ready.*ship.*demo" <<<"$NO_COLUMN_LIST"'
+printf 'task-list-stdin\n' >"$TMP/task-list.stdin"
+exec 9<"$TMP/task-list.stdin"
+PATH="$NO_COLUMN_PATH" b dm-task.sh list <&9 >"$TMP/task-list-no-column.out"
+IFS= read -r TASK_LIST_STDIN <&9 || TASK_LIST_STDIN=""
+exec 9<&-
+check "no-column task list never consumes caller stdin" \
+  '[ "$TASK_LIST_STDIN" = task-list-stdin ]'
+
+printf 'status-stdin\n' >"$TMP/status.stdin"
+exec 9<"$TMP/status.stdin"
+PATH="$NO_COLUMN_PATH" b dm-status.sh <&9 >"$TMP/status-no-column.out"
+IFS= read -r STATUS_STDIN <&9 || STATUS_STDIN=""
+exec 9<&-
+NO_COLUMN_STATUS="$(cat "$TMP/status-no-column.out")"
+check "no-column status keeps the task row and ready gate" \
+  'grep -q "gate-ready.*ship.*demo" <<<"$NO_COLUMN_STATUS" && grep -q "READY-GATE.*gate-ready.*coldstart-review" <<<"$NO_COLUMN_STATUS"'
+check "no-column status never consumes caller stdin" \
+  '[ "$STATUS_STDIN" = status-stdin ]'
+
 GATE_STATUS="$(b dm-status.sh)"
 check "status names approved-but-unscheduled work" 'grep -q "READY-GATE.*gate-ready.*coldstart-review" <<<"$GATE_STATUS"'
 check "gate start records owner horizon" \

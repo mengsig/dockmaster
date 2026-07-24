@@ -618,14 +618,17 @@ case "$cmd" in
     ;;
 
   list)
-    printf 'ID\tKIND\tREPO\tSTATE\n'
-    while IFS= read -r id; do
-      # Bulk overview: reconcile each row OFFLINE (DM_NO_FETCH=1). A per-task live
-      # PR refresh here would turn `list` (and the session-start digest that calls
-      # it) into N sequential GitHub round-trips on the hottest command. A single
-      # `state <id>` still refreshes live; `list` favors a fast local snapshot.
-      printf '%s\t%s\t%s\t%s\n' "$id" "$(dm_meta_get "$id" kind)" "$(dm_meta_get "$id" repo)" "$(DM_NO_FETCH=1 "$0" state "$id" | sed 's/ · .*//; s/^state: //')"
-    done < <(dm_all_task_ids) | column -t -s$'\t' 2>/dev/null || cat
+    rows="$(
+      printf 'ID\tKIND\tREPO\tSTATE\n'
+      while IFS= read -r id; do
+        # Bulk overview: reconcile each row OFFLINE (DM_NO_FETCH=1). A per-task live
+        # PR refresh here would turn `list` (and the session-start digest that calls
+        # it) into N sequential GitHub round-trips on the hottest command. A single
+        # `state <id>` still refreshes live; `list` favors a fast local snapshot.
+        printf '%s\t%s\t%s\t%s\n' "$id" "$(dm_meta_get "$id" kind)" "$(dm_meta_get "$id" repo)" "$(DM_NO_FETCH=1 "$0" state "$id" | sed 's/ · .*//; s/^state: //')"
+      done < <(dm_all_task_ids)
+    )"
+    dm_print_tsv "$rows"
     ;;
 
   *)

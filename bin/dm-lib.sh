@@ -44,6 +44,19 @@ dm_info() { printf '%s\n' "$*"; }
 
 dm_need() { command -v "$1" >/dev/null 2>&1 || dm_die "required tool not found: $1"; }
 
+# dm_print_tsv <rows> - format owned TSV rows when `column` is available;
+# otherwise replay the same rows. Never reads caller stdin.
+dm_print_tsv() {
+  local rows="${1:-}" rendered
+  [ -n "$rows" ] || return 0
+  if command -v column >/dev/null 2>&1 \
+    && rendered="$(printf '%s\n' "$rows" | column -t -s$'\t' 2>/dev/null)"; then
+    printf '%s\n' "$rendered"
+  else
+    printf '%s\n' "$rows"
+  fi
+}
+
 # --- GitHub CLI resolution ---------------------------------------------------
 # Plain `gh` is the SUPPORTED BASELINE for every GitHub call; `gh-axi` is the
 # operator's private wrapper (no public install path) and only ever a preferred
