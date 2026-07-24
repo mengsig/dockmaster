@@ -3637,6 +3637,83 @@ check "a legacy non-canonical worktree record is NOT reported ORPHAN" \
 check "a genuine orphan is still reported ORPHAN" \
   'grep -q "ORPHAN.*worktrees/c147-genuine-orphan$" <<<"$C147_STATUS"'
 
+echo "== #107 gate fix: gh_api_retry signals failure through its OWN return code =="
+# Direct unit test of the return-code contract, via the existing prfn probe
+# (sources dm-pr.sh harmlessly through its `url` command, then calls any
+# function directly). Indirect sweep-level tests alone do not catch this: a
+# downstream `jq -e` on empty input also happens to fail, masking a broken
+# return code at the caller. This targets gh_api_retry itself.
+GHRC1="$TMP/gh-retry-rc-perm"; mkdir -p "$GHRC1"
+cat > "$GHRC1/gh" <<'STUB'
+#!/bin/sh
+echo "HTTP 404: Not Found" >&2
+exit 1
+STUB
+chmod +x "$GHRC1/gh"
+RC1=0
+OUT1="$(PATH="$GHRC1:$PATH" prfn gh_api_retry "repos/o/r/pulls/1" 2>"$TMP/gh-retry-rc-perm-err")" || RC1=$?
+check "gh_api_retry returns non-zero on a permanent failure"  '[ "$RC1" -ne 0 ]'
+check "gh_api_retry prints no stdout on a permanent failure"  '[ -z "$OUT1" ]'
+check "gh_api_retry surfaces the underlying error on stderr"  'grep -q "HTTP 404" "$TMP/gh-retry-rc-perm-err"'
+
+GHRC2="$TMP/gh-retry-rc-exhaust"; mkdir -p "$GHRC2"
+cat > "$GHRC2/gh" <<'STUB'
+#!/bin/sh
+echo "HTTP 429: API rate limit exceeded" >&2
+exit 1
+STUB
+chmod +x "$GHRC2/gh"
+RC2=0
+OUT2="$(DM_GH_RETRY_MAX=2 DM_GH_RETRY_BASE_SECS=0 PATH="$GHRC2:$PATH" prfn gh_api_retry "repos/o/r/pulls/1" 2>/dev/null)" || RC2=$?
+check "gh_api_retry returns non-zero after exhausting retries" '[ "$RC2" -ne 0 ]'
+check "gh_api_retry prints no stdout after exhausting retries" '[ -z "$OUT2" ]'
+
+echo "== #107 gate fix: sweep summary names an unknown checks/review, never blends into clean =="
+b dm-repo.sh add prswp3 "$TMP/origin.git" --mode pipeline --no-memory >/dev/null 2>&1
+mkdir -p "$DM_HOME/repos/prswp3/o"
+ln -s "$TMP/origin.git" "$DM_HOME/repos/prswp3/o/r.git"
+git -C "$DM_HOME/repos/prswp3" remote set-url origin o/r.git
+b dm-task.sh new prswp3-a --kind ship --repo prswp3 >/dev/null 2>&1
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set prswp3-a pr "https://github.com/o/r/pull/201" ) >/dev/null 2>&1
+GHSTUB201="$TMP/ghstub201"; mkdir -p "$GHSTUB201"
+cat > "$GHSTUB201/gh" <<STUB
+#!/bin/sh
+case "\$*" in
+  *number=201*) cat "$GHSTUB201/pr201.json"; exit 0 ;;
+esac
+exit 1
+STUB
+chmod +x "$GHSTUB201/gh"
+# hasNextPage:true -> review unknown (fails closed, #107); an unrecognized
+# statusCheckRollup state similarly falls closed to checks: unknown.
+cat > "$GHSTUB201/pr201.json" <<'JSON'
+{"data":{"repository":{"pullRequest":{
+  "state":"OPEN","merged":false,"headRefOid":"ddd444",
+  "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"BOGUS_UNEXPECTED_STATE"}}}]},
+  "reviews":{"pageInfo":{"hasNextPage":true},"nodes":[]}
+}}}}
+JSON
+SWEEP201="$(PATH="$GHSTUB201:$PATH" b dm-pr.sh sweep 2>&1)"
+check "the per-line output shows unknown, not a silent clean/passing" \
+  'grep -q "prswp3-a  state: OPEN  checks: unknown  reviews: unknown" <<<"$SWEEP201"'
+check "the summary names the unverified review, not silence" \
+  'grep -q "1 with an unverified review" <<<"$SWEEP201"'
+check "the summary names the unknown CI, not silence" \
+  'grep -q "1 with unknown CI" <<<"$SWEEP201"'
+
+echo "== #107 gate fix: sweep's circuit breaker aborts on sustained rate limiting =="
+# Reuses the GHRETRY fixture (prswp2-retry, PR 103) from the retry/backoff
+# section above: fail-until=99 with the transient marker set means every
+# attempt looks rate-limited, so gh_api_retry always exhausts. A breaker max
+# of 1 trips on that single exhausted PR regardless of where in the fleet
+# enumeration order it falls — no need to stage 5 consecutive tasks.
+rm -f "$GHRETRY/gh-calls"; printf '99\n' > "$GHRETRY/fail-until"; : > "$GHRETRY/transient"
+CB_RC=0
+CBOUT="$(DM_GH_RETRY_MAX=2 DM_GH_RETRY_BASE_SECS=0 DM_GH_CIRCUIT_BREAKER_MAX=1 PATH="$GHRETRY:$PATH" b dm-pr.sh sweep 2>&1)" || CB_RC=$?
+check "the breaker aborts the whole sweep, not just the one PR" '[ "$CB_RC" -ne 0 ]'
+check "the abort names sustained rate limiting"                 'grep -qi "rate limit" <<<"$CBOUT"'
+rm -f "$GHRETRY/fail-until" "$GHRETRY/transient"
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
