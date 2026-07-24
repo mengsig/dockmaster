@@ -68,6 +68,13 @@ AWAIT_INTERVAL_SECS=15
 GH_RETRY_MAX="${DM_GH_RETRY_MAX:-4}"
 GH_RETRY_BASE_SECS="${DM_GH_RETRY_BASE_SECS:-2}"
 
+# sweep's circuit breaker (#107): abort the whole sweep after this many
+# CONSECUTIVE PRs each exhaust their full gh_api_retry budget, rather than
+# grinding through the rest of a large fleet at the same degraded rate under
+# sustained rate limiting (worst case ~(2+4+6+...)s of sleeping per exhausted
+# PR with the defaults above).
+GH_CIRCUIT_BREAKER_MAX="${DM_GH_CIRCUIT_BREAKER_MAX:-5}"
+
 # is_transient_gh_error <stderr-text>  -> true if a `gh api` failure looks like
 # a rate limit or a transient transport error worth retrying, false for a
 # permanent error (404, bad request, auth) that retrying cannot fix.
@@ -75,25 +82,43 @@ is_transient_gh_error() {
   grep -qiE 'rate limit|secondary rate|HTTP 429|HTTP 5[0-9][0-9]|time(d)? ?out|could not resolve host|connection reset|temporary failure|unexpected EOF' <<<"$1"
 }
 
+# Distinct exit code gh_api_retry returns when it stopped specifically because
+# it exhausted the retry budget on a TRANSIENT error, as opposed to any other
+# failure — sweep's circuit breaker watches for exactly this code. Every
+# caller of gh_api_retry is invoked through a `$(...)` command substitution,
+# which bash runs in a subshell, so a global variable set inside gh_api_retry
+# can never be observed by the caller once it returns; the exit code is the
+# only channel that survives that boundary. Chosen far from any real `gh`
+# exit code (which is 1 for essentially every API failure).
+GH_RETRY_EXHAUSTED_RC=99
+
 # gh_api_retry <args to `gh api`...>  -> stdout of the call. Retries a
 # transient/rate-limit failure with bounded exponential backoff; a permanent
-# failure, or exhausting the attempts, returns non-zero exactly like a single
+# failure returns the real underlying `gh` exit code, exactly like a single
 # failed `gh api` call would — every existing degrade-to-unknown/dm_die caller
 # is unchanged, only the path to that same failure gets slower and sturdier.
+# Exhausting the attempts on a still-transient error returns
+# GH_RETRY_EXHAUSTED_RC instead, still non-zero so every `||` fallback still
+# fires the same way, just distinguishably so the circuit breaker can tell
+# "rate-limited" apart from "ordinary failure".
 # Reads only: mutations (`pr create`, the merge PUT) are never retried here —
 # retrying a mutation without an idempotency guarantee risks a double side
 # effect, so those keep their own single-attempt handling.
 gh_api_retry() {
-  local attempt=1 out err rc errtext
+  local attempt=1 out err rc errtext transient
   while :; do
     err="$(mktemp "$DM_STATE/.gh-retry.XXXXXX")" || dm_die "mktemp failed for gh api retry buffer"
-    if out="$(gh api "$@" 2>"$err")"; then
+    rc=0; out="$(gh api "$@" 2>"$err")" || rc=$?
+    if [ "$rc" -eq 0 ]; then
       rm -f "$err"; printf '%s' "$out"; return 0
     fi
-    rc=$?
     errtext="$(cat "$err" 2>/dev/null || true)"; rm -f "$err"
-    if [ "$attempt" -ge "$GH_RETRY_MAX" ] || ! is_transient_gh_error "$errtext"; then
+    if is_transient_gh_error "$errtext"; then transient=1; else transient=0; fi
+    if [ "$attempt" -ge "$GH_RETRY_MAX" ] || [ "$transient" -eq 0 ]; then
       printf '%s' "$errtext" >&2
+      if [ "$transient" -eq 1 ] && [ "$attempt" -ge "$GH_RETRY_MAX" ]; then
+        return "$GH_RETRY_EXHAUSTED_RC"
+      fi
       return "$rc"
     fi
     sleep "$((GH_RETRY_BASE_SECS * attempt))"
@@ -289,12 +314,16 @@ GQL
 # unexpected shape, a GraphQL `errors` entry, or more than SWEEP_REVIEWS_PAGE
 # reviews (pageInfo.hasNextPage) all fail CLOSED to "unknown", never a false
 # "clean" (the #107 false-green: the old unpaginated reviews call silently
-# truncated at GitHub's default page size of 30).
+# truncated at GitHub's default page size of 30). Propagates gh_api_retry's
+# exact exit code (rather than flattening to 1) so a caller can see
+# GH_RETRY_EXHAUSTED_RC specifically — sweep's circuit breaker needs it.
 sweep_pr_snapshot() {
-  local owner="$1" name="$2" number="$3" json
+  local owner="$1" name="$2" number="$3" json rc
+  rc=0
   json="$(gh_api_retry graphql -f query="$(sweep_graphql_query)" \
       -F owner="$owner" -F name="$name" -F number="$number" \
-      -F reviewsFirst="$SWEEP_REVIEWS_PAGE" 2>/dev/null)" || return 1
+      -F reviewsFirst="$SWEEP_REVIEWS_PAGE" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
   printf '%s' "$json" | jq -ce '
     if (.errors | length) > 0 then error("graphql error") else . end
     | .data.repository.pullRequest as $pr
@@ -326,6 +355,11 @@ sweep_pr_snapshot() {
 # read_sweep_snapshot <json>  -> validates and destructures into
 # SWEEP_STATE/SWEEP_CHECKS/SWEEP_REVIEW/SWEEP_HEAD, or returns 1. Mirrors
 # load_check_snapshot_json's boundary validation for the sweep-only shape.
+# SWEEP_HEAD is validated but deliberately never persisted: `check` already
+# owns pr_head as part of its own atomic pr_check_snapshot write, and writing
+# it again from here would give the same field two independent, driftable
+# sources. Validating it anyway is still worth doing — a malformed head is a
+# signal the rest of the response may be untrustworthy too.
 read_sweep_snapshot() {
   local json="$1" values
   values="$(printf '%s' "$json" | jq -er '
@@ -905,13 +939,16 @@ case "$cmd" in
     # Online (#107): ONE GraphQL call per PR (sweep_pr_snapshot) replaces the 4
     # sequential REST calls (`check`'s 3 plus a separate reviews fetch) this
     # used to cost, retried with bounded backoff on a transient/rate-limit
-    # failure (gh_api_retry). It refreshes the cached pr_state/checks meta
-    # directly. A PR just observed MERGED falls back to the full REST `check`,
-    # since that transition is safety-relevant (dm-worktree.sh landed trusts
-    # pr_head, which this GraphQL query does not populate) — merge_state and
-    # pr_check_snapshot get written exactly as they always have been.
-    # `merge`/`await-checks` always re-run `check` fresh regardless, so this
-    # path never itself feeds a merge decision.
+    # failure (gh_api_retry), plus a circuit breaker that aborts the sweep
+    # early on sustained rate limiting rather than grinding through the whole
+    # fleet at the same degraded rate (GH_CIRCUIT_BREAKER_MAX below). An OPEN
+    # PR only gets pr_state/checks refreshed in the cache; merge_state/
+    # pr_head/pr_check_snapshot are left as they were (this GraphQL query
+    # does not populate them, and `merge`/`await-checks` always re-derive
+    # them fresh anyway — this path never itself feeds a merge decision). A
+    # PR just observed MERGED is the one case that IS safety-relevant
+    # (dm-worktree.sh landed trusts pr_head), so it falls back to the full
+    # REST `check` there, which writes all five fields exactly as before.
     #
     # Offline (DM_NO_FETCH=1 — how dm-status invokes it): perform NO network. Show
     # the cached pr_state/checks and skip the review query, matching how
@@ -919,7 +956,8 @@ case "$cmd" in
     offline=0
     [ "${DM_NO_FETCH:-0}" = "1" ] && offline=1
     [ "$offline" -eq 1 ] || dm_need gh
-    total=0; red=0; changes=0; missing=0
+    total=0; red=0; changes=0; missing=0; unknown_review=0; unknown_checks=0
+    consecutive_exhausted=0
     while IFS= read -r id; do
       [ -n "$id" ] || continue
       total=$((total + 1))
@@ -940,7 +978,10 @@ case "$cmd" in
         checks="$(dm_meta_get "$id" checks)"; [ -n "$checks" ] || checks="?"
         state="$(dm_meta_get "$id" pr_state)"; [ -n "$state" ] || state="?"
         printf '  %s  state: %s  checks: %s (cached)  reviews: (no fetch)  %s\n' "$id" "$state" "$checks" "$url"
-        case "$checks" in failing) red=$((red + 1)) ;; esac
+        case "$checks" in
+          failing) red=$((red + 1)) ;;
+          unknown) unknown_checks=$((unknown_checks + 1)) ;;
+        esac
         continue
       fi
       # Online: one GraphQL call gets state + CI rollup + review verdict
@@ -949,11 +990,27 @@ case "$cmd" in
       n="$(pr_number_from_url "$url")"
       slug="$(repo_slug "$repo")"
       owner="${slug%%/*}"; name="${slug#*/}"
-      snap=""; snap="$(sweep_pr_snapshot "$owner" "$name" "$n")" || snap=""
+      snap=""; snap_rc=0
+      snap="$(sweep_pr_snapshot "$owner" "$name" "$n")" || snap_rc=$?
       if [ -z "$snap" ] || ! read_sweep_snapshot "$snap"; then
+        # A failure whose exit code is specifically GH_RETRY_EXHAUSTED_RC (as
+        # opposed to an ordinary one-shot failure, e.g. a malformed response)
+        # is the rate-limit signal the circuit breaker watches:
+        # GH_CIRCUIT_BREAKER_MAX of these IN A ROW aborts the sweep rather
+        # than grinding through the rest of a large fleet at the same
+        # degraded rate.
+        if [ "$snap_rc" -eq "$GH_RETRY_EXHAUSTED_RC" ]; then
+          consecutive_exhausted=$((consecutive_exhausted + 1))
+          if [ "$consecutive_exhausted" -ge "$GH_CIRCUIT_BREAKER_MAX" ]; then
+            dm_die "REFUSED: $consecutive_exhausted consecutive PRs exhausted gh's retry budget (sustained rate limiting?) — aborting the sweep early rather than grinding through the rest of the fleet at the same degraded rate. Wait for the rate limit to reset, then retry."
+          fi
+        else
+          consecutive_exhausted=0
+        fi
         printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
         continue
       fi
+      consecutive_exhausted=0
       state="$SWEEP_STATE"; checks="$SWEEP_CHECKS"; review="$SWEEP_REVIEW"
       if [ "$state" = "MERGED" ]; then
         if ! "$0" check "$id" >/dev/null 2>&1; then
@@ -966,8 +1023,14 @@ case "$cmd" in
         dm_meta_set "$id" pr_state "$state"
         dm_meta_set "$id" checks "$checks"
       fi
-      case "$checks" in failing) red=$((red + 1)) ;; esac
-      case "$review" in changes-requested) changes=$((changes + 1)) ;; esac
+      case "$checks" in
+        failing) red=$((red + 1)) ;;
+        unknown) unknown_checks=$((unknown_checks + 1)) ;;
+      esac
+      case "$review" in
+        changes-requested) changes=$((changes + 1)) ;;
+        unknown) unknown_review=$((unknown_review + 1)) ;;
+      esac
       printf '  %s  state: %s  checks: %s  reviews: %s  %s\n' "$id" "$state" "$checks" "$review" "$url"
     done < <(dm_open_pr_tasks)
     if [ "$total" -eq 0 ]; then
@@ -976,6 +1039,12 @@ case "$cmd" in
       note=""
       [ "$red" -gt 0 ] && note="$note, $red with red CI"
       [ "$changes" -gt 0 ] && note="$note, $changes with changes requested"
+      # unknown is distinct from clean/red: a review truncated past its
+      # bounded page, or a CI rollup gh could not confirm, must never read
+      # the same as an all-clear fleet — surface it so it gets a look, not
+      # a skim-past.
+      [ "$unknown_review" -gt 0 ] && note="$note, $unknown_review with an unverified review"
+      [ "$unknown_checks" -gt 0 ] && note="$note, $unknown_checks with unknown CI"
       [ "$missing" -gt 0 ] && note="$note, $missing with a missing clone"
       note="${note#, }"
       [ -n "$note" ] && note=" ($note)"
