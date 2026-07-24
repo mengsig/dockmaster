@@ -95,6 +95,30 @@ dm_pr_delivery_gate() {
 # Spins (at 0.1s) a blocking reclaim marker must survive before it counts as
 # abandoned. A real reclaim is a few filesystem calls, so 5s is a vast margin.
 DM_LOCK_RECLAIM_STALL_SPINS=50
+DM_LOCK_HELD_TARGET=""
+DM_LOCK_HELD_TOKEN=""
+DM_LOCK_HELD_PID=""
+
+dm_current_pid() {
+  # Bash 3.2 keeps $$ from the parent inside (...) subshells. A child's PPID is
+  # the actual shell process holding this lock.
+  sh -c 'printf "%s\n" "$PPID"'
+}
+
+dm_lock_release_if_owner() {
+  local target="$1" token="$2" pid="$3" lockdir owner
+  lockdir="$target.lock"; owner="$lockdir/$token"
+  [ -n "$token" ] && [ -f "$owner" ] || return 1
+  [ "$(cat "$owner" 2>/dev/null || true)" = "$pid:$token" ] || return 1
+  rm -rf "$lockdir" 2>/dev/null || return 1
+}
+
+dm_lock_trap_cleanup() {
+  [ -z "$DM_LOCK_HELD_TARGET" ] \
+    || dm_lock_release_if_owner "$DM_LOCK_HELD_TARGET" "$DM_LOCK_HELD_TOKEN" "$DM_LOCK_HELD_PID" \
+    || true
+  DM_LOCK_HELD_TARGET=""; DM_LOCK_HELD_TOKEN=""; DM_LOCK_HELD_PID=""
+}
 
 # Acquire the reclaim mutex that serializes reclaimers, self-healing one leaked
 # by a reclaimer that died mid-reclaim. Before #122 this marker was unstamped
@@ -106,9 +130,10 @@ DM_LOCK_RECLAIM_STALL_SPINS=50
 #     bounded and tiny, so a marker outliving it by 5s cannot have a live owner.
 # Returns 0 holding the mutex; 1 otherwise (caller retries on the next spin).
 dm_lock_acquire_reclaim() {
-  local reclaim="$1" stalled="$2" rcpid
+  local reclaim="$1" stalled="$2" rcpid holder_pid
   if mkdir "$reclaim" 2>/dev/null; then
-    printf '%s\n' "$$" > "$reclaim/pid" 2>/dev/null || true
+    holder_pid="$(dm_current_pid)"
+    printf '%s\n' "$holder_pid" > "$reclaim/pid" 2>/dev/null || true
     return 0
   fi
   rcpid="$(cat "$reclaim/pid" 2>/dev/null || true)"
@@ -128,7 +153,8 @@ dm_lock_acquire_reclaim() {
 
 dm_lock() {
   # dm_lock <file>  -- acquire the advisory lock guarding <file>
-  local target="$1" lockdir reclaim waited=0 stalled=0 pid rpid
+  local target="$1" lockdir reclaim waited=0 stalled=0 pid rpid holder_pid owner_path token
+  [ -z "$DM_LOCK_HELD_TARGET" ] || dm_die "dm_lock is not reentrant (already holds $DM_LOCK_HELD_TARGET)"
   lockdir="$target.lock"; reclaim="$lockdir.reclaim"
   while ! mkdir "$lockdir" 2>/dev/null; do
     # The lock is held. Self-heal ONLY a lock abandoned by a crashed holder,
@@ -175,23 +201,30 @@ dm_lock() {
     fi
     sleep 0.1
   done
-  # We hold the lock: record our PID so a future waiter can detect our crash.
-  printf '%s\n' "$$" > "$lockdir/pid" 2>/dev/null || true
-  # Clean up on normal exit / dm_die (EXIT), and on signal death. A trapped
-  # INT/TERM handler must ALSO terminate: without the explicit exit, bash runs
-  # the handler and then RESUMES the (now unlocked) critical section — which
-  # would let a waiter acquire and write concurrently. So each signal handler
-  # cleans up and exits with the conventional 128+signo code.
-  trap "rm -rf '$lockdir' 2>/dev/null || true" EXIT
-  trap "rm -rf '$lockdir' 2>/dev/null || true; exit 130" INT
-  trap "rm -rf '$lockdir' 2>/dev/null || true; exit 143" TERM
+  holder_pid="$(dm_current_pid)"
+  owner_path="$(mktemp "$lockdir/owner.XXXXXX")" \
+    || { rm -rf "$lockdir"; dm_die "could not create ownership token for $(basename "$target")"; }
+  token="$(basename "$owner_path")"
+  printf '%s:%s\n' "$holder_pid" "$token" > "$owner_path" \
+    || { rm -rf "$lockdir"; dm_die "could not record ownership token for $(basename "$target")"; }
+  printf '%s\n' "$holder_pid" > "$lockdir/pid" \
+    || { rm -rf "$lockdir"; dm_die "could not record holder PID for $(basename "$target")"; }
+  DM_LOCK_HELD_TARGET="$target"; DM_LOCK_HELD_TOKEN="$token"; DM_LOCK_HELD_PID="$holder_pid"
+  trap 'dm_lock_trap_cleanup' EXIT
+  trap 'dm_lock_trap_cleanup; exit 130' INT
+  trap 'dm_lock_trap_cleanup; exit 143' TERM
 }
 
 dm_unlock() {
   # dm_unlock <file>  -- release the lock and clear the traps
-  local lockdir="$1.lock"
-  rm -rf "$lockdir" 2>/dev/null || true
+  local target="$1" token pid
+  [ "$DM_LOCK_HELD_TARGET" = "$target" ] \
+    || dm_die "cannot unlock $(basename "$target"): this process does not own it"
+  token="$DM_LOCK_HELD_TOKEN"; pid="$DM_LOCK_HELD_PID"
   trap - EXIT INT TERM
+  DM_LOCK_HELD_TARGET=""; DM_LOCK_HELD_TOKEN=""; DM_LOCK_HELD_PID=""
+  dm_lock_release_if_owner "$target" "$token" "$pid" \
+    || dm_die "cannot unlock $(basename "$target"): ownership changed"
 }
 
 dm_ensure_dirs() {
@@ -414,10 +447,77 @@ dm_meta_set_fields() {
   dm_unlock "$f"
 }
 
-# True while a task-bound browser review or its notification waiter is live.
+# Append while the caller owns this task's meta lock.
+dm_status_append_locked() {
+  local id="$1" state="$2" note="${3:-}" at="${4:-}"
+  dm_require_id "$id"
+  [ -n "$state" ] || dm_die "status state is required"
+  dm_require_single_line "status state" "$state"
+  dm_require_single_line "status note" "$note"
+  dm_require_complete_task_locked "$id"
+  [ -n "$at" ] || at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s %s: %s\n' "$at" "$state" "$note" >> "$(dm_status_path "$id")" \
+    || dm_die "failed appending status for '$id'"
+}
+
+# Repair the at-most-one pending audit row left by a crash after meta commit.
+dm_transition_reconcile_locked() {
+  local id="$1" seq audited state note at marker expected
+  seq="$(dm_meta_get "$id" transition_seq)"
+  [ -n "$seq" ] || return 0
+  case "$seq" in *[!0-9]*) dm_die "task '$id' has invalid transition_seq '$seq'" ;; esac
+  audited="$(dm_meta_get "$id" transition_audited_seq)"
+  [ "$audited" != "$seq" ] || return 0
+  state="$(dm_meta_get "$id" transition_state)"
+  note="$(dm_meta_get "$id" transition_note)"
+  at="$(dm_meta_get "$id" transition_at)"
+  [ -n "$state" ] && [ -n "$at" ] \
+    || dm_die "task '$id' has incomplete pending transition audit '$seq'"
+  marker="[transition:$seq]"
+  expected="$at $state: $note $marker"
+  if ! grep -qxF "$expected" "$(dm_status_path "$id")" 2>/dev/null; then
+    dm_status_append_locked "$id" "$state" "$note $marker" "$at"
+  fi
+  dm_meta_set_fields_locked "$id" transition_audited_seq "$seq"
+}
+
+dm_task_transition_locked() {
+  # dm_task_transition_locked <id> <event-state> <note> <key> <value>...
+  local id="$1" state="$2" note="$3" old_seq next_seq at
+  shift 3
+  [ "$#" -ge 2 ] && [ $(( $# % 2 )) -eq 0 ] \
+    || dm_die "dm_task_transition_locked requires one or more field/value pairs"
+  dm_require_single_line "transition state" "$state"
+  dm_require_single_line "transition note" "$note"
+  dm_transition_reconcile_locked "$id"
+  old_seq="$(dm_meta_get "$id" transition_seq)"
+  [ -n "$old_seq" ] || old_seq=0
+  case "$old_seq" in *[!0-9]*) dm_die "task '$id' has invalid transition_seq '$old_seq'" ;; esac
+  next_seq=$((old_seq + 1))
+  at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  dm_meta_set_fields_locked "$id" "$@" \
+    transition_seq "$next_seq" transition_state "$state" \
+    transition_note "$note" transition_at "$at"
+  dm_transition_reconcile_locked "$id"
+}
+
+dm_task_terminal_locked() {
+  local id="$1" kind wt status
+  kind="$(dm_meta_get "$id" kind)"
+  if [ "$kind" = "scout" ] && [ -f "$DM_DATA/$id/report.md" ]; then return 0; fi
+  if [ "$kind" = "ship" ] && [ "$(dm_meta_get "$id" pr_state)" = "MERGED" ]; then return 0; fi
+  status="$(dm_status_path "$id")"
+  if [ "$kind" = "ship" ] && grep -qE '^[^ ]+ merged: ' "$status" 2>/dev/null; then return 0; fi
+  wt="$(dm_meta_get "$id" worktree)"
+  if grep -qE '^[^ ]+ discarded: ' "$status" 2>/dev/null \
+    && { [ -z "$wt" ] || [ ! -d "$wt" ]; }; then return 0; fi
+  return 1
+}
+
+# True unless both review state machines are explicitly terminal or absent.
 dm_review_active() {
-  case "$(dm_meta_get "$1" review_session_state)" in opening|active) return 0 ;; esac
-  case "$(dm_meta_get "$1" waiter_state)" in prepared|active) return 0 ;; esac
+  case "$(dm_meta_get "$1" review_session_state)" in ''|terminal) ;; *) return 0 ;; esac
+  case "$(dm_meta_get "$1" waiter_state)" in ''|terminal) ;; *) return 0 ;; esac
   return 1
 }
 
@@ -431,11 +531,9 @@ dm_status_append() {
   dm_require_single_line "status state" "$2"
   dm_require_single_line "status note" "${3:-}"
   dm_ensure_dirs
-  local meta status; meta="$(dm_meta_path "$1")"; status="$(dm_status_path "$1")"
+  local meta; meta="$(dm_meta_path "$1")"
   dm_lock "$meta"
-  dm_require_complete_task_locked "$1"
-  printf '%s %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "${3:-}" >> "$status" \
-    || { dm_unlock "$meta"; dm_die "failed appending status for '$1'"; }
+  dm_status_append_locked "$1" "$2" "${3:-}"
   dm_unlock "$meta"
 }
 

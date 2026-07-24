@@ -88,8 +88,10 @@ would duplicate context and make both runtimes slower and less predictable.
 
 `dm-brief.sh` computes an advisory tier (`model_recommended`) from the task kind
 + title and surfaces it in the brief header; `dm-status` flags any `working`
-task with none recorded as UNSIZED. Map that tier to the models and efforts the
-active `spawn_agent` declaration actually advertises:
+task with none recorded as UNSIZED. Run
+`bin/dm-dispatch-size.sh <tier> <supported|unsupported>` for the mapping;
+`supported` means the active `spawn_agent` declaration advertises both selector
+fields and the listed values:
 
 - `haiku` → `gpt-5.6-terra`, `low`
 - `sonnet` → `gpt-5.6-terra`, `medium`
@@ -160,7 +162,8 @@ Every requested change goes through the same gated flow:
      dispatch with `dm-task.sh new --mode local-only`).
    - **PR** → load `pr-workflow`, choose the tier, and durably expose the first
      ready gate before dispatching it:
-     `bin/dm-task.sh approve <id> <tier> <first-gate>`. Then run coldstart review
+     `bin/dm-task.sh approve <id> <tier>`. The config chooses the first and every
+     subsequent gate. Then run coldstart review
      → fix + tests → merge-gate review → fix + tests → PR creation.
 4. **Merge gate.** After the PR is open, the operator either merges on GitHub
    (you watch for it and then sync + teardown) or you ask for approval and merge

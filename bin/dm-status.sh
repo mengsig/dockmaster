@@ -123,10 +123,13 @@ if [ -n "$tasks" ]; then
         if [ -n "$approved_epoch" ]; then ready_age="$(human_age $((now - approved_epoch)))"; else ready_age="age unknown"; fi
         pipeline_rows+="  READY-GATE: task $tid approved $ready_age ago; '$pipeline_gate' has no runtime owner"$'\n'
         ;;
+      claimed)
+        pipeline_rows+="  GATE-CLAIMED: task $tid '$pipeline_gate' epoch $(dm_meta_get "$tid" pipeline_epoch) reserved by thread $(dm_meta_get "$tid" pipeline_owner_thread); runtime owner not attached"$'\n'
+        ;;
       running)
         gate_epoch="$(iso_to_epoch "$(dm_meta_get "$tid" gate_started_at)")"
         if [ -n "$gate_epoch" ]; then gate_age="$(human_age $((now - gate_epoch)))"; else gate_age="age unknown"; fi
-        pipeline_rows+="  GATE-RUNNING: task $tid '$pipeline_gate' for $gate_age"$'\n'
+        pipeline_rows+="  GATE-RUNNING: task $tid '$pipeline_gate' for $gate_age by $(dm_meta_get "$tid" pipeline_owner_agent)"$'\n'
         ;;
       blocked)
         pipeline_rows+="  INTEGRATION-BLOCKED: task $tid '$pipeline_gate' waits for $(dm_meta_get "$tid" pipeline_blocked_by): $(dm_meta_get "$tid" pipeline_blocked_reason)"$'\n'

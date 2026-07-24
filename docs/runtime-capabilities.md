@@ -63,7 +63,8 @@ Codex collaboration names in Claude adapters.
   secondmate → worker. Six concurrent open threads bound fan-out; ordinary work
   uses at most three so approval, recovery, and review retain capacity.
 - Current collaboration exposes per-spawn `model` and `reasoning_effort`.
-  Dockmaster maps advisory tiers to advertised values, records the actual choice,
+  `bin/dm-dispatch-size.sh` maps advisory tiers to advertised values, and the
+  dockmaster records the actual choice,
   and falls back visibly to inherited settings on an older surface rather than
   pretending an override occurred.
 - Scheduled-task management exists in desktop/web, not the CLI. CLI sessions use

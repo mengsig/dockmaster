@@ -53,7 +53,7 @@
       "claude": ".claude/skills",
       "codex": ".agents/skills, the official repository skill location",
       "verification": "direct",
-      "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", "tests/check-runtime-parity.js"]
+      "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", "bin/dm-dispatch-size.sh", "tests/check-runtime-parity.js"]
     },
     {
       "id": "task-dispatch",

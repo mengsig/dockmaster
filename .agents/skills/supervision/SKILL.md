@@ -90,15 +90,15 @@ and spawn only after proving zero. Persist the name before spawning, then the
 returned identity:
 
 ```
-bin/dm-task.sh waiter <id> prepare <thread-name>
+waiter_epoch="$(bin/dm-task.sh waiter <id> prepare <thread-name>)"
 spawn_agent(...)
-bin/dm-task.sh waiter <id> active <thread-name> <agent-id>
+bin/dm-task.sh waiter <id> active <thread-name> "$waiter_epoch" <agent-id>
 ```
 
 When feedback returns, set it `idle`, relay feedback to the artifact/code owner,
 then re-arm that exact waiter with `followup_task`; do not consume another
 thread. On approval, session end, or visible waiter failure, run
-`bin/dm-task.sh waiter <id> terminal`. An active session or waiter makes
+`bin/dm-task.sh waiter <id> terminal <waiter-epoch> <agent-id>`. An active session or waiter makes
 `dm-worktree.sh remove` and `dm-task.sh archive` refuse.
 
 For an ad-hoc surface with no task, derive one stable thread name from the

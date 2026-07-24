@@ -2,6 +2,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const { spawnSync } = require('child_process')
 
 const ROOT = process.env.DM_PARITY_ROOT
   ? path.resolve(process.env.DM_PARITY_ROOT)
@@ -192,6 +193,22 @@ function checkCodexAutonomyContracts() {
   for (const [pattern, label] of selectorRequirements) {
     if (!pattern.test(lifecycle)) fail(`Codex right-sizing missing ${label}`)
   }
+  const selector = path.join(ROOT, 'bin/dm-dispatch-size.sh')
+  const selectorCases = [
+    ['haiku', 'supported', 'model=gpt-5.6-terra\nreasoning_effort=low'],
+    ['sonnet', 'supported', 'model=gpt-5.6-terra\nreasoning_effort=medium'],
+    ['opus', 'supported', 'model=gpt-5.6-sol\nreasoning_effort=high'],
+    ['waiter', 'supported', 'model=gpt-5.6-terra\nreasoning_effort=low'],
+    ['opus', 'unsupported', 'model=inherited\nreasoning_effort=inherited'],
+  ]
+  for (const [tier, support, expected] of selectorCases) {
+    const result = spawnSync('bash', [selector, tier, support], { encoding: 'utf8' })
+    if (result.status !== 0 || result.stdout.trim() !== expected) {
+      fail(`Codex dispatch selector is not executable for ${tier}/${support}`)
+    }
+  }
+  const invalid = spawnSync('bash', [selector, 'unknown', 'supported'], { encoding: 'utf8' })
+  if (invalid.status === 0) fail('Codex dispatch selector accepts an unknown tier')
 
   if (!/wait_agent\(timeout_ms=3600000\)/.test(supervision)
       || !/Never issue an immediate identical empty re-wait/.test(supervision)

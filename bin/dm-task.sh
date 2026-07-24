@@ -17,10 +17,15 @@
 # Commands:
 #   new <id> --kind ship|scout --repo R [--mode M] [--title T]
 #   set <id> <key> <value>
-#   approve <id> <fast|default|rigorous> [<first-gate>]
-#   gate <id> <ready|start|block|complete> <gate> [...]
+#   approve <id> <fast|default|rigorous>
+#   gate <id> claim <gate> <thread>
+#   gate <id> start <gate> <epoch> <agent-id>
+#   gate <id> release <gate> <epoch> <reason>
+#   gate <id> block <gate> <blocker-id> <reason>
+#   gate <id> ready <gate>
+#   gate <id> complete <gate> <epoch> <evidence>
 #   ready-gates            list approved gates waiting for a runtime owner
-#   waiter <id> <prepare|active|idle|terminal> [...]
+#   waiter <id> <prepare|active|idle|terminal|cancel|recover> [...]
 #   get <id> [<key>]
 #   event <id> <state> [<note>]
 #   state <id>            reconcile and print current state
@@ -40,6 +45,46 @@ valid_pipeline_gate() {
   case "${1:-}" in
     ''|[!a-z]*|*[!a-z0-9-]*) return 1 ;;
   esac
+  [ "${#1}" -le 64 ]
+}
+pipeline_config() {
+  local tier="$1" file
+  file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/config/pr-pipeline.$tier.json"
+  [ -f "$file" ] || dm_die "missing pipeline definition: $file"
+  printf '%s\n' "$file"
+}
+pipeline_first_gate() { jq -er '.gates[0].id' "$(pipeline_config "$1")"; }
+pipeline_next_gate() {
+  jq -r --arg gate "$2" '
+    [.gates[].id] as $ids
+    | ($ids | index($gate)) as $i
+    | if $i == null then error("unknown gate") else ($ids[$i + 1] // "") end
+  ' "$(pipeline_config "$1")"
+}
+next_generation() {
+  case "${1:-}" in ''|*[!0-9]*) printf '1\n' ;; *) printf '%s\n' "$(( $1 + 1 ))" ;; esac
+}
+require_nonterminal_locked() {
+  local id="$1"
+  dm_task_terminal_locked "$id" && dm_die "task '$id' is terminal; no new pipeline or waiter work may be scheduled"
+  return 0
+}
+gate_next_locked() {
+  local id="$1" tier="$2" gate="$3" recovery
+  recovery="$(dm_meta_get "$id" pipeline_recovery_resume_gate)"
+  if [ -n "$recovery" ]; then
+    case "$gate" in
+      rebase) printf 'merge-gate-review\n' ;;
+      merge-gate-review) printf 'final-tests\n' ;;
+      final-tests) printf '%s\n' "$recovery" ;;
+      *) dm_die "task '$id' has malformed recovery sequence at gate '$gate'" ;;
+    esac
+  else
+    pipeline_next_gate "$tier" "$gate"
+  fi
+}
+valid_thread_name() {
+  case "${1:-}" in ''|*[!a-z0-9_]*) return 1 ;; esac
   [ "${#1}" -le 64 ]
 }
 valid_integration_gate() {
@@ -94,52 +139,68 @@ case "$cmd" in
       pr|pr_state|merge_state|pr_check_snapshot|pr_head) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
       base) dm_die "'base' is recorded by dm-worktree.sh create --base; it must not be set by hand" ;;
       worktree) dm_die "'worktree' is maintained by dm-worktree.sh create/remove; it must not be set by hand" ;;
-      approved_at|pipeline_tier|pipeline_gate|pipeline_state|gate_started_at|pipeline_blocked_by|pipeline_blocked_reason)
+      approved_at|pipeline_tier|pipeline_gate|pipeline_state|pipeline_generation|pipeline_epoch|pipeline_owner_thread|pipeline_owner_agent|gate_started_at|pipeline_blocked_by|pipeline_blocked_reason|pipeline_recovery_resume_gate|pipeline_last_gate|pipeline_last_evidence)
         dm_die "'$key' is pipeline state maintained by dm-task.sh approve/gate; it must not be set by hand" ;;
-      waiter_thread_name|waiter_agent_id|waiter_state)
+      waiter_thread_name|waiter_agent_id|waiter_state|waiter_generation|waiter_epoch)
         dm_die "'$key' is review-waiter state maintained by dm-task.sh waiter; it must not be set by hand" ;;
-      review_session_state|review_session_started_at)
+      review_session_state|review_session_started_at|review_session_generation|review_session_epoch|review_session_mode)
         dm_die "'$key' is review-session state maintained by dm-lavish.sh; it must not be set by hand" ;;
+      transition_seq|transition_state|transition_note|transition_at|transition_audited_seq)
+        dm_die "'$key' is a transition journal field maintained internally; it must not be set by hand" ;;
     esac
     dm_meta_set "$id" "$key" "$value"
     ;;
 
   approve)
-    id="${1:-}"; tier="${2:-}"; gate="${3:-coldstart-review}"
-    [ -n "$id" ] && [ -n "$tier" ] \
-      || dm_die "usage: dm-task.sh approve <id> <fast|default|rigorous> [<first-gate>]"
+    id="${1:-}"; tier="${2:-}"
+    [ "$#" -eq 2 ] && [ -n "$id" ] && [ -n "$tier" ] \
+      || dm_die "usage: dm-task.sh approve <id> <fast|default|rigorous>"
     dm_require_id "$id"
     valid_pipeline_tier "$tier" || dm_die "pipeline tier must be fast|default|rigorous"
-    valid_pipeline_gate "$gate" || dm_die "invalid pipeline gate: '$gate'"
+    gate="$(pipeline_first_gate "$tier")"
     meta="$(dm_meta_path "$id")"
     dm_lock "$meta"
     dm_require_complete_task_locked "$id"
+    require_nonterminal_locked "$id"
     [ "$(dm_meta_get "$id" kind)" = "ship" ] || dm_die "only ship tasks enter a delivery pipeline"
     [ "$(dm_meta_get "$id" mode)" != "local-only" ] || dm_die "local-only tasks do not enter a PR pipeline"
     approved_at="$(dm_meta_get "$id" approved_at)"
     [ -z "$approved_at" ] || dm_die "task '$id' is already approved at $approved_at"
     approved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    dm_meta_set_fields_locked "$id" \
+    dm_task_transition_locked "$id" working "approved; $tier pipeline gate '$gate' ready to schedule" \
       approved_at "$approved_at" pipeline_tier "$tier" pipeline_gate "$gate" \
-      pipeline_state ready gate_started_at "" pipeline_blocked_by "" pipeline_blocked_reason ""
+      pipeline_state ready pipeline_generation 0 pipeline_epoch "" \
+      pipeline_owner_thread "" pipeline_owner_agent "" gate_started_at "" \
+      pipeline_blocked_by "" pipeline_blocked_reason "" pipeline_recovery_resume_gate ""
     dm_unlock "$meta"
-    dm_status_append "$id" working "approved; $tier pipeline gate '$gate' ready to schedule"
     ;;
 
   gate)
     id="${1:-}"; action="${2:-}"; gate="${3:-}"; shift 3 2>/dev/null || true
     [ -n "$id" ] && [ -n "$action" ] && [ -n "$gate" ] \
-      || dm_die "usage: dm-task.sh gate <id> <ready|start|block|complete> <gate> [<blocker-id> <reason>]"
+      || dm_die "usage: dm-task.sh gate <id> <claim|start|release|block|ready|complete> <gate> ..."
     dm_require_id "$id"
     valid_pipeline_gate "$gate" || dm_die "invalid pipeline gate: '$gate'"
-    status_state=working
-    status_note=""
     case "$action" in
       ready)
         [ "$#" -eq 0 ] || dm_die "usage: dm-task.sh gate <id> ready <gate>"
         ;;
+      claim)
+        thread="${1:-}"
+        [ "$#" -eq 1 ] && valid_thread_name "$thread" \
+          || dm_die "usage: dm-task.sh gate <id> claim <gate> <thread-name matching [a-z0-9_]+>"
+        ;;
       start)
-        [ "$#" -eq 0 ] || dm_die "usage: dm-task.sh gate <id> start <gate>"
+        epoch="${1:-}"; agent="${2:-}"
+        [ "$#" -eq 2 ] && [ -n "$epoch" ] && [ -n "$agent" ] \
+          || dm_die "usage: dm-task.sh gate <id> start <gate> <epoch> <agent-id>"
+        dm_require_single_line "pipeline owner agent id" "$agent"
+        ;;
+      release)
+        epoch="${1:-}"; reason="${2:-}"
+        [ "$#" -eq 2 ] && [ -n "$epoch" ] && [ -n "$reason" ] \
+          || dm_die "usage: dm-task.sh gate <id> release <gate> <epoch> <reason>"
+        dm_require_single_line "pipeline claim release reason" "$reason"
         ;;
       block)
         blocker="${1:-}"; reason="${2:-}"
@@ -153,20 +214,23 @@ case "$cmd" in
         dm_require_single_line "pipeline blocker reason" "$reason"
         ;;
       complete)
-        [ "$#" -le 1 ] || dm_die "usage: dm-task.sh gate <id> complete <gate> [<next-gate>]"
-        next_gate="${1:-}"
-        [ -z "$next_gate" ] || valid_pipeline_gate "$next_gate" \
-          || dm_die "invalid next pipeline gate: '$next_gate'"
+        epoch="${1:-}"; evidence="${2:-}"
+        [ "$#" -eq 2 ] && [ -n "$epoch" ] && [ -n "$evidence" ] \
+          || dm_die "usage: dm-task.sh gate <id> complete <gate> <epoch> <evidence>"
+        dm_require_single_line "pipeline gate evidence" "$evidence"
         ;;
-      *) dm_die "gate action must be ready|start|block|complete" ;;
+      *) dm_die "gate action must be claim|start|release|block|ready|complete" ;;
     esac
     meta="$(dm_meta_path "$id")"
     dm_lock "$meta"
     dm_require_complete_task_locked "$id"
+    require_nonterminal_locked "$id"
     [ -n "$(dm_meta_get "$id" approved_at)" ] \
       || dm_die "task '$id' has no recorded approval; run dm-task.sh approve first"
     current_gate="$(dm_meta_get "$id" pipeline_gate)"
     current_state="$(dm_meta_get "$id" pipeline_state)"
+    current_epoch="$(dm_meta_get "$id" pipeline_epoch)"
+    tier="$(dm_meta_get "$id" pipeline_tier)"
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     case "$action" in
       ready)
@@ -174,81 +238,124 @@ case "$cmd" in
           || dm_die "cannot ready '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
         blocker="$(dm_meta_get "$id" pipeline_blocked_by)"
         if [ -f "$(dm_meta_path "$blocker")" ]; then
-          blocker_state="$(DM_NO_FETCH=1 "$0" state "$blocker" | sed 's/ · .*//; s/^state: //')"
-          [ "$blocker_state" = "done" ] \
-            || dm_die "integration blocker '$blocker' is still '$blocker_state'; gate remains blocked"
+          dm_task_terminal_locked "$blocker" \
+            || dm_die "integration blocker '$blocker' is not terminal; gate remains blocked"
         elif [ ! -f "$DM_STATE/archive/$blocker.meta" ]; then
           dm_die "integration blocker '$blocker' has no active or archived task record"
         fi
-        dm_meta_set_fields_locked "$id" \
-          pipeline_state ready gate_started_at "" pipeline_blocked_by "" pipeline_blocked_reason ""
-        status_note="pipeline gate '$gate' ready to schedule"
+        recovery_resume="$(dm_meta_get "$id" pipeline_recovery_resume_gate)"
+        [ -n "$recovery_resume" ] || recovery_resume="$gate"
+        dm_task_transition_locked "$id" working "blocker cleared; recovery rebase ready to schedule" \
+          pipeline_gate rebase pipeline_state ready pipeline_epoch "" \
+          pipeline_owner_thread "" pipeline_owner_agent "" gate_started_at "" \
+          pipeline_blocked_by "" pipeline_blocked_reason "" \
+          pipeline_recovery_resume_gate "$recovery_resume"
+        ;;
+      claim)
+        [ "$current_state" = "ready" ] && [ "$current_gate" = "$gate" ] \
+          || dm_die "cannot claim '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
+        generation="$(next_generation "$(dm_meta_get "$id" pipeline_generation)")"
+        dm_task_transition_locked "$id" working "pipeline gate '$gate' claimed by '$thread' (epoch $generation)" \
+          pipeline_state claimed pipeline_generation "$generation" pipeline_epoch "$generation" \
+          pipeline_owner_thread "$thread" pipeline_owner_agent "" gate_started_at ""
+        dm_unlock "$meta"
+        printf '%s\n' "$generation"
+        exit 0
         ;;
       start)
-        [ "$current_state" = "ready" ] && [ "$current_gate" = "$gate" ] \
-          || dm_die "cannot start '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
-        dm_meta_set_fields_locked "$id" pipeline_state running gate_started_at "$now"
-        status_note="pipeline gate '$gate' started"
+        [ "$current_state" = "claimed" ] && [ "$current_gate" = "$gate" ] && [ "$current_epoch" = "$epoch" ] \
+          || dm_die "cannot start '$gate' epoch '$epoch': current gate is '${current_gate:-unset}' in state '${current_state:-unset}' epoch '${current_epoch:-unset}'"
+        [ -n "$(dm_meta_get "$id" pipeline_owner_thread)" ] \
+          || dm_die "cannot start '$gate': claim has no owner thread"
+        dm_task_transition_locked "$id" working "pipeline gate '$gate' started by '$agent' (epoch $epoch)" \
+          pipeline_state running pipeline_owner_agent "$agent" gate_started_at "$now"
+        ;;
+      release)
+        [ "$current_state" = "claimed" ] && [ "$current_gate" = "$gate" ] && [ "$current_epoch" = "$epoch" ] \
+          || dm_die "cannot release '$gate' epoch '$epoch': claim no longer matches"
+        dm_task_transition_locked "$id" working "pipeline gate '$gate' claim released: $reason" \
+          pipeline_state ready pipeline_epoch "" pipeline_owner_thread "" \
+          pipeline_owner_agent "" gate_started_at ""
         ;;
       block)
         [ "$current_state" = "ready" ] && [ "$current_gate" = "$gate" ] \
           || dm_die "cannot block '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
-        dm_meta_set_fields_locked "$id" \
+        dm_task_transition_locked "$id" paused "integration gate '$gate' waits for '$blocker': $reason" \
           pipeline_state blocked gate_started_at "" \
           pipeline_blocked_by "$blocker" pipeline_blocked_reason "$reason"
-        status_state=paused
-        status_note="integration gate '$gate' waits for '$blocker': $reason"
         ;;
       complete)
-        [ "$current_state" = "running" ] && [ "$current_gate" = "$gate" ] \
-          || dm_die "cannot complete '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
+        [ "$current_state" = "running" ] && [ "$current_gate" = "$gate" ] && [ "$current_epoch" = "$epoch" ] \
+          || dm_die "cannot complete '$gate' epoch '$epoch': current gate is '${current_gate:-unset}' in state '${current_state:-unset}' epoch '${current_epoch:-unset}'"
+        [ -n "$(dm_meta_get "$id" pipeline_owner_agent)" ] \
+          || dm_die "cannot complete '$gate': running gate has no worker identity"
+        next_gate="$(gate_next_locked "$id" "$tier" "$gate")"
         if [ -n "$next_gate" ]; then
-          dm_meta_set_fields_locked "$id" \
+          if [ "$gate" = "final-tests" ] && [ -n "$(dm_meta_get "$id" pipeline_recovery_resume_gate)" ]; then
+            recovery_resume=""
+          else
+            recovery_resume="$(dm_meta_get "$id" pipeline_recovery_resume_gate)"
+          fi
+          dm_task_transition_locked "$id" working "pipeline gate '$gate' complete ($evidence); '$next_gate' ready" \
             pipeline_gate "$next_gate" pipeline_state ready gate_started_at "" \
-            pipeline_blocked_by "" pipeline_blocked_reason ""
-          status_note="pipeline gate '$gate' complete; '$next_gate' ready to schedule"
+            pipeline_epoch "" pipeline_owner_thread "" pipeline_owner_agent "" \
+            pipeline_blocked_by "" pipeline_blocked_reason "" \
+            pipeline_recovery_resume_gate "$recovery_resume" \
+            pipeline_last_gate "$gate" pipeline_last_evidence "$evidence"
         else
-          dm_meta_set_fields_locked "$id" pipeline_state complete
-          status_note="pipeline gate '$gate' complete"
+          dm_task_transition_locked "$id" working "pipeline gate '$gate' complete ($evidence); pipeline complete" \
+            pipeline_state complete pipeline_epoch "" pipeline_owner_thread "" \
+            pipeline_owner_agent "" gate_started_at "" pipeline_last_gate "$gate" \
+            pipeline_last_evidence "$evidence"
         fi
         ;;
     esac
     dm_unlock "$meta"
-    dm_status_append "$id" "$status_state" "$status_note"
     ;;
 
   ready-gates)
-    printf 'ID\tTIER\tGATE\tAPPROVED\n'
+    rows="$(mktemp "${TMPDIR:-/tmp}/dm-ready-gates.XXXXXX")"
+    trap 'rm -f "$rows"' EXIT
+    printf 'ID\tTIER\tGATE\tAPPROVED\n' >"$rows"
     while IFS= read -r id; do
       [ "$(dm_meta_get "$id" pipeline_state)" = "ready" ] || continue
-      printf '%s\t%s\t%s\t%s\n' "$id" "$(dm_meta_get "$id" pipeline_tier)" \
-        "$(dm_meta_get "$id" pipeline_gate)" "$(dm_meta_get "$id" approved_at)"
-    done < <(dm_all_task_ids) | sort -t$'\t' -k4,4 | column -t -s$'\t' 2>/dev/null || cat
+      meta="$(dm_meta_path "$id")"
+      dm_lock "$meta"
+      dm_transition_reconcile_locked "$id"
+      if [ "$(dm_meta_get "$id" pipeline_state)" = "ready" ] && ! dm_task_terminal_locked "$id"; then
+        printf '%s\t%s\t%s\t%s\n' "$id" "$(dm_meta_get "$id" pipeline_tier)" \
+          "$(dm_meta_get "$id" pipeline_gate)" "$(dm_meta_get "$id" approved_at)" >>"$rows"
+      fi
+      dm_unlock "$meta"
+    done < <(dm_all_task_ids)
+    header="$(sed -n '1p' "$rows")"
+    body="$(sed '1d' "$rows" | sort -t$'\t' -k4,4)"
+    { printf '%s\n' "$header"; [ -z "$body" ] || printf '%s\n' "$body"; } >"$rows"
+    if command -v column >/dev/null 2>&1; then column -t -s$'\t' <"$rows"; else cat "$rows"; fi
+    rm -f "$rows"
+    trap - EXIT
     ;;
 
   waiter)
     id="${1:-}"; action="${2:-}"; shift 2 2>/dev/null || true
     [ -n "$id" ] && [ -n "$action" ] \
-      || dm_die "usage: dm-task.sh waiter <id> <prepare|active|idle|terminal> [...]"
+      || dm_die "usage: dm-task.sh waiter <id> <prepare|active|idle|terminal|cancel|recover> [...]"
     dm_require_id "$id"
     case "$action" in
       prepare)
         thread="${1:-}"
         [ "$#" -eq 1 ] && [ -n "$thread" ] \
           || dm_die "usage: dm-task.sh waiter <id> prepare <thread-name>"
-        case "$thread" in ''|*[!a-z0-9_]*) dm_die "waiter thread name must match [a-z0-9_]+" ;; esac
-        [ "${#thread}" -le 64 ] || dm_die "waiter thread name must be <= 64 characters"
+        valid_thread_name "$thread" || dm_die "waiter thread name must match [a-z0-9_]+ and be <= 64 characters"
         meta="$(dm_meta_path "$id")"
         dm_lock "$meta"
         dm_require_complete_task_locked "$id"
+        require_nonterminal_locked "$id"
         old_state="$(dm_meta_get "$id" waiter_state)"
         old_thread="$(dm_meta_get "$id" waiter_thread_name)"
         old_agent="$(dm_meta_get "$id" waiter_agent_id)"
         case "$old_state" in
-          prepared)
-            [ "$old_thread" = "$thread" ] && [ -z "$old_agent" ] \
-              || dm_die "task '$id' has malformed or ambiguous prepared waiter state; reconcile it before launch"
-            ;;
+          prepared) dm_die "task '$id' already has a prepared waiter; duplicate launch refused" ;;
           ''|terminal)
             [ -z "$old_thread" ] && [ -z "$old_agent" ] \
               || dm_die "task '$id' has legacy waiter identity without a live state; reconcile it before launch"
@@ -263,61 +370,104 @@ case "$cmd" in
             dm_die "task '$id' has unknown waiter state '$old_state'; reconcile it before launch"
             ;;
         esac
-        dm_meta_set_fields_locked "$id" waiter_thread_name "$thread" waiter_agent_id "" waiter_state prepared
+        epoch="$(next_generation "$(dm_meta_get "$id" waiter_generation)")"
+        dm_task_transition_locked "$id" working "notification waiter '$thread' reserved (epoch $epoch)" \
+          waiter_thread_name "$thread" waiter_agent_id "" waiter_state prepared \
+          waiter_generation "$epoch" waiter_epoch "$epoch"
         dm_unlock "$meta"
+        printf '%s\n' "$epoch"
         ;;
       active)
-        thread="${1:-}"; agent="${2:-}"
-        [ "$#" -eq 2 ] && [ -n "$thread" ] && [ -n "$agent" ] \
-          || dm_die "usage: dm-task.sh waiter <id> active <thread-name> <agent-id>"
-        case "$thread" in ''|*[!a-z0-9_]*) dm_die "waiter thread name must match [a-z0-9_]+" ;; esac
-        [ "${#thread}" -le 64 ] || dm_die "waiter thread name must be <= 64 characters"
+        thread="${1:-}"; epoch="${2:-}"; agent="${3:-}"
+        [ "$#" -eq 3 ] && [ -n "$thread" ] && [ -n "$epoch" ] && [ -n "$agent" ] \
+          || dm_die "usage: dm-task.sh waiter <id> active <thread-name> <epoch> <agent-id>"
+        valid_thread_name "$thread" || dm_die "invalid waiter thread name"
         dm_require_single_line "waiter agent id" "$agent"
         meta="$(dm_meta_path "$id")"
         dm_lock "$meta"
         dm_require_complete_task_locked "$id"
+        require_nonterminal_locked "$id"
         old_state="$(dm_meta_get "$id" waiter_state)"
         old_thread="$(dm_meta_get "$id" waiter_thread_name)"
         old_agent="$(dm_meta_get "$id" waiter_agent_id)"
         case "$old_state" in
           prepared)
-            [ "$old_thread" = "$thread" ] && [ -z "$old_agent" ] \
+            [ "$old_thread" = "$thread" ] && [ -z "$old_agent" ] && [ "$(dm_meta_get "$id" waiter_epoch)" = "$epoch" ] \
               || dm_die "task '$id' prepared waiter '$old_thread'; refusing mismatched or malformed activation"
             ;;
           idle|active)
-            [ "$old_thread" = "$thread" ] && [ "$old_agent" = "$agent" ] \
+            [ "$old_thread" = "$thread" ] && [ "$old_agent" = "$agent" ] && [ "$(dm_meta_get "$id" waiter_epoch)" = "$epoch" ] \
               || dm_die "task '$id' already records waiter '${old_agent:-missing}'; refusing ambiguous replacement"
             ;;
           *)
             dm_die "task '$id' has no prepared or reusable waiter; prepare its identity before activation"
             ;;
         esac
-        dm_meta_set_fields_locked "$id" waiter_thread_name "$thread" waiter_agent_id "$agent" waiter_state active
+        dm_task_transition_locked "$id" working "notification waiter '$agent' active (epoch $epoch)" \
+          waiter_thread_name "$thread" waiter_agent_id "$agent" waiter_state active
         dm_unlock "$meta"
         ;;
       idle)
-        [ "$#" -eq 0 ] || dm_die "usage: dm-task.sh waiter <id> idle"
+        epoch="${1:-}"; agent="${2:-}"
+        [ "$#" -eq 2 ] && [ -n "$epoch" ] && [ -n "$agent" ] \
+          || dm_die "usage: dm-task.sh waiter <id> idle <epoch> <agent-id>"
         meta="$(dm_meta_path "$id")"
         dm_lock "$meta"
         dm_require_complete_task_locked "$id"
         old_state="$(dm_meta_get "$id" waiter_state)"
         [ "$old_state" = "active" ] || [ "$old_state" = "idle" ] \
           || dm_die "task '$id' has no active waiter to keep idle"
-        [ -n "$(dm_meta_get "$id" waiter_thread_name)" ] \
-          && [ -n "$(dm_meta_get "$id" waiter_agent_id)" ] \
-          || dm_die "task '$id' has no waiter identity to keep idle"
-        dm_meta_set_fields_locked "$id" waiter_state idle
+        [ "$(dm_meta_get "$id" waiter_epoch)" = "$epoch" ] \
+          && [ "$(dm_meta_get "$id" waiter_agent_id)" = "$agent" ] \
+          || dm_die "stale waiter idle transition refused"
+        dm_task_transition_locked "$id" working "notification waiter '$agent' idle (epoch $epoch)" waiter_state idle
         dm_unlock "$meta"
         ;;
       terminal)
-        [ "$#" -eq 0 ] || dm_die "usage: dm-task.sh waiter <id> terminal"
+        epoch="${1:-}"; agent="${2:-}"
+        [ "$#" -eq 2 ] && [ -n "$epoch" ] && [ -n "$agent" ] \
+          || dm_die "usage: dm-task.sh waiter <id> terminal <epoch> <agent-id>"
         meta="$(dm_meta_path "$id")"
         dm_lock "$meta"
         dm_require_complete_task_locked "$id"
-        dm_meta_set_fields_locked "$id" waiter_thread_name "" waiter_agent_id "" waiter_state terminal
+        [ "$(dm_meta_get "$id" waiter_epoch)" = "$epoch" ] \
+          && [ "$(dm_meta_get "$id" waiter_agent_id)" = "$agent" ] \
+          || dm_die "stale waiter terminal transition refused"
+        dm_task_transition_locked "$id" working "notification waiter '$agent' terminal (epoch $epoch)" \
+          waiter_thread_name "" waiter_agent_id "" waiter_state terminal waiter_epoch ""
         dm_unlock "$meta"
         ;;
-      *) dm_die "waiter state must be prepare|active|idle|terminal" ;;
+      cancel)
+        epoch="${1:-}"
+        [ "$#" -eq 1 ] && [ -n "$epoch" ] || dm_die "usage: dm-task.sh waiter <id> cancel <epoch>"
+        meta="$(dm_meta_path "$id")"
+        dm_lock "$meta"
+        dm_require_complete_task_locked "$id"
+        [ "$(dm_meta_get "$id" waiter_state)" = "prepared" ] \
+          && [ "$(dm_meta_get "$id" waiter_epoch)" = "$epoch" ] \
+          || dm_die "stale waiter cancellation refused"
+        dm_task_transition_locked "$id" working "notification waiter reservation cancelled (epoch $epoch)" \
+          waiter_thread_name "" waiter_agent_id "" waiter_state terminal waiter_epoch ""
+        dm_unlock "$meta"
+        ;;
+      recover)
+        expected_state="${1:-}"; epoch="${2:-}"; agent="${3:-}"; reason="${4:-}"
+        [ "$#" -eq 4 ] && [ -n "$expected_state" ] && [ -n "$reason" ] \
+          || dm_die "usage: dm-task.sh waiter <id> recover <expected-state> <epoch-or--> <agent-or--> <reason>"
+        dm_require_single_line "waiter recovery reason" "$reason"
+        [ "$expected_state" != "-" ] || expected_state=""
+        meta="$(dm_meta_path "$id")"
+        dm_lock "$meta"
+        dm_require_complete_task_locked "$id"
+        [ "$(dm_meta_get "$id" waiter_state)" = "$expected_state" ] \
+          && { [ "$epoch" = "-" ] && [ -z "$(dm_meta_get "$id" waiter_epoch)" ] || [ "$(dm_meta_get "$id" waiter_epoch)" = "$epoch" ]; } \
+          && { [ "$agent" = "-" ] && [ -z "$(dm_meta_get "$id" waiter_agent_id)" ] || [ "$(dm_meta_get "$id" waiter_agent_id)" = "$agent" ]; } \
+          || dm_die "waiter recovery snapshot changed; stale recovery refused"
+        dm_task_transition_locked "$id" working "notification waiter recovered: $reason" \
+          waiter_thread_name "" waiter_agent_id "" waiter_state terminal waiter_epoch ""
+        dm_unlock "$meta"
+        ;;
+      *) dm_die "waiter state must be prepare|active|idle|terminal|cancel|recover" ;;
     esac
     ;;
 
@@ -353,6 +503,13 @@ case "$cmd" in
     id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-task.sh state <id>"
     dm_require_id "$id"
     [ -f "$(dm_meta_path "$id")" ] || { echo "state: unknown · source: none · no such task"; exit 0; }
+    transition_seq="$(dm_meta_get "$id" transition_seq)"
+    if [ -n "$transition_seq" ] && [ "$(dm_meta_get "$id" transition_audited_seq)" != "$transition_seq" ]; then
+      meta="$(dm_meta_path "$id")"
+      dm_lock "$meta"
+      dm_transition_reconcile_locked "$id"
+      dm_unlock "$meta"
+    fi
     kind="$(dm_meta_get "$id" kind)"
     wt="$(dm_meta_get "$id" worktree)"
     # Refresh pr_state from GitHub first so an out-of-band merge (operator merged
@@ -431,17 +588,13 @@ case "$cmd" in
     dm_require_id "$id"
     meta="$(dm_meta_path "$id")"
     [ -f "$meta" ] || dm_die "no such task: $id"
+    dm_lock "$meta"
+    dm_require_complete_task_locked "$id"
+    dm_transition_reconcile_locked "$id"
     dm_review_active "$id" \
       && dm_die "refusing to archive '$id': Lavish review session or notification waiter is active"
-    # Fail closed: only a task that reconciles to terminal 'done' may be archived.
-    # `state` derives 'done' solely from positive landing/report evidence, so a
-    # ship task with unlanded work reconciles to 'working' and is refused here —
-    # archival must never bury unfinished work.
-    st="$("$0" state "$id" | sed 's/ · .*//; s/^state: //')"
-    case "$st" in
-      done|discarded) ;;
-      *) dm_die "refusing to archive '$id': current state is '$st', not done/discarded" ;;
-    esac
+    dm_task_terminal_locked "$id" \
+      || dm_die "refusing to archive '$id': no positive terminal evidence"
     # A worktree still on disk is a live local copy that teardown never removed.
     # Its (possibly unlanded) work must not be swept away behind the operator's
     # back — require teardown first.
@@ -452,22 +605,15 @@ case "$cmd" in
     archdir="$DM_STATE/archive"
     mkdir -p "$archdir"
     status="$(dm_status_path "$id")"
-    # Lock the meta path so the move cannot race a concurrent meta writer.
-    dm_lock "$meta"
-    dm_require_complete_task_locked "$id"
-    if dm_review_active "$id"; then
-      dm_unlock "$meta"
-      dm_die "refusing to archive '$id': Lavish review became active during archive validation"
-    fi
     mv -f "$meta" "$archdir/$id.meta" || { dm_unlock "$meta"; dm_die "failed archiving meta for '$id'"; }
     if [ -f "$status" ]; then
       mv -f "$status" "$archdir/$id.status" || { dm_unlock "$meta"; dm_die "failed archiving status log for '$id'"; }
     fi
-    dm_unlock "$meta"
     if [ -d "$DM_DATA/$id" ]; then
       rm -rf "$archdir/$id"   # replace any stale archive of a reused id
-      mv -f "$DM_DATA/$id" "$archdir/$id" || dm_die "failed archiving data dir for '$id'"
+      mv -f "$DM_DATA/$id" "$archdir/$id" || { dm_unlock "$meta"; dm_die "failed archiving data dir for '$id'"; }
     fi
+    dm_unlock "$meta"
     dm_info "archived task $id -> state/archive/"
     ;;
 

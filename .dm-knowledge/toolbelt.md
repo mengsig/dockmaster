@@ -12,8 +12,9 @@ these are the constraints that are not obvious from the code you are editing.
   land + rebase; `dm-sync` FF clone refresh; `dm-backlog`; `dm-lavish` review
   artifact; `dm-test` tests gate; `dm-memory` context system; `dm-thread-name`
   role-specific runtime labels; `dm-secondmate` locked supervisor identities;
-  `dm-command-guard` destructive-Git command parsing. Point work at the right
-  script instead of reinventing lifecycle logic.
+  `dm-command-guard` destructive-Git command parsing; `dm-dispatch-size`
+  executable Codex model/effort mapping. Point work at the right script instead
+  of reinventing lifecycle logic.
 - **[invariant]** Scripts in `bin/` must run on bash 3.2 (macOS default): no
   `mapfile`/`readarray`, no `declare -A`, no `${var^^}`/`${var,,}`, no `&>>`.
   Use while-read loops and parallel indexed arrays instead. No test pins this —

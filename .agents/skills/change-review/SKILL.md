@@ -28,7 +28,7 @@ change; the PR-or-local decision and any pipeline come *after* approval.
    the surface and tells the operator it is ready to review, with a one-line plain
    summary of the change:
    ```
-   bin/dm-lavish.sh open <id>
+   review_epoch="$(bin/dm-lavish.sh open <id>)"
    ```
    Then start the notification-producing wait described below. Do not run the
    poll in an unattended command session.
@@ -54,9 +54,9 @@ ambiguity blocker. Only a proven zero-owner state permits `spawn_agent`. Before
 that spawn, persist the deterministic name; then persist the returned identity:
 
 ```
-bin/dm-task.sh waiter <id> prepare "$waiter_thread"
+waiter_epoch="$(bin/dm-task.sh waiter <id> prepare "$waiter_thread")"
 spawn_agent(...)
-bin/dm-task.sh waiter <id> active "$waiter_thread" <returned-agent-id>
+bin/dm-task.sh waiter <id> active "$waiter_thread" "$waiter_epoch" <returned-agent-id>
 ```
 
 If active persistence fails after spawn, interrupt that exact returned id and
@@ -64,7 +64,7 @@ surface the failure; never leave an owner durable state cannot name.
 
 Give the waiter the absolute dockmaster directory, task id, and this exact job:
 
-1. Run `bin/dm-lavish.sh poll <id>` synchronously in the dockmaster directory.
+1. Run `bin/dm-lavish.sh poll <id> <review-epoch>` synchronously in the dockmaster directory.
 2. If the command yields a running session, keep resuming that same session
    until it exits. The waiter must not return while the command is still live.
 3. Return the complete feedback, layout warning, session-end result, or visible
@@ -75,8 +75,10 @@ while the approval goal is active; when the waiter completes, reconcile the
 review and relay actionable feedback to the implementation crewmate. Never
 treat a raw background or yielded terminal session as a parent wake source.
 Keep the waiter id for this review session. On approval, session end, or visible
-waiter failure, run `bin/dm-task.sh waiter <id> terminal`; on non-terminal
-feedback run `bin/dm-task.sh waiter <id> idle`. If dispatch fails because no
+waiter failure, run `bin/dm-task.sh waiter <id> terminal <waiter-epoch> <agent-id>`;
+on non-terminal feedback run `bin/dm-task.sh waiter <id> idle <waiter-epoch>
+<agent-id>`. If dispatch fails before activation, run `waiter <id> cancel
+<waiter-epoch>`. If dispatch fails because no
 thread slot is available, remain attached through the whole current turn or
 surface the capacity blocker; never silently fall back to an unattended terminal
 wait. A raw root poll is allowed only while root explicitly resumes the yielded
@@ -91,7 +93,7 @@ command to exit in that same attached turn.
    surface are authoritative input.)
 
 4. **Approval → decide how it lands.** Once the operator approves, end the
-   session (`bin/dm-lavish.sh end <id>`) and ask the operator one plain question:
+   session (`bin/dm-lavish.sh end <id> <review-epoch>`) and ask the operator one plain question:
    **create a PR, or keep it local?**
    - **local** → set the task to local mode first — `bin/dm-merge.sh local`
      refuses any task whose mode isn't `local-only` — then land with the guarded

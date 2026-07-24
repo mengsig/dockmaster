@@ -31,46 +31,38 @@ check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
 gate_start_race_has_one_winner() {
-  local id="gate-start-race" lockdir pids="" pid i winners=0
+  local id="gate-start-race" pids="" pid i winners=0
   b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
-  b dm-task.sh approve "$id" default coldstart-review >/dev/null
-  lockdir="$DM_HOME/state/tasks/$id.meta.lock"
-  mkdir "$lockdir"
+  b dm-task.sh approve "$id" default >/dev/null
   for i in 1 2 3 4 5 6; do
     (
-      if b dm-task.sh gate "$id" start coldstart-review >/dev/null 2>&1; then
+      if b dm-task.sh gate "$id" claim coldstart-review "gate_claim_$i" >/dev/null 2>&1; then
         : > "$TMP/gate-start-race.$i.ok"
       fi
     ) &
     pids="$pids $!"
   done
-  sleep 1
-  rmdir "$lockdir"
   for pid in $pids; do wait "$pid"; done
   for i in 1 2 3 4 5 6; do
     [ ! -e "$TMP/gate-start-race.$i.ok" ] || winners=$((winners + 1))
   done
   [ "$winners" -eq 1 ] \
-    && [ "$(grep -c "pipeline gate 'coldstart-review' started" "$DM_HOME/state/tasks/$id.status")" -eq 1 ]
+    && [ "$(grep -c "pipeline gate 'coldstart-review' claimed" "$DM_HOME/state/tasks/$id.status")" -eq 1 ]
 }
 
 waiter_activation_race_has_one_winner() {
-  local id="waiter-activation-race" thread lockdir pids="" pid i winners=0
+  local id="waiter-activation-race" thread epoch pids="" pid i winners=0
   b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
   thread="$(b dm-thread-name.sh "$id" review_waiter)"
-  b dm-task.sh waiter "$id" prepare "$thread" >/dev/null
-  lockdir="$DM_HOME/state/tasks/$id.meta.lock"
-  mkdir "$lockdir"
+  epoch="$(b dm-task.sh waiter "$id" prepare "$thread")"
   for i in 1 2 3 4 5 6; do
     (
-      if b dm-task.sh waiter "$id" active "$thread" "agent-$i" >/dev/null 2>&1; then
+      if b dm-task.sh waiter "$id" active "$thread" "$epoch" "agent-$i" >/dev/null 2>&1; then
         : > "$TMP/waiter-activation-race.$i.ok"
       fi
     ) &
     pids="$pids $!"
   done
-  sleep 1
-  rmdir "$lockdir"
   for pid in $pids; do wait "$pid"; done
   for i in 1 2 3 4 5 6; do
     [ ! -e "$TMP/waiter-activation-race.$i.ok" ] || winners=$((winners + 1))
@@ -78,6 +70,13 @@ waiter_activation_race_has_one_winner() {
   [ "$winners" -eq 1 ] \
     && [ "$(b dm-task.sh get "$id" waiter_state)" = active ] \
     && [ -n "$(b dm-task.sh get "$id" waiter_agent_id)" ]
+}
+
+run_gate() {
+  local id="$1" gate="$2" owner="$3" epoch
+  epoch="$(b dm-task.sh gate "$id" claim "$gate" "${id//[^a-z0-9]/_}_${gate//-/_}")"
+  b dm-task.sh gate "$id" start "$gate" "$epoch" "$owner" >/dev/null
+  b dm-task.sh gate "$id" complete "$gate" "$epoch" "smoke evidence" >/dev/null
 }
 
 # Hermetic authenticated runtime snapshot. Production doctor still probes real
@@ -339,6 +338,22 @@ check "the timeout message names the reclaim marker, not just the lock" \
   "grep -q \"lk.meta.lock.reclaim'\" <<<\"\$LOCK_MSG\" && grep -q \"lk.meta.lock' \" <<<\"\$LOCK_MSG\""
 check "dm-lib documents no knob it does not implement" \
   '! grep -q "DM_LOCK_STALE_SECS" "$ROOT/bin/dm-lib.sh"'
+LOCK_OWNER="$LOCKFIX/owner.meta"
+OWNER_PAIR="$(bash -c '. "$1/bin/dm-lib.sh"; dm_lock "$2"; printf "%s:%s\n" "$$" "$(cat "$2.lock/pid")"; dm_unlock "$2"' _ "$ROOT" "$LOCK_OWNER")"
+check "lock records the actual holder process" '[ "${OWNER_PAIR%%:*}" = "${OWNER_PAIR##*:}" ]'
+mkdir -p "$LOCK_OWNER.lock"
+printf '222:successor\n' >"$LOCK_OWNER.lock/owner"
+printf '222\n' >"$LOCK_OWNER.lock/pid"
+stale_lock_survives() {
+  bash -c '. "$1/bin/dm-lib.sh"; dm_lock_release_if_owner "$2" stale 111' _ "$ROOT" "$LOCK_OWNER"
+  [ -d "$LOCK_OWNER.lock" ]
+}
+check "stale cleanup cannot remove a successor lock" \
+  'stale_lock_survives'
+rm -rf "$LOCK_OWNER.lock"
+bash -c '. "$1/bin/dm-lib.sh"; dm_lock "$2"; kill -TERM "$$"' _ "$ROOT" "$LOCK_OWNER" >/dev/null 2>&1 || true
+SIGNAL_REACQUIRE="$(bash -c '. "$1/bin/dm-lib.sh"; dm_lock "$2"; printf acquired; dm_unlock "$2"' _ "$ROOT" "$LOCK_OWNER")"
+check "signal cleanup releases only its owned lock" '[ "$SIGNAL_REACQUIRE" = acquired ]'
 
 # --- managed-worktree guard wiring (#83) -------------------------------------
 # The shipped Codex PreToolUse hook must resolve dm-command-guard.sh from the
@@ -470,30 +485,71 @@ echo "== durable pipeline scheduling =="
 b dm-task.sh new gate-blocker --kind scout --repo demo >/dev/null
 b dm-task.sh new gate-ready --kind ship --repo demo --mode pipeline >/dev/null
 check "approval exposes the first gate as ready" \
-  'b dm-task.sh approve gate-ready default coldstart-review >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*default.*coldstart-review"'
+  'b dm-task.sh approve gate-ready fast >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*fast.*coldstart-review"'
 GATE_STATUS="$(b dm-status.sh)"
 check "status names approved-but-unscheduled work" 'grep -q "READY-GATE.*gate-ready.*coldstart-review" <<<"$GATE_STATUS"'
 check "gate start records owner horizon" \
-  'b dm-task.sh gate gate-ready start coldstart-review >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = running ] && [ -n "$(b dm-task.sh get gate-ready gate_started_at)" ]'
+  'E="$(b dm-task.sh gate gate-ready claim coldstart-review smoke_gate)" && b dm-task.sh gate gate-ready start coldstart-review "$E" /root/gate >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = running ] && [ "$(b dm-task.sh get gate-ready pipeline_owner_agent)" = /root/gate ]'
 check "completed gate can expose the next ready gate" \
-  'b dm-task.sh gate gate-ready complete coldstart-review branch-tests >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*branch-tests"'
+  'E="$(b dm-task.sh get gate-ready pipeline_epoch)" && b dm-task.sh gate gate-ready complete coldstart-review "$E" review-pass >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*fix-1"'
 check "overlap cannot block a branch-local gate" \
-  '! b dm-task.sh gate gate-ready block branch-tests gate-blocker overlap >/dev/null 2>&1'
+  '! b dm-task.sh gate gate-ready block fix-1 gate-blocker overlap >/dev/null 2>&1'
 check "branch-local work runs before overlap reaches integration" \
-  'b dm-task.sh gate gate-ready start branch-tests >/dev/null && b dm-task.sh gate gate-ready complete branch-tests rebase >/dev/null'
+  'run_gate gate-ready fix-1 /root/fix && run_gate gate-ready branch-tests /root/tests && [ "$(b dm-task.sh get gate-ready pipeline_gate)" = pr ]'
 check "integration blocker and reason are durable" \
-  'b dm-task.sh gate gate-ready block rebase gate-blocker "same deployment files" >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = blocked ] && [ "$(b dm-task.sh get gate-ready pipeline_blocked_by)" = gate-blocker ] && [ "$(b dm-task.sh get gate-ready pipeline_blocked_reason)" = "same deployment files" ]'
+  'b dm-task.sh gate gate-ready block pr gate-blocker "same deployment files" >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = blocked ] && [ "$(b dm-task.sh get gate-ready pipeline_blocked_by)" = gate-blocker ] && [ "$(b dm-task.sh get gate-ready pipeline_blocked_reason)" = "same deployment files" ]'
 check "integration gate cannot ready before blocker completes" \
-  '! b dm-task.sh gate gate-ready ready rebase >/dev/null 2>&1'
+  '! b dm-task.sh gate gate-ready ready pr >/dev/null 2>&1'
 mkdir -p "$DM_HOME/data/gate-blocker"
 printf '# done\n' > "$DM_HOME/data/gate-blocker/report.md"
 check "completed blocker releases integration gate explicitly" \
-  'b dm-task.sh gate gate-ready ready rebase >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*rebase"'
+  'b dm-task.sh gate gate-ready ready pr >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*rebase"'
 GATE_STATUS="$(b dm-status.sh)"
 check "released integration work is visible as unscheduled" 'grep -q "READY-GATE.*gate-ready.*rebase" <<<"$GATE_STATUS"'
+check "recovery cannot skip rebase, final review, or final tests" \
+  'run_gate gate-ready rebase /root/rebase && [ "$(b dm-task.sh get gate-ready pipeline_gate)" = merge-gate-review ] && run_gate gate-ready merge-gate-review /root/review && [ "$(b dm-task.sh get gate-ready pipeline_gate)" = final-tests ] && run_gate gate-ready final-tests /root/final-tests && [ "$(b dm-task.sh get gate-ready pipeline_gate)" = pr ]'
+CLAIM_ONE="$(b dm-task.sh gate gate-ready claim pr rollback_claim)"
+check "failed assignment can release its exact claim" \
+  'b dm-task.sh gate gate-ready release pr "$CLAIM_ONE" spawn-failed >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = ready ]'
+CLAIM_TWO="$(b dm-task.sh gate gate-ready claim pr second_claim)"
+check "released claim epoch cannot start a successor claim" \
+  '[ "$CLAIM_ONE" != "$CLAIM_TWO" ] && ! b dm-task.sh gate gate-ready start pr "$CLAIM_ONE" stale-agent >/dev/null 2>&1'
+check "claimed gate exposes its durable thread owner" \
+  'CLAIM_STATUS="$(b dm-status.sh)"; grep -q "GATE-CLAIMED.*gate-ready.*second_claim" <<<"$CLAIM_STATUS"'
 check "generic set cannot forge pipeline state" \
   '! b dm-task.sh set gate-ready pipeline_state running >/dev/null 2>&1'
-check "concurrent gate starts have exactly one owner" 'gate_start_race_has_one_winner'
+check "concurrent gate claims have exactly one owner" 'gate_start_race_has_one_winner'
+b dm-task.sh new canonical-gates --kind ship --repo demo --mode pipeline >/dev/null
+check "callers cannot choose a first gate" \
+  '! b dm-task.sh approve canonical-gates default pr >/dev/null 2>&1'
+b dm-task.sh approve canonical-gates default >/dev/null
+CANONICAL_EPOCH="$(b dm-task.sh gate canonical-gates claim coldstart-review canonical_gate)"
+b dm-task.sh gate canonical-gates start coldstart-review "$CANONICAL_EPOCH" canonical-agent >/dev/null
+check "callers cannot supply or skip to a next gate" \
+  '! b dm-task.sh gate canonical-gates complete coldstart-review "$CANONICAL_EPOCH" evidence branch-tests >/dev/null 2>&1'
+b dm-task.sh gate canonical-gates complete coldstart-review "$CANONICAL_EPOCH" evidence >/dev/null
+check "canonical config derives the next gate" \
+  '[ "$(b dm-task.sh get canonical-gates pipeline_gate)" = fix-1 ]'
+check "terminal tasks cannot be approved or assigned waiters" \
+  '! b dm-task.sh approve gate-blocker fast >/dev/null 2>&1 && ! b dm-task.sh waiter gate-blocker prepare terminal_waiter >/dev/null 2>&1'
+b dm-task.sh new terminal-gate --kind ship --repo demo --mode pipeline >/dev/null
+b dm-task.sh approve terminal-gate fast >/dev/null
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set terminal-gate pr_state MERGED )
+check "terminal tasks disappear from ready gates and refuse claims" \
+  '! b dm-task.sh ready-gates | grep -q terminal-gate && ! b dm-task.sh gate terminal-gate claim coldstart-review terminal_gate >/dev/null 2>&1'
+
+b dm-task.sh new transition-repair --kind ship --repo demo --mode pipeline >/dev/null
+( . "$ROOT/bin/dm-lib.sh"
+  meta="$(dm_meta_path transition-repair)"
+  dm_lock "$meta"
+  dm_meta_set_fields_locked transition-repair transition_seq 7 transition_state working \
+    transition_note interrupted transition_at 2026-07-24T00:00:00Z transition_audited_seq 6
+  dm_unlock "$meta"
+)
+b dm-task.sh state transition-repair >/dev/null
+b dm-task.sh state transition-repair >/dev/null
+check "pending transition audit repairs exactly once" \
+  '[ "$(grep -c "\\[transition:7\\]" "$DM_HOME/state/tasks/transition-repair.status")" -eq 1 ] && [ "$(b dm-task.sh get transition-repair transition_audited_seq)" = 7 ]'
 
 echo "== fast pipeline config =="
 FAST="$ROOT/config/pr-pipeline.fast.json"
@@ -516,13 +572,15 @@ check "rigorous ends in pr gate"               '[ "$(jq -r ".gates[-1].gate" "$R
 # The three shipped tiers must share the same top-level shape (a consistent gate
 # schema is what lets one runner drive any of them).
 check "all three tiers share the top-level shape" 'for f in default fast rigorous; do [ "$(jq -r "has(\"version\") and has(\"description\") and has(\"gates\")" "$ROOT/config/pr-pipeline.$f.json")" = "true" ] || exit 1; done'
+check "every tier has unique durable gate ids" \
+  'for f in default fast rigorous; do jq -e "[.gates[].id] as \$ids | (\$ids | length) > 0 and (\$ids | all(type == \"string\" and length > 0)) and ((\$ids | unique | length) == (\$ids | length))" "$ROOT/config/pr-pipeline.$f.json" >/dev/null || exit 1; done'
 
 echo "== lavish degradation (optional tool absent) =="
 # Simulate lavish-axi being absent: a PATH of symlinks to only the real tools
 # dm-lavish needs, deliberately excluding lavish-axi. This works whether or not
 # lavish-axi happens to be installed on the machine running the test.
 NB="$TMP/nolavish"; mkdir -p "$NB"
-for t in bash env dirname basename mkdir date sed awk jq git cat mv rm mktemp; do
+for t in bash sh env dirname basename mkdir rmdir date sed awk jq git cat mv rm mktemp grep sort head kill; do
   p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$NB/$t"
 done
 lav() { PATH="$NB" "$ROOT/bin/dm-lavish.sh" "$@"; }
@@ -530,10 +588,11 @@ check "lavish-axi absent from probe PATH"   '! PATH="$NB" command -v lavish-axi'
 check "lavish open fails on missing artifact (tool absent)" '! lav open demo-1 >/dev/null 2>&1'
 ART="$(b dm-lavish.sh path demo-1)"
 printf '<!doctype html><title>x</title>\n' > "$ART"
-check "lavish open degrades (exit 0, tool absent)" 'lav open demo-1 >/dev/null 2>&1'
-check "lavish poll degrades (exit 0, tool absent)" 'lav poll demo-1 >/dev/null 2>&1'
-OPENOUT="$(lav open demo-1 2>&1)"
-check "lavish open names the artifact path"        'grep -qF "$ART" <<<"$OPENOUT"'
+MANUAL_EPOCH="$(lav open demo-1 2>"$TMP/manual-open.err")"
+check "lavish open creates guarded manual session" '[ -n "$MANUAL_EPOCH" ] && [ "$(b dm-task.sh get demo-1 review_session_state)" = active-manual ]'
+check "lavish manual open names the artifact path" 'grep -qF "$ART" "$TMP/manual-open.err"'
+check "lavish poll fails closed without tool" '! lav poll demo-1 "$MANUAL_EPOCH" >/dev/null 2>&1'
+check "manual review ends by exact epoch" 'lav end demo-1 "$MANUAL_EPOCH" >/dev/null'
 
 echo "== Lavish session/waiter cleanup guard =="
 FAKE_LAVISH="$TMP/fake-lavish"; mkdir -p "$FAKE_LAVISH"
@@ -544,50 +603,77 @@ WAITER_THREAD="$(b dm-thread-name.sh demo-1 review_waiter)"
 UNPREPARED_THREAD="$(b dm-thread-name.sh waiter-unprepared review_waiter)"
 b dm-task.sh new waiter-unprepared --kind ship --repo demo --mode pipeline >/dev/null
 check "waiter activation refuses a missing durable preparation" \
-  '! b dm-task.sh waiter waiter-unprepared active "$UNPREPARED_THREAD" /root/unprepared >/dev/null 2>&1'
+  '! b dm-task.sh waiter waiter-unprepared active "$UNPREPARED_THREAD" 1 /root/unprepared >/dev/null 2>&1'
 ( . "$ROOT/bin/dm-lib.sh"
   dm_meta_set_fields waiter-unprepared waiter_thread_name "$UNPREPARED_THREAD" waiter_agent_id /root/legacy waiter_state ""
 )
 check "legacy identity without state fails closed as ambiguous" \
   '! b dm-task.sh waiter waiter-unprepared prepare "$UNPREPARED_THREAD" >/dev/null 2>&1 && [ "$(b dm-task.sh get waiter-unprepared waiter_agent_id)" = /root/legacy ]'
 check "explicit terminal recovery clears malformed waiter identity" \
-  'b dm-task.sh waiter waiter-unprepared terminal >/dev/null && [ -z "$(b dm-task.sh get waiter-unprepared waiter_thread_name)" ] && [ -z "$(b dm-task.sh get waiter-unprepared waiter_agent_id)" ]'
+  'b dm-task.sh waiter waiter-unprepared recover - - /root/legacy legacy-recovery >/dev/null && [ -z "$(b dm-task.sh get waiter-unprepared waiter_thread_name)" ] && [ -z "$(b dm-task.sh get waiter-unprepared waiter_agent_id)" ]'
 check "waiter name is durable before spawn" \
-  'b dm-task.sh waiter demo-1 prepare "$WAITER_THREAD" >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_state)" = prepared ]'
+  'WAITER_EPOCH="$(b dm-task.sh waiter demo-1 prepare "$WAITER_THREAD")" && export WAITER_EPOCH && [ "$(b dm-task.sh get demo-1 waiter_state)" = prepared ]'
 check "prepared launch ambiguity prevents worktree cleanup" \
   'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
 check "waiter identity activates atomically" \
-  'b dm-task.sh waiter demo-1 active "$WAITER_THREAD" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_thread_name)" = "$WAITER_THREAD" ] && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = active ]'
+  'b dm-task.sh waiter demo-1 active "$WAITER_THREAD" "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_thread_name)" = "$WAITER_THREAD" ] && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = active ]'
 check "concurrent waiter activations preserve one exact owner" 'waiter_activation_race_has_one_winner'
 check "active waiter prevents worktree cleanup even with force" \
   'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
 check "idle waiter keeps exact identity for reuse" \
-  'b dm-task.sh waiter demo-1 idle >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ]'
+  'b dm-task.sh waiter demo-1 idle "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ]'
 check "prepare refuses to erase a reusable idle identity" \
   '! b dm-task.sh waiter demo-1 prepare "$WAITER_THREAD" >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ]'
 check "idle waiter reactivation requires its exact identity" \
-  '! b dm-task.sh waiter demo-1 active "$WAITER_THREAD" /root/different-waiter >/dev/null 2>&1 && b dm-task.sh waiter demo-1 active "$WAITER_THREAD" /root/review-waiter >/dev/null'
+  '! b dm-task.sh waiter demo-1 active "$WAITER_THREAD" "$WAITER_EPOCH" /root/different-waiter >/dev/null 2>&1 && b dm-task.sh waiter demo-1 active "$WAITER_THREAD" "$WAITER_EPOCH" /root/review-waiter >/dev/null'
 check "opening Lavish records active session" \
-  'axilav open demo-1 >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = active ] && [ -n "$(b dm-task.sh get demo-1 review_session_started_at)" ]'
-check "poll requires and accepts active session" 'axilav poll demo-1 >/dev/null'
+  'REVIEW_EPOCH="$(axilav open demo-1)" && export REVIEW_EPOCH && [ "$(b dm-task.sh get demo-1 review_session_state)" = active ] && [ -n "$(b dm-task.sh get demo-1 review_session_started_at)" ]'
+check "poll requires and accepts active session" 'axilav poll demo-1 "$REVIEW_EPOCH" >/dev/null'
 check "active session prevents worktree cleanup" \
   'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
 check "ending session and waiter clears durable identities" \
-  'axilav end demo-1 >/dev/null && b dm-task.sh waiter demo-1 terminal >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ] && [ -z "$(b dm-task.sh get demo-1 waiter_agent_id)" ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = terminal ]'
-check "poll refuses after session end" '! axilav poll demo-1 >/dev/null 2>&1'
+  'axilav end demo-1 "$REVIEW_EPOCH" >/dev/null && b dm-task.sh waiter demo-1 terminal "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ] && [ -z "$(b dm-task.sh get demo-1 waiter_agent_id)" ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = terminal ]'
+check "poll refuses after session end" '! axilav poll demo-1 "$REVIEW_EPOCH" >/dev/null 2>&1'
 printf '#!/usr/bin/env bash\nexit 9\n' > "$FAKE_LAVISH/lavish-axi"
 check "failed open clears its cleanup reservation visibly" \
   '! axilav open demo-1 >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ]'
+printf '#!/usr/bin/env bash\n[ "${1:-}" != end ]\n' > "$FAKE_LAVISH/lavish-axi"
+chmod +x "$FAKE_LAVISH/lavish-axi"
+FAIL_END_EPOCH="$(axilav open demo-1)"
+check "failed end remains guarded and rejects stale epochs" \
+  '! axilav end demo-1 "$FAIL_END_EPOCH" >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = closing ] && ! axilav end demo-1 999 >/dev/null 2>&1'
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
+check "same epoch can retry a failed end" \
+  'axilav end demo-1 "$FAIL_END_EPOCH" >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ]'
+
+SLOW_READY="$TMP/slow-open.ready"
+SLOW_RELEASE="$TMP/slow-open.release"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'if [ "${1:-}" = end ]; then exit 0; fi' \
+  ': > "$SLOW_READY"' \
+  'while [ ! -e "$SLOW_RELEASE" ]; do :; done' > "$FAKE_LAVISH/lavish-axi"
+chmod +x "$FAKE_LAVISH/lavish-axi"
+SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav open demo-1 >"$TMP/slow-open.epoch" &
+SLOW_PID=$!
+while [ ! -e "$SLOW_READY" ] && kill -0 "$SLOW_PID" 2>/dev/null; do :; done
+[ -e "$SLOW_READY" ] || { wait "$SLOW_PID" || true; bad "slow Lavish open reached coordination point"; exit 1; }
+SLOW_EPOCH="$(b dm-task.sh get demo-1 review_session_epoch)"
+SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav end demo-1 "$SLOW_EPOCH" >/dev/null
+: > "$SLOW_RELEASE"
+wait "$SLOW_PID"
+check "close during slow open cannot resurrect the session" \
+  '[ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ] && ! axilav poll demo-1 "$SLOW_EPOCH" >/dev/null 2>&1'
 b dm-task.sh new review-archive --kind scout --repo demo >/dev/null
-mkdir -p "$DM_HOME/data/review-archive"
-printf '# report\n' > "$DM_HOME/data/review-archive/report.md"
 ARCHIVE_WAITER="$(b dm-thread-name.sh review-archive review_waiter)"
 b dm-task.sh waiter review-archive prepare "$ARCHIVE_WAITER" >/dev/null
-b dm-task.sh waiter review-archive active "$ARCHIVE_WAITER" /root/archive-waiter >/dev/null
+ARCHIVE_EPOCH="$(b dm-task.sh get review-archive waiter_epoch)"
+b dm-task.sh waiter review-archive active "$ARCHIVE_WAITER" "$ARCHIVE_EPOCH" /root/archive-waiter >/dev/null
+mkdir -p "$DM_HOME/data/review-archive"
+printf '# report\n' > "$DM_HOME/data/review-archive/report.md"
 check "active waiter prevents otherwise-valid archive" \
   'ERR="$(b dm-task.sh archive review-archive 2>&1 || true)"; grep -q "Lavish review session or notification waiter is active" <<<"$ERR" && [ -f "$DM_HOME/state/tasks/review-archive.meta" ]'
 check "terminal waiter permits archive" \
-  'b dm-task.sh waiter review-archive terminal >/dev/null && b dm-task.sh archive review-archive >/dev/null && [ -f "$DM_HOME/state/archive/review-archive.meta" ]'
+  'b dm-task.sh waiter review-archive terminal "$ARCHIVE_EPOCH" /root/archive-waiter >/dev/null && b dm-task.sh archive review-archive >/dev/null && [ -f "$DM_HOME/state/archive/review-archive.meta" ]'
 b dm-task.sh new malformed-review --kind scout --repo demo >/dev/null
 mkdir -p "$DM_HOME/data/malformed-review"
 printf '# report\n' > "$DM_HOME/data/malformed-review/report.md"
@@ -597,10 +683,10 @@ printf '# report\n' > "$DM_HOME/data/malformed-review/report.md"
 check "malformed active waiter still prevents archive" \
   '! b dm-task.sh archive malformed-review >/dev/null 2>&1 && [ -f "$DM_HOME/state/tasks/malformed-review.meta" ]'
 check "explicit terminal recovery releases malformed active state" \
-  'b dm-task.sh waiter malformed-review terminal >/dev/null && b dm-task.sh archive malformed-review >/dev/null && [ -f "$DM_HOME/state/archive/malformed-review.meta" ]'
+  'b dm-task.sh waiter malformed-review recover active - - malformed-recovery >/dev/null && b dm-task.sh archive malformed-review >/dev/null && [ -f "$DM_HOME/state/archive/malformed-review.meta" ]'
 
 echo "== state reconciliation =="
-check "state pending pre-work" 'OUT="$(b dm-task.sh state demo-1)"; grep -q pending <<<"$OUT"'
+check "completed review leaves task working" 'OUT="$(b dm-task.sh state demo-1)"; grep -q working <<<"$OUT"'
 git -C "$WT" checkout -q -b feat/x/add-multiply
 printf 'def multiply(a,b):\n    return a*b\n' >> "$WT/src/calc.py"
 git -C "$WT" -c user.email=c@c.co -c user.name=c commit -qam "add multiply" >/dev/null
@@ -1105,6 +1191,15 @@ echo "== archive (prune a landed, torn-down task) =="
 b dm-task.sh new arch-wip --kind ship --repo demo >/dev/null
 check "archive refuses a non-done task"       '! b dm-task.sh archive arch-wip >/dev/null 2>&1'
 check "refused task keeps its meta"           '[ -f "$DM_HOME/state/tasks/arch-wip.meta" ]'
+DM_NO_FETCH=1 b dm-worktree.sh create arch-wip demo >"$TMP/archive-race.create" 2>&1 &
+ARCH_CREATE_PID=$!
+b dm-task.sh archive arch-wip >"$TMP/archive-race.archive" 2>&1 &
+ARCHIVE_PID=$!
+wait "$ARCH_CREATE_PID" || true
+wait "$ARCHIVE_PID" || true
+check "archive and worktree creation serialize without splitting task state" \
+  '[ -f "$DM_HOME/state/tasks/arch-wip.meta" ] && [ ! -f "$DM_HOME/state/archive/arch-wip.meta" ] && [ -d "$DM_HOME/state/worktrees/arch-wip" ]'
+b dm-worktree.sh remove arch-wip --force >/dev/null 2>&1
 # demo-1 landed and was torn down above (state done, no worktree) -> archivable.
 check "archive moves a done task's records"   'b dm-task.sh archive demo-1 >/dev/null'
 check "archived meta leaves tasks/"           '[ ! -f "$DM_HOME/state/tasks/demo-1.meta" ]'

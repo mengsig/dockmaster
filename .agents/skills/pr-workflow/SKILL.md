@@ -98,14 +98,21 @@ The file has a `gates` array. Run the gates top to bottom. A repo's delivery
 Immediately after approval and tier selection, record the first ready gate:
 
 ```
-bin/dm-task.sh approve <id> <fast|default|rigorous> <first-gate>
+bin/dm-task.sh approve <id> <fast|default|rigorous>
 ```
 
-For every gate, run `dm-task.sh gate <id> start <gate>` immediately before
-assigning its runtime owner; return it to `ready` if assignment fails. After
-success, atomically expose the next gate with
-`dm-task.sh gate <id> complete <gate> <next-gate>` (omit `<next-gate>` only when
-the pipeline is terminal). A ready gate is approved-but-unscheduled work;
+For every gate, reserve ownership first:
+
+```
+epoch="$(dm-task.sh gate <id> claim <gate> <thread-name>)"
+spawn_agent(...)
+dm-task.sh gate <id> start <gate> "$epoch" <returned-agent-id>
+```
+
+If assignment fails, run `gate <id> release <gate> "$epoch" "<reason>"`.
+After success, run `gate <id> complete <gate> "$epoch" "<evidence>"`. The task
+derives the next gate from the selected config; callers cannot skip or invent
+gates. A ready gate is approved-but-unscheduled work;
 `dm-task.sh ready-gates` and `dm-status.sh` surface it across restarts. Do not
 describe it as in progress unless `start` succeeded and a real owner exists.
 
@@ -117,9 +124,10 @@ blocker and reason:
 bin/dm-task.sh gate <id> block <rebase|merge-gate-review|final-tests|verify|security|pr|land> <blocker-id> "<reason>"
 ```
 
-After that blocker lands, transition the gate back to ready, rebase onto the new
-base, and rerun final review/tests before PR opening or landing. Never treat a
-cold review on the stale base as the final gate.
+After that blocker lands, `gate <id> ready <gate>` forces the recovery sequence
+`rebase → merge-gate-review → final-tests` before returning to the blocked gate.
+Then rerun final review/tests on the new base. Never treat a cold review on the
+stale base as the final gate.
 
 ## The canonical pipeline (two review passes)
 

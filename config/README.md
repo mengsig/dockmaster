@@ -25,6 +25,9 @@ By default the dockmaster runs the pipeline itself, driving each gate with the
 active runtime's subagent adapter while following `pr-workflow`. It
 reads:
 
+- each gate's unique **`id`**, the durable state-machine name. The task tool
+  derives the first and next gate from this ordered list; callers cannot supply
+  a replacement order or skip ahead.
 - the gate **order** (top to bottom), and
 - each review gate's **`pass`** label (`coldstart` | `merge-gate`), which names
   which of the two review passes it is.

@@ -171,8 +171,7 @@ clear_missing_worktree() {
   else
     note="$note; no git record held a head"
   fi
-  dm_meta_set "$id" worktree ""
-  dm_status_append "$id" discarded "$note"
+  dm_task_transition_locked "$id" discarded "$note" worktree ""
   dm_info "cleared stale worktree record for $id (directory was already absent: $recorded)"
 }
 
@@ -242,10 +241,16 @@ case "$cmd" in
     done
     [ -n "$id" ] && [ -n "$repo" ] || dm_die "usage: dm-worktree.sh create <id> <repo> [<branch>] [--base <ref>]"
     dm_require_id "$id"
+    meta="$(dm_meta_path "$id")"
+    dm_lock "$meta"
+    [ -n "$(dm_meta_get "$id" kind)" ] \
+      || dm_die "no task record for '$id' (or it has no kind); create it first: dm-task.sh new $id --kind ship|scout --repo $repo"
+    dm_require_complete_task_locked "$id"
+    dm_task_terminal_locked "$id" && dm_die "terminal task '$id' cannot receive a new worktree"
+    dm_review_active "$id" && dm_die "task '$id' has active review state; worktree creation refused"
     # Require an existing task record with a kind. Without it, create would write
     # a kind-less meta that `dm-task.sh state` cannot classify (it reconciles by
     # kind). Fail closed and point at the record-creating command.
-    [ -n "$(dm_meta_get "$id" kind)" ] || dm_die "no task record for '$id' (or it has no kind); create it first: dm-task.sh new $id --kind ship|scout --repo $repo"
     dir="$(dm_repo_dir "$repo")"
     # THE ONE EXEMPTION to "never operate on the distro" (#119). Cutting a
     # worktree off DM_HOME is exactly how dockmaster ships changes to itself
@@ -298,12 +303,15 @@ case "$cmd" in
       git -C "$dir" worktree add --detach "$wt" "$base" >/dev/null
     fi
     assert_isolated "$wt" "$repo" >/dev/null
-    dm_meta_set "$id" worktree "$wt"
-    dm_meta_set "$id" repo "$repo"
+    if [ -n "$base_ref" ]; then
+      dm_meta_set_fields_locked "$id" worktree "$wt" repo "$repo" base "$base_ref"
+    else
+      dm_meta_set_fields_locked "$id" worktree "$wt" repo "$repo"
+    fi
     # Record the parent ref so dm-pr.sh open can default the sub-PR's --base to
     # it (the "main PR" this child stacks on). Not a landing field: it carries
     # no forge risk analogous to pr/pr_state/merge_state.
-    [ -n "$base_ref" ] && dm_meta_set "$id" base "$base_ref"
+    dm_unlock "$meta"
     dm_info "$wt"
     ;;
 
@@ -383,6 +391,9 @@ case "$cmd" in
       esac
     done
     [ -n "$id" ] || dm_die "usage: dm-worktree.sh remove <id> [--force]"
+    meta="$(dm_meta_path "$id")"
+    dm_lock "$meta"
+    dm_require_complete_task_locked "$id"
     dm_review_active "$id" \
       && dm_die "REFUSED: $id still has an active Lavish review session or notification waiter. End the session and clear the waiter before cleanup."
     repo="$(dm_meta_get "$id" repo)"
@@ -395,13 +406,14 @@ case "$cmd" in
 Nothing remains to inspect, so the work cannot be proven landed — an interrupted cleanup leaves exactly this.
 If the path is merely unavailable (unmounted volume), restore it and retry. Otherwise re-run with --force (explicit discard authority) to clear the stale record."
       clear_missing_worktree "$id" "$repo" "$recorded"
+      dm_unlock "$meta"
       exit 0
     fi
     wt="$(require_managed_worktree "$id")"
     kind="$(dm_meta_get "$id" kind)"
     # Runs for EVERY kind so a mutable `kind` cannot switch the gate off (#127),
     # and under --force it decides whether a discard destroyed work (#120).
-    landed_rc=0; landed_out="$("$0" landed "$id" 2>&1)" || landed_rc=$?
+    landed_rc=0; landed_out="$(DM_NO_FETCH=1 "$0" landed "$id" 2>&1)" || landed_rc=$?
     if [ "$force" -eq 0 ]; then
       if [ "$kind" = "scout" ] && [ ! -f "$DM_DATA/$id/report.md" ]; then
         dm_die "REFUSED: scout $id has no report at data/$id/report.md. Produce the report, or pass --force only with explicit discard authority."
@@ -473,7 +485,8 @@ Inspect $wt. If its git record is broken or the work is expendable, re-run with 
       discard_orphan_worktree "$wt" "$id"
       dm_warn "removed $id's worktree directly: repo '$repo' does not resolve, so no clone to park its head into or prune its admin entry; any discarded commit could not be preserved"
     fi
-    dm_meta_set "$id" worktree ""
+    transition_state=working
+    transition_note="worktree removed"
     # Written here, not via dm-task.sh event, to bar forgery. Skipped only when
     # merge-signalled AND proven landed: else task pins (#69) or loss is silent (#120).
     if [ "$force" -eq 1 ]; then
@@ -490,9 +503,12 @@ Inspect $wt. If its git record is broken or the work is expendable, re-run with 
         fi
       fi
       if [ "$merge_signal" -eq 0 ] || [ "$landed_rc" -ne 0 ]; then
-        dm_status_append "$id" discarded "$discard_note"
+        transition_state=discarded
+        transition_note="$discard_note"
       fi
     fi
+    dm_task_transition_locked "$id" "$transition_state" "$transition_note" worktree ""
+    dm_unlock "$meta"
     dm_info "removed worktree for $id"
     ;;
 
