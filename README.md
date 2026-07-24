@@ -4,9 +4,7 @@
 
 **Talk to one agent. Ship across every repo.**
 
-> Latest release v0.2.0 · MIT licensed · Claude Code adapter released; the
-> OpenAI Codex adapter is on `main` but not yet in a tagged release
-> ([CHANGELOG](CHANGELOG.md))
+> Latest release v0.2.0 · MIT licensed · ([CHANGELOG](CHANGELOG.md))
 
 [![CI](https://github.com/mengsig/dockmaster/actions/workflows/ci.yml/badge.svg)](https://github.com/mengsig/dockmaster/actions/workflows/ci.yml)
 
@@ -15,20 +13,15 @@ never handles cargo itself, but directs a crew of dockhands (crewmates) working 
 the holds, hoisting cargo aboard the ships of your fleet, and reports back to you. See
 [the theme note](docs/architecture.md#the-dockyard) for the full mapping.
 
-dockmaster is an *agent distro* for Claude Code and OpenAI Codex: portable shared
-instructions, runtime-native skill adapters, and helper scripts that turn either
-session into a fleet handler. You talk to a single **dockmaster**; it runs
-autonomous workers in clean git worktrees and hands you finished PRs, approved
-local merges, or investigation reports.
+dockmaster is an *agent distro* for Claude Code: a portable operating contract,
+skills, and helper scripts that turn one session into a fleet handler. You talk
+to a single **dockmaster**; it runs autonomous workers in clean git worktrees and
+hands you finished PRs, approved local merges, or investigation reports.
 
-There is no bash daemon or terminal multiplexer. Shared lifecycle contracts stay
-in `AGENTS.md` and the toolbelt; `.claude/` and `.agents/` isolate each runtime's
-tool vocabulary. Both use native background collaboration and bounded waits, so
-one runtime never has to interpret the other's tool calls. See
-[docs/architecture.md](docs/architecture.md) and the checked
-[capability matrix](docs/runtime-capabilities.md).
-Installed-runtime and performance proof is recorded in
-[runtime validation](docs/runtime-validation.md).
+There is no bash daemon or terminal multiplexer. Lifecycle contracts live in
+`AGENTS.md` and the toolbelt; `.claude/skills/` holds the workflow skills, loaded
+at the trigger points the contract names. Background work uses the runtime's own
+agents and bounded waits. See [docs/architecture.md](docs/architecture.md).
 
 ## How it works
 
@@ -145,16 +138,14 @@ flowchart TD
 ## Layout
 
 ```
-AGENTS.md            runtime-neutral operating contract
+AGENTS.md            the operating contract
 docs/architecture.md the design and why it is built this way
 bin/                 the toolbelt; run `bin/dm help` for the full list (`bin/dm <sub>` dispatches to `bin/dm-<sub>.sh`)
-.claude/skills/      Claude-native workflow adapters
-.agents/skills/      Codex-native workflow adapters
-.codex/              trusted-project Codex nesting and safety config
+.claude/skills/      the workflow skills
 .dm-knowledge/       this repo's own committed shared-memory notes
 workflows/           optional deterministic PR-pipeline runner
 config/              PR-pipeline defaults and per-repo overrides
-tests/               lifecycle, parity, runtime, and performance checks
+tests/               lifecycle, runtime, and performance checks
 .github/             CI workflow (smoke + syntax on ubuntu + macos)
 CONTRIBUTING.md      how to test, portability rules, branch/commit style
 SECURITY.md          trust model and private vulnerability reporting
@@ -168,15 +159,14 @@ state/ repos/ data/  operator-private runtime, clones, and artifacts (gitignored
 1. **Clone** this repository and `cd` into it.
 2. **Run `bin/dm-doctor.sh`** — it checks your tools and GitHub auth and
    scaffolds the runtime layout (`state/`, `data/`, `repos/`).
-3. **Launch Claude Code or Codex** in the repo root and accept its project trust
-   prompt. Claude loads `CLAUDE.md` → `AGENTS.md`; Codex loads `AGENTS.md` and
-   the trusted `.codex/config.toml` layer.
+3. **Launch Claude Code** in the repo root and accept its project trust prompt.
+   It loads `CLAUDE.md` → `AGENTS.md`.
 4. **Ask it to add a repo** and give it work (see Quick start).
 
 ## Quick start
 
 ```sh
-# from a Claude Code or Codex session started in this directory:
+# from a Claude Code session started in this directory:
 > add my repo git@github.com:me/app.git and fix the flaky login test in #412
 ```
 
@@ -276,9 +266,8 @@ Import prints what it could not carry and how to re-establish it, then run
 
 Supported platforms: macOS and Linux; the scripts run on bash 3.2+.
 
-- **Required for anything:** one authenticated runtime (Claude Code or Codex),
-  plus `git` and `jq`. Select explicitly with `bin/dm-doctor.sh check --runtime
-  claude|codex`; the default `auto` accepts either and never requires both.
+- **Required for anything:** an authenticated Claude Code CLI, plus `git` and
+  `jq`. `bin/dm-doctor.sh check` reports all three.
 - **Local-only mode needs nothing further.** Worktree isolation, scouts, the
   review gate, tests, and approved fast-forward landing all work with just the
   above.
@@ -314,12 +303,12 @@ Node 14 or newer; CI checks that documented minimum. CLI startup timing is an
 opt-in, bounded, non-fatal diagnostic:
 `DM_RUNTIME_STARTUP_SAMPLE=1 bash tests/runtime-performance.sh`.
 
-Run `node tests/check-runtime-parity.js` for adapter/capability drift,
+Run `node tests/check-skill-triggers.js` for skill/trigger drift,
 `bash tests/runtime-performance.sh` for context guardrails, and
-`bash tests/runtime-smoke.sh` for installed-runtime structured discovery,
-trusted rule/hook guardrails, and config checks. Runtime smoke deletes its
-evidence on success or failure; add `--keep-evidence` only when sanitized
-version/status artifacts are needed for a report.
+`bash tests/runtime-smoke.sh` for the command-guard probes and installed-CLI
+checks. Runtime smoke deletes its evidence on success or failure; add
+`--keep-evidence` only when sanitized version/status artifacts are needed for a
+report.
 
 ## License
 

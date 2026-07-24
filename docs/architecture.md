@@ -1,45 +1,42 @@
 # dockmaster architecture
 
-dockmaster is an **agent distro**: shared instructions, runtime-native skill
-adapters, helper scripts, and state conventions that turn either Claude Code or
-OpenAI Codex into a fleet handler. You talk to one **dockmaster**; it runs a crew
-of autonomous subagents across many repositories.
+dockmaster is an **agent distro** for Claude Code: shared instructions, skills,
+helper scripts, and state conventions that turn one session into a fleet handler.
+You talk to one **dockmaster**; it runs a crew of autonomous subagents across
+many repositories.
 
-The shared layer owns policy and durable state. Runtime adapters own tool nouns
-and scheduling semantics: `.claude/skills/` for Claude, `.agents/skills/` plus
-trusted `.codex/config.toml` for Codex. They have exact skill-name parity but are
-never loaded by the other runtime. This keeps prompt context clean while
-preserving one lifecycle and one toolbelt.
+The shared layer owns policy and durable state; `.claude/skills/` holds the
+workflow skills, loaded only at the trigger points `AGENTS.md` names. This keeps
+prompt context clean while preserving one lifecycle and one toolbelt.
 
 ## The core bet
 
-> Keep lifecycle policy shared; use each runtime's native collaboration and wait
-> primitives behind an adapter. Never teach one runtime the other's tool schema.
+> Keep lifecycle policy in the shared contract and the toolbelt; use the
+> runtime's native collaboration and wait primitives, loaded on demand.
 
-| concern | shared contract | Claude adapter | Codex adapter |
-| --- | --- | --- | --- |
-| liaison | `AGENTS.md` | `CLAUDE.md` includes it | Codex discovers it directly |
-| per-task worker | one task / one worktree | background `Agent` | `spawn_agent`, `fork_turns="none"` |
-| supervision | durable state + no daemon | completion notification, task controls | mailbox, `wait_agent`, collaboration controls |
-| follow-up / steering | same worker identity | `SendMessage` | `send_message` / `followup_task` |
-| external wait | bounded command + native wake | `Monitor` or schedule | attached command, waiter subagent, or scheduled task |
-| nested domain crew | root → secondmate → worker | native nested agents | `agents.max_depth=2`, six-thread cap |
-| worktree isolation | `bin/dm-worktree.sh` | worktree-aware agent | brief-pinned existing worktree |
-| durable backlog | `state/backlog.json` + rendered markdown | task list mirror | thread list mirror |
-| project registry | `state/repos.json` + clones under `repos/` | shared | shared |
-| global memory | `state/operator.md`, `state/learnings.md`, optional runtime memory | shared | shared |
-| per-repo memory | committed `.dm-knowledge/` notes + private `.dm/` stores | shared | shared |
-| delivery modes | modular **PR pipeline** (ordered gates) per repo | shared | shared |
-| no-mistakes gate | review/test/security gates + optional runner | Claude reviewers | Codex fresh subagents; focused fallback if optional review skill absent |
-| right-sizing | task shape, review tier, focused context | per-agent model/effort where available | agent count and prompt scope; no unproved per-spawn selector |
-| review surface | lavish-axi | background poll notification | no-fork waiter completion notification |
-| self-update / fleet sync | guarded fast-forward via `bin/` | shared | shared |
-| stacked sub-PRs | recorded parent base + guarded PR open | shared | shared |
+| concern | shared contract | runtime mechanism |
+| --- | --- | --- |
+| liaison | `AGENTS.md` | `CLAUDE.md` includes it |
+| per-task worker | one task / one worktree | background `Agent` |
+| supervision | durable state + no daemon | completion notification, task controls |
+| follow-up / steering | same worker identity | `SendMessage` |
+| external wait | bounded command + native wake | `Monitor` or schedule |
+| nested domain crew | root → secondmate → worker | native nested agents |
+| worktree isolation | `bin/dm-worktree.sh` | worktree-aware agent |
+| durable backlog | `state/backlog.json` + rendered markdown | task list mirror |
+| project registry | `state/repos.json` + clones under `repos/` | shared |
+| global memory | `state/operator.md`, `state/learnings.md`, optional runtime memory | shared |
+| per-repo memory | committed `.dm-knowledge/` notes + private `.dm/` stores | shared |
+| delivery modes | modular **PR pipeline** (ordered gates) per repo | shared |
+| no-mistakes gate | review/test/security gates + optional runner | fresh Agent reviewers |
+| right-sizing | task shape, review tier, focused context | per-agent model/effort |
+| review surface | lavish-axi | background poll notification |
+| self-update / fleet sync | guarded fast-forward via `bin/` | shared |
+| stacked sub-PRs | recorded parent base + guarded PR open | shared |
 
 The result remains a small distro with no supervisor daemon. Each worker is a
-full runtime agent, while generated briefs and `fork_turns="none"` keep redundant
-parent context out of Codex workers. The complete mapping and evidence live in
-[`runtime-capabilities.md`](runtime-capabilities.md).
+full runtime agent, and a generated brief keeps redundant parent context out of
+it.
 
 ## The Dockyard
 
@@ -269,8 +266,8 @@ session or a scheduled task for long-running/recurring work.
 
 Independent work dispatches in bounded waves within runtime capacity. Durable
 thread name is recorded before spawn; returned runtime id is recorded before the
-backlog item moves to in-flight. Codex keeps three of six slots available for
-approval, recovery, and review work.
+backlog item moves to in-flight. Capacity is kept in reserve for approval,
+recovery, and review work.
 Work that touches the same
 repo subsystem, or depends on unlanded work, is serialized or recorded as
 blocked. Every ship task runs in its **own** worktree created by
@@ -289,10 +286,7 @@ and reports. Never forced, never discards unlanded work.
 Every requested change follows one canonical flow. The crewmate implements in
 its worktree and renders the change as a **lavish review artifact**; the operator
 approves it (with back-and-forth, all mediated by the dockmaster); only then does
-the dockmaster ask **PR or local**. See the active runtime's `change-review` skill.
-Codex approval polls run inside a dedicated no-fork waiter: the waiter owns any
-yielded terminal session through exit, and its subagent completion wakes the
-dockmaster mailbox. A raw terminal session is never treated as a wake source.
+the dockmaster ask **PR or local**. See the `change-review` skill.
 
 On the PR path, delivery is an **ordered list of named gates** declared per repo
 in `config/pr-pipeline.<repo>.json` (falling back to
@@ -339,13 +333,11 @@ AGENTS.md                operating contract for the dockmaster (CLAUDE.md → th
 README.md                overview
 docs/architecture.md     this file
 bin/                     portable helper scripts (repo/worktree/pr/backlog/merge/memory)
-.claude/skills/          Claude-native workflow adapters
-.agents/skills/          Codex-native workflow adapters
-.codex/                  trusted-project Codex config/rules (including hooks)
+.claude/skills/          the workflow skills
 .dm-knowledge/           this repo's own committed shared-memory notes
 workflows/               optional Workflow runner for the PR pipeline (opt-in)
 config/                  pipeline defaults + per-repo overrides (committed defaults)
-tests/                   lifecycle, parity, runtime, and performance checks
+tests/                   lifecycle, runtime, and performance checks
 .github/                 CI workflow (smoke + syntax on ubuntu + macos)
 CONTRIBUTING.md          how to test, portability rules, branch/commit style
 SECURITY.md              trust model and private vulnerability reporting
@@ -363,6 +355,5 @@ operating contract plus an index into the notes. Recall still unions the legacy
 block for managed repos that have not migrated, so nothing is stranded.
 
 `state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
-tracked surface (`AGENTS.md`, `bin/`, both runtime adapters, `.codex/`,
-`workflows/`, `config/` defaults, docs) is the shared distro and ships through
-this repo's own PR path.
+tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `workflows/`, `config/`
+defaults, docs) is the shared distro and ships through this repo's own PR path.

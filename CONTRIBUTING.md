@@ -1,15 +1,15 @@
 # Contributing
 
-dockmaster is an agent distro: the tracked surface (`AGENTS.md`, `bin/`, both
-runtime skill adapters, `.codex/`, `workflows/`, `config/` defaults, `docs/`) is
-the shared distro; `state/`, `repos/`, `data/`, and `.env` are operator-private
-and gitignored. Changes to the tracked surface go through this repo's own PR path.
+dockmaster is an agent distro: the tracked surface (`AGENTS.md`, `bin/`,
+`.claude/skills/`, `workflows/`, `config/` defaults, `docs/`) is the shared
+distro; `state/`, `repos/`, `data/`, and `.env` are operator-private and
+gitignored. Changes to the tracked surface go through this repo's own PR path.
 
 ## Testing
 
 ```sh
 bash tests/smoke.sh
-node tests/check-runtime-parity.js
+node tests/check-skill-triggers.js
 bash tests/runtime-performance.sh
 bash tests/runtime-smoke.sh
 ```
@@ -23,9 +23,8 @@ behavior.
 CI (`.github/workflows/ci.yml`) runs on `ubuntu-latest` and `macos-latest` for
 every pull request and every push to `main` (a push to a feature branch with no
 open PR does not trigger it). Beyond the four commands above it also runs
-`tests/check-gate-drift.js`, `tests/check-pr-runner.js`, a deterministic
-waiter-child check, and `tests/runtime-codex-offline.sh` (which installs the
-pinned Codex CLI), plus bash/JS syntax and bash-3.2 lint checks. A separate
+`tests/check-gate-drift.js`, `tests/check-pr-runner.js`, and a deterministic
+waiter-child check, plus bash/JS syntax and bash-3.2 lint checks. A separate
 `node14-compat` job re-runs the JS checks under Node 14 on ubuntu only.
 
 ## Portability

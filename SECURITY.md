@@ -25,9 +25,7 @@ look:
 - **The destructive-command guard is a guardrail, not a security boundary.**
   `bin/dm-command-guard.sh` parses shell commands and refuses destructive Git
   forms; the script is the authority and [Command guard](#command-guard) below
-  describes it. `.codex/rules/dockmaster.rules` is a **coarser second layer**,
-  not a mirror of it: seven argv-prefix rules against an allowlist that refuses
-  dozens more.
+  describes it.
 
   Be precise about what the guard is for. It raises the cost of an *accidental*
   destructive command and catches the forms an agent actually emits — which is
@@ -62,8 +60,8 @@ look:
 
 ## Command guard
 
-`bin/dm-command-guard.sh` is a PreToolUse hook (wired from `.codex/config.toml`)
-that parses a shell command and refuses Git forms that can lose work. It is an
+`bin/dm-command-guard.sh` is a PreToolUse hook handler that parses a shell
+command and refuses Git forms that can lose work. It is an
 **allowlist**: a Git subcommand is refused unless it is named permitted, so an
 unrecognized or future subcommand fails closed.
 
@@ -170,7 +168,9 @@ the only thing standing between an agent and a repository:
   one on the command line is.
 - It does not restrict non-Git destruction (`rm -rf`, a build script, an
   interpreter). Worktree isolation and the operating contract carry that.
-- It is enforced on the Codex runtime today; Claude-side wiring is #89.
+- It is **not wired into a runtime today**: it is reachable as
+  `dm-command-guard.sh check <command>` and as a hook handler, but nothing
+  installs it as a PreToolUse hook. Claude-side wiring is #89.
 
 Guarded toolbelt paths and the operating contract remain the primary controls.
 
