@@ -878,7 +878,8 @@ check "legacy lavish flow creates no Codex session state" \
 
 echo "== Lavish session/waiter cleanup guard =="
 FAKE_LAVISH="$TMP/fake-lavish"; mkdir -p "$FAKE_LAVISH"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
+FAKE_LAVISH_CALLS="$TMP/legacy-lavish.calls"; export FAKE_LAVISH_CALLS
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$FAKE_LAVISH_CALLS"\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
 axilav() { PATH="$FAKE_LAVISH:$PATH" "$ROOT/bin/dm-lavish.sh" "$@"; }
 LEGACY_REVIEW_ID="review-legacy"
@@ -888,17 +889,53 @@ LEGACY_ART="$(b dm-lavish.sh path "$LEGACY_REVIEW_ID")"
 printf '<!doctype html><title>legacy review</title>\n' > "$LEGACY_ART"
 check "Claude legacy open/poll/end keep the no-epoch interface" \
   'axilav open "$LEGACY_REVIEW_ID" >/dev/null && axilav poll "$LEGACY_REVIEW_ID" >/dev/null && axilav end "$LEGACY_REVIEW_ID" >/dev/null'
-check "Claude legacy review leaves no guarded session and cleans up normally" \
+check "Claude legacy flow makes the exact historical lavish-axi calls" \
+  '[ "$(sed -n "1p" "$FAKE_LAVISH_CALLS")" = "$LEGACY_ART" ] &&
+   [ "$(sed -n "2p" "$FAKE_LAVISH_CALLS")" = "poll $LEGACY_ART" ] &&
+   [ "$(sed -n "3p" "$FAKE_LAVISH_CALLS")" = "end $LEGACY_ART" ] &&
+   [ "$(wc -l < "$FAKE_LAVISH_CALLS" | tr -d " ")" = 3 ]'
+check "unmarked Claude flow refuses guarded selection without creating state" \
+  '! axilav open "$LEGACY_REVIEW_ID" --guarded >/dev/null 2>&1 &&
+   ! b dm-task.sh set "$LEGACY_REVIEW_ID" review_protocol codex-guarded-v1 >/dev/null 2>&1 &&
+   [ "$(wc -l < "$FAKE_LAVISH_CALLS" | tr -d " ")" = 3 ] &&
+   [ -z "$(b dm-task.sh get "$LEGACY_REVIEW_ID" review_protocol)" ]'
+check "Claude legacy review leaves no guarded state and cleans up normally" \
   '[ -z "$(b dm-task.sh get "$LEGACY_REVIEW_ID" review_session_state)" ] &&
    [ -z "$(b dm-task.sh get "$LEGACY_REVIEW_ID" review_session_epoch)" ] &&
+   [ -z "$(b dm-task.sh get "$LEGACY_REVIEW_ID" review_session_generation)" ] &&
    b dm-worktree.sh remove "$LEGACY_REVIEW_ID" --force >/dev/null 2>&1 &&
    [ ! -d "$LEGACY_REVIEW_WT" ]'
 REVIEW_ID="review-pipeline"
 b dm-task.sh new "$REVIEW_ID" --kind ship --repo demo --mode pipeline >/dev/null
 REVIEW_WT="$(b dm-worktree.sh create "$REVIEW_ID" demo | tail -n1)"
-b dm-task.sh approve "$REVIEW_ID" fast >/dev/null
 PIPE_ART="$(b dm-lavish.sh path "$REVIEW_ID")"
 printf '<!doctype html><title>pipeline review</title>\n' > "$PIPE_ART"
+check "Codex review preparation is durable and delivery-neutral" \
+  'axilav prepare "$REVIEW_ID" &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" review_protocol)" = codex-guarded-v1 ] &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = prepared ] &&
+   [ -z "$(b dm-task.sh get "$REVIEW_ID" pipeline_repo)" ] &&
+   [ -z "$(b dm-task.sh get "$REVIEW_ID" approved_at)" ] &&
+   [ -z "$(b dm-task.sh get "$REVIEW_ID" pipeline_plan)" ]'
+check "guarded task cannot silently enter the legacy review path" \
+  '! axilav open "$REVIEW_ID" >/dev/null 2>&1 &&
+   ! axilav poll "$REVIEW_ID" >/dev/null 2>&1 &&
+   ! axilav end "$REVIEW_ID" >/dev/null 2>&1'
+check "restart after preparation is idempotent and remains cleanup-protected" \
+  'axilav prepare "$REVIEW_ID" &&
+   ERR="$(b dm-worktree.sh remove "$REVIEW_ID" --force 2>&1 || true)";
+   grep -q "active Lavish review session or notification waiter" <<<"$ERR" &&
+   [ -d "$REVIEW_WT" ]'
+check "prepared-review crash recovery can cancel without downgrading protocol" \
+  'axilav cancel "$REVIEW_ID" --guarded &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ] &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" review_protocol)" = codex-guarded-v1 ] &&
+   axilav prepare "$REVIEW_ID" &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = prepared ]'
+check "pipeline approval refuses a prepared but incomplete guarded review" \
+  '! b dm-task.sh approve "$REVIEW_ID" fast >/dev/null 2>&1 &&
+   [ -z "$(b dm-task.sh get "$REVIEW_ID" pipeline_repo)" ] &&
+   [ -z "$(b dm-task.sh get "$REVIEW_ID" approved_at)" ]'
 WAITER_THREAD="$(b dm-thread-name.sh "$REVIEW_ID" review_waiter)"
 UNPREPARED_THREAD="$(b dm-thread-name.sh waiter-unprepared review_waiter)"
 b dm-task.sh new waiter-unprepared --kind ship --repo demo --mode pipeline >/dev/null
@@ -927,35 +964,42 @@ check "prepare refuses to erase a reusable idle identity" \
 check "idle waiter reactivation requires its exact identity" \
   '! b dm-task.sh waiter "$REVIEW_ID" active "$WAITER_THREAD" "$WAITER_EPOCH" /root/different-waiter >/dev/null 2>&1 && b dm-task.sh waiter "$REVIEW_ID" active "$WAITER_THREAD" "$WAITER_EPOCH" /root/review-waiter >/dev/null'
 check "opening Lavish records active session" \
-  'REVIEW_EPOCH="$(axilav open "$REVIEW_ID")" && export REVIEW_EPOCH && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = active ] && [ -n "$(b dm-task.sh get "$REVIEW_ID" review_session_started_at)" ]'
-check "poll requires and accepts active session" 'axilav poll "$REVIEW_ID" "$REVIEW_EPOCH" >/dev/null'
+  'REVIEW_EPOCH="$(axilav open "$REVIEW_ID" --guarded)" && export REVIEW_EPOCH && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = active ] && [ -n "$(b dm-task.sh get "$REVIEW_ID" review_session_started_at)" ]'
+check "poll requires and accepts active session" 'axilav poll "$REVIEW_ID" "$REVIEW_EPOCH" --guarded >/dev/null'
 check "active session prevents worktree cleanup" \
   'ERR="$(b dm-worktree.sh remove "$REVIEW_ID" --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$REVIEW_WT" ]'
-check "ending session and waiter clears durable identities" \
-  'axilav end "$REVIEW_ID" "$REVIEW_EPOCH" >/dev/null && b dm-task.sh waiter "$REVIEW_ID" terminal "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ] && [ -z "$(b dm-task.sh get "$REVIEW_ID" waiter_agent_id)" ] && [ "$(b dm-task.sh get "$REVIEW_ID" waiter_state)" = terminal ]'
-check "poll refuses after session end" '! axilav poll "$REVIEW_ID" "$REVIEW_EPOCH" >/dev/null 2>&1'
+check "terminal session cannot bind delivery while its waiter remains live" \
+  'axilav end "$REVIEW_ID" "$REVIEW_EPOCH" --guarded >/dev/null &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ] &&
+   ! b dm-task.sh approve "$REVIEW_ID" fast >/dev/null 2>&1 &&
+   [ -z "$(b dm-task.sh get "$REVIEW_ID" pipeline_repo)" ]'
+check "ending the waiter clears the final durable review identity" \
+  'b dm-task.sh waiter "$REVIEW_ID" terminal "$WAITER_EPOCH" /root/review-waiter >/dev/null &&
+   [ -z "$(b dm-task.sh get "$REVIEW_ID" waiter_agent_id)" ] &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" waiter_state)" = terminal ]'
+check "poll refuses after session end" '! axilav poll "$REVIEW_ID" "$REVIEW_EPOCH" --guarded >/dev/null 2>&1'
 printf '%s\n' '#!/usr/bin/env bash' \
   'printf "%s\n" "$*" >> "$FAKE_LAVISH_CALLS"' \
   'exit 9' > "$FAKE_LAVISH/lavish-axi"
 FAKE_LAVISH_CALLS="$TMP/failed-open.calls"; export FAKE_LAVISH_CALLS
 check "partial open failure attempts cleanup and retains an uncertain guard" \
-  '! axilav open "$REVIEW_ID" >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = cleanup-uncertain ] && grep -q "^end " "$FAKE_LAVISH_CALLS"'
+  '! axilav open "$REVIEW_ID" --guarded >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = cleanup-uncertain ] && grep -q "^end " "$FAKE_LAVISH_CALLS"'
 check "uncertain failed-open cleanup still prevents worktree removal" \
   '! b dm-worktree.sh remove "$REVIEW_ID" --force >/dev/null 2>&1 && [ -d "$REVIEW_WT" ]'
 printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
 check "uncertain cleanup can be retried by exact epoch" \
-  'UNCERTAIN_EPOCH="$(b dm-task.sh get "$REVIEW_ID" review_session_epoch)" && axilav end "$REVIEW_ID" "$UNCERTAIN_EPOCH" >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
+  'UNCERTAIN_EPOCH="$(b dm-task.sh get "$REVIEW_ID" review_session_epoch)" && axilav end "$REVIEW_ID" "$UNCERTAIN_EPOCH" --guarded >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
 printf '#!/usr/bin/env bash\nif [ "${1:-}" = end ]; then exit 0; fi\nexit 9\n' > "$FAKE_LAVISH/lavish-axi"
 check "failed open clears only after external cleanup is confirmed" \
-  '! axilav open "$REVIEW_ID" >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
+  '! axilav open "$REVIEW_ID" --guarded >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
 printf '#!/usr/bin/env bash\n[ "${1:-}" != end ]\n' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
-FAIL_END_EPOCH="$(axilav open "$REVIEW_ID")"
+FAIL_END_EPOCH="$(axilav open "$REVIEW_ID" --guarded)"
 check "failed end remains guarded and rejects stale epochs" \
-  '! axilav end "$REVIEW_ID" "$FAIL_END_EPOCH" >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = cleanup-uncertain ] && ! axilav end "$REVIEW_ID" 999 >/dev/null 2>&1'
+  '! axilav end "$REVIEW_ID" "$FAIL_END_EPOCH" --guarded >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = cleanup-uncertain ] && ! axilav end "$REVIEW_ID" 999 --guarded >/dev/null 2>&1'
 printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
 check "same epoch can retry a failed end" \
-  'axilav end "$REVIEW_ID" "$FAIL_END_EPOCH" >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
+  'axilav end "$REVIEW_ID" "$FAIL_END_EPOCH" --guarded >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
 
 LAVISH_HANG_PID="$TMP/lavish-hang.pid"
 printf '%s\n' '#!/usr/bin/env bash' \
@@ -966,15 +1010,15 @@ printf '%s\n' '#!/usr/bin/env bash' \
   'fi' \
   'exit 0' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
-HANG_END_EPOCH="$(LAVISH_HANG_PID="$LAVISH_HANG_PID" axilav open "$REVIEW_ID")"
+HANG_END_EPOCH="$(LAVISH_HANG_PID="$LAVISH_HANG_PID" axilav open "$REVIEW_ID" --guarded)"
 HANG_END_STATUS=0
-LAVISH_HANG_PID="$LAVISH_HANG_PID" axilav end "$REVIEW_ID" "$HANG_END_EPOCH" >/dev/null 2>&1 || HANG_END_STATUS=$?
+LAVISH_HANG_PID="$LAVISH_HANG_PID" axilav end "$REVIEW_ID" "$HANG_END_EPOCH" --guarded >/dev/null 2>&1 || HANG_END_STATUS=$?
 HANG_PID="$(cat "$LAVISH_HANG_PID")"
 check "hung cleanup is TERM/KILL bounded and fails closed" \
   '[ "$HANG_END_STATUS" -ne 0 ] && ! kill -0 "$HANG_PID" 2>/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = cleanup-uncertain ]'
 printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
 check "bounded cleanup guard remains retryable" \
-  'axilav end "$REVIEW_ID" "$HANG_END_EPOCH" >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
+  'axilav end "$REVIEW_ID" "$HANG_END_EPOCH" --guarded >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
 
 SLOW_READY="$TMP/slow-open.ready"
 SLOW_RELEASE="$TMP/slow-open.release"
@@ -983,16 +1027,16 @@ printf '%s\n' '#!/usr/bin/env bash' \
   ': > "$SLOW_READY"' \
   'while [ ! -e "$SLOW_RELEASE" ]; do :; done' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
-SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav open "$REVIEW_ID" >"$TMP/slow-open.epoch" &
+SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav open "$REVIEW_ID" --guarded >"$TMP/slow-open.epoch" &
 SLOW_PID=$!
 while [ ! -e "$SLOW_READY" ] && kill -0 "$SLOW_PID" 2>/dev/null; do :; done
 [ -e "$SLOW_READY" ] || { wait "$SLOW_PID" || true; bad "slow Lavish open reached coordination point"; exit 1; }
 SLOW_EPOCH="$(b dm-task.sh get "$REVIEW_ID" review_session_epoch)"
-SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav end "$REVIEW_ID" "$SLOW_EPOCH" >/dev/null
+SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav end "$REVIEW_ID" "$SLOW_EPOCH" --guarded >/dev/null
 : > "$SLOW_RELEASE"
 wait "$SLOW_PID"
 check "close during slow open cannot resurrect the session" \
-  '[ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ] && ! axilav poll "$REVIEW_ID" "$SLOW_EPOCH" >/dev/null 2>&1'
+  '[ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ] && ! axilav poll "$REVIEW_ID" "$SLOW_EPOCH" --guarded >/dev/null 2>&1'
 
 POLL_READY="$TMP/stale-poll.ready"
 POLL_RELEASE="$TMP/stale-poll.release"
@@ -1005,18 +1049,25 @@ printf '%s\n' '#!/usr/bin/env bash' \
   'fi' \
   'exit 0' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
-POLL_EPOCH="$(POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav open "$REVIEW_ID")"
+POLL_EPOCH="$(POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav open "$REVIEW_ID" --guarded)"
 POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" \
-  axilav poll "$REVIEW_ID" "$POLL_EPOCH" >"$TMP/stale-poll.out" 2>"$TMP/stale-poll.err" &
+  axilav poll "$REVIEW_ID" "$POLL_EPOCH" --guarded >"$TMP/stale-poll.out" 2>"$TMP/stale-poll.err" &
 POLL_PID=$!
 while [ ! -e "$POLL_READY" ] && kill -0 "$POLL_PID" 2>/dev/null; do :; done
 [ -e "$POLL_READY" ] || { wait "$POLL_PID" || true; bad "poll reached stale-epoch coordination point"; exit 1; }
-POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav end "$REVIEW_ID" "$POLL_EPOCH" >/dev/null
+POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav end "$REVIEW_ID" "$POLL_EPOCH" --guarded >/dev/null
 : > "$POLL_RELEASE"
 POLL_RC=0; wait "$POLL_PID" || POLL_RC=$?
 STALE_FEEDBACK="$(find "$(dirname "$PIPE_ART")" -name "stale-feedback.$POLL_EPOCH.*" -type f -print -quit)"
 check "poll revalidates epoch and quarantines stale feedback" \
   '[ "$POLL_RC" -ne 0 ] && [ -n "$STALE_FEEDBACK" ] && grep -q "stale operator feedback" "$STALE_FEEDBACK" && ! grep -q "stale operator feedback" "$TMP/stale-poll.out"'
+check "pipeline approval binds only after guarded review terminal" \
+  'b dm-task.sh approve "$REVIEW_ID" fast >/dev/null &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" pipeline_repo)" = demo ] &&
+   [ -n "$(b dm-task.sh get "$REVIEW_ID" approved_at)" ] &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" review_protocol)" = codex-guarded-v1 ] &&
+   [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ] &&
+   ! axilav open "$REVIEW_ID" --guarded >/dev/null 2>&1'
 
 b dm-task.sh new review-archive --kind scout --repo demo >/dev/null
 ARCHIVE_WAITER="$(b dm-thread-name.sh review-archive review_waiter)"
@@ -1029,6 +1080,20 @@ check "active waiter prevents otherwise-valid archive" \
   'ERR="$(b dm-task.sh archive review-archive 2>&1 || true)"; grep -q "Lavish review session or notification waiter is active" <<<"$ERR" && [ -f "$DM_HOME/state/tasks/review-archive.meta" ]'
 check "terminal waiter permits archive" \
   'b dm-task.sh waiter review-archive terminal "$ARCHIVE_EPOCH" /root/archive-waiter >/dev/null && b dm-task.sh archive review-archive >/dev/null && [ -f "$DM_HOME/state/archive/review-archive.meta" ]'
+b dm-task.sh new prepared-review-archive --kind scout --repo demo >/dev/null
+PREPARED_ARCHIVE_ART="$(b dm-lavish.sh path prepared-review-archive)"
+printf '<!doctype html><title>prepared archive</title>\n' > "$PREPARED_ARCHIVE_ART"
+b dm-lavish.sh prepare prepared-review-archive
+mkdir -p "$DM_HOME/data/prepared-review-archive"
+printf '# report\n' > "$DM_HOME/data/prepared-review-archive/report.md"
+check "prepared guarded review prevents otherwise-valid archive" \
+  '! b dm-task.sh archive prepared-review-archive >/dev/null 2>&1 &&
+   [ -f "$DM_HOME/state/tasks/prepared-review-archive.meta" ]'
+check "cancelling unopened review permits archive without erasing protocol" \
+  'b dm-lavish.sh cancel prepared-review-archive --guarded &&
+   [ "$(b dm-task.sh get prepared-review-archive review_protocol)" = codex-guarded-v1 ] &&
+   b dm-task.sh archive prepared-review-archive >/dev/null &&
+   [ -f "$DM_HOME/state/archive/prepared-review-archive.meta" ]'
 b dm-task.sh new malformed-review --kind scout --repo demo >/dev/null
 mkdir -p "$DM_HOME/data/malformed-review"
 printf '# report\n' > "$DM_HOME/data/malformed-review/report.md"
@@ -1039,6 +1104,33 @@ check "malformed active waiter still prevents archive" \
   '! b dm-task.sh archive malformed-review >/dev/null 2>&1 && [ -f "$DM_HOME/state/tasks/malformed-review.meta" ]'
 check "explicit terminal recovery releases malformed active state" \
   'b dm-task.sh waiter malformed-review recover active - - malformed-recovery >/dev/null && b dm-task.sh archive malformed-review >/dev/null && [ -f "$DM_HOME/state/archive/malformed-review.meta" ]'
+b dm-task.sh new malformed-review-protocol --kind scout --repo demo >/dev/null
+mkdir -p "$DM_HOME/data/malformed-review-protocol"
+printf '# report\n' > "$DM_HOME/data/malformed-review-protocol/report.md"
+( . "$ROOT/bin/dm-lib.sh"
+  dm_meta_set_fields malformed-review-protocol review_protocol codex-guarded-v1 review_session_state ""
+)
+check "guarded marker with missing state fails closed for CLI and archive" \
+  '! b dm-lavish.sh cancel malformed-review-protocol --guarded >/dev/null 2>&1 &&
+   ! b dm-task.sh archive malformed-review-protocol >/dev/null 2>&1 &&
+   [ -f "$DM_HOME/state/tasks/malformed-review-protocol.meta" ]'
+b dm-task.sh new missing-review-protocol --kind ship --repo demo --mode pipeline >/dev/null
+( . "$ROOT/bin/dm-lib.sh"
+  dm_meta_set_fields missing-review-protocol review_session_state active \
+    review_session_epoch 7 review_session_mode tool
+)
+check "durable review state without a marker never falls back to legacy" \
+  '! b dm-lavish.sh poll missing-review-protocol >/dev/null 2>&1 &&
+   ! b dm-lavish.sh end missing-review-protocol >/dev/null 2>&1 &&
+   [ "$(b dm-task.sh get missing-review-protocol review_session_state)" = active ]'
+b dm-task.sh new unknown-review-protocol --kind ship --repo demo --mode pipeline >/dev/null
+( . "$ROOT/bin/dm-lib.sh"
+  dm_meta_set_fields unknown-review-protocol review_protocol future-protocol review_session_state terminal
+)
+check "unknown guarded protocol refuses review and later approval" \
+  '! b dm-lavish.sh open unknown-review-protocol --guarded >/dev/null 2>&1 &&
+   ! b dm-task.sh approve unknown-review-protocol fast >/dev/null 2>&1 &&
+   [ -z "$(b dm-task.sh get unknown-review-protocol pipeline_repo)" ]'
 
 echo "== state reconciliation =="
 check "completed guarded review leaves task working" 'OUT="$(b dm-task.sh state "$REVIEW_ID")"; grep -q working <<<"$OUT"'

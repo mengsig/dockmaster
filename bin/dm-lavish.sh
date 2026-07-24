@@ -7,10 +7,12 @@
 # worktree) so it survives teardown and never dirties the worktree.
 #
 # Commands:
-#   path <id>          print (and create the dir for) the artifact path
-#   open <id>          open a review; opt-in pipelines print a session epoch
-#   poll <id> [epoch]  legacy poll, or exact opt-in pipeline session poll
-#   end  <id> [epoch]  legacy end, or exact opt-in pipeline session end
+#   path <id>                         print/create the artifact path
+#   prepare <id>                      opt in to guarded Codex review
+#   open <id> [--guarded]             legacy open, or guarded open with epoch
+#   poll <id> [epoch] [--guarded]     legacy poll, or exact guarded poll
+#   end <id> [epoch] [--guarded]      legacy end, or exact guarded end
+#   cancel <id> --guarded             cancel a prepared, unopened review
 #
 # lavish-axi is an OPTIONAL review tool: it drives the interactive browser
 # surface. The artifact (change.html) is written by the crewmate regardless, so
@@ -22,15 +24,25 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_ensure_dirs
 
-id="${2:-}"; [ -n "$id" ] || { echo "usage: dm-lavish.sh {path|open|poll|end} <id> [epoch]" >&2; exit 2; }
+id="${2:-}"; [ -n "$id" ] || { echo "usage: dm-lavish.sh {path|prepare|open|poll|end|cancel} <id> [epoch] [--guarded]" >&2; exit 2; }
 dm_require_id "$id"
 dir="$DM_DATA/$id/lavish"
 file="$dir/change.html"
 
 have_lavish() { command -v lavish-axi >/dev/null 2>&1; }
-pipeline_review_session() { [ -n "$(dm_meta_get "$id" pipeline_repo)" ]; }
 next_session_generation() {
   case "${1:-}" in ''|*[!0-9]*) printf '1\n' ;; *) printf '%s\n' "$(( $1 + 1 ))" ;; esac
+}
+guarded_flag_present() {
+  local arg
+  for arg in "$@"; do [ "$arg" = "--guarded" ] && return 0; done
+  return 1
+}
+require_guarded_protocol_locked() {
+  local protocol
+  protocol="$(dm_meta_get "$id" review_protocol)"
+  [ "$protocol" = "$DM_CODEX_REVIEW_PROTOCOL" ] \
+    || dm_die "task '$id' review protocol changed or is not guarded Codex"
 }
 session_cas_locked() {
   local expected="$1" epoch="$2"
@@ -102,11 +114,60 @@ quarantine_feedback() {
   printf '%s\n' "$quarantine"
 }
 
-# Claude and non-pipeline callers predate durable review epochs. Preserve that
-# interface exactly; CAS state belongs only to the opt-in Codex PR pipeline.
-if ! pipeline_review_session; then
+# Artifact paths are runtime-neutral and never select a review protocol.
+if [ "${1:-}" = "path" ]; then
+  [ "$#" -eq 2 ] || { echo "usage: dm-lavish.sh path <id>" >&2; exit 2; }
+  mkdir -p "$dir"
+  printf '%s\n' "$file"
+  exit 0
+fi
+
+if [ "${1:-}" = "prepare" ]; then
+  [ "$#" -eq 2 ] || dm_die "usage: dm-lavish.sh prepare <id>"
+  [ -f "$file" ] || dm_die "no artifact at $file (the crewmate writes it first)"
+  meta="$(dm_meta_path "$id")"
+  dm_lock "$meta"
+  dm_require_complete_task_locked "$id"
+  dm_task_terminal_locked "$id" && dm_die "task '$id' is terminal; refusing guarded review preparation"
+  [ -z "$(dm_meta_get "$id" approved_at)" ] && [ -z "$(dm_meta_get "$id" pipeline_repo)" ] \
+    || dm_die "task '$id' already has delivery approval or binding; guarded review must be prepared first"
+  protocol="$(dm_meta_get "$id" review_protocol)"
+  old_state="$(dm_meta_get "$id" review_session_state)"
+  case "$protocol" in
+    "")
+      [ -z "$old_state" ] \
+        || dm_die "task '$id' has review state '$old_state' without a protocol marker"
+      dm_task_transition_locked "$id" review-ready "guarded Codex review prepared" \
+        review_protocol "$DM_CODEX_REVIEW_PROTOCOL" review_session_state prepared \
+        review_session_started_at "" review_session_epoch "" review_session_mode ""
+      ;;
+    "$DM_CODEX_REVIEW_PROTOCOL")
+      case "$old_state" in
+        prepared) ;;
+        terminal)
+          dm_task_transition_locked "$id" review-ready "guarded Codex review prepared" \
+            review_session_state prepared review_session_started_at "" \
+            review_session_epoch "" review_session_mode ""
+          ;;
+        *) dm_die "task '$id' already has guarded review state '${old_state:-missing}'" ;;
+      esac
+      ;;
+    *) dm_die "task '$id' has unknown review protocol '$protocol'" ;;
+  esac
+  dm_unlock "$meta"
+  exit 0
+fi
+
+protocol="$(dm_meta_get "$id" review_protocol)"
+if [ -z "$protocol" ]; then
+  old_state="$(dm_meta_get "$id" review_session_state)"
+  [ -z "$old_state" ] \
+    || dm_die "task '$id' has review state '$old_state' without a protocol marker; refusing legacy fallback"
+  guarded_flag_present "$@" \
+    && dm_die "task '$id' is not prepared for guarded Codex review; run dm-lavish.sh prepare $id first"
+  # Claude and unmarked callers predate durable review epochs. Preserve their
+  # commands and lavish-axi calls exactly; they create no review state.
   case "${1:-}" in
-    path) mkdir -p "$dir"; printf '%s\n' "$file" ;;
     open)
       [ -f "$file" ] || dm_die "no artifact at $file (the crewmate writes it first)"
       if have_lavish; then
@@ -133,17 +194,40 @@ if ! pipeline_review_session; then
   esac
   exit 0
 fi
+[ "$protocol" = "$DM_CODEX_REVIEW_PROTOCOL" ] \
+  || dm_die "task '$id' has unknown review protocol '$protocol'"
 
 case "${1:-}" in
-  path) mkdir -p "$dir"; printf '%s\n' "$file" ;;
+  open)
+    [ "$#" -eq 3 ] && [ "${3:-}" = "--guarded" ] \
+      || dm_die "guarded task '$id' requires: dm-lavish.sh open $id --guarded"
+    ;;
+  poll|end)
+    [ "$#" -eq 4 ] && [ "${4:-}" = "--guarded" ] \
+      || dm_die "guarded task '$id' requires an exact epoch and --guarded"
+    ;;
+  cancel)
+    [ "$#" -eq 3 ] && [ "${3:-}" = "--guarded" ] \
+      || dm_die "guarded task '$id' requires: dm-lavish.sh cancel $id --guarded"
+    ;;
+  *) echo "usage: dm-lavish.sh {prepare|open|poll|end|cancel} <id> [epoch] --guarded" >&2; exit 2 ;;
+esac
+
+case "${1:-}" in
   open)
     [ -f "$file" ] || dm_die "no artifact at $file (the crewmate writes it first)"
     meta="$(dm_meta_path "$id")"
     dm_lock "$meta"
     dm_require_complete_task_locked "$id"
+    require_guarded_protocol_locked
     dm_task_terminal_locked "$id" && dm_die "task '$id' is terminal; refusing a new review session"
+    [ -z "$(dm_meta_get "$id" approved_at)" ] && [ -z "$(dm_meta_get "$id" pipeline_repo)" ] \
+      || dm_die "task '$id' already has delivery approval or binding; guarded review is closed"
     old_state="$(dm_meta_get "$id" review_session_state)"
-    case "$old_state" in ''|terminal) ;; *) dm_die "task '$id' already has review session state '$old_state'" ;; esac
+    case "$old_state" in
+      prepared|terminal) ;;
+      *) dm_die "task '$id' guarded review is not prepared or terminal (state '${old_state:-missing}')" ;;
+    esac
     epoch="$(next_session_generation "$(dm_meta_get "$id" review_session_generation)")"
     started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     mode=manual
@@ -231,6 +315,7 @@ case "${1:-}" in
     [ -f "$file" ] || dm_die "no artifact at $file"
     meta="$(dm_meta_path "$id")"
     dm_lock "$meta"
+    require_guarded_protocol_locked
     session_cas_locked active "$epoch" \
       || { dm_unlock "$meta"; dm_die "no matching active tool-backed review session for '$id' epoch '$epoch'"; }
     dm_unlock "$meta"
@@ -253,6 +338,7 @@ case "${1:-}" in
     case "$epoch" in *[!0-9]*) dm_die "review epoch must be numeric" ;; esac
     meta="$(dm_meta_path "$id")"
     dm_lock "$meta"
+    require_guarded_protocol_locked
     current_state="$(dm_meta_get "$id" review_session_state)"
     [ "$(dm_meta_get "$id" review_session_epoch)" = "$epoch" ] \
       || { dm_unlock "$meta"; dm_die "stale review end refused for epoch '$epoch'"; }
@@ -291,5 +377,17 @@ case "${1:-}" in
     fi
     finish_cleanup "$meta" "$epoch" "review session terminal (epoch $epoch)"
     ;;
-  *)    echo "usage: dm-lavish.sh {path|open|poll|end} <id> [epoch]" >&2; exit 2 ;;
+  cancel)
+    meta="$(dm_meta_path "$id")"
+    dm_lock "$meta"
+    dm_require_complete_task_locked "$id"
+    require_guarded_protocol_locked
+    [ "$(dm_meta_get "$id" review_session_state)" = "prepared" ] \
+      && [ -z "$(dm_meta_get "$id" review_session_epoch)" ] \
+      || dm_die "only a prepared, unopened guarded review can be cancelled"
+    dm_task_transition_locked "$id" working "guarded Codex review preparation cancelled" \
+      review_session_state terminal review_session_started_at "" \
+      review_session_epoch "" review_session_mode ""
+    dm_unlock "$meta"
+    ;;
 esac

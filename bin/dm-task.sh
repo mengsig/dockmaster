@@ -390,7 +390,7 @@ case "$cmd" in
         dm_die "'$key' is security evidence maintained by dm-pr.sh security-scan/security-review; it must not be set by hand" ;;
       waiter_thread_name|waiter_agent_id|waiter_state|waiter_generation|waiter_epoch)
         dm_die "'$key' is review-waiter state maintained by dm-task.sh waiter; it must not be set by hand" ;;
-      review_session_state|review_session_started_at|review_session_generation|review_session_epoch|review_session_mode)
+      review_protocol|review_session_state|review_session_started_at|review_session_generation|review_session_epoch|review_session_mode)
         dm_die "'$key' is review-session state maintained by dm-lavish.sh; it must not be set by hand" ;;
       transition_seq|transition_state|transition_note|transition_at|transition_audited_seq)
         dm_die "'$key' is a transition journal field maintained internally; it must not be set by hand" ;;
@@ -419,6 +419,20 @@ case "$cmd" in
     [ "$(dm_meta_get "$id" mode)" != "local-only" ] || dm_die "local-only tasks do not enter a PR pipeline"
     approved_at="$(dm_meta_get "$id" approved_at)"
     [ -z "$approved_at" ] || dm_die "task '$id' is already approved at $approved_at"
+    review_protocol="$(dm_meta_get "$id" review_protocol)"
+    case "$review_protocol" in
+      "")
+        ;;
+      "$DM_CODEX_REVIEW_PROTOCOL")
+        [ "$(dm_meta_get "$id" review_session_state)" = "terminal" ] \
+          || dm_die "task '$id' has not completed its guarded Codex review"
+        dm_review_active "$id" \
+          && dm_die "task '$id' guarded Codex review still has a live session or notification waiter"
+        ;;
+      *)
+        dm_die "task '$id' has unknown review protocol '$review_protocol'; refusing approval"
+        ;;
+    esac
     pipeline_snapshot_locked "$id"
     approved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     dm_task_transition_locked "$id" working "approved; snapshotted $plan_source ($plan_hash); gate '$gate' ready to schedule" \

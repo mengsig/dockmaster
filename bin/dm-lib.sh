@@ -543,9 +543,24 @@ dm_task_terminal_locked() {
   return 1
 }
 
+# Guarded reviews opt in before delivery is selected. A recognized marker with
+# missing state is malformed and stays busy; unknown markers fail closed too.
+DM_CODEX_REVIEW_PROTOCOL="codex-guarded-v1"
+
 # True unless both review state machines are explicitly terminal or absent.
 dm_review_active() {
-  case "$(dm_meta_get "$1" review_session_state)" in ''|terminal) ;; *) return 0 ;; esac
+  local protocol state
+  protocol="$(dm_meta_get "$1" review_protocol)"
+  state="$(dm_meta_get "$1" review_session_state)"
+  case "$protocol" in
+    "")
+      case "$state" in ''|terminal) ;; *) return 0 ;; esac
+      ;;
+    "$DM_CODEX_REVIEW_PROTOCOL")
+      [ "$state" = "terminal" ] || return 0
+      ;;
+    *) return 0 ;;
+  esac
   case "$(dm_meta_get "$1" waiter_state)" in ''|terminal) ;; *) return 0 ;; esac
   return 1
 }

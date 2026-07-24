@@ -28,14 +28,20 @@ change; the PR-or-local decision and any pipeline come *after* approval.
    the surface and tells the operator it is ready to review, with a one-line plain
    summary of the change:
    ```
-   review_epoch="$(bin/dm-lavish.sh open <id>)"
+   bin/dm-lavish.sh prepare <id>
+   review_epoch="$(bin/dm-lavish.sh open <id> --guarded)"
    ```
+   `prepare` is the durable Codex protocol choice. It happens before approval
+   and before deciding PR versus local, and binds neither delivery mode nor
+   pipeline plan. It is safe to repeat after a restart while still `prepared`.
+   If the review is abandoned before open, release that cleanup guard with
+   `bin/dm-lavish.sh cancel <id> --guarded`.
    Then start the notification-producing wait described below. Do not run the
    poll in an unattended command session.
 
 ## Codex notification contract
 
-`bin/dm-lavish.sh open <id>` records the session active. Its poll is a
+`bin/dm-lavish.sh open <id> --guarded` records the session active. Its poll is a
 long-running terminal command, but completion of a command session does **not**
 wake the dockmaster's collaboration mailbox. The dockmaster therefore delegates
 each approval wait to one dedicated low-cost Codex waiter with
@@ -64,7 +70,7 @@ surface the failure; never leave an owner durable state cannot name.
 
 Give the waiter the absolute dockmaster directory, task id, and this exact job:
 
-1. Run `bin/dm-lavish.sh poll <id> <review-epoch>` synchronously in the dockmaster directory.
+1. Run `bin/dm-lavish.sh poll <id> <review-epoch> --guarded` synchronously in the dockmaster directory.
 2. If the command yields a running session, keep resuming that same session
    until it exits. The waiter must not return while the command is still live.
 3. Return the complete feedback, layout warning, session-end result, or visible
@@ -93,7 +99,7 @@ command to exit in that same attached turn.
    surface are authoritative input.)
 
 4. **Approval → decide how it lands.** Once the operator approves, end the
-   session (`bin/dm-lavish.sh end <id> <review-epoch>`) and ask the operator one plain question:
+   session (`bin/dm-lavish.sh end <id> <review-epoch> --guarded`) and ask the operator one plain question:
    **create a PR, or keep it local?**
    - **local** → set the task to local mode first — `bin/dm-merge.sh local`
      refuses any task whose mode isn't `local-only` — then land with the guarded

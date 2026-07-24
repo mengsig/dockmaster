@@ -150,9 +150,11 @@ function checkCodexRigorousFallbacks() {
 function checkCodexLavishWake() {
   const review = read('.agents/skills/change-review/SKILL.md')
   const supervision = read('.agents/skills/supervision/SKILL.md')
+  const lavish = read('bin/dm-lavish.sh')
   const requirements = [
+    [review, /dm-lavish\.sh prepare <id>[\s\S]*dm-lavish\.sh open <id> --guarded/, 'pre-delivery guarded review preparation'],
     [review, /spawn_agent\([\s\S]*fork_turns="none"[\s\S]*\)/, 'no-fork waiter dispatch'],
-    [review, /bin\/dm-lavish\.sh poll <id>/, 'synchronous Lavish poll'],
+    [review, /bin\/dm-lavish\.sh poll <id> <review-epoch> --guarded/, 'synchronous guarded Lavish poll'],
     [review, /waiter must not return while the command is still live/, 'waiter session ownership'],
     [review, /completion is delivered to the parent mailbox/, 'parent mailbox completion'],
     [review, /Never[\s\S]{0,80}terminal session as a parent wake source/, 'raw-session prohibition'],
@@ -168,6 +170,11 @@ function checkCodexLavishWake() {
   }
   if (/collect feedback with a yielded command session/.test(review)) {
     fail('Codex change review still treats a yielded command as the approval wake')
+  }
+  if (!/review_protocol "\$DM_CODEX_REVIEW_PROTOCOL" review_session_state prepared/.test(lavish)
+      || !/guarded_flag_present[\s\S]*not prepared for guarded Codex review/.test(lavish)
+      || /pipeline_review_session/.test(lavish)) {
+    fail('Codex Lavish selection is not an explicit pre-delivery protocol marker')
   }
   console.log('ok   Codex Lavish wait has a notification-producing parent wake')
 }
