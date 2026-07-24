@@ -88,7 +88,10 @@ repo_slug() {
   local dir
   dir="$(dm_repo_dir "$1")" \
     || dm_die "cannot resolve repo '$1' to derive its GitHub slug; refusing to fall back to the current directory"
-  owner_repo "$(git -C "$dir" remote get-url origin)"
+  # Read the declared identity, not `remote get-url`'s transport rewrite.
+  # Git's `url.*.insteadOf` may intentionally map a GitHub URL to a local mirror;
+  # the PR still belongs to the declared owner/repo.
+  owner_repo "$(git -C "$dir" config --get remote.origin.url)"
 }
 
 pr_number_from_url() {
@@ -189,20 +192,25 @@ is_git_oid() {
 }
 
 load_check_snapshot_json() {
-  local snapshot="$1" values owner name
+  local snapshot="$1" values owner name base_owner base_name
   values="$(printf '%s' "$snapshot" | jq -er '
     select(type == "object")
-    | [.head, .head_repo, .head_ref, .checks, .merge_state, .state]
+    | [.head, .head_repo, .head_ref, .base, .base_repo, .base_ref,
+       .checks, .merge_state, .state]
     | if all(.[]; type == "string") then .[] else error("invalid snapshot") end' 2>/dev/null)" || return 1
   {
     IFS= read -r PR_SNAPSHOT_HEAD
     IFS= read -r PR_SNAPSHOT_HEAD_REPO
     IFS= read -r PR_SNAPSHOT_HEAD_REF
+    IFS= read -r PR_SNAPSHOT_BASE
+    IFS= read -r PR_SNAPSHOT_BASE_REPO
+    IFS= read -r PR_SNAPSHOT_BASE_REF
     IFS= read -r PR_SNAPSHOT_CHECKS
     IFS= read -r PR_SNAPSHOT_MERGE_STATE
     IFS= read -r PR_SNAPSHOT_STATE
   } <<<"$values"
   [ -z "$PR_SNAPSHOT_HEAD" ] || is_git_oid "$PR_SNAPSHOT_HEAD" || return 1
+  [ -z "$PR_SNAPSHOT_BASE" ] || is_git_oid "$PR_SNAPSHOT_BASE" || return 1
   case "$PR_SNAPSHOT_CHECKS" in passing|failing|pending|none|unknown) ;; *) return 1 ;; esac
   case "$PR_SNAPSHOT_MERGE_STATE" in clean|blocked|unstable|dirty|behind|draft|has_hooks|unknown) ;; *) return 1 ;; esac
   case "$PR_SNAPSHOT_STATE" in OPEN|CLOSED|MERGED|UNKNOWN) ;; *) return 1 ;; esac
@@ -212,7 +220,29 @@ load_check_snapshot_json() {
   owner="${PR_SNAPSHOT_HEAD_REPO%%/*}"; name="${PR_SNAPSHOT_HEAD_REPO#*/}"
   [ -n "$owner" ] && [ -n "$name" ] && [ "$name" != "$PR_SNAPSHOT_HEAD_REPO" ] || return 1
   case "$PR_SNAPSHOT_HEAD_REPO" in *[!A-Za-z0-9._/-]*|*/*/*) return 1 ;; esac
-  git check-ref-format "refs/heads/$PR_SNAPSHOT_HEAD_REF" >/dev/null 2>&1
+  git check-ref-format "refs/heads/$PR_SNAPSHOT_HEAD_REF" >/dev/null 2>&1 || return 1
+  if [ -z "$PR_SNAPSHOT_BASE_REPO" ] && [ -z "$PR_SNAPSHOT_BASE_REF" ]; then
+    [ -z "$PR_SNAPSHOT_BASE" ]
+    return
+  fi
+  base_owner="${PR_SNAPSHOT_BASE_REPO%%/*}"; base_name="${PR_SNAPSHOT_BASE_REPO#*/}"
+  [ -n "$base_owner" ] && [ -n "$base_name" ] && [ "$base_name" != "$PR_SNAPSHOT_BASE_REPO" ] || return 1
+  case "$PR_SNAPSHOT_BASE_REPO" in *[!A-Za-z0-9._/-]*|*/*/*) return 1 ;; esac
+  git check-ref-format "refs/heads/$PR_SNAPSHOT_BASE_REF" >/dev/null 2>&1
+}
+
+pipeline_check_live() {
+  local id="$1" purpose="$2" repo="$3" slug="$4"
+  local base_ref="$5" base_sha="$6" head_sha="$7" fetched
+  [ -n "$base_ref" ] && [ -n "$base_sha" ] && [ -n "$head_sha" ] \
+    || dm_die "PR did not report a complete base/HEAD identity"
+  same_repo "$slug" "$PR_SNAPSHOT_BASE_REPO" \
+    || dm_die "PR base repo '$PR_SNAPSHOT_BASE_REPO' does not match task repo '$slug'"
+  fetched="$(dm_refresh_task_base "$id" "$base_ref")"
+  [ "$fetched" = "$base_sha" ] \
+    || dm_die "live PR base $base_ref@$base_sha does not match fetched origin/$base_ref@$fetched"
+  "$(dirname "${BASH_SOURCE[0]}")/dm-task.sh" pipeline-check \
+    "$id" "$purpose" "$repo" "$base_ref" "$base_sha" "$head_sha"
 }
 
 check_runs_rollup() {
@@ -354,6 +384,7 @@ case "$cmd" in
     # yet pushed.
     gh_cli="$(dm_require_github_cli)"
     wt="$(dm_require_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
+    pipeline_repo="$(dm_meta_get "$id" pipeline_repo)"
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || dm_die "worktree is on a detached HEAD; crewmate must create a branch first"
     ! dm_tracked_dirty "$wt" || dm_die "worktree has uncommitted changes to tracked files; commit before opening a PR"
@@ -361,12 +392,23 @@ case "$cmd" in
       dm_die "cannot inspect untracked files before opening a PR; nothing pushed. ${untracked:-No detail from git.}"
     fi
     [ -z "$untracked" ] || dm_die "worktree has untracked files; clean or commit them before opening a PR: $(dm_first_line "$untracked")"
-    open_snapshot="$(dm_task_git_snapshot "$id")"
-    open_head="${open_snapshot#*$'\t'}"
     dir="$(dm_repo_dir "$repo")"; slug="$(repo_slug "$repo")"
     # No explicit --base: default to the recorded parent (a stacked sub-PR
     # created via `dm-worktree.sh create --base`), else the default branch.
     base="$(dm_pr_base_for "$id" "$base" "$dir")"
+    open_snapshot="$(dm_task_git_snapshot "$id")"
+    open_head="${open_snapshot#*$'\t'}"
+    if [ -n "$pipeline_repo" ]; then
+      dm_need gh
+      base_sha="$(dm_refresh_task_base "$id" "$base")"
+      open_snapshot="$(dm_task_git_snapshot "$id")"
+      open_base_sha="${open_snapshot%%$'\t'*}"
+      open_head="${open_snapshot#*$'\t'}"
+      [ "$open_base_sha" = "$base_sha" ] \
+        || dm_die "fetched PR base changed before open preflight"
+      "$(dirname "${BASH_SOURCE[0]}")/dm-task.sh" pipeline-check \
+        "$id" open "$repo" "$base" "$base_sha" "$open_head"
+    fi
     dm_info "pushing $branch -> origin"
     # The first push (-u) can fail for benign reasons (upstream already set), so
     # retry a plain push. If THAT is rejected — typically a non-fast-forward
@@ -400,9 +442,40 @@ case "$cmd" in
     # parse leaves a real PR the task record does not know about. Name the
     # recovery instead of leaving the operator to discover `adopt`.
     [ -n "$url" ] || dm_die "$gh_cli reported success but printed no PR url: branch '$branch' IS pushed and the PR probably exists. Find it on GitHub, then record it with: dm-pr.sh adopt $id <url>"
-    [ "$(dm_task_git_snapshot "$id")" = "$open_snapshot" ] \
-      || dm_die "PR created at $url, but task base/HEAD changed during open; rerun the required gates before recording completion"
-    dm_meta_set_fields "$id" branch "$branch" pr "$url" pr_head "$open_head"
+    if [ -n "$pipeline_repo" ]; then
+      same_repo "$slug" "$(pr_repo_slug_from_url "$url")" \
+        || dm_die "PR created at $url, but it belongs to a different repo than task '$id'"
+      n="$(pr_number_from_url "$url")"
+      json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" \
+        || dm_die "PR created at $url, but its live base/HEAD could not be verified; do not complete the PR gate"
+      live_snapshot="$(printf '%s' "$json" | jq -cer '
+        {
+          state: ((.state // "unknown") | ascii_upcase),
+          checks: "unknown",
+          merge_state: (.mergeable_state // "unknown"),
+          head: (.head.sha // ""),
+          head_repo: (.head.repo.full_name // ""),
+          head_ref: (.head.ref // ""),
+          base: (.base.sha // ""),
+          base_repo: (.base.repo.full_name // ""),
+          base_ref: (.base.ref // "")
+        }' 2>/dev/null)" \
+        || dm_die "PR created at $url, but GitHub returned an invalid live identity; do not complete the PR gate"
+      load_check_snapshot_json "$live_snapshot" \
+        || dm_die "PR created at $url, but GitHub returned an incomplete live base/HEAD; do not complete the PR gate"
+      [ "$PR_SNAPSHOT_HEAD" = "$open_head" ] \
+        || dm_die "PR created at $url, but live head $PR_SNAPSHOT_HEAD does not match reviewed HEAD $open_head"
+      [ "$PR_SNAPSHOT_BASE_REF" = "$base" ] \
+        || dm_die "PR created at $url, but live base '$PR_SNAPSHOT_BASE_REF' retargeted from approved '$base'"
+      pipeline_check_live "$id" open "$repo" "$slug" \
+        "$PR_SNAPSHOT_BASE_REF" "$PR_SNAPSHOT_BASE" "$PR_SNAPSHOT_HEAD"
+      dm_meta_set_fields "$id" branch "$branch" pr "$url" pr_head "$open_head" \
+        pr_base_ref "$PR_SNAPSHOT_BASE_REF" pr_base_sha "$PR_SNAPSHOT_BASE"
+    else
+      [ "$(dm_task_git_snapshot "$id")" = "$open_snapshot" ] \
+        || dm_die "PR created at $url, but task base/HEAD changed during open; rerun the required gates before recording completion"
+      dm_meta_set_fields "$id" branch "$branch" pr "$url" pr_head "$open_head"
+    fi
     dm_status_append "$id" done "PR $url"
     dm_info "$url"
     ;;
@@ -432,7 +505,34 @@ case "$cmd" in
       dm_die "task $id already has a different PR recorded ($existing); adopt onto a fresh task id instead"
     fi
     dm_need gh
-    dm_meta_set "$id" pr "$url"
+    pipeline_repo="$(dm_meta_get "$id" pipeline_repo)"
+    if [ -n "$pipeline_repo" ]; then
+      json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" \
+        || dm_die "could not verify PR before adoption: $url"
+      live_snapshot="$(printf '%s' "$json" | jq -cer '
+        {
+          state: ((.state // "unknown") | ascii_upcase),
+          checks: "unknown",
+          merge_state: (.mergeable_state // "unknown"),
+          head: (.head.sha // ""),
+          head_repo: (.head.repo.full_name // ""),
+          head_ref: (.head.ref // ""),
+          base: (.base.sha // ""),
+          base_repo: (.base.repo.full_name // ""),
+          base_ref: (.base.ref // "")
+        }' 2>/dev/null)" \
+        || dm_die "invalid PR response before adoption: $url"
+      load_check_snapshot_json "$live_snapshot" \
+        || dm_die "PR has an incomplete live base/HEAD and cannot be adopted: $url"
+      same_repo "$slug" "$PR_SNAPSHOT_BASE_REPO" \
+        || dm_die "PR base repo '$PR_SNAPSHOT_BASE_REPO' does not match task repo '$slug'"
+      pipeline_check_live "$id" open "$repo" "$slug" \
+        "$PR_SNAPSHOT_BASE_REF" "$PR_SNAPSHOT_BASE" "$PR_SNAPSHOT_HEAD"
+      dm_meta_set_fields "$id" pr "$url" pr_head "$PR_SNAPSHOT_HEAD" \
+        pr_base_ref "$PR_SNAPSHOT_BASE_REF" pr_base_sha "$PR_SNAPSHOT_BASE"
+    else
+      dm_meta_set "$id" pr "$url"
+    fi
     "$0" check "$id"
     dm_status_append "$id" done "adopted PR $url"
     dm_info "adopted $url for task $id"
@@ -460,7 +560,14 @@ case "$cmd" in
       || dm_die "invalid PR response for $url"
     head_ref="$(printf '%s' "$json" | jq -er '(.head.ref // "") | select(type == "string")' 2>/dev/null)" \
       || dm_die "invalid PR response for $url"
+    base_sha="$(printf '%s' "$json" | jq -er '(.base.sha // "") | select(type == "string")' 2>/dev/null)" \
+      || dm_die "invalid PR response for $url"
+    base_repo="$(printf '%s' "$json" | jq -er '(.base.repo.full_name // "") | select(type == "string")' 2>/dev/null)" \
+      || dm_die "invalid PR response for $url"
+    base_ref="$(printf '%s' "$json" | jq -er '(.base.ref // "") | select(type == "string")' 2>/dev/null)" \
+      || dm_die "invalid PR response for $url"
     [ -z "$sha" ] || is_git_oid "$sha" || dm_die "PR returned an invalid head SHA: $url"
+    [ -z "$base_sha" ] || is_git_oid "$base_sha" || dm_die "PR returned an invalid base SHA: $url"
     [ "$merged" = "true" ] && state="MERGED"
     # Roll up CI for the head sha from BOTH the check-runs API and the legacy
     # combined commit-status API, worst-wins. A repo whose CI reports only via
@@ -481,12 +588,27 @@ case "$cmd" in
     snapshot="$(jq -cn --arg state "$state" --arg checks "$rollup" \
       --arg merge_state "$merge_state" --arg head "$sha" \
       --arg head_repo "$head_repo" --arg head_ref "$head_ref" \
-      '{state:$state, checks:$checks, merge_state:$merge_state, head:$head, head_repo:$head_repo, head_ref:$head_ref}')"
+      --arg base "$base_sha" --arg base_repo "$base_repo" --arg base_ref "$base_ref" \
+      '{state:$state, checks:$checks, merge_state:$merge_state,
+        head:$head, head_repo:$head_repo, head_ref:$head_ref,
+        base:$base, base_repo:$base_repo, base_ref:$base_ref}')"
     load_check_snapshot_json "$snapshot" || dm_die "invalid PR/check state returned for $url"
+    pipeline_repo="$(dm_meta_get "$id" pipeline_repo)"
+    if [ -n "$pipeline_repo" ]; then
+      purpose=open
+      [ "$(dm_meta_get "$id" pipeline_state)" = "complete" ] && purpose=merge
+      pipeline_check_live "$id" "$purpose" "$repo" "$slug" \
+        "$base_ref" "$base_sha" "$sha"
+    fi
     dm_meta_set "$id" pr_state "$state"
     dm_meta_set "$id" checks "$rollup"
     dm_meta_set "$id" merge_state "$merge_state"
-    dm_meta_set "$id" pr_head "$sha"
+    if [ -n "$pipeline_repo" ]; then
+      dm_meta_set_fields "$id" pr_live_head "$sha" \
+        pr_live_base_ref "$base_ref" pr_live_base_sha "$base_sha"
+    else
+      dm_meta_set "$id" pr_head "$sha"
+    fi
     dm_meta_set "$id" pr_check_snapshot "$snapshot"
     if [ "$snapshot_only" -eq 1 ]; then
       printf '%s\n' "$snapshot"
@@ -648,6 +770,8 @@ case "$cmd" in
     merge_state="$PR_SNAPSHOT_MERGE_STATE"
     checked_head="$PR_SNAPSHOT_HEAD"
     head_repo="$PR_SNAPSHOT_HEAD_REPO"; head_ref="$PR_SNAPSHOT_HEAD_REF"
+    checked_base="$PR_SNAPSHOT_BASE"
+    base_repo="$PR_SNAPSHOT_BASE_REPO"; base_ref="$PR_SNAPSHOT_BASE_REF"
     case "$state" in
       OPEN) : ;;
       MERGED) dm_die "PR already merged: $url" ;;
@@ -695,6 +819,11 @@ case "$cmd" in
     esac
     n="$(pr_number_from_url "$url")"
     slug="$(repo_slug "$repo")"
+    pipeline_repo="$(dm_meta_get "$id" pipeline_repo)"
+    if [ -n "$pipeline_repo" ]; then
+      pipeline_check_live "$id" merge "$repo" "$slug" \
+        "$base_ref" "$checked_base" "$checked_head"
+    fi
     if [ "$never_exception" -eq 1 ]; then
       # TOCTOU guard: the base was verified before the CI/mergeable gates above,
       # but GitHub merges into whatever the base is AT MERGE TIME and
@@ -707,6 +836,21 @@ case "$cmd" in
       # race is closed separately by the SHA-conditioned merge mutation.
       recheck_base="$(verify_never_exception "$repo" "$slug" "$n" "$url")"
       [ "$recheck_base" = "$exception_base" ] || dm_die "REFUSED: PR base changed from '$exception_base' to '$recheck_base' between verification and merge (retargeted on GitHub); refusing: $url"
+    fi
+    if [ -n "$pipeline_repo" ]; then
+      recheck_out=""
+      recheck_out="$("$0" check "$id" --snapshot 2>&1)" \
+        || dm_die "REFUSED: final live PR identity refresh failed for $url: ${recheck_out:-unknown error}"
+      load_check_snapshot_json "$recheck_out" \
+        || dm_die "REFUSED: final live PR identity was invalid: $url"
+      [ "$PR_SNAPSHOT_HEAD" = "$checked_head" ] \
+        && [ "$PR_SNAPSHOT_HEAD_REPO" = "$head_repo" ] \
+        && [ "$PR_SNAPSHOT_HEAD_REF" = "$head_ref" ] \
+        || dm_die "REFUSED: PR head identity changed during merge verification: $url"
+      [ "$PR_SNAPSHOT_BASE" = "$checked_base" ] \
+        && [ "$PR_SNAPSHOT_BASE_REPO" = "$base_repo" ] \
+        && [ "$PR_SNAPSHOT_BASE_REF" = "$base_ref" ] \
+        || dm_die "REFUSED: PR base identity changed during merge verification: $url"
     fi
     expected_head="$(expected_pr_head "$id" "$head_repo" "$head_ref")" \
       || dm_die "REFUSED: could not re-verify matching local and remote heads immediately before merge: $url"
@@ -751,6 +895,10 @@ case "$cmd" in
     grep -iEq -- 'crypt|encrypt|decrypt|cipher|hmac|\bhash\b|\brsa\b|\baes\b|sha[0-9]|jwt' <<<"$diff" && hits="$hits crypto" || true
     grep -iEq -- 'parse|deserial|unmarshal|unpickle|yaml\.load|json\.load|eval\(|exec\(|subprocess|os\.system|shell=true|system\(' <<<"$diff" && hits="$hits input-parsing" || true
     grep -iEq -- 'https?://|fetch\(|socket|urlopen|requests\.|\bcurl\b|\bsql\b|execute\(|redirect|open\(' <<<"$diff" && hits="$hits external-io" || true
+    if [ -n "$(dm_meta_get "$id" pipeline_repo)" ]; then
+      grep -iEq -- '(^|[^[:alnum:]_])((rm|unlink|rmdir|truncate|chmod|chown)(Sync)?|os\.(remove|unlink|rmdir|truncate|chmod|chown)|shutil\.rmtree|fs\.(rm|unlink|rmdir|truncate|chmod|chown)|remove_(file|dir|all))([^[:alnum:]_]|$)' <<<"$diff" \
+        && hits="$hits destructive/privilege" || true
+    fi
     hits="${hits# }"
     if [ -n "$hits" ]; then
       dm_meta_set_fields "$id" security_scan hit \

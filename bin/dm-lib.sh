@@ -385,6 +385,10 @@ dm_meta_set() {
   local f tmp; f="$(dm_meta_path "$1")"
   dm_lock "$f"
   dm_require_complete_task_locked "$1"
+  if [ "$2" = "repo" ] && [ "$(dm_meta_get "$1" repo)" != "$3" ]; then
+    dm_unlock "$f"
+    dm_die "task repo is immutable after creation"
+  fi
   tmp="$(mktemp "$DM_TASKS/.meta.XXXXXX")" || { dm_unlock "$f"; dm_die "mktemp failed for meta '$1'"; }
   # Build into $tmp; on any write failure remove the temp (no orphan) and fail
   # loudly. `|| true` on the read keeps a missing file from tripping set -e.
@@ -427,6 +431,9 @@ dm_meta_set_fields_locked() {
   drop=":"
   while [ "$#" -gt 0 ]; do
     key="$1"; value="$2"; shift 2
+    if [ "$key" = "repo" ] && [ "$(dm_meta_get "$id" repo)" != "$value" ]; then
+      dm_die "task repo is immutable after creation"
+    fi
     drop="${drop}${key}:"
     keys+=("$key"); values+=("$value")
   done
@@ -929,14 +936,49 @@ dm_require_worktree() {
   printf '%s\n' "$wt"
 }
 
+# dm_task_base_ref <id> -> immutable pipeline base when approved, task/default
+# base before approval. Every result is a safe branch ref.
+dm_task_base_ref() {
+  local id="$1" repo pipeline_repo ref dir
+  repo="$(dm_meta_get "$id" repo)"
+  pipeline_repo="$(dm_meta_get "$id" pipeline_repo)"
+  [ -z "$pipeline_repo" ] || [ "$pipeline_repo" = "$repo" ] \
+    || dm_die "task '$id' repo '$repo' no longer matches immutable pipeline repo '$pipeline_repo'"
+  ref="$(dm_meta_get "$id" pipeline_base_ref)"
+  [ -n "$ref" ] || ref="$(dm_meta_get "$id" base)"
+  if [ -z "$ref" ]; then
+    dir="$(dm_repo_dir "$repo")"
+    ref="$(dm_default_branch "$dir")"
+  fi
+  git check-ref-format "refs/heads/$ref" >/dev/null 2>&1 \
+    || dm_die "invalid task base branch '$ref' for task '$id'"
+  printf '%s\n' "$ref"
+}
+
+# dm_refresh_task_base <id> <expected-ref> -> fetch and print exact remote SHA.
+# The explicit refspec cannot update a local branch or execute caller text.
+dm_refresh_task_base() {
+  local id="$1" expected="$2" repo dir ref sha
+  ref="$(dm_task_base_ref "$id")"
+  [ "$ref" = "$expected" ] \
+    || dm_die "PR base '$expected' does not match approved pipeline base '$ref'"
+  repo="$(dm_meta_get "$id" repo)"
+  dir="$(dm_repo_dir "$repo")"
+  git -C "$dir" fetch --quiet origin \
+    "+refs/heads/$ref:refs/remotes/origin/$ref" \
+    || dm_die "could not fetch exact PR base 'origin/$ref' for task '$id'"
+  sha="$(git -C "$dir" rev-parse --verify --quiet "origin/$ref^{commit}" 2>/dev/null)" \
+    || dm_die "cannot resolve fetched PR base 'origin/$ref' for task '$id'"
+  printf '%s\n' "$sha"
+}
+
 # dm_task_git_snapshot <id> -> exact base SHA<TAB>HEAD SHA for gate evidence.
 dm_task_git_snapshot() {
   local id="$1" wt repo dir base_ref base_sha head_sha
   wt="$(dm_require_worktree "$id")"
   repo="$(dm_meta_get "$id" repo)"
   dir="$(dm_repo_dir "$repo")"
-  base_ref="$(dm_meta_get "$id" base)"
-  [ -n "$base_ref" ] || base_ref="$(dm_default_branch "$dir")"
+  base_ref="$(dm_task_base_ref "$id")"
   base_sha="$(git -C "$wt" rev-parse --verify --quiet "origin/$base_ref^{commit}" 2>/dev/null \
     || git -C "$wt" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null)" \
     || dm_die "cannot resolve exact pipeline base '$base_ref' for task '$id'"

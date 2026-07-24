@@ -1,9 +1,15 @@
 # PR pipeline config
 
-`pr-pipeline.<repo>.json` when present, otherwise the selected
+`pr-pipeline.repos/<repo>.json` when present, otherwise the selected
 `pr-pipeline.<fast|default|rigorous>.json`,
 declare the PR delivery pipeline as an **ordered list of gates**. Two things read
 this file, and they read different parts of it — so keep every field meaningful:
+
+Legacy `pr-pipeline.<repo>.json` overrides still load for repo names other than
+`fast`, `default`, and `rigorous`, with a deprecation warning. Those three names
+are always tier files in the legacy namespace; use `pr-pipeline.repos/<repo>.json`
+for an override. This removes the repo/tier filename collision without breaking
+existing non-colliding overrides.
 
 ## Rigor tiers
 
@@ -36,9 +42,14 @@ reads:
 It also honors the `pr` gate's **`method`** at the merge-authority step, by
 passing it to `bin/dm-pr.sh merge --method <method>`.
 
-Approval stores the selected gate array and its hash in task meta. Every later
-transition reads that immutable snapshot, never the live config, so an edit
-cannot weaken or reorder an already-approved run.
+Approval stores the selected gate array and its hash, plus immutable repo and
+base-ref/SHA bindings, in task meta. Every later transition reads that snapshot,
+never the live config. PR open and merge additionally require GitHub's live
+base/HEAD to match the latest completed proof.
+
+The binding is the opt-in boundary. Tasks without it retain the established
+Claude/legacy PR and security-scan lifecycle, with no added command, gate,
+network round trip, or merge refusal.
 
 ## The optional executor: `workflows/pr-pipeline.js`
 

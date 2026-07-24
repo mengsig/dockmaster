@@ -89,6 +89,29 @@ run_gate() {
   b dm-task.sh gate "$id" complete "$gate" "$epoch" "$owner" "$evidence" >/dev/null
 }
 
+complete_pipeline_pr_proof() {
+  # Test-only trusted setup: drive real gates, then simulate dm-pr's validated
+  # record write so merge fixtures can focus on the final live GitHub checks.
+  local id="$1" url="$2" base_ref="$3" wt head base_sha epoch thread
+  wt="$(b dm-task.sh get "$id" worktree)"
+  head="$(git -C "$wt" rev-parse HEAD)"
+  base_sha="$(git -C "$wt" rev-parse "origin/$base_ref")"
+  b dm-task.sh approve "$id" fast >/dev/null
+  run_gate "$id" coldstart-review "/root/$id-review"
+  run_gate "$id" fix-1 "/root/$id-fix"
+  run_gate "$id" branch-tests "/root/$id-tests"
+  thread="${id//[^a-z0-9]/_}_pr"
+  epoch="$(b dm-task.sh gate "$id" claim pr "$thread")"
+  b dm-task.sh gate "$id" start pr "$epoch" "$thread" "/root/$id-pr" >/dev/null
+  (
+    . "$ROOT/bin/dm-lib.sh"
+    dm_meta_set_fields "$id" pr "$url" pr_head "$head" \
+      pr_base_ref "$base_ref" pr_base_sha "$base_sha"
+  ) >/dev/null
+  b dm-task.sh gate "$id" complete pr "$epoch" "/root/$id-pr" recorded-pr >/dev/null
+  printf '%s\n' "$head"
+}
+
 # Hermetic authenticated runtime snapshot. Production doctor still probes real
 # auth; smoke must not inherit developer login state or hosted-CI anonymity.
 RUNTIME_OK="$TMP/runtime-ok"
@@ -107,7 +130,7 @@ git init -q -b main "$TMP/seed"
 
 cd "$ROOT"
 b() { "$ROOT/bin/$@"; }
-mkdir -p "$DM_HOME/config"
+mkdir -p "$DM_HOME/config/pr-pipeline.repos"
 cp "$ROOT"/config/pr-pipeline.{fast,default,rigorous}.json "$DM_HOME/config/"
 
 # Build a hermetic PATH with one executable omitted while retaining every other
@@ -599,18 +622,33 @@ check "canonical config derives the next gate" \
 # A repo override wins before the selected tier, then the approved plan remains
 # immutable even if that live override is weakened.
 jq '.gates = [.gates[0], .gates[1]]' "$ROOT/config/pr-pipeline.default.json" \
-  >"$DM_HOME/config/pr-pipeline.demo.json"
+  >"$DM_HOME/config/pr-pipeline.repos/demo.json"
 b dm-task.sh new snapshotted-plan --kind ship --repo demo --mode pipeline >/dev/null
 b dm-worktree.sh create snapshotted-plan demo >/dev/null 2>&1
 b dm-task.sh approve snapshotted-plan rigorous >/dev/null
 jq '.gates = [.gates[-1]]' "$ROOT/config/pr-pipeline.default.json" \
-  >"$DM_HOME/config/pr-pipeline.demo.json"
+  >"$DM_HOME/config/pr-pipeline.repos/demo.json"
 run_gate snapshotted-plan coldstart-review /root/snapshot-review
 check "repo-specific plan wins before tier fallback" \
-  '[ "$(b dm-task.sh get snapshotted-plan pipeline_plan_source)" = pr-pipeline.demo.json ] && [ "$(b dm-task.sh get snapshotted-plan pipeline_gate)" = fix-1 ]'
+  '[ "$(b dm-task.sh get snapshotted-plan pipeline_plan_source)" = pr-pipeline.repos/demo.json ] && [ "$(b dm-task.sh get snapshotted-plan pipeline_gate)" = fix-1 ]'
 check "approval snapshots a hashed plan immune to live config weakening" \
   '[ -n "$(b dm-task.sh get snapshotted-plan pipeline_plan_hash)" ] && [ "$(jq -r ".[1].id" <<<"$(b dm-task.sh get snapshotted-plan pipeline_plan)")" = fix-1 ]'
-rm -f "$DM_HOME/config/pr-pipeline.demo.json"
+rm -f "$DM_HOME/config/pr-pipeline.repos/demo.json"
+
+b dm-repo.sh add fast "$TMP/origin.git" --mode pipeline --no-memory >/dev/null 2>&1
+b dm-task.sh new tier-name-repo --kind ship --repo fast --mode pipeline >/dev/null
+b dm-worktree.sh create tier-name-repo fast >/dev/null 2>&1
+b dm-task.sh approve tier-name-repo rigorous >/dev/null
+check "repo named like a tier cannot collide with the legacy tier file" \
+  '[ "$(b dm-task.sh get tier-name-repo pipeline_plan_source)" = pr-pipeline.rigorous.json ]'
+jq '.gates = [.gates[0], .gates[1]]' "$ROOT/config/pr-pipeline.default.json" \
+  >"$DM_HOME/config/pr-pipeline.repos/fast.json"
+b dm-task.sh new tier-name-override --kind ship --repo fast --mode pipeline >/dev/null
+b dm-worktree.sh create tier-name-override fast >/dev/null 2>&1
+b dm-task.sh approve tier-name-override rigorous >/dev/null
+check "tier-named repo uses only the unambiguous override namespace" \
+  '[ "$(b dm-task.sh get tier-name-override pipeline_plan_source)" = pr-pipeline.repos/fast.json ]'
+rm -f "$DM_HOME/config/pr-pipeline.repos/fast.json"
 
 b dm-task.sh new stale-head-proof --kind ship --repo demo --mode pipeline >/dev/null
 STALE_HEAD_WT="$(b dm-worktree.sh create stale-head-proof demo | tail -n1)"
@@ -661,9 +699,36 @@ git -C "$REWIND_WT" commit -qm "change after tests"
 check "a post-gate commit rewinds and clears downstream proofs" \
   '! b dm-task.sh gate rewind-proofs claim pr rewind_pr >/dev/null 2>&1 && [ "$(b dm-task.sh get rewind-proofs pipeline_gate)" = coldstart-review ] && [ "$(b dm-task.sh get rewind-proofs pipeline_state)" = ready ] && [ -z "$(b dm-task.sh get rewind-proofs tests)" ]'
 
+b dm-task.sh new recovery-rewind --kind ship --repo demo --mode pipeline >/dev/null
+RECOVERY_REWIND_WT="$(b dm-worktree.sh create recovery-rewind demo | tail -n1)"
+b dm-task.sh approve recovery-rewind fast >/dev/null
+run_gate recovery-rewind coldstart-review /root/recovery-review
+run_gate recovery-rewind fix-1 /root/recovery-fix
+run_gate recovery-rewind branch-tests /root/recovery-tests
+b dm-task.sh gate recovery-rewind block pr gate-blocker overlap >/dev/null
+b dm-task.sh gate recovery-rewind ready pr >/dev/null
+run_gate recovery-rewind rebase /root/recovery-rebase
+printf 'commit inside recovery\n' >"$RECOVERY_REWIND_WT/recovery-change.txt"
+git -C "$RECOVERY_REWIND_WT" add recovery-change.txt
+git -C "$RECOVERY_REWIND_WT" commit -qm "change inside recovery"
+check "commit between recovery gates rewinds canonical state and clears recovery" \
+  '! b dm-task.sh gate recovery-rewind claim merge-gate-review recovery_stale >/dev/null 2>&1 &&
+   [ "$(b dm-task.sh get recovery-rewind pipeline_gate)" = coldstart-review ] &&
+   [ -z "$(b dm-task.sh get recovery-rewind pipeline_recovery_resume_gate)" ] &&
+   [ -z "$(b dm-task.sh get recovery-rewind pipeline_blocked_by)" ]'
+check "canonical scheduling resumes without stale recovery routing" \
+  'run_gate recovery-rewind coldstart-review /root/recovery-restart &&
+   [ "$(b dm-task.sh get recovery-rewind pipeline_gate)" = fix-1 ]'
+
+check "task repo cannot be retargeted after creation" \
+  '! b dm-task.sh set gate-ready repo fast >/dev/null 2>&1 &&
+   ! ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set gate-ready repo fast ) >/dev/null 2>&1 &&
+   [ "$(b dm-task.sh get gate-ready repo)" = demo ] &&
+   [ "$(b dm-task.sh get gate-ready pipeline_repo)" = demo ]'
+
 # Tests, security, and PR gates accept only matching sanctioned tool signals.
 jq '.gates = [.gates[] | select(.id == "branch-tests")]' "$ROOT/config/pr-pipeline.fast.json" \
-  >"$DM_HOME/config/pr-pipeline.demo.json"
+  >"$DM_HOME/config/pr-pipeline.repos/demo.json"
 b dm-task.sh new test-proof --kind ship --repo demo --mode pipeline >/dev/null
 b dm-worktree.sh create test-proof demo >/dev/null 2>&1
 b dm-task.sh approve test-proof fast >/dev/null
@@ -676,7 +741,7 @@ check "tests gate accepts exact matching dm-test evidence" \
   'b dm-task.sh gate test-proof complete branch-tests "$TEST_PROOF_EPOCH" /root/test-proof claimed-pass >/dev/null'
 
 jq '.gates = [.gates[] | select(.id == "security")]' "$ROOT/config/pr-pipeline.rigorous.json" \
-  >"$DM_HOME/config/pr-pipeline.demo.json"
+  >"$DM_HOME/config/pr-pipeline.repos/demo.json"
 b dm-task.sh new security-proof --kind ship --repo demo --mode pipeline >/dev/null
 SECURITY_PROOF_WT="$(b dm-worktree.sh create security-proof demo | tail -n1)"
 printf 'token validation surface\n' >"$SECURITY_PROOF_WT/security-proof.txt"
@@ -693,24 +758,35 @@ check "security scan hit still requires the scheduler review assertion" \
 check "security gate accepts current scan plus explicit review pass" \
   'b dm-task.sh gate security-proof complete security "$SECURITY_PROOF_EPOCH" /root/security-proof security-review-pass >/dev/null'
 
-jq '.gates = [.gates[] | select(.id == "pr")]' "$ROOT/config/pr-pipeline.fast.json" \
-  >"$DM_HOME/config/pr-pipeline.demo.json"
+rm -f "$DM_HOME/config/pr-pipeline.repos/demo.json"
 b dm-task.sh new pr-proof --kind ship --repo demo --mode pipeline >/dev/null
 PR_PROOF_WT="$(b dm-worktree.sh create pr-proof demo | tail -n1)"
 git -C "$PR_PROOF_WT" switch -q -c feat/x/pr-proof
 b dm-task.sh approve pr-proof fast >/dev/null
+run_gate pr-proof coldstart-review /root/pr-proof-review
+run_gate pr-proof fix-1 /root/pr-proof-fix
+run_gate pr-proof branch-tests /root/pr-proof-tests
 PR_PROOF_EPOCH="$(b dm-task.sh gate pr-proof claim pr pr_proof)"
 b dm-task.sh gate pr-proof start pr "$PR_PROOF_EPOCH" pr_proof /root/pr-proof >/dev/null
 check "PR gate refuses completion before sanctioned PR creation" \
   '! b dm-task.sh gate pr-proof complete pr "$PR_PROOF_EPOCH" /root/pr-proof claimed-pr >/dev/null 2>&1'
 PR_PROOF_CLI="$TMP/pr-proof-cli"; mkdir -p "$PR_PROOF_CLI"
-printf '#!/bin/sh\nprintf "https://github.com/o/r/pull/900\\n"\n' >"$PR_PROOF_CLI/gh"
-cp "$PR_PROOF_CLI/gh" "$PR_PROOF_CLI/gh-axi"
+PR_PROOF_HEAD="$(git -C "$PR_PROOF_WT" rev-parse HEAD)"
+PR_PROOF_BASE="$(git -C "$PR_PROOF_WT" rev-parse origin/main)"
+git -C "$DM_HOME/repos/demo" remote set-url origin https://github.com/o/r.git
+git -C "$DM_HOME/repos/demo" config "url.file://$TMP/origin.git.insteadOf" https://github.com/o/r.git
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"feat/x/pr-proof","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"unknown"}\n' \
+  "$PR_PROOF_HEAD" "$PR_PROOF_BASE" >"$PR_PROOF_CLI/pr.json"
+cat >"$PR_PROOF_CLI/gh" <<STUB
+#!/bin/sh
+case "\$*" in api*) cat "$PR_PROOF_CLI/pr.json" ;; *) printf "https://github.com/o/r/pull/900\\n" ;; esac
+STUB
+printf '#!/bin/sh\nprintf "https://github.com/o/r/pull/900\\n"\n' >"$PR_PROOF_CLI/gh-axi"
 chmod +x "$PR_PROOF_CLI/gh" "$PR_PROOF_CLI/gh-axi"
 PATH="$PR_PROOF_CLI:$PATH" b dm-pr.sh open pr-proof --title proof --body proof >/dev/null
 check "PR gate accepts exact HEAD recorded by sanctioned open" \
   'b dm-task.sh gate pr-proof complete pr "$PR_PROOF_EPOCH" /root/pr-proof claimed-pr >/dev/null'
-rm -f "$DM_HOME/config/pr-pipeline.demo.json"
+rm -f "$DM_HOME/config/pr-pipeline.repos/demo.json"
 
 check "terminal tasks cannot be approved or assigned waiters" \
   '! b dm-task.sh approve gate-blocker fast >/dev/null 2>&1 && ! b dm-task.sh waiter gate-blocker prepare terminal_waiter >/dev/null 2>&1'
@@ -972,8 +1048,38 @@ check "security-scan flags a security-surface diff" 'b dm-pr.sh security-scan se
 check "security-scan names the signals"             'grep -qi "signals present" <<<"$SCANOUT"'
 # demo-1's diff is a pure arithmetic helper: no security surface -> exit non-zero.
 check "security-scan clears a benign diff"          '! b dm-pr.sh security-scan demo-1 >/dev/null 2>&1'
+b dm-task.sh new sec-destructive --kind ship --repo demo --mode pipeline >/dev/null
+SEC_DESTRUCTIVE_WT="$(b dm-worktree.sh create sec-destructive demo | tail -n1)"
+printf '#!/bin/sh\nchmod 600 "$1"\nrm -rf "$2"\n' >"$SEC_DESTRUCTIVE_WT/cleanup.sh"
+git -C "$SEC_DESTRUCTIVE_WT" add cleanup.sh
+git -C "$SEC_DESTRUCTIVE_WT" commit -qm "add destructive cleanup"
+b dm-task.sh approve sec-destructive fast >/dev/null
+SEC_DESTRUCTIVE_OUT="$(b dm-pr.sh security-scan sec-destructive 2>&1 || true)"
+check "security-scan flags destructive and privilege surfaces" \
+  'grep -q "destructive/privilege" <<<"$SEC_DESTRUCTIVE_OUT" &&
+   [ "$(b dm-task.sh get sec-destructive security_scan)" = hit ]'
+b dm-task.sh new sec-destructive-legacy --kind ship --repo demo >/dev/null
+SEC_DESTRUCTIVE_LEGACY_WT="$(b dm-worktree.sh create sec-destructive-legacy demo | tail -n1)"
+printf '#!/bin/sh\nchmod 600 "$1"\n' >"$SEC_DESTRUCTIVE_LEGACY_WT/cleanup.sh"
+git -C "$SEC_DESTRUCTIVE_LEGACY_WT" add cleanup.sh
+git -C "$SEC_DESTRUCTIVE_LEGACY_WT" commit -qm "add legacy cleanup"
+check "legacy security scan keeps its established signal set" \
+  '! b dm-pr.sh security-scan sec-destructive-legacy >/dev/null 2>&1 &&
+   [ "$(b dm-task.sh get sec-destructive-legacy security_scan)" = clear ] &&
+   [ -z "$(b dm-task.sh get sec-destructive-legacy pipeline_repo)" ]'
+b dm-task.sh new sec-benign-words --kind ship --repo demo >/dev/null
+SEC_BENIGN_WT="$(b dm-worktree.sh create sec-benign-words demo | tail -n1)"
+printf 'summary formatting remains deterministic\n' >"$SEC_BENIGN_WT/notes.txt"
+git -C "$SEC_BENIGN_WT" add notes.txt
+git -C "$SEC_BENIGN_WT" commit -qm "add benign wording"
+check "security-scan does not match destructive command substrings" \
+  '! b dm-pr.sh security-scan sec-benign-words >/dev/null 2>&1 &&
+   [ "$(b dm-task.sh get sec-benign-words security_scan)" = clear ]'
 check "security-scan requires an id"                '! b dm-pr.sh security-scan >/dev/null 2>&1'
 b dm-worktree.sh remove sec-scan --force >/dev/null 2>&1
+b dm-worktree.sh remove sec-destructive --force >/dev/null 2>&1
+b dm-worktree.sh remove sec-destructive-legacy --force >/dev/null 2>&1
+b dm-worktree.sh remove sec-benign-words --force >/dev/null 2>&1
 # `open` on a local-only task must refuse (its path is dm-merge.sh local). The
 # guard fires before any GitHub tool or push, so it is exercisable offline.
 b dm-task.sh new pr-localonly --kind ship --repo demo --mode local-only >/dev/null
@@ -987,6 +1093,12 @@ chmod +x "$PR_OPEN_STUB/gh-axi"
 b dm-task.sh new pr-untracked --kind ship --repo demo --mode pipeline >/dev/null
 PR_UNTRACKED_WT="$(b dm-worktree.sh create pr-untracked demo | tail -n1)"
 git -C "$PR_UNTRACKED_WT" checkout -q -b feat/x/pr-untracked
+ b dm-task.sh approve pr-untracked fast >/dev/null
+run_gate pr-untracked coldstart-review /root/pr-untracked-review
+run_gate pr-untracked fix-1 /root/pr-untracked-fix
+run_gate pr-untracked branch-tests /root/pr-untracked-tests
+PR_UNTRACKED_EPOCH="$(b dm-task.sh gate pr-untracked claim pr pr_untracked)"
+b dm-task.sh gate pr-untracked start pr "$PR_UNTRACKED_EPOCH" pr_untracked /root/pr-untracked >/dev/null
 printf 'not committed\n' > "$PR_UNTRACKED_WT/untracked.txt"
 PR_UNTRACKED_OUT="$(PATH="$PR_OPEN_STUB:$PATH" b dm-pr.sh open pr-untracked --title x 2>&1 || true)"
 check "pr open refuses untracked files before push" 'grep -q "untracked files" <<<"$PR_UNTRACKED_OUT" && [ ! -f "$PR_OPEN_STUB/invoked" ]'
@@ -1004,6 +1116,12 @@ git -C "$PR_GHAXI_WT" checkout -q -b feat/x/pr-ghaxi-fail
 printf 'x = 1\n' > "$PR_GHAXI_WT/ghaxi_fail.py"
 git -C "$PR_GHAXI_WT" add -A >/dev/null
 git -C "$PR_GHAXI_WT" commit -qm "add ghaxi_fail" >/dev/null
+b dm-task.sh approve pr-ghaxi-fail fast >/dev/null
+run_gate pr-ghaxi-fail coldstart-review /root/pr-ghaxi-review
+run_gate pr-ghaxi-fail fix-1 /root/pr-ghaxi-fix
+run_gate pr-ghaxi-fail branch-tests /root/pr-ghaxi-tests
+PR_GHAXI_EPOCH="$(b dm-task.sh gate pr-ghaxi-fail claim pr pr_ghaxi_fail)"
+b dm-task.sh gate pr-ghaxi-fail start pr "$PR_GHAXI_EPOCH" pr_ghaxi_fail /root/pr-ghaxi >/dev/null
 check "pr open fails when gh-axi fails" \
   '! PATH="$GHAXI_FAIL_STUB:$PATH" b dm-pr.sh open pr-ghaxi-fail --title x >/dev/null 2>&1'
 GHAXI_FAIL_OUT="$(PATH="$GHAXI_FAIL_STUB:$PATH" b dm-pr.sh open pr-ghaxi-fail --title x 2>&1 || true)"
@@ -1066,22 +1184,73 @@ echo "== pr open success path: plain gh alone, and gh-axi preferred (#104) =="
 # the same way, so the stubs differ only in which name gets invoked.
 open_task() {
   # open_task <id> <branch> -> commit a file on a fresh branch in a new worktree
-  local id="$1" branch="$2" wt
+  local id="$1" branch="$2" wt epoch
   b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
   wt="$(b dm-worktree.sh create "$id" demo | tail -n1)"
   git -C "$wt" checkout -q -b "$branch"
   printf 'x = 1\n' > "$wt/$id.py"
   git -C "$wt" add -A >/dev/null
   git -C "$wt" commit -qm "work for $id" >/dev/null
+  b dm-task.sh approve "$id" fast >/dev/null
+  run_gate "$id" coldstart-review "/root/$id-review"
+  run_gate "$id" fix-1 "/root/$id-fix"
+  run_gate "$id" branch-tests "/root/$id-tests"
+  epoch="$(b dm-task.sh gate "$id" claim pr "${id//-/_}_pr")"
+  b dm-task.sh gate "$id" start pr "$epoch" "${id//-/_}_pr" "/root/$id-pr" >/dev/null
 }
+legacy_open_task() {
+  local id="$1" branch="$2" wt
+  b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
+  wt="$(b dm-worktree.sh create "$id" demo | tail -n1)"
+  git -C "$wt" checkout -q -b "$branch"
+  printf 'legacy = 1\n' >"$wt/$id.py"
+  git -C "$wt" add -A >/dev/null
+  git -C "$wt" commit -qm "legacy work for $id" >/dev/null
+}
+PR_LEGACY_STUB="$TMP/pr-open-legacy"; mkdir -p "$PR_LEGACY_STUB"
+cat >"$PR_LEGACY_STUB/gh-axi" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >>"$PR_LEGACY_STUB/axi-calls"
+printf 'https://github.com/o/r/pull/320\n'
+STUB
+cat >"$PR_LEGACY_STUB/gh" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >>"$PR_LEGACY_STUB/gh-calls"
+exit 1
+STUB
+chmod +x "$PR_LEGACY_STUB/gh-axi" "$PR_LEGACY_STUB/gh"
+legacy_open_task pr-legacy feat/x/pr-legacy
+PR_LEGACY_OUT="$(PATH="$PR_LEGACY_STUB:$NOAXI_PATH" b dm-pr.sh open pr-legacy --title legacy --body body 2>&1)"
+check "legacy PR open adds no live API call or proof gate" \
+  'grep -q "https://github.com/o/r/pull/320" <<<"$PR_LEGACY_OUT" &&
+   [ "$(wc -l <"$PR_LEGACY_STUB/axi-calls" | tr -d " ")" = 1 ] &&
+   [ ! -s "$PR_LEGACY_STUB/gh-calls" ] &&
+   [ -z "$(b dm-task.sh get pr-legacy pipeline_repo)" ]'
 PR_GH_STUB="$TMP/pr-open-gh"; mkdir -p "$PR_GH_STUB"
 cat > "$PR_GH_STUB/gh" <<STUB
 #!/bin/sh
 printf '%s\n' "\$*" >> "$PR_GH_STUB/gh-calls"
-printf 'https://github.com/o/r/pull/321\n'
+case "\$*" in api*) cat "$PR_GH_STUB/pr.json" ;; *) printf 'https://github.com/o/r/pull/321\n' ;; esac
 STUB
 chmod +x "$PR_GH_STUB/gh"
+open_task pr-retarget feat/x/pr-retarget
+check "explicit PR base cannot retarget outside the approved snapshot" \
+  '! PATH="$PR_GH_STUB:$NOAXI_PATH" b dm-pr.sh open pr-retarget --title retarget --body body --base pipeline-base >/dev/null 2>&1 &&
+   ! git -C "$TMP/origin.git" rev-parse --verify --quiet refs/heads/feat/x/pr-retarget >/dev/null'
+open_task pr-live-retarget feat/x/pr-live-retarget
+PR_LIVE_RETARGET_HEAD="$(git -C "$DM_HOME/state/worktrees/pr-live-retarget" rev-parse HEAD)"
+PR_LIVE_RETARGET_BASE="$(git -C "$DM_HOME/state/worktrees/pr-live-retarget" rev-parse origin/pipeline-base)"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"feat/x/pr-live-retarget","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"pipeline-base","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"unknown"}\n' \
+  "$PR_LIVE_RETARGET_HEAD" "$PR_LIVE_RETARGET_BASE" >"$PR_GH_STUB/pr.json"
+PR_LIVE_RETARGET_OUT="$(PATH="$PR_GH_STUB:$NOAXI_PATH" b dm-pr.sh open pr-live-retarget --title retarget --body body 2>&1 || true)"
+check "live PR base retarget is rejected before PR proof is recorded" \
+  'grep -q "live base.*retargeted" <<<"$PR_LIVE_RETARGET_OUT" &&
+   [ -z "$(b dm-task.sh get pr-live-retarget pr)" ]'
 open_task pr-gh-only feat/x/pr-gh-only
+PR_GH_HEAD="$(git -C "$DM_HOME/state/worktrees/pr-gh-only" rev-parse HEAD)"
+PR_GH_BASE="$(git -C "$DM_HOME/state/worktrees/pr-gh-only" rev-parse origin/main)"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"feat/x/pr-gh-only","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"unknown"}\n' \
+  "$PR_GH_HEAD" "$PR_GH_BASE" >"$PR_GH_STUB/pr.json"
 PR_GH_OUT="$(PATH="$PR_GH_STUB:$NOAXI_PATH" b dm-pr.sh open pr-gh-only --title "plain gh" --body body 2>&1 || true)"
 check "pr open succeeds with only plain gh installed" 'grep -q "https://github.com/o/r/pull/321" <<<"$PR_GH_OUT"'
 check "plain gh received the pr create call"          'grep -q "^pr create -R " "$PR_GH_STUB/gh-calls"'
@@ -1101,13 +1270,17 @@ STUB
 cat > "$PR_AXI_STUB/gh" <<STUB
 #!/bin/sh
 printf '%s\n' "\$*" >> "$PR_AXI_STUB/gh-calls"
-printf 'https://github.com/o/r/pull/999\n'
+cat "$PR_AXI_STUB/pr.json"
 STUB
 chmod +x "$PR_AXI_STUB/gh-axi" "$PR_AXI_STUB/gh"
 open_task pr-axi-pref feat/x/pr-axi-pref
+PR_AXI_HEAD="$(git -C "$DM_HOME/state/worktrees/pr-axi-pref" rev-parse HEAD)"
+PR_AXI_BASE="$(git -C "$DM_HOME/state/worktrees/pr-axi-pref" rev-parse origin/main)"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"feat/x/pr-axi-pref","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"unknown"}\n' \
+  "$PR_AXI_HEAD" "$PR_AXI_BASE" >"$PR_AXI_STUB/pr.json"
 PATH="$PR_AXI_STUB:$NOAXI_PATH" b dm-pr.sh open pr-axi-pref --title "wrapper" --body body >/dev/null 2>&1 || true
 check "the wrapper handled the create when installed" 'grep -q "^pr create -R " "$PR_AXI_STUB/axi-calls"'
-check "plain gh was not used for the create"          '[ ! -f "$PR_AXI_STUB/gh-calls" ]'
+check "plain gh was not used for the create"          '! grep -q "^pr create " "$PR_AXI_STUB/gh-calls"'
 check "both CLIs record the same PR url"       '[ "$(b dm-task.sh get pr-axi-pref pr)" = "$(b dm-task.sh get pr-gh-only pr)" ]'
 check "both CLIs record their own branch"      '[ "$(b dm-task.sh get pr-axi-pref branch)" = "feat/x/pr-axi-pref" ]'
 check "both CLIs append the same done event"   'grep -q "done: PR https://github.com/o/r/pull/321" "$DM_HOME/state/tasks/pr-axi-pref.status"'
@@ -1130,6 +1303,9 @@ check "no leftover temp file after the parse failure"         '[ -z "$(find "$DM
 b dm-worktree.sh remove pr-gh-only --force >/dev/null 2>&1
 b dm-worktree.sh remove pr-axi-pref --force >/dev/null 2>&1
 b dm-worktree.sh remove pr-nourl --force >/dev/null 2>&1
+b dm-worktree.sh remove pr-retarget --force >/dev/null 2>&1
+b dm-worktree.sh remove pr-live-retarget --force >/dev/null 2>&1
+b dm-worktree.sh remove pr-legacy --force >/dev/null 2>&1
 
 echo "== repo create reaches plain gh instead of demanding the wrapper (#104) =="
 # The remote-creating branch of `create` needs network past this point, so stop
@@ -2451,9 +2627,8 @@ check "reader prints nothing after the clear"    '[ -z "$(mbread mauth)" ]'
 echo "== merge-base exception: dm-pr.sh merge honors the LIVE PR base on a never repo =="
 # Give this local fixture a GitHub-shaped, still-local origin: repo_slug resolves
 # to o/r while fetches remain hermetic for post-merge sync.
-mkdir -p "$DM_HOME/repos/mauth/o"
-ln -s "$TMP/origin.git" "$DM_HOME/repos/mauth/o/r.git"
-git -C "$DM_HOME/repos/mauth" remote set-url origin o/r.git
+git -C "$DM_HOME/repos/mauth" remote set-url origin https://github.com/o/r.git
+git -C "$DM_HOME/repos/mauth" config "url.file://$TMP/origin.git.insteadOf" https://github.com/o/r.git
 # Stub gh so the live-base read is deterministic and offline: PR-detail calls
 # answer with pr.json (or pr2.json after the first read when "retarget" is
 # armed, simulating a mid-merge base/head change), check-runs/status/ref calls
@@ -2462,8 +2637,12 @@ git -C "$DM_HOME/repos/mauth" remote set-url origin o/r.git
 # (or not reaching) the mutation is observable.
 b dm-repo.sh set mauth merge_authority never >/dev/null
 b dm-repo.sh set mauth merge_allowed_bases "integration" >/dev/null
-b dm-task.sh new mauth-exc --kind ship --repo mauth >/dev/null
-( . "$ROOT/bin/dm-lib.sh"; dm_meta_set mauth-exc pr "https://github.com/o/r/pull/9" ) >/dev/null 2>&1
+git -C "$DM_HOME/repos/mauth" branch integration main
+git -C "$DM_HOME/repos/mauth" push -q origin integration
+b dm-task.sh new mauth-exc --kind ship --repo mauth --mode pipeline >/dev/null
+MAUTH_EXC_WT="$(b dm-worktree.sh create mauth-exc mauth fix/head --base integration | tail -n1)"
+MAUTH_EXC_HEAD="$(complete_pipeline_pr_proof mauth-exc "https://github.com/o/r/pull/9" integration)"
+MAUTH_EXC_BASE="$(git -C "$MAUTH_EXC_WT" rev-parse origin/integration)"
 GHSTUB="$TMP/ghstub"; mkdir -p "$GHSTUB"
 cat > "$GHSTUB/gh" <<STUB
 #!/bin/sh
@@ -2488,8 +2667,9 @@ printf '#!/bin/sh\n: > "%s/ghaxi-called"\nexit 1\n' "$GHSTUB" > "$GHSTUB/gh-axi"
 chmod +x "$GHSTUB/gh" "$GHSTUB/gh-axi"
 printf '{"total_count":0,"check_runs":[]}\n' > "$GHSTUB/runs.json"
 printf '{"total_count":0}\n' > "$GHSTUB/status.json"
-printf '{"object":{"sha":"abc123"}}\n' > "$GHSTUB/ref.json"
-printf '{"state":"open","merged":false,"base":{"ref":"integration","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+printf '{"object":{"sha":"%s"}}\n' "$MAUTH_EXC_HEAD" > "$GHSTUB/ref.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"integration","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"unknown"}\n' \
+  "$MAUTH_EXC_HEAD" "$MAUTH_EXC_BASE" > "$GHSTUB/pr.json"
 EXCOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a listed live base passes the authority gate"        'grep -q "operator-granted merge base" <<<"$EXCOUT"'
 check "downstream never-merge-red gate still applies"       'grep -qi "no checks reported" <<<"$EXCOUT"'
@@ -2526,25 +2706,28 @@ check "a listed base that IS the live default still refuses" 'grep -q "not an op
 # every gate INCLUDING the pre-mutation re-verify, reach the gh-axi mutation
 # (observable via the stub's marker), and fail only on the stub's exit 1.
 b dm-repo.sh set mauth merge_allowed_bases "integration,integration2" >/dev/null
-printf '{"total_count":1,"check_runs":[{"head_sha":"abc123","status":"completed","conclusion":"success"}]}\n' > "$GHSTUB/runs.json"
-printf '{"state":"open","merged":false,"head":{"sha":"abc123","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"integration","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr.json"
+printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$MAUTH_EXC_HEAD" > "$GHSTUB/runs.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"integration","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' \
+  "$MAUTH_EXC_HEAD" "$MAUTH_EXC_BASE" > "$GHSTUB/pr.json"
 rm -f "$GHSTUB/ghaxi-called" "$GHSTUB/seen"
 GREENOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a green listed-base merge reaches the merge mutation" '[ -f "$GHSTUB/ghaxi-called" ] && grep -q "atomic merge failed" <<<"$GREENOUT"'
 # TOCTOU: the base is retargeted to the DEFAULT after the first verification —
 # the pre-mutation re-check refuses and the mutation is never invoked.
 rm -f "$GHSTUB/ghaxi-called" "$GHSTUB/seen"
-printf '{"state":"open","merged":false,"head":{"sha":"abc123","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr2.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$MAUTH_EXC_HEAD" > "$GHSTUB/pr2.json"
 : > "$GHSTUB/retarget"
-TOCTOU1="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
-check "a mid-merge retarget to the default refuses"           'grep -q "not an operator-granted merge base" <<<"$TOCTOU1"'
+TOCTOU1_STATUS=0
+TOCTOU1="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1)" || TOCTOU1_STATUS=$?
+check "a mid-merge retarget to the default refuses"           '[ "$TOCTOU1_STATUS" -ne 0 ]'
 check "the retargeted merge never reaches the mutation"       '[ ! -f "$GHSTUB/ghaxi-called" ]'
 # TOCTOU: retargeted to ANOTHER allowed branch — still refused (the base
 # changed since verification), mutation never invoked.
 rm -f "$GHSTUB/seen"
-printf '{"state":"open","merged":false,"head":{"sha":"abc123","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"integration2","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$GHSTUB/pr2.json"
-TOCTOU2="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
-check "a retarget to another ALLOWED base still refuses"      'grep -q "base changed" <<<"$TOCTOU2"'
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"integration2","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$MAUTH_EXC_HEAD" > "$GHSTUB/pr2.json"
+TOCTOU2_STATUS=0
+TOCTOU2="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1)" || TOCTOU2_STATUS=$?
+check "a retarget to another ALLOWED base still refuses"      '[ "$TOCTOU2_STATUS" -ne 0 ]'
 check "the allowed-retarget merge never reaches the mutation" '[ ! -f "$GHSTUB/ghaxi-called" ]'
 rm -f "$GHSTUB/retarget" "$GHSTUB/seen"
 
@@ -2580,17 +2763,17 @@ echo "== merge mutation runs on plain gh, and on gh-axi, with the same outcome (
 # but still-local origin keeps repo_slug resolvable and the post-merge sync
 # hermetic.
 b dm-repo.sh add ghfb "$TMP/origin.git" --mode pipeline --no-memory >/dev/null 2>&1
-mkdir -p "$DM_HOME/repos/ghfb/o"
-ln -s "$TMP/origin.git" "$DM_HOME/repos/ghfb/o/r.git"
-git -C "$DM_HOME/repos/ghfb" remote set-url origin o/r.git
+git -C "$DM_HOME/repos/ghfb" remote set-url origin https://github.com/o/r.git
+git -C "$DM_HOME/repos/ghfb" config "url.file://$TMP/origin.git.insteadOf" https://github.com/o/r.git
 # One stub dir per case: gh answers every parsed read from a fixture file, and
 # whichever binary receives the merge PUT records its exact argv.
 merge_fixtures() {
-  local d="$1" n="$2"
-  printf '{"total_count":1,"check_runs":[{"head_sha":"abc123","status":"completed","conclusion":"success"}]}\n' > "$d/runs.json"
+  local d="$1" n="$2" head="$3" base_sha="$4"
+  printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$head" > "$d/runs.json"
   printf '{"total_count":0}\n' > "$d/status.json"
-  printf '{"object":{"sha":"abc123"}}\n' > "$d/ref.json"
-  printf '{"state":"open","merged":false,"head":{"sha":"abc123","ref":"fix/ghfb-%s","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$n" > "$d/pr.json"
+  printf '{"object":{"sha":"%s"}}\n' "$head" > "$d/ref.json"
+  printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/ghfb-%s","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' \
+    "$head" "$n" "$base_sha" > "$d/pr.json"
 }
 gh_read_stub() {
   cat <<STUB
@@ -2607,13 +2790,18 @@ MFB_GH="$TMP/merge-fallback-gh"; mkdir -p "$MFB_GH"
   printf 'if [ "$1" = api ] && [ "$2" = --method ]; then printf "%%s\\n" "$*" >> "%s/mutations"; printf "{\\"merged\\":true}\\n"; exit 0; fi\n' "$MFB_GH"
   printf 'cat "%s/pr.json"\n' "$MFB_GH"; } > "$MFB_GH/gh"
 chmod +x "$MFB_GH/gh"
-merge_fixtures "$MFB_GH" plain
-b dm-task.sh new ghfb-plain --kind ship --repo ghfb >/dev/null
-( . "$ROOT/bin/dm-lib.sh"; dm_meta_set ghfb-plain pr "https://github.com/o/r/pull/7" ) >/dev/null 2>&1
+b dm-task.sh new ghfb-plain --kind ship --repo ghfb --mode pipeline >/dev/null
+GHFB_PLAIN_WT="$(b dm-worktree.sh create ghfb-plain ghfb fix/ghfb-plain | tail -n1)"
+printf 'plain\n' >"$GHFB_PLAIN_WT/plain.txt"
+git -C "$GHFB_PLAIN_WT" add plain.txt
+git -C "$GHFB_PLAIN_WT" commit -qm "plain merge fixture"
+GHFB_PLAIN_HEAD="$(complete_pipeline_pr_proof ghfb-plain "https://github.com/o/r/pull/7" main)"
+GHFB_PLAIN_BASE="$(git -C "$GHFB_PLAIN_WT" rev-parse origin/main)"
+merge_fixtures "$MFB_GH" plain "$GHFB_PLAIN_HEAD" "$GHFB_PLAIN_BASE"
 MFB_GH_OUT="$(PATH="$MFB_GH:$NOAXI_PATH" b dm-pr.sh merge ghfb-plain 2>&1 || true)"
 check "merge completes with only plain gh installed" 'grep -q "^merged: https://github.com/o/r/pull/7$" <<<"$MFB_GH_OUT"'
 check "the plain-gh mutation uses gh's own argv shape" \
-  'grep -Fx "api --method PUT /repos/o/r/pulls/7/merge --raw-field sha=abc123 --raw-field merge_method=squash" "$MFB_GH/mutations" >/dev/null'
+  'grep -Fx "api --method PUT /repos/o/r/pulls/7/merge --raw-field sha=$GHFB_PLAIN_HEAD --raw-field merge_method=squash" "$MFB_GH/mutations" >/dev/null'
 check "plain gh records the landed task state"        '[ "$(b dm-task.sh get ghfb-plain pr_state)" = "MERGED" ]'
 check "plain gh appends the merged event"             'grep -q " merged: https://github.com/o/r/pull/7" "$DM_HOME/state/tasks/ghfb-plain.status"'
 
@@ -2623,13 +2811,18 @@ MFB_AXI="$TMP/merge-fallback-axi"; mkdir -p "$MFB_AXI"
   printf 'cat "%s/pr.json"\n' "$MFB_AXI"; } > "$MFB_AXI/gh"
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s/mutations"\nprintf "merged: true\\n"\n' "$MFB_AXI" > "$MFB_AXI/gh-axi"
 chmod +x "$MFB_AXI/gh" "$MFB_AXI/gh-axi"
-merge_fixtures "$MFB_AXI" wrapper
-b dm-task.sh new ghfb-axi --kind ship --repo ghfb >/dev/null
-( . "$ROOT/bin/dm-lib.sh"; dm_meta_set ghfb-axi pr "https://github.com/o/r/pull/8" ) >/dev/null 2>&1
+b dm-task.sh new ghfb-axi --kind ship --repo ghfb --mode pipeline >/dev/null
+GHFB_AXI_WT="$(b dm-worktree.sh create ghfb-axi ghfb fix/ghfb-wrapper | tail -n1)"
+printf 'wrapper\n' >"$GHFB_AXI_WT/wrapper.txt"
+git -C "$GHFB_AXI_WT" add wrapper.txt
+git -C "$GHFB_AXI_WT" commit -qm "wrapper merge fixture"
+GHFB_AXI_HEAD="$(complete_pipeline_pr_proof ghfb-axi "https://github.com/o/r/pull/8" main)"
+GHFB_AXI_BASE="$(git -C "$GHFB_AXI_WT" rev-parse origin/main)"
+merge_fixtures "$MFB_AXI" wrapper "$GHFB_AXI_HEAD" "$GHFB_AXI_BASE"
 MFB_AXI_OUT="$(PATH="$MFB_AXI:$NOAXI_PATH" b dm-pr.sh merge ghfb-axi 2>&1 || true)"
 check "merge completes with the wrapper installed"    'grep -q "^merged: https://github.com/o/r/pull/8$" <<<"$MFB_AXI_OUT"'
 check "the wrapper mutation keeps its positional-method shape" \
-  'grep -Fx "api PUT /repos/o/r/pulls/8/merge --field sha=abc123 --field merge_method=squash" "$MFB_AXI/mutations" >/dev/null'
+  'grep -Fx "api PUT /repos/o/r/pulls/8/merge --field sha=$GHFB_AXI_HEAD --field merge_method=squash" "$MFB_AXI/mutations" >/dev/null'
 check "the wrapper path never sent the mutation through plain gh" '[ ! -f "$MFB_AXI/gh-mutations" ]'
 check "both CLIs reach the same landed task record" \
   '[ "$(b dm-task.sh get ghfb-axi pr_state)" = "$(b dm-task.sh get ghfb-plain pr_state)" ] && grep -q " merged: https://github.com/o/r/pull/8" "$DM_HOME/state/tasks/ghfb-axi.status"'
@@ -3066,12 +3259,16 @@ b dm-task.sh new await-75 --kind ship --repo mauth >/dev/null
 AWT="$(b dm-worktree.sh create await-75 mauth | tail -n1)"
 git -C "$AWT" checkout -q -b fix/await-75
 AWHEAD="$(git -C "$AWT" rev-parse HEAD)"
+AWBASE="$(git -C "$AWT" rev-parse origin/main)"
 OLDHEAD="1111111111111111111111111111111111111111"
 CHANGEDHEAD="2222222222222222222222222222222222222222"
 ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set await-75 pr "https://github.com/o/r/pull/75" ) >/dev/null 2>&1
 mkdir -p "$DM_HOME/repos/mauth/.github/workflows"
+rm -f "$GHSTUB/fail" "$GHSTUB/retarget" "$GHSTUB/seen" \
+  "$GHSTUB/ref-fail" "$GHSTUB/ref-invalid"
 printf '{"object":{"sha":"%s"}}\n' "$AWHEAD" > "$GHSTUB/ref.json"
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"dirty"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"dirty"}\n' \
+  "$AWHEAD" "$AWBASE" > "$GHSTUB/pr.json"
 printf '{"total_count":0,"check_runs":[]}\n' > "$GHSTUB/runs.json"
 printf '{"total_count":0}\n' > "$GHSTUB/status.json"
 AWDIRTY="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 120 --interval-secs 1 2>&1 || true)"
@@ -3080,13 +3277,15 @@ check "dirty fast-fail is non-zero"            '! PATH="$GHSTUB:$PATH" b dm-pr.s
 
 # A stale PR response can still name the previous head and its real terminal
 # run. The independent worktree head must keep that rollup non-terminal.
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' "$OLDHEAD" > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"unknown"}\n' \
+  "$OLDHEAD" "$AWBASE" > "$GHSTUB/pr.json"
 printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$OLDHEAD" > "$GHSTUB/runs.json"
 AWSTALE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
 check "old-head green is not trusted as terminal" 'grep -q "has not reached expected head" <<<"$AWSTALE" && grep -q "last rollup: pending" <<<"$AWSTALE"'
 
 # A real not-yet-registered response has both count zero and an empty array.
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"unknown"}\n' \
+  "$AWHEAD" "$AWBASE" > "$GHSTUB/pr.json"
 printf '{"total_count":0,"check_runs":[]}\n' > "$GHSTUB/runs.json"
 AWNONE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
 check "consistent zero-run response remains non-terminal" 'grep -q "last rollup: none" <<<"$AWNONE" && ! grep -q "passing" <<<"$AWNONE"'
@@ -3147,7 +3346,8 @@ rm -f "$GHSTUB/ref-invalid"
 # A failed refresh after a previously-dirty result must be reported as unknown,
 # never by reusing the cached dirty state.
 printf '{"total_count":0}\n' > "$GHSTUB/status.json"
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"dirty"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"dirty"}\n' \
+  "$AWHEAD" "$AWBASE" > "$GHSTUB/pr.json"
 PATH="$GHSTUB:$PATH" b dm-pr.sh check await-75 >/dev/null
 : > "$GHSTUB/fail"
 AWFAIL="$(PATH="$GHSTUB:$PATH" b dm-pr.sh await-checks await-75 --timeout-secs 0 --interval-secs 1 2>&1 || true)"
@@ -3163,7 +3363,8 @@ b dm-repo.sh set mauth merge_authority ask >/dev/null
 printf '{"object":{"sha":"%s"}}\n' "$AWHEAD" > "$GHSTUB/ref.json"
 printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$AWHEAD" > "$GHSTUB/runs.json"
 printf '{"total_count":0}\n' > "$GHSTUB/status.json"
-printf '{"state":"unknown","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+printf '{"state":"unknown","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' \
+  "$AWHEAD" "$AWBASE" > "$GHSTUB/pr.json"
 rm -f "$GHSTUB/ghaxi-called"
 AWUNKNOWN="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge await-75 2>&1 || true)"
 check "UNKNOWN PR state refuses before mutation" 'grep -q "not confirmed OPEN (UNKNOWN)" <<<"$AWUNKNOWN" && [ ! -f "$GHSTUB/ghaxi-called" ]'
@@ -3171,10 +3372,10 @@ check "UNKNOWN PR state refuses before mutation" 'grep -q "not confirmed OPEN (U
 echo "== check snapshot is bound to its invoking refresh =="
 cp "$GHSTUB/gh" "$GHSTUB/gh-normal"
 cat > "$GHSTUB/old-pr.json" <<EOF
-{"state":"open","merged":false,"head":{"sha":"$OLDHEAD","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}
+{"state":"open","merged":false,"head":{"sha":"$OLDHEAD","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"sha":"$AWBASE","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"unknown"}
 EOF
 cat > "$GHSTUB/new-pr.json" <<EOF
-{"state":"open","merged":false,"head":{"sha":"$AWHEAD","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}
+{"state":"open","merged":false,"head":{"sha":"$AWHEAD","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"sha":"$AWBASE","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}
 EOF
 printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$OLDHEAD" > "$GHSTUB/old-runs.json"
 printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$AWHEAD" > "$GHSTUB/new-runs.json"
@@ -3247,7 +3448,62 @@ fi
 exec "$REAL_GIT" "\$@"
 STUB
 chmod +x "$GHSTUB/git"
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"has_hooks"}\n' "$AWHEAD" > "$GHSTUB/pr.json"
+
+b dm-task.sh new stale-merge-proof --kind ship --repo mauth --mode pipeline >/dev/null
+STALE_MERGE_WT="$(b dm-worktree.sh create stale-merge-proof mauth fix/stale-merge | tail -n1)"
+printf 'reviewed\n' >"$STALE_MERGE_WT/stale-merge.txt"
+git -C "$STALE_MERGE_WT" add stale-merge.txt
+git -C "$STALE_MERGE_WT" commit -qm "reviewed merge fixture"
+STALE_REVIEWED_HEAD="$(complete_pipeline_pr_proof stale-merge-proof "https://github.com/o/r/pull/78" main)"
+printf 'unreviewed\n' >>"$STALE_MERGE_WT/stale-merge.txt"
+git -C "$STALE_MERGE_WT" add stale-merge.txt
+git -C "$STALE_MERGE_WT" commit -qm "post-pipeline commit"
+STALE_CURRENT_HEAD="$(git -C "$STALE_MERGE_WT" rev-parse HEAD)"
+STALE_BASE="$(git -C "$STALE_MERGE_WT" rev-parse origin/main)"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/stale-merge","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' \
+  "$STALE_CURRENT_HEAD" "$STALE_BASE" >"$GHSTUB/pr.json"
+printf '{"object":{"sha":"%s"}}\n' "$STALE_CURRENT_HEAD" >"$GHSTUB/ref.json"
+printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$STALE_CURRENT_HEAD" >"$GHSTUB/runs.json"
+printf '{"total_count":0}\n' >"$GHSTUB/status.json"
+rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events"
+STALE_MERGE_OUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge stale-merge-proof 2>&1 || true)"
+check "post-pipeline commit refuses merge and rewinds before mutation" \
+  'grep -q "required gates were rescheduled" <<<"$STALE_MERGE_OUT" &&
+   [ "$(b dm-task.sh get stale-merge-proof pipeline_gate)" = coldstart-review ] &&
+   [ "$(b dm-task.sh get stale-merge-proof pipeline_state)" = ready ] &&
+   [ -z "$(b dm-task.sh get stale-merge-proof pr_head)" ] &&
+   [ ! -s "$GHSTUB/axi-calls" ]'
+
+b dm-task.sh new base-advance-proof --kind ship --repo mauth --mode pipeline >/dev/null
+git -C "$DM_HOME/repos/mauth" branch base-advance-target main
+git -C "$DM_HOME/repos/mauth" push -q origin base-advance-target
+BASE_ADVANCE_WT="$(b dm-worktree.sh create base-advance-proof mauth fix/base-advance --base base-advance-target | tail -n1)"
+printf 'base proof\n' >"$BASE_ADVANCE_WT/base-proof.txt"
+git -C "$BASE_ADVANCE_WT" add base-proof.txt
+git -C "$BASE_ADVANCE_WT" commit -qm "base proof fixture"
+BASE_ADVANCE_HEAD="$(complete_pipeline_pr_proof base-advance-proof "https://github.com/o/r/pull/79" base-advance-target)"
+git clone -q "$TMP/origin.git" "$TMP/merge-base-updater"
+git -C "$TMP/merge-base-updater" checkout -q base-advance-target
+printf 'advanced for merge\n' >"$TMP/merge-base-updater/merge-base.txt"
+git -C "$TMP/merge-base-updater" add merge-base.txt
+git -C "$TMP/merge-base-updater" commit -qm "advance merge base"
+git -C "$TMP/merge-base-updater" push -q origin base-advance-target
+BASE_ADVANCED_SHA="$(git -C "$TMP/merge-base-updater" rev-parse HEAD)"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/base-advance","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"base-advance-target","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' \
+  "$BASE_ADVANCE_HEAD" "$BASE_ADVANCED_SHA" >"$GHSTUB/pr.json"
+printf '{"object":{"sha":"%s"}}\n' "$BASE_ADVANCE_HEAD" >"$GHSTUB/ref.json"
+printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$BASE_ADVANCE_HEAD" >"$GHSTUB/runs.json"
+rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events"
+BASE_ADVANCE_OUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge base-advance-proof 2>&1 || true)"
+check "advanced PR base requires rebase and final proof before merge" \
+  'grep -q "required gates were rescheduled" <<<"$BASE_ADVANCE_OUT" &&
+   [ "$(b dm-task.sh get base-advance-proof pipeline_gate)" = rebase ] &&
+   [ "$(b dm-task.sh get base-advance-proof pipeline_recovery_resume_gate)" = pr ] &&
+   [ ! -s "$GHSTUB/axi-calls" ]'
+
+AWBASE="$(git -C "$AWT" rev-parse origin/main)"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/await-75","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"has_hooks"}\n' \
+  "$AWHEAD" "$AWBASE" > "$GHSTUB/pr.json"
 printf '{"object":{"sha":"%s"}}\n' "$AWHEAD" > "$GHSTUB/ref.json"
 printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$AWHEAD" > "$GHSTUB/runs.json"
 printf '{"total_count":0}\n' > "$GHSTUB/status.json"
@@ -3271,12 +3527,16 @@ check "slash branch deletion uses exact conditional lease" 'grep -Fx "origin|--f
 check "successful cleanup is reported" 'grep -q "deleted merged branch: fix/await-75" <<<"$AWSUCCESS"'
 
 echo "== branch advance after merge is rejected by server lease =="
-RACEHEAD="4444444444444444444444444444444444444444"
-b dm-task.sh new cleanup-race --kind ship --repo mauth >/dev/null
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/race","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$RACEHEAD" > "$GHSTUB/pr.json"
+b dm-task.sh new cleanup-race --kind ship --repo mauth --mode pipeline >/dev/null
+RACE_WT="$(b dm-worktree.sh create cleanup-race mauth fix/race | tail -n1)"
+printf 'race\n' >"$RACE_WT/race.txt"
+git -C "$RACE_WT" add race.txt
+git -C "$RACE_WT" commit -qm "cleanup race fixture"
+RACEHEAD="$(complete_pipeline_pr_proof cleanup-race "https://github.com/o/r/pull/77" main)"
+RACEBASE="$(git -C "$RACE_WT" rev-parse origin/main)"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/race","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' "$RACEHEAD" "$RACEBASE" > "$GHSTUB/pr.json"
 printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$RACEHEAD" > "$GHSTUB/runs.json"
 printf '{"object":{"sha":"%s"}}\n' "$RACEHEAD" > "$GHSTUB/ref.json"
-PATH="$GHSTUB:$PATH" b dm-pr.sh adopt cleanup-race "https://github.com/o/r/pull/77" >/dev/null
 rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events" "$GHSTUB/git-push-calls" "$GHSTUB/remote-advanced"
 : > "$GHSTUB/advance-on-merge"
 RACEMERGE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge cleanup-race --delete-branch 2>&1)"
@@ -3289,16 +3549,20 @@ rm -f "$GHSTUB/advance-on-merge" "$GHSTUB/remote-advanced"
 echo "== adopted fork PR resolves live fork ref and never deletes it =="
 FORKHEAD="3333333333333333333333333333333333333333"
 b dm-task.sh new adopted-fork --kind ship --repo mauth >/dev/null
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"feature/nested/head","repo":{"full_name":"forker/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$FORKHEAD" > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"feature/nested/head","repo":{"full_name":"forker/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' "$FORKHEAD" "$RACEBASE" > "$GHSTUB/pr.json"
 printf '{"total_count":1,"check_runs":[{"head_sha":"%s","status":"completed","conclusion":"success"}]}\n' "$FORKHEAD" > "$GHSTUB/runs.json"
 printf '{"object":{"sha":"%s"}}\n' "$FORKHEAD" > "$GHSTUB/ref.json"
 PATH="$GHSTUB:$PATH" b dm-pr.sh adopt adopted-fork "https://github.com/o/r/pull/76" >/dev/null
 check "adopted PR has no worktree dependency" '[ -z "$(b dm-task.sh get adopted-fork worktree)" ]'
 rm -f "$GHSTUB/axi-calls" "$GHSTUB/axi-events" "$GHSTUB/gh-calls" "$GHSTUB/git-push-calls"
 FORKMERGE="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge adopted-fork --method squash --delete-branch 2>&1)"
-check "adopted PR merges through base-repo endpoint" 'grep -Fx "api PUT /repos/o/r/pulls/76/merge --field sha=$FORKHEAD --field merge_method=squash" "$GHSTUB/axi-calls" >/dev/null'
-check "fork head ref with slashes is resolved encoded" 'grep -q "repos/forker/r/git/ref/heads/feature%2Fnested%2Fhead" "$GHSTUB/gh-calls"'
-check "fork branch is never deleted" '[ ! -s "$GHSTUB/git-push-calls" ] && grep -q "head belongs to fork forker/r" <<<"$FORKMERGE"'
+check "legacy adopted PR merges without Codex pipeline state" \
+  'grep -Fx "api PUT /repos/o/r/pulls/76/merge --field sha=$FORKHEAD --field merge_method=squash" "$GHSTUB/axi-calls" >/dev/null &&
+   [ -z "$(b dm-task.sh get adopted-fork pipeline_repo)" ]'
+check "legacy fork head ref with slashes is resolved encoded" \
+  'grep -q "repos/forker/r/git/ref/heads/feature%2Fnested%2Fhead" "$GHSTUB/gh-calls"'
+check "legacy fork branch is never deleted" \
+  '[ ! -s "$GHSTUB/git-push-calls" ] && grep -q "head belongs to fork forker/r" <<<"$FORKMERGE"'
 rm -rf "$DM_HOME/repos/mauth/.github"
 
 echo "== registry integrity: corruption never reads as an empty registry (#112, #114) =="

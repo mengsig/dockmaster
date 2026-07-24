@@ -12,8 +12,12 @@ reorder, drop, or add gates by editing one array.
 
 ## Where the pipeline comes from
 
-1. Per repo: `config/pr-pipeline.<repo>.json` if it exists.
+1. Per repo: `config/pr-pipeline.repos/<repo>.json` if it exists.
 2. Otherwise: the selected `config/pr-pipeline.<fast|default|rigorous>.json`.
+
+Legacy `config/pr-pipeline.<repo>.json` remains a warned fallback only for repo
+names that do not collide with tier names. Repos named `fast`, `default`, or
+`rigorous` use the new namespace for overrides.
 
 Approval snapshots the canonical gate array and its hash into task meta. Run
 that snapshot to completion; a later live-config edit never changes an approved
@@ -131,6 +135,17 @@ authentication against another process running as the same OS user. The
 mechanical boundary is immutable plan/order, exact SHAs, and sanctioned signals.
 Any commit after completion rewinds to the first snapshotted gate and clears
 downstream proofs.
+
+Approval also binds the task's immutable repo and reviewed base ref/SHA. PR open
+cannot retarget that base. GitHub's live base and head must match the latest
+completed proof at PR creation and merge; a base advance enters
+rebase → merge-gate review → final tests recovery, while a new branch commit
+rewinds to the canonical first gate.
+
+These proof checks activate only after `dm-task.sh approve` records the immutable
+pipeline binding. Legacy tasks without that binding keep the established Claude
+open, adopt, check, security-scan, and merge paths: no added gate, fetch, API
+round trip, or merge refusal.
 
 File/subsystem overlap does not stop branch-local implementation, cold review,
 or branch-local tests. At the integration horizon only, record the concrete

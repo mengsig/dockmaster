@@ -18,6 +18,7 @@
 #   new <id> --kind ship|scout --repo R [--mode M] [--title T]
 #   set <id> <key> <value>
 #   approve <id> <fast|default|rigorous>
+#   pipeline-check <id> <open|merge> <repo> <base-ref> <base-sha> <head-sha>
 #   gate <id> claim <gate> <thread>
 #   gate <id> start <gate> <epoch> <thread> <agent-id>
 #   gate <id> release <gate> <epoch> <thread> <reason>
@@ -48,8 +49,20 @@ valid_pipeline_gate() {
   [ "${#1}" -le 64 ]
 }
 pipeline_config() {
-  local repo="$1" tier="$2" file
-  file="$DM_CONFIG/pr-pipeline.$repo.json"
+  local repo="$1" tier="$2" file legacy
+  file="$DM_CONFIG/pr-pipeline.repos/$repo.json"
+  if [ ! -f "$file" ]; then
+    legacy="$DM_CONFIG/pr-pipeline.$repo.json"
+    case "$repo" in
+      fast|default|rigorous) ;;
+      *)
+        if [ -f "$legacy" ]; then
+          dm_warn "legacy pipeline override '$legacy' is deprecated; move it to '$DM_CONFIG/pr-pipeline.repos/$repo.json'"
+          file="$legacy"
+        fi
+        ;;
+    esac
+  fi
   [ -f "$file" ] || file="$DM_CONFIG/pr-pipeline.$tier.json"
   [ -f "$file" ] || dm_die "missing pipeline definition: $file"
   printf '%s\n' "$file"
@@ -70,6 +83,7 @@ pipeline_plan_hash() {
 }
 pipeline_plan_locked() {
   local id="$1" plan expected actual
+  pipeline_require_binding_locked "$id"
   plan="$(dm_meta_get "$id" pipeline_plan)"
   expected="$(dm_meta_get "$id" pipeline_plan_hash)"
   [ -n "$plan" ] && [ -n "$expected" ] \
@@ -78,6 +92,18 @@ pipeline_plan_locked() {
   [ "$actual" = "$expected" ] \
     || dm_die "task '$id' pipeline plan snapshot hash mismatch; refusing live-config fallback"
   printf '%s\n' "$plan"
+}
+pipeline_require_binding_locked() {
+  local id="$1" repo pipeline_repo base_ref
+  repo="$(dm_meta_get "$id" repo)"
+  pipeline_repo="$(dm_meta_get "$id" pipeline_repo)"
+  [ -n "$pipeline_repo" ] && [ "$repo" = "$pipeline_repo" ] \
+    || dm_die "task '$id' repo does not match its immutable pipeline binding"
+  base_ref="$(dm_meta_get "$id" pipeline_base_ref)"
+  [ -n "$base_ref" ] \
+    || dm_die "task '$id' has no immutable pipeline base binding"
+  [ "$(dm_task_base_ref "$id")" = "$base_ref" ] \
+    || dm_die "task '$id' base does not match its immutable pipeline binding"
 }
 pipeline_first_gate_locked() {
   pipeline_plan_locked "$1" | jq -er '.[0].id'
@@ -134,14 +160,61 @@ valid_integration_gate() {
 pipeline_snapshot_locked() {
   local snapshot
   snapshot="$(dm_task_git_snapshot "$1")"
+  PIPELINE_BASE_REF="$(dm_task_base_ref "$1")"
   PIPELINE_BASE_SHA="${snapshot%%$'\t'*}"
   PIPELINE_HEAD_SHA="${snapshot#*$'\t'}"
   [ -n "$PIPELINE_BASE_SHA" ] && [ -n "$PIPELINE_HEAD_SHA" ] \
     || dm_die "could not capture exact pipeline git snapshot for '$1'"
 }
 
+pipeline_clear_proofs_locked() {
+  dm_meta_set_fields_locked "$1" \
+    tests "" tests_base_sha "" tests_head_sha "" \
+    security_scan "" security_scan_base_sha "" security_scan_head_sha "" \
+    pr_head "" pr_base_ref "" pr_base_sha ""
+}
+
+pipeline_rewind_canonical_locked() {
+  local id="$1" reason="$2" first
+  first="$(pipeline_first_gate_locked "$id")"
+  dm_task_transition_locked "$id" working "$reason; proofs invalidated and '$first' ready" \
+    pipeline_gate "$first" pipeline_state ready pipeline_epoch "" \
+    pipeline_owner_thread "" pipeline_owner_agent "" gate_started_at "" \
+    pipeline_claim_base_sha "" pipeline_claim_head_sha "" \
+    pipeline_blocked_by "" pipeline_blocked_reason "" pipeline_recovery_resume_gate "" \
+    pipeline_last_gate "" pipeline_last_evidence "" \
+    pipeline_last_base_sha "$PIPELINE_BASE_SHA" pipeline_last_head_sha "$PIPELINE_HEAD_SHA"
+  pipeline_clear_proofs_locked "$id"
+}
+
+pipeline_recover_base_locked() {
+  local id="$1" reason="$2" resume
+  resume="$(dm_meta_get "$id" pipeline_recovery_resume_gate)"
+  [ -n "$resume" ] || resume="$(dm_meta_get "$id" pipeline_gate)"
+  dm_task_transition_locked "$id" working "$reason; rebase recovery required" \
+    pipeline_gate rebase pipeline_state ready pipeline_epoch "" \
+    pipeline_owner_thread "" pipeline_owner_agent "" gate_started_at "" \
+    pipeline_claim_base_sha "" pipeline_claim_head_sha "" \
+    pipeline_blocked_by "" pipeline_blocked_reason "" \
+    pipeline_recovery_resume_gate "$resume" \
+    pipeline_last_gate "" pipeline_last_evidence "" \
+    pipeline_last_base_sha "$PIPELINE_BASE_SHA" pipeline_last_head_sha "$PIPELINE_HEAD_SHA"
+  pipeline_clear_proofs_locked "$id"
+}
+
+pipeline_invalidate_changed_locked() {
+  local id="$1" anchor_base="$2" anchor_head="$3" reason="$4"
+  if [ "$PIPELINE_HEAD_SHA" != "$anchor_head" ]; then
+    pipeline_rewind_canonical_locked "$id" "$reason: HEAD changed"
+  elif [ "$PIPELINE_BASE_SHA" != "$anchor_base" ] && [ -n "$(dm_meta_get "$id" pipeline_last_gate)" ]; then
+    pipeline_recover_base_locked "$id" "$reason: base advanced"
+  else
+    pipeline_rewind_canonical_locked "$id" "$reason: base changed before reviewed proof"
+  fi
+}
+
 pipeline_rewind_if_changed_locked() {
-  local id="$1" state anchor_base anchor_head first
+  local id="$1" state anchor_base anchor_head
   state="$(dm_meta_get "$id" pipeline_state)"
   case "$state" in ready|complete) ;; *) return 0 ;; esac
   anchor_base="$(dm_meta_get "$id" pipeline_last_base_sha)"
@@ -150,20 +223,64 @@ pipeline_rewind_if_changed_locked() {
   pipeline_snapshot_locked "$id"
   [ "$PIPELINE_BASE_SHA" = "$anchor_base" ] && [ "$PIPELINE_HEAD_SHA" = "$anchor_head" ] \
     && return 0
-  first="$(pipeline_first_gate_locked "$id")"
-  dm_task_transition_locked "$id" working "git snapshot changed after gate completion; proofs invalidated and '$first' ready" \
-    pipeline_gate "$first" pipeline_state ready pipeline_epoch "" \
-    pipeline_owner_thread "" pipeline_owner_agent "" gate_started_at "" \
-    pipeline_claim_base_sha "" pipeline_claim_head_sha "" \
-    pipeline_last_gate "" pipeline_last_evidence "" \
-    pipeline_last_base_sha "$PIPELINE_BASE_SHA" pipeline_last_head_sha "$PIPELINE_HEAD_SHA" \
-    tests "" tests_base_sha "" tests_head_sha "" \
-    security_scan "" security_scan_base_sha "" security_scan_head_sha ""
+  pipeline_invalidate_changed_locked "$id" "$anchor_base" "$anchor_head" \
+    "git snapshot changed after gate completion"
+}
+
+pipeline_final_gate_locked() {
+  pipeline_plan_locked "$1" | jq -er '.[-1].id'
+}
+
+pipeline_check_open_locked() {
+  local id="$1" final claim_base claim_head last_base last_head
+  final="$(pipeline_final_gate_locked "$id")"
+  [ "$(pipeline_gate_kind_locked "$id" "$final")" = "pr" ] \
+    || dm_die "approved pipeline does not end in a PR proof gate"
+  [ "$(dm_meta_get "$id" pipeline_state)" = "running" ] \
+    && [ "$(dm_meta_get "$id" pipeline_gate)" = "$final" ] \
+    || dm_die "PR open requires the approved pipeline's final PR gate to be running"
+  claim_base="$(dm_meta_get "$id" pipeline_claim_base_sha)"
+  claim_head="$(dm_meta_get "$id" pipeline_claim_head_sha)"
+  last_base="$(dm_meta_get "$id" pipeline_last_base_sha)"
+  last_head="$(dm_meta_get "$id" pipeline_last_head_sha)"
+  if [ "$PIPELINE_BASE_SHA" != "$claim_base" ] || [ "$PIPELINE_HEAD_SHA" != "$claim_head" ]; then
+    pipeline_invalidate_changed_locked "$id" "$claim_base" "$claim_head" \
+      "git snapshot changed before PR open"
+    dm_die "PR open proof became stale; required gates were rescheduled"
+  fi
+  [ -n "$(dm_meta_get "$id" pipeline_last_gate)" ] \
+    && [ "$PIPELINE_BASE_SHA" = "$last_base" ] \
+    && [ "$PIPELINE_HEAD_SHA" = "$last_head" ] \
+    || dm_die "PR open requires a current completed proof snapshot before the final PR gate"
+}
+
+pipeline_check_merge_locked() {
+  local id="$1" final url anchor_base anchor_head
+  final="$(pipeline_final_gate_locked "$id")"
+  anchor_base="$(dm_meta_get "$id" pipeline_last_base_sha)"
+  anchor_head="$(dm_meta_get "$id" pipeline_last_head_sha)"
+  if [ -n "$anchor_base" ] && [ -n "$anchor_head" ] \
+    && { [ "$PIPELINE_BASE_SHA" != "$anchor_base" ] || [ "$PIPELINE_HEAD_SHA" != "$anchor_head" ]; }; then
+    pipeline_invalidate_changed_locked "$id" "$anchor_base" "$anchor_head" \
+      "git snapshot changed after pipeline completion"
+    dm_die "merge proof became stale; required gates were rescheduled"
+  fi
+  [ "$(pipeline_gate_kind_locked "$id" "$final")" = "pr" ] \
+    && [ "$(dm_meta_get "$id" pipeline_state)" = "complete" ] \
+    && [ "$(dm_meta_get "$id" pipeline_gate)" = "$final" ] \
+    && [ "$(dm_meta_get "$id" pipeline_last_gate)" = "$final" ] \
+    || dm_die "merge requires a complete approved pipeline ending in its PR proof gate"
+  url="$(dm_meta_get "$id" pr)"
+  [ "$(dm_meta_get "$id" pipeline_last_evidence)" = "pr:$url" ] \
+    && [ "$(dm_meta_get "$id" pr_head)" = "$PIPELINE_HEAD_SHA" ] \
+    && [ "$(dm_meta_get "$id" pr_base_ref)" = "$PIPELINE_BASE_REF" ] \
+    && [ "$(dm_meta_get "$id" pr_base_sha)" = "$PIPELINE_BASE_SHA" ] \
+    || dm_die "merge requires the sanctioned PR proof for the exact current base and HEAD"
 }
 
 pipeline_validate_evidence_locked() {
   local id="$1" gate="$2" base_sha="$3" head_sha="$4" supplied="$5"
-  local kind result scan url pr_head
+  local kind result scan url pr_head pr_base_ref pr_base_sha
   case "$gate" in
     rebase) kind=rebase ;;
     merge-gate-review) kind=review ;;
@@ -194,8 +311,12 @@ pipeline_validate_evidence_locked() {
     pr)
       url="$(dm_meta_get "$id" pr)"
       pr_head="$(dm_meta_get "$id" pr_head)"
+      pr_base_ref="$(dm_meta_get "$id" pr_base_ref)"
+      pr_base_sha="$(dm_meta_get "$id" pr_base_sha)"
       [ -n "$url" ] && [ "$pr_head" = "$head_sha" ] \
-        || dm_die "cannot complete '$gate': sanctioned PR signal is missing or stale for current HEAD"
+        && [ "$pr_base_ref" = "$(dm_meta_get "$id" pipeline_base_ref)" ] \
+        && [ "$pr_base_sha" = "$base_sha" ] \
+        || dm_die "cannot complete '$gate': sanctioned PR signal is missing or stale for current base/HEAD"
       PIPELINE_VALIDATED_EVIDENCE="pr:$url"
       ;;
     *)
@@ -249,10 +370,11 @@ case "$cmd" in
     # It is recorded only by `dm-worktree.sh create --base`, which also writes
     # directly via dm_meta_set and so is unaffected by this CLI-only guard.
     case "$key" in
-      pr|pr_state|merge_state|pr_check_snapshot|pr_head) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
+      repo) dm_die "'repo' is immutable after task creation" ;;
+      pr|pr_state|merge_state|pr_check_snapshot|pr_head|pr_base_ref|pr_base_sha|pr_live_head|pr_live_base_ref|pr_live_base_sha) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
       base) dm_die "'base' is recorded by dm-worktree.sh create --base; it must not be set by hand" ;;
       worktree) dm_die "'worktree' is maintained by dm-worktree.sh create/remove; it must not be set by hand" ;;
-      approved_at|pipeline_tier|pipeline_plan|pipeline_plan_hash|pipeline_plan_source|pipeline_gate|pipeline_state|pipeline_generation|pipeline_epoch|pipeline_owner_thread|pipeline_owner_agent|gate_started_at|pipeline_blocked_by|pipeline_blocked_reason|pipeline_recovery_resume_gate|pipeline_claim_base_sha|pipeline_claim_head_sha|pipeline_last_base_sha|pipeline_last_head_sha|pipeline_last_gate|pipeline_last_evidence)
+      approved_at|pipeline_repo|pipeline_base_ref|pipeline_base_sha|pipeline_tier|pipeline_plan|pipeline_plan_hash|pipeline_plan_source|pipeline_gate|pipeline_state|pipeline_generation|pipeline_epoch|pipeline_owner_thread|pipeline_owner_agent|gate_started_at|pipeline_blocked_by|pipeline_blocked_reason|pipeline_recovery_resume_gate|pipeline_claim_base_sha|pipeline_claim_head_sha|pipeline_last_base_sha|pipeline_last_head_sha|pipeline_last_gate|pipeline_last_evidence)
         dm_die "'$key' is pipeline state maintained by dm-task.sh approve/gate; it must not be set by hand" ;;
       tests|tests_base_sha|tests_head_sha)
         dm_die "'$key' is test evidence maintained by dm-test.sh; it must not be set by hand" ;;
@@ -280,7 +402,7 @@ case "$cmd" in
     plan="$(pipeline_plan_from_file "$config")"
     plan_hash="$(pipeline_plan_hash "$plan")"
     gate="$(jq -er '.[0].id' <<<"$plan")"
-    plan_source="${config##*/}"
+    plan_source="${config#"$DM_CONFIG"/}"
     meta="$(dm_meta_path "$id")"
     dm_lock "$meta"
     dm_require_complete_task_locked "$id"
@@ -292,13 +414,44 @@ case "$cmd" in
     pipeline_snapshot_locked "$id"
     approved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     dm_task_transition_locked "$id" working "approved; snapshotted $plan_source ($plan_hash); gate '$gate' ready to schedule" \
-      approved_at "$approved_at" pipeline_tier "$tier" pipeline_plan "$plan" \
+      approved_at "$approved_at" pipeline_repo "$repo" \
+      pipeline_base_ref "$PIPELINE_BASE_REF" pipeline_base_sha "$PIPELINE_BASE_SHA" \
+      pipeline_tier "$tier" pipeline_plan "$plan" \
       pipeline_plan_hash "$plan_hash" pipeline_plan_source "$plan_source" pipeline_gate "$gate" \
       pipeline_state ready pipeline_generation 0 pipeline_epoch "" \
       pipeline_owner_thread "" pipeline_owner_agent "" gate_started_at "" \
       pipeline_blocked_by "" pipeline_blocked_reason "" pipeline_recovery_resume_gate "" \
       pipeline_claim_base_sha "" pipeline_claim_head_sha "" \
       pipeline_last_base_sha "$PIPELINE_BASE_SHA" pipeline_last_head_sha "$PIPELINE_HEAD_SHA"
+    dm_unlock "$meta"
+    ;;
+
+  pipeline-check)
+    id="${1:-}"; purpose="${2:-}"; repo="${3:-}"; base_ref="${4:-}"
+    base_sha="${5:-}"; head_sha="${6:-}"
+    [ "$#" -eq 6 ] && [ -n "$id" ] && [ -n "$repo" ] \
+      && [ -n "$base_ref" ] && [ -n "$base_sha" ] && [ -n "$head_sha" ] \
+      || dm_die "usage: dm-task.sh pipeline-check <id> <open|merge> <repo> <base-ref> <base-sha> <head-sha>"
+    case "$purpose" in open|merge) ;; *) dm_die "pipeline-check purpose must be open|merge" ;; esac
+    dm_require_id "$id"; dm_require_id "$repo"
+    git check-ref-format "refs/heads/$base_ref" >/dev/null 2>&1 \
+      || dm_die "invalid pipeline-check base ref '$base_ref'"
+    case "$base_sha$head_sha" in *[!0-9A-Fa-f]*) dm_die "pipeline-check SHAs must be Git object ids" ;; esac
+    meta="$(dm_meta_path "$id")"
+    dm_lock "$meta"
+    dm_require_complete_task_locked "$id"
+    pipeline_require_binding_locked "$id"
+    [ "$(dm_meta_get "$id" pipeline_repo)" = "$repo" ] \
+      || { dm_unlock "$meta"; dm_die "pipeline repo binding does not match '$repo'"; }
+    [ "$(dm_meta_get "$id" pipeline_base_ref)" = "$base_ref" ] \
+      || { dm_unlock "$meta"; dm_die "PR base '$base_ref' does not match approved pipeline base"; }
+    pipeline_snapshot_locked "$id"
+    [ "$PIPELINE_BASE_SHA" = "$base_sha" ] && [ "$PIPELINE_HEAD_SHA" = "$head_sha" ] \
+      || { dm_unlock "$meta"; dm_die "live PR base/HEAD does not match the exact local task snapshot"; }
+    case "$purpose" in
+      open) pipeline_check_open_locked "$id" ;;
+      merge) pipeline_check_merge_locked "$id" ;;
+    esac
     dm_unlock "$meta"
     ;;
 
@@ -472,6 +625,7 @@ case "$cmd" in
             pipeline_state complete pipeline_epoch "" pipeline_owner_thread "" \
             pipeline_owner_agent "" gate_started_at "" \
             pipeline_claim_base_sha "" pipeline_claim_head_sha "" \
+            pipeline_blocked_by "" pipeline_blocked_reason "" pipeline_recovery_resume_gate "" \
             pipeline_last_gate "$gate" pipeline_last_evidence "$PIPELINE_VALIDATED_EVIDENCE" \
             pipeline_last_base_sha "$PIPELINE_BASE_SHA" pipeline_last_head_sha "$PIPELINE_HEAD_SHA"
         fi
