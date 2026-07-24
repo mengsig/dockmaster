@@ -4709,6 +4709,154 @@ check "CI parses bin/*.sh with the macOS system bash 3.2 (#164)" \
 check "that step stays behind the system-bash-is-v3 assertion (#164)" \
   '[ "$(grep -n "no longer version 3" "$CI_YML" | cut -d: -f1)" -lt "$(grep -n "/bin/bash -n" "$CI_YML" | cut -d: -f1)" ]'
 
+echo "== verify gate: registry fields =="
+V="$ROOT/bin/dm-verify.sh"
+check "app fields are settable"        'b dm-repo.sh set demo app_url "http://localhost:\$DM_VERIFY_PORT" >/dev/null'
+check "app_url is stored verbatim"     '[ "$(b dm-repo.sh get demo app_url)" = "http://localhost:\$DM_VERIFY_PORT" ]'
+# Every app command is eval'd or matched as ONE line; a multi-line value would
+# run only its first line, so it must be refused rather than silently truncated.
+MULTILINE="$(printf 'one\ntwo')"
+check "a multi-line app command is refused" '! b dm-repo.sh set demo app_start_cmd "$MULTILINE" >/dev/null 2>&1'
+b dm-repo.sh set demo app_ready_cmd "true" >/dev/null
+b dm-repo.sh set demo app_ready_cmd "" >/dev/null
+check "an empty value clears the field"     '[ -z "$(b dm-repo.sh get demo app_ready_cmd)" ]'
+check "an unknown field is still refused"   '! b dm-repo.sh set demo app_nonsense x >/dev/null 2>&1'
+
+echo "== verify gate: does the gate fire? =="
+b dm-task.sh new vrf1 --kind ship --repo demo --title "verify gate" >/dev/null
+VWT="$(b dm-worktree.sh create vrf1 demo)"
+mkdir -p "$VWT/frontend"; printf 'console.log(1)\n' > "$VWT/frontend/app.js"
+# A user-facing surface moved but the repo cannot be booted. That is UNAVAILABLE
+# (exit 3) and must never read as a pass or a quiet skip.
+GATE_UNAVAIL="$("$V" gate vrf1 2>&1 || true)"; GATE_UNAVAIL_RC=0
+"$V" gate vrf1 >/dev/null 2>&1 || GATE_UNAVAIL_RC=$?
+check "no app config exits 3, not 0"        '[ "$GATE_UNAVAIL_RC" = 3 ]'
+check "the unavailable refusal says so"     'grep -q "UNAVAILABLE" <<<"$GATE_UNAVAIL"'
+check "it names the missing app_start_cmd"  'grep -q "app_start_cmd" <<<"$GATE_UNAVAIL"'
+# Registered app lifecycle: a marker file stands in for a real server, so the
+# whole boot/ready/seed/teardown contract is exercised without a network.
+b dm-repo.sh set demo app_start_cmd 'printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"' >/dev/null
+b dm-repo.sh set demo app_ready_cmd 'test -f "$DM_VERIFY_DIR/app.state"' >/dev/null
+b dm-repo.sh set demo app_stop_cmd 'rm -f "$DM_VERIFY_DIR/app.state"' >/dev/null
+b dm-repo.sh set demo app_seed_cmd 'printf seeded > "$DM_VERIFY_DIR/app.seed"' >/dev/null
+check "a touched surface with app config is required" '"$V" gate vrf1 >/dev/null 2>&1'
+check "the required line names the changed file"      'GOUT="$("$V" gate vrf1 2>&1)"; grep -q "frontend/app.js" <<<"$GOUT"'
+rm -f "$VWT/frontend/app.js"; mkdir -p "$VWT/docs"; printf 'x\n' > "$VWT/docs/notes.md"
+GATE_NA_RC=0; "$V" gate vrf1 >/dev/null 2>&1 || GATE_NA_RC=$?
+check "a docs-only diff exits 1 (no surface)"  '[ "$GATE_NA_RC" = 1 ]'
+# "could not determine" must never be reported as "nothing to verify": a task
+# whose worktree is gone exits 2, distinct from the no-surface 1.
+b dm-task.sh new vrfx --kind ship --repo demo --title "no worktree" >/dev/null
+GATE_ERR_RC=0; "$V" gate vrfx >/dev/null 2>&1 || GATE_ERR_RC=$?
+check "an unresolvable worktree exits 2, not 1" '[ "$GATE_ERR_RC" = 2 ]'
+# verify_surfaces overrides the default globs, so a repo can declare its own.
+b dm-repo.sh set demo verify_surfaces 'docs/**' >/dev/null
+check "a repo's own verify_surfaces fires the gate" '"$V" gate vrf1 >/dev/null 2>&1'
+b dm-repo.sh set demo verify_surfaces '' >/dev/null
+
+echo "== verify gate: app lifecycle =="
+check "up boots the app"                 '"$V" up vrf1 >/dev/null 2>&1'
+VPORT="$(b dm-task.sh get vrf1 verify_port)"
+VDIR="$DM_HOME/data/vrf1/verify"
+check "the port is in the per-task range" '[ "$VPORT" -ge 8600 ] && [ "$VPORT" -le 8999 ]'
+check "app state is recorded up"          '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "up" ]'
+check "DM_VERIFY_PORT reached the app"    'grep -q "port=$VPORT" "$VDIR/app.state"'
+check "the app ran in the task worktree"  'grep -q "cwd=$VWT" "$VDIR/app.state"'
+check "the seed command ran"              '[ -f "$VDIR/app.seed" ]'
+check "app_url resolved the port token"   '[ "$(b dm-task.sh get vrf1 verify_url)" = "http://localhost:$VPORT" ]'
+check "a second up refuses while it is up" '! "$V" up vrf1 >/dev/null 2>&1'
+check "down stops the app"                '"$V" down vrf1 >/dev/null 2>&1'
+check "the app is really gone"            '[ ! -f "$VDIR/app.state" ]'
+check "app state is recorded down"        '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "down" ]'
+check "down is idempotent"                '"$V" down vrf1 >/dev/null 2>&1'
+
+echo "== verify gate: an app that cannot be brought down is never brought up =="
+b dm-repo.sh set demo app_stop_cmd '' >/dev/null
+check "start without stop is refused"     '! "$V" up vrf1 >/dev/null 2>&1'
+check "nothing was started"               '[ ! -f "$VDIR/app.state" ]'
+b dm-repo.sh set demo app_stop_cmd 'rm -f "$DM_VERIFY_DIR/app.state"' >/dev/null
+
+echo "== verify gate: a failed boot always tears down =="
+# The start command half-starts (leaves its marker) and then fails. Without the
+# cleanup trap that marker - a real app or container in production - would leak.
+b dm-repo.sh set demo app_start_cmd 'printf half > "$DM_VERIFY_DIR/app.state"; false' >/dev/null
+check "a failing start fails the gate"    '! "$V" up vrf1 >/dev/null 2>&1'
+check "the half-started app was stopped"  '[ ! -f "$VDIR/app.state" ]'
+check "state is recorded down after failure" '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "down" ]'
+# Starts fine but never becomes ready: the bounded wait must give up and tear down.
+b dm-repo.sh set demo app_start_cmd 'printf up > "$DM_VERIFY_DIR/app.state"' >/dev/null
+b dm-repo.sh set demo app_ready_cmd 'false' >/dev/null
+check "a never-ready app fails the gate"  '! DM_VERIFY_READY_TIMEOUT=1 "$V" up vrf1 >/dev/null 2>&1'
+check "the unready app was stopped"       '[ ! -f "$VDIR/app.state" ]'
+b dm-repo.sh set demo app_start_cmd 'printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"' >/dev/null
+b dm-repo.sh set demo app_ready_cmd 'test -f "$DM_VERIFY_DIR/app.state"' >/dev/null
+
+echo "== verify gate: the operator's own instance is never adopted =="
+# The derived port is occupied by something that is NOT this task's app. The gate
+# must move to a free one; attaching to whatever answers would be a fabricated pass.
+if command -v node >/dev/null 2>&1; then
+  DERIVED="$(printf '%s' vrf1 | cksum | awk '{print 8600 + ($1 % 400)}')"
+  node -e "require('net').createServer().listen($DERIVED,'127.0.0.1',()=>{setTimeout(()=>process.exit(0),20000)})" &
+  SQUATTER=$!
+  sleep 1
+  "$V" up vrf1 >/dev/null 2>&1
+  BUSY_PORT="$(b dm-task.sh get vrf1 verify_port)"
+  check "the occupied derived port is not reused" '[ "$BUSY_PORT" != "$DERIVED" ]'
+  check "the app still booted on a free port"     '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "up" ]'
+  kill "$SQUATTER" 2>/dev/null || true
+  "$V" down vrf1 >/dev/null 2>&1
+else
+  echo "  skip node-backed port-squatter check (node absent)"
+fi
+
+echo "== verify gate: the verdict cannot be fabricated =="
+"$V" up vrf1 >/dev/null 2>&1
+NOFLOW_RC=0; NOFLOW="$("$V" report vrf1 2>&1)" || NOFLOW_RC=$?
+check "no recorded flow exits 3"          '[ "$NOFLOW_RC" = 3 ]'
+check "it says nothing was verified"      'grep -q "NOTHING VERIFIED" <<<"$NOFLOW"'
+check "a bad flow result is refused"      '! "$V" flow vrf1 login green >/dev/null 2>&1'
+check "a bad flow name is refused"        '! "$V" flow vrf1 "bad name" pass >/dev/null 2>&1'
+"$V" flow vrf1 login pass "signed in" >/dev/null
+"$V" flow vrf1 checkout fail "cart total was wrong" >/dev/null
+FAIL_RC=0; FAILOUT="$("$V" report vrf1 2>&1)" || FAIL_RC=$?
+check "one failing flow fails the gate"   '[ "$FAIL_RC" = 1 ]'
+check "the failing flow is named"         'grep -q "checkout" <<<"$FAILOUT"'
+check "the failure is recorded in meta"   '[ "$(b dm-task.sh get vrf1 verify)" = "fail" ]'
+check "the report is written"             '[ -f "$VDIR/report.md" ] && [ -f "$VDIR/report.html" ]'
+# A flake is not a pass: report must stay red on one (testing-policy's stance).
+"$V" down vrf1 >/dev/null 2>&1; "$V" up vrf1 >/dev/null 2>&1
+"$V" flow vrf1 login flake "passed only on retry" >/dev/null
+FLAKE_RC=0; "$V" report vrf1 >/dev/null 2>&1 || FLAKE_RC=$?
+check "a flake does not pass the gate"    '[ "$FLAKE_RC" = 1 ]'
+# A new boot starts a new run: the previous flows are set aside, never carried
+# into the next verdict and never deleted.
+check "the previous run's flows are kept" '[ -n "$(ls -A "$VDIR/runs" 2>/dev/null)" ]'
+"$V" down vrf1 >/dev/null 2>&1; "$V" up vrf1 >/dev/null 2>&1
+"$V" flow vrf1 login pass "signed in" >/dev/null
+check "an all-pass run passes the gate"   '"$V" report vrf1 >/dev/null 2>&1'
+check "the pass is recorded in meta"      '[ "$(b dm-task.sh get vrf1 verify)" = "pass" ]'
+
+echo "== verify gate: two crewmates never drive one browser (#80) =="
+# DM_VERIFY_BROWSER_SHARED forces the degraded path: no per-task browser, so the
+# one shared browser is held under an exclusive lease instead of being shared.
+VB="$TMP/verify-bin"; mkdir -p "$VB"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$VB/chrome-devtools-axi"; chmod +x "$VB/chrome-devtools-axi"
+vsession() { PATH="$VB:$PATH" DM_VERIFY_BROWSER_SHARED=1 DM_VERIFY_LEASE_TIMEOUT=1 "$V" session "$1"; }
+check "session degrades to the shared browser" 'vsession vrf1 >/dev/null 2>&1'
+check "the shared mode is recorded"            '[ "$(b dm-task.sh get vrf1 verify_browser_mode)" = "shared" ]'
+check "the lease is recorded as held"          '[ "$(b dm-task.sh get vrf1 verify_browser_lease)" = "held" ]'
+b dm-task.sh new vrf2 --kind ship --repo demo --title "second driver" >/dev/null
+b dm-worktree.sh create vrf2 demo >/dev/null
+"$V" up vrf2 >/dev/null 2>&1
+CONTEND="$(vsession vrf2 2>&1 || true)"; CONTEND_RC=0
+vsession vrf2 >/dev/null 2>&1 || CONTEND_RC=$?
+check "a second crewmate cannot take the browser" '[ "$CONTEND_RC" != 0 ]'
+check "the refusal names the holder"              'grep -q "vrf1" <<<"$CONTEND"'
+check "down releases the lease"                   '"$V" down vrf1 >/dev/null 2>&1; [ "$(b dm-task.sh get vrf1 verify_browser_lease)" = "released" ]'
+check "the browser is then available"             'vsession vrf2 >/dev/null 2>&1'
+"$V" down vrf2 >/dev/null 2>&1
+check "no lease is left behind"                   '[ ! -d "$DM_HOME/state/browser.lease" ]'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
