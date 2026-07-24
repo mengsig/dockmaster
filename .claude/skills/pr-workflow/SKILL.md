@@ -43,8 +43,8 @@ them; the sizing is yours to get right.
   Select it for: this distro's own merge-gate / safety-gate code, auth,
   migrations, concurrency or locking, anything touching money or secrets, or any
   change the operator is nervous about. It replaces the two generalist passes
-  with a dimension-parallel cold review, adversarially verifies every finding
-  before spending a fix round, and adds a behavioral `verify` gate.
+  with a dimension-parallel cold review and adversarially verifies every finding
+  before spending a fix round. (The behavioral `verify` gate is in `default` too.)
 
 The tiers share one gate schema, so a tier is just a different ordered `gates`
 array. The two new mechanics the rigorous tier introduces are executable
@@ -66,9 +66,9 @@ same way):
 The rigorous gate order is
 `review (dimension-parallel) → verify-findings → fix → tests → verify → security
 → pr`. The behavioral `verify` gate drives the changed behavior
-end to end (via the `verify` skill) and reports what was actually exercised — not
-just that tests pass; it is skippable only when the diff has no runtime surface
-(docs/config-only). `security` is auto-triggered (`bin/dm-pr.sh security-scan`,
+end to end (via the `e2e-verification` skill) and reports what was actually exercised — not
+just that tests pass; it is skipped only on the mechanical no-surface decision
+(`bin/dm-verify.sh gate`). `security` is auto-triggered (`bin/dm-pr.sh security-scan`,
 then `security-review` only on a hit, else an explicit skip), and `pr` opens the
 PR. Waiting for CI is **not** a pipeline gate — it runs in the operator-mediated
 merge tail after the PR opens (see "Merge authority" below). The never-merge-red
@@ -91,7 +91,7 @@ The file has a `gates` array. Run the gates top to bottom. A repo's delivery
 ## The canonical pipeline (two review passes)
 
 ```
-coldstart review → fix → tests → merge-gate review → fix → tests → pr
+coldstart review → fix → tests → merge-gate review → fix → tests → verify → pr
 ```
 
 The two passes are deliberate: the first is a cold, independent read that will
@@ -115,6 +115,11 @@ worktree/branch from meta, communicates only through the task record, and
   final gate before the PR: same cold-read discipline, on the fixed tree. This
   is the "merge gate."
 - **fix / tests** — resolve any merge-gate findings and re-confirm green.
+- **verify** — optional, behavioral. `bin/dm-verify.sh gate <id>` decides
+  mechanically from the diff: exit 0 = a user-facing surface moved, so boot the
+  app and drive it (`e2e-verification` skill); exit 1 = no surface moved, an
+  explicit skip; exit 3 = a surface moved but the repo registers no
+  `app_start_cmd`, reported as **unavailable** — never as a pass.
 - **security** — optional. Run `security-review` on the diff only when the change
   touches auth, input handling, secrets, crypto, or external I/O. To make the
   skip deliberate rather than silent, `bin/dm-pr.sh security-scan <id>` greps the

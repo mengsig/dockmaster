@@ -96,6 +96,8 @@ Do not dispatch until required tools are present and GitHub auth is good. Plain
   after it was opened (the tail of the PR pipeline, after PR creation).
 - **testing-policy** — before relying on the tests gate for a repo with no
   registered test command, or when a test is flaky.
+- **e2e-verification** — when a change touches a user-facing surface and must be
+  proven working in the real app, not just green in CI.
 - **supervision** — whenever work is in flight (runtime-native background work,
   completion/wait primitives, and scheduled checks; no polling daemon).
 - **merge-conflict** — when a branch has diverged or a rebase hits conflicts.
@@ -206,6 +208,8 @@ SHARED store. Open the one covering what you are editing:
   aggregate gate, and where each platform's coverage actually lives.
 - `.dm-knowledge/runtime-and-tests.md` — skills and their triggers, test
   coverage gaps, the context budget.
+- `.dm-knowledge/verify-gate.md` — per-task app ports, browser isolation (#80),
+  the trap/lock hazard, why a screenshot is verified before it counts.
 
 Per-task notes (`.dm-knowledge/<task-id>.md`) land beside these as work ships;
 fold one into an area note once it outlives its task. The legacy `dm:knowledge`
