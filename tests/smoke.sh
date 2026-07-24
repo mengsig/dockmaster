@@ -35,8 +35,7 @@ file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 RUNTIME_OK="$TMP/runtime-ok"
 mkdir -p "$RUNTIME_OK"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNTIME_OK/claude"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNTIME_OK/codex"
-chmod +x "$RUNTIME_OK/claude" "$RUNTIME_OK/codex"
+chmod +x "$RUNTIME_OK/claude"
 export PATH="$RUNTIME_OK:$PATH"
 
 # --- fixtures ----------------------------------------------------------------
@@ -49,7 +48,7 @@ git init -q -b main "$TMP/seed"
 cd "$ROOT"
 b() { "$ROOT/bin/$@"; }
 
-echo "== Codex thread identity + command guard =="
+echo "== agent thread identity + command guard =="
 THREAD_A="$(b dm-thread-name.sh fix-login-412 worker)"
 THREAD_B="$(b dm-thread-name.sh fix.login-412 worker)"
 THREAD_C="$(b dm-thread-name.sh fix_login_412 worker)"
@@ -58,7 +57,7 @@ ROLE_THREAD="$(b dm-thread-name.sh fix-login-412 verify)"
 MAX_ID="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
 MAX_THREAD="$(b dm-thread-name.sh "$MAX_ID" secondmate)"
 check "thread name is stable" '[ "$THREAD_A" = "$(b dm-thread-name.sh fix-login-412 worker)" ]'
-check "thread name matches Codex grammar" 'grep -Eq "^[a-z0-9_]{1,64}$" <<<"$THREAD_A"'
+check "thread name matches the label grammar" 'grep -Eq "^[a-z0-9_]{1,64}$" <<<"$THREAD_A"'
 check "normalized collisions retain distinct identities" '[ "$THREAD_A" != "$THREAD_B" ] && [ "$THREAD_A" != "$THREAD_C" ] && [ "$THREAD_B" != "$THREAD_C" ]'
 check "role participates in identity" '[ "$THREAD_A" != "$ROLE_THREAD" ]'
 check "long and max-length ids stay bounded" '[ "${#LONG_THREAD}" -le 64 ] && [ "${#MAX_THREAD}" -le 64 ]'
@@ -290,30 +289,26 @@ check "the timeout message names the reclaim marker, not just the lock" \
 check "dm-lib documents no knob it does not implement" \
   '! grep -q "DM_LOCK_STALE_SECS" "$ROOT/bin/dm-lib.sh"'
 
-# --- managed-worktree guard wiring (#83) -------------------------------------
-# The shipped Codex PreToolUse hook must resolve dm-command-guard.sh from the
-# distro root even when cwd is a managed clone/worktree, whose git-toplevel has
-# no guard script. Exercise the EXACT resolver string from .codex/config.toml.
-GUARD_HOOK_CMD="$(sed -n "s/^command = '\(.*\)'\$/\1/p" "$ROOT/.codex/config.toml")"
+# --- managed-worktree guard hook (#83) ---------------------------------------
+# The PreToolUse hook classifies by the command alone: cwd inside a managed
+# clone/worktree must not change the verdict, with or without DM_HOME.
 GUARD_DISTRO="$TMP/guard-distro"
 mkdir -p "$GUARD_DISTRO/bin" "$GUARD_DISTRO/repos/veriflow/src" "$GUARD_DISTRO/state/worktrees/dm-fake/src"
 cp "$ROOT/bin/dm-command-guard.sh" "$GUARD_DISTRO/bin/dm-command-guard.sh"
 chmod +x "$GUARD_DISTRO/bin/dm-command-guard.sh"
+GUARD_HOOK="$GUARD_DISTRO/bin/dm-command-guard.sh"
 GUARD_WT="$GUARD_DISTRO/state/worktrees/dm-fake/src"
 GUARD_CLONE="$GUARD_DISTRO/repos/veriflow/src"
-# Walk-up resolution: DM_HOME unset, cwd inside a managed worktree/clone.
-guard_walkup() { ( cd "$1" && printf '%s' "$2" | env -u DM_HOME sh -c "$GUARD_HOOK_CMD" ); }
-# DM_HOME fast path: cwd unrelated to the distro, DM_HOME names its root.
-guard_dmhome() { ( cd "$TMP" && printf '%s' "$1" | DM_HOME="$GUARD_DISTRO" sh -c "$GUARD_HOOK_CMD" ); }
+guard_from() { ( cd "$1" && printf '%s' "$2" | env -u DM_HOME "$GUARD_HOOK" hook ); }
+guard_dmhome() { ( cd "$TMP" && printf '%s' "$1" | DM_HOME="$GUARD_DISTRO" "$GUARD_HOOK" hook ); }
 GUARD_RESET='{"tool_input":{"command":"git reset --hard"}}'
 GUARD_CHECKOUT='{"tool_input":{"command":"git checkout -- package-lock.json"}}'
 GUARD_CLEAN='{"tool_input":{"command":"git clean -fdx"}}'
 GUARD_STATUS='{"tool_input":{"command":"git status"}}'
-check "wiring resolves guard extracted from .codex/config.toml" '[ -n "$GUARD_HOOK_CMD" ]'
-check "wiring blocks destructive git from a managed worktree (walk-up, no DM_HOME)" '! guard_walkup "$GUARD_WT" "$GUARD_RESET" >/dev/null 2>&1'
-check "wiring blocks destructive git from a managed clone (walk-up, no DM_HOME)" '! guard_walkup "$GUARD_CLONE" "$GUARD_CHECKOUT" >/dev/null 2>&1'
-check "wiring permits read-only git from a managed worktree" 'guard_walkup "$GUARD_WT" "$GUARD_STATUS" >/dev/null 2>&1'
-check "wiring blocks destructive git via DM_HOME fast path" '! guard_dmhome "$GUARD_CLEAN" >/dev/null 2>&1'
+check "hook blocks destructive git from a managed worktree (no DM_HOME)" '! guard_from "$GUARD_WT" "$GUARD_RESET" >/dev/null 2>&1'
+check "hook blocks destructive git from a managed clone (no DM_HOME)" '! guard_from "$GUARD_CLONE" "$GUARD_CHECKOUT" >/dev/null 2>&1'
+check "hook permits read-only git from a managed worktree" 'guard_from "$GUARD_WT" "$GUARD_STATUS" >/dev/null 2>&1'
+check "hook blocks destructive git with DM_HOME set" '! guard_dmhome "$GUARD_CLEAN" >/dev/null 2>&1'
 
 echo "== secondmate durable identity state =="
 SECOND_THREAD="$(b dm-thread-name.sh payments secondmate)"
@@ -364,22 +359,20 @@ check "doctor reports git ok"                'grep -qE "ok +git" <<<"$DOC"'
 check "doctor scaffolds home"                'b dm-doctor.sh >/dev/null && [ -d "$DM_HOME/state/tasks" ] && [ -d "$DM_HOME/state/worktrees" ] && [ -f "$DM_HOME/state/repos.json" ]'
 RUNTIME_BAD="$TMP/runtime-bad"
 mkdir -p "$RUNTIME_BAD"
-printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNTIME_BAD/claude"
-printf '#!/usr/bin/env bash\nexit 1\n' > "$RUNTIME_BAD/codex"
-chmod +x "$RUNTIME_BAD/claude" "$RUNTIME_BAD/codex"
-check "doctor requires only selected Claude runtime" 'PATH="$RUNTIME_BAD:$PATH" b dm-doctor.sh check --runtime claude >/dev/null'
-check "doctor fails selected unavailable Codex runtime" '! PATH="$RUNTIME_BAD:$PATH" b dm-doctor.sh check --runtime codex >/dev/null 2>&1'
+printf '#!/usr/bin/env bash\nexit 1\n' > "$RUNTIME_BAD/claude"
+chmod +x "$RUNTIME_BAD/claude"
+check "doctor fails an unauthenticated Claude runtime" '! PATH="$RUNTIME_BAD:$PATH" b dm-doctor.sh check >/dev/null 2>&1'
 CLEAN_DOCTOR_HOME="$TMP/clean-doctor-home"
 check "doctor passes CI-like environment only through explicit authenticated stub" \
-  'env -i HOME="$HOME" DM_HOME="$CLEAN_DOCTOR_HOME" PATH="$RUNTIME_OK:$PATH" "$ROOT/bin/dm-doctor.sh" check --runtime codex >/dev/null'
+  'env -i HOME="$HOME" DM_HOME="$CLEAN_DOCTOR_HOME" PATH="$RUNTIME_OK:$PATH" "$ROOT/bin/dm-doctor.sh" check >/dev/null'
 STATEFUL_RUNTIME="$TMP/runtime-stateful"
 STATEFUL_COUNT="$TMP/runtime-stateful-count"
 mkdir -p "$STATEFUL_RUNTIME"
-printf '%s\n' '#!/usr/bin/env bash' 'n=0; [ ! -f "$STATEFUL_COUNT" ] || n="$(cat "$STATEFUL_COUNT")"' 'n=$((n + 1)); printf "%s\n" "$n" > "$STATEFUL_COUNT"' '[ "$n" -eq 1 ]' > "$STATEFUL_RUNTIME/codex"
-chmod +x "$STATEFUL_RUNTIME/codex"
-STATEFUL_OUT="$(STATEFUL_COUNT="$STATEFUL_COUNT" PATH="$STATEFUL_RUNTIME:$PATH" b dm-doctor.sh check --runtime codex)"
-check "doctor probes selected runtime exactly once" '[ "$(cat "$STATEFUL_COUNT")" = 1 ]'
-check "doctor reports and exits from the same immutable snapshot" 'grep -qE "ok +codex-runtime" <<<"$STATEFUL_OUT" && ! grep -q "MISSING.*codex-runtime" <<<"$STATEFUL_OUT"'
+printf '%s\n' '#!/usr/bin/env bash' 'n=0; [ ! -f "$STATEFUL_COUNT" ] || n="$(cat "$STATEFUL_COUNT")"' 'n=$((n + 1)); printf "%s\n" "$n" > "$STATEFUL_COUNT"' '[ "$n" -eq 1 ]' > "$STATEFUL_RUNTIME/claude"
+chmod +x "$STATEFUL_RUNTIME/claude"
+STATEFUL_OUT="$(STATEFUL_COUNT="$STATEFUL_COUNT" PATH="$STATEFUL_RUNTIME:$PATH" b dm-doctor.sh check)"
+check "doctor probes the runtime exactly once" '[ "$(cat "$STATEFUL_COUNT")" = 1 ]'
+check "doctor reports and exits from the same immutable snapshot" 'grep -qE "ok +claude-runtime" <<<"$STATEFUL_OUT" && ! grep -q "MISSING.*claude-runtime" <<<"$STATEFUL_OUT"'
 
 echo "== create (new repo from an empty remote) =="
 git init -q --bare -b main "$TMP/new.git"   # an empty remote the operator "made"
@@ -599,9 +592,9 @@ path_without_ghaxi() {
   done <<<"$(printf '%s' "$PATH" | tr ':' '\n')"
   out="${out#:}"
   # Dropping a directory takes its unrelated tools with it — gh-axi ships in an
-  # nvm bin that also holds node and codex. Re-provide anything that vanished so
+  # nvm bin that also holds node and claude. Re-provide anything that vanished so
   # the filter removes exactly the wrapper, even on a nvm-only machine.
-  for tool in git jq node claude codex; do
+  for tool in git jq node claude; do
     real="$(command -v "$tool" 2>/dev/null)" || continue
     if ! ( PATH="$out"; command -v "$tool" >/dev/null 2>&1 ); then ln -sf "$real" "$shim/$tool"; fi
   done
@@ -3067,16 +3060,16 @@ REGINT_RAWKEYS="$(grep -n 'repos | keys' "$ROOT"/bin/*.sh | grep -v '/bin/dm-lib
 check "the registry is never enumerated by a raw jq keys call outside dm-lib" \
   '[ -z "$REGINT_RAWKEYS" ]'
 
-echo "== runtime parity + performance guards =="
-check "runtime parity suite passes" 'node "$ROOT/tests/check-runtime-parity.js" >/dev/null'
+echo "== skill trigger + performance guards =="
+check "skill trigger suite passes" 'node "$ROOT/tests/check-skill-triggers.js" >/dev/null'
 EVIDENCE_PARENT="$TMP/evidence-parent"
 mkdir -m 700 "$EVIDENCE_PARENT"
 printf 'untouched\n' > "$TMP/evidence-victim"
-ln -s "$TMP/evidence-victim" "$EVIDENCE_PARENT/codex-version.txt"
+ln -s "$TMP/evidence-victim" "$EVIDENCE_PARENT/runtime-version.txt"
 EVIDENCE_ONE="$("$ROOT/tests/runtime-evidence-dir.sh" create "$EVIDENCE_PARENT")"
 EVIDENCE_TWO="$("$ROOT/tests/runtime-evidence-dir.sh" create "$EVIDENCE_PARENT")"
 check "runtime evidence uses unique private children" '[ "$EVIDENCE_ONE" != "$EVIDENCE_TWO" ] && [ ! -L "$EVIDENCE_ONE" ] && [ "$(file_mode "$EVIDENCE_ONE")" = 700 ]'
-SAFE_EVIDENCE="$("$ROOT/tests/runtime-evidence-dir.sh" reserve "$EVIDENCE_ONE" codex-version.txt)"
+SAFE_EVIDENCE="$("$ROOT/tests/runtime-evidence-dir.sh" reserve "$EVIDENCE_ONE" runtime-version.txt)"
 check "runtime evidence files are private regular files" '[ -f "$SAFE_EVIDENCE" ] && [ ! -L "$SAFE_EVIDENCE" ] && [ "$(file_mode "$SAFE_EVIDENCE")" = 600 ]'
 ln -s "$TMP/evidence-victim" "$EVIDENCE_ONE/attacker.json"
 check "runtime evidence refuses fixed-file symlinks" '! "$ROOT/tests/runtime-evidence-dir.sh" reserve "$EVIDENCE_ONE" attacker.json >/dev/null 2>&1 && grep -Fx untouched "$TMP/evidence-victim" >/dev/null'
@@ -3102,64 +3095,51 @@ check "explicit keep is required to retain failed-run evidence" '[ -d "$FAIL_KEE
 check "failed retained evidence removes raw secrets" '! grep -R "session-secret" "$FAIL_KEEP_DIR" >/dev/null 2>&1 && ! find "$FAIL_KEEP_DIR" -type f -name "*.raw*" | grep -q .'
 rm -rf "$FAIL_KEEP_DIR"
 check "runtime performance guard passes" 'node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
-PARITY_FIXTURE="$TMP/runtime-parity"
-mkdir -p "$PARITY_FIXTURE"
-copy_parity_input() {
+CHECK_FIXTURE="$TMP/runtime-check"
+mkdir -p "$CHECK_FIXTURE"
+copy_check_input() {
   local relative="$1"
-  mkdir -p "$PARITY_FIXTURE/$(dirname "$relative")"
-  cp "$ROOT/$relative" "$PARITY_FIXTURE/$relative"
+  mkdir -p "$CHECK_FIXTURE/$(dirname "$relative")"
+  cp "$ROOT/$relative" "$CHECK_FIXTURE/$relative"
 }
-for relative in AGENTS.md CLAUDE.md config/runtime-capabilities.json \
-  config/runtime-performance-baseline.json docs/runtime-capabilities.md \
-  .codex/config.toml .claude/settings.json; do
-  copy_parity_input "$relative"
+for relative in AGENTS.md CLAUDE.md config/runtime-performance-baseline.json \
+  .claude/settings.json; do
+  copy_check_input "$relative"
 done
-while IFS= read -r relative; do copy_parity_input "$relative"; done < <(
-  jq -r '.capabilities[].evidence[]' "$ROOT/config/runtime-capabilities.json" | sort -u
-)
 while IFS= read -r skill; do
-  copy_parity_input ".claude/skills/$skill/SKILL.md"
-  copy_parity_input ".agents/skills/$skill/SKILL.md"
-done < <(jq -r '.skills[]' "$ROOT/config/runtime-capabilities.json")
+  copy_check_input ".claude/skills/$(basename "$skill")/SKILL.md"
+done < <(find "$ROOT/.claude/skills" -mindepth 1 -maxdepth 1 -type d)
 check "runtime fixture excludes repository and private state" \
-  '[ ! -e "$PARITY_FIXTURE/.git" ] && [ ! -e "$PARITY_FIXTURE/state" ] && [ ! -e "$PARITY_FIXTURE/repos" ] && [ ! -e "$PARITY_FIXTURE/data" ] && [ ! -e "$PARITY_FIXTURE/.env" ]'
-rm "$PARITY_FIXTURE/.agents/skills/rollback/SKILL.md"
-check "runtime parity fails on a missing Codex skill" \
-  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
-cp "$ROOT/.agents/skills/rollback/SKILL.md" "$PARITY_FIXTURE/.agents/skills/rollback/SKILL.md"
-WAKE_SKILL="$PARITY_FIXTURE/.agents/skills/change-review/SKILL.md"
-sed 's/spawn_agent/command_session/g' "$WAKE_SKILL" > "$WAKE_SKILL.tmp"
-mv "$WAKE_SKILL.tmp" "$WAKE_SKILL"
-check "runtime parity fails when Codex Lavish loses its mailbox wake" \
-  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
-cp "$ROOT/.agents/skills/change-review/SKILL.md" "$WAKE_SKILL"
-DISPATCH_SKILL="$PARITY_FIXTURE/.agents/skills/task-lifecycle/SKILL.md"
-sed 's/at most three/at most four/' "$DISPATCH_SKILL" > "$DISPATCH_SKILL.tmp"
-mv "$DISPATCH_SKILL.tmp" "$DISPATCH_SKILL"
-check "runtime parity fails a capability-specific dispatch mutation" \
-  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/check-runtime-parity.js" >/dev/null 2>&1'
-cp "$ROOT/.agents/skills/task-lifecycle/SKILL.md" "$DISPATCH_SKILL"
-mkdir -p "$PARITY_FIXTURE/.claude/skills/added-runtime"
-printf '%s\n' '---' 'name: added-runtime' 'description: mutation fixture' '---' > "$PARITY_FIXTURE/.claude/skills/added-runtime/SKILL.md"
+  '[ ! -e "$CHECK_FIXTURE/.git" ] && [ ! -e "$CHECK_FIXTURE/state" ] && [ ! -e "$CHECK_FIXTURE/repos" ] && [ ! -e "$CHECK_FIXTURE/data" ] && [ ! -e "$CHECK_FIXTURE/.env" ]'
+FLEET_SKILL="$CHECK_FIXTURE/.claude/skills/fleet-change/SKILL.md"
+sed 's/--status queued/--status inflight/' "$FLEET_SKILL" > "$FLEET_SKILL.tmp"
+mv "$FLEET_SKILL.tmp" "$FLEET_SKILL"
+check "trigger check fails when a fleet child claims ownership before spawn" \
+  '! DM_CHECK_ROOT="$CHECK_FIXTURE" node "$ROOT/tests/check-skill-triggers.js" >/dev/null 2>&1'
+cp "$ROOT/.claude/skills/fleet-change/SKILL.md" "$FLEET_SKILL"
+mkdir -p "$CHECK_FIXTURE/.claude/skills/added-runtime"
+printf '%s\n' '---' 'name: added-runtime' 'description: mutation fixture' '---' > "$CHECK_FIXTURE/.claude/skills/added-runtime/SKILL.md"
+check "trigger check fails on a skill with no AGENTS.md trigger" \
+  '! DM_CHECK_ROOT="$CHECK_FIXTURE" node "$ROOT/tests/check-skill-triggers.js" >/dev/null 2>&1'
 check "runtime performance guard fails on added Claude skill" \
-  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
-rm -rf "$PARITY_FIXTURE/.claude/skills/added-runtime"
-mkdir -p "$PARITY_FIXTURE/.claude/hooks"
-printf '#!/bin/sh\nexit 0\n' > "$PARITY_FIXTURE/.claude/hooks/added.sh"
+  '! DM_CHECK_ROOT="$CHECK_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+rm -rf "$CHECK_FIXTURE/.claude/skills/added-runtime"
+mkdir -p "$CHECK_FIXTURE/.claude/hooks"
+printf '#!/bin/sh\nexit 0\n' > "$CHECK_FIXTURE/.claude/hooks/added.sh"
 check "runtime performance guard rejects unclassified Claude files" \
-  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
-rm -rf "$PARITY_FIXTURE/.claude/hooks"
-CLAUDE_TASK="$PARITY_FIXTURE/.claude/skills/task-lifecycle/SKILL.md"
+  '! DM_CHECK_ROOT="$CHECK_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+rm -rf "$CHECK_FIXTURE/.claude/hooks"
+CLAUDE_TASK="$CHECK_FIXTURE/.claude/skills/task-lifecycle/SKILL.md"
 sed 's/run in background/run on background/' "$CLAUDE_TASK" > "$CLAUDE_TASK.tmp"
 check "same-size Claude mutation preserves byte count" \
   '[ "$(wc -c < "$CLAUDE_TASK")" -eq "$(wc -c < "$CLAUDE_TASK.tmp")" ]'
 mv "$CLAUDE_TASK.tmp" "$CLAUDE_TASK"
 check "runtime performance guard fails on same-size Claude mutation" \
-  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+  '! DM_CHECK_ROOT="$CHECK_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
 cp "$ROOT/.claude/skills/task-lifecycle/SKILL.md" "$CLAUDE_TASK"
-printf '%03000d\n' 0 >> "$PARITY_FIXTURE/AGENTS.md"
+printf '%03000d\n' 0 >> "$CHECK_FIXTURE/AGENTS.md"
 check "runtime performance guard fails on instruction bloat" \
-  '! DM_PARITY_ROOT="$PARITY_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+  '! DM_CHECK_ROOT="$CHECK_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
 
 echo "== dm-state (export/import: state portability, #106) =="
 SP="$TMP/state-portability"

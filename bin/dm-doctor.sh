@@ -12,7 +12,7 @@
 # its tooling check here so "what the toolbelt needs" lives in exactly one place.
 #
 # Usage:
-#   dm-doctor.sh [check] [--runtime auto|claude|codex|both]
+#   dm-doctor.sh [check]
 #
 # Exit 0 = required tools present. Exit 1 = a required tool is missing. A missing
 # PR-flow or optional tool warns but never fails the check: local-only delivery
@@ -78,63 +78,25 @@ report_warn_tier() {
   done
 }
 
-runtime_probe() {
-  local runtime="$1"
-  command -v "$runtime" >/dev/null 2>&1 || return 2
-  case "$runtime" in
-    claude) claude auth status --json >/dev/null 2>&1 ;;
-    codex) codex login status >/dev/null 2>&1 ;;
-  esac
+claude_runtime_status() {
+  local status=0
+  command -v claude >/dev/null 2>&1 || { printf 'absent\n'; return 0; }
+  claude auth status --json >/dev/null 2>&1 || status=$?
+  if [ "$status" -eq 0 ]; then printf 'ready\n'; else printf 'unauthenticated\n'; fi
 }
 
-runtime_status() {
-  local runtime="$1" status=0
-  runtime_probe "$runtime" || status=$?
-  case "$status" in 0) printf 'ready\n' ;; 2) printf 'absent\n' ;; *) printf 'unauthenticated\n' ;; esac
-}
-
-snapshot_runtimes() {
-  CLAUDE_RUNTIME_STATUS="$(runtime_status claude)"
-  CODEX_RUNTIME_STATUS="$(runtime_status codex)"
-  case "$CLAUDE_RUNTIME_STATUS" in ready|absent|unauthenticated) ;; *) dm_die "invalid Claude probe result" ;; esac
-  case "$CODEX_RUNTIME_STATUS" in ready|absent|unauthenticated) ;; *) dm_die "invalid Codex probe result" ;; esac
-}
-
-report_one_runtime() {
-  local runtime="$1" required="$2" status
-  case "$runtime" in claude) status="$CLAUDE_RUNTIME_STATUS" ;; codex) status="$CODEX_RUNTIME_STATUS" ;; esac
-  case "$status" in
-    ready) printf '  ok       %-13s %s\n' "$runtime-runtime" "installed and authenticated"; return 0 ;;
-    absent) printf '  %-8s %-13s %s\n' "$required" "$runtime-runtime" "CLI absent" ;;
-    unauthenticated) printf '  %-8s %-13s %s\n' "$required" "$runtime-runtime" "authentication unavailable" ;;
-  esac
-  [ "$required" = "MISSING" ] && return 1
-  return 0
-}
-
+# One probe per run: the printed line and the readiness verdict must come from
+# the same snapshot, or a second probe could disagree with what was reported.
 report_runtime() {
-  local selected="$1" claude_ok=0 codex_ok=0 miss=0
-  snapshot_runtimes
-  if [ "$CLAUDE_RUNTIME_STATUS" = ready ]; then claude_ok=1; fi
-  if [ "$CODEX_RUNTIME_STATUS" = ready ]; then codex_ok=1; fi
-  case "$selected" in
-    claude|codex) report_one_runtime "$selected" MISSING || miss=1 ;;
-    both)
-      report_one_runtime claude MISSING || miss=$((miss + 1))
-      report_one_runtime codex MISSING || miss=$((miss + 1))
-      ;;
-    auto)
-      if [ "$claude_ok" -eq 1 ]; then report_one_runtime claude MISSING
-      elif [ "$codex_ok" -eq 1 ]; then report_one_runtime codex MISSING
-      else
-        printf '  MISSING  %-13s %s\n' "agent-runtime" "no authenticated Claude or Codex runtime"
-        miss=1
-      fi
-      [ "$claude_ok" -eq 1 ] || report_one_runtime claude warn
-      [ "$codex_ok" -eq 1 ] || report_one_runtime codex warn
-      ;;
+  local status
+  status="$(claude_runtime_status)"
+  case "$status" in
+    ready) printf '  ok       %-13s %s\n' "claude-runtime" "installed and authenticated"; return 0 ;;
+    absent) printf '  MISSING  %-13s %s\n' "claude-runtime" "CLI absent" ;;
+    unauthenticated) printf '  MISSING  %-13s %s\n' "claude-runtime" "authentication unavailable" ;;
+    *) dm_die "invalid Claude probe result: '$status'" ;;
   esac
-  return "$miss"
+  return 1
 }
 
 report_node() {
@@ -176,7 +138,7 @@ report_pr_delivery() {
 # report_tools <compact> -> prints one line per tool; returns the count of
 # missing REQUIRED tools (so a caller can gate on readiness).
 report_tools() {
-  local compact="$1" selected_runtime="$2" name purpose miss=0 runtime_miss=0 i
+  local compact="$1" name purpose miss=0 runtime_miss=0 i
   for ((i = 0; i < ${#REQUIRED_TOOLS[@]}; i += 2)); do
     name="${REQUIRED_TOOLS[i]}"; purpose="${REQUIRED_TOOLS[i + 1]}"
     if command -v "$name" >/dev/null 2>&1; then
@@ -190,7 +152,7 @@ report_tools() {
   report_warn_tier "$compact" "needed for the PR flow" "${PRFLOW_TOOLS[@]}"
   report_warn_tier "$compact" "optional" "${OPTIONAL_TOOLS[@]}"
   report_node
-  report_runtime "$selected_runtime" || runtime_miss=$?
+  report_runtime || runtime_miss=$?
   miss=$((miss + runtime_miss))
   report_pr_delivery
   return "$miss"
@@ -248,22 +210,20 @@ probe_state_json() {
   return "$bad"
 }
 
-mode="full"; selected_runtime="auto"
+mode="full"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     check|full) mode="$1"; shift ;;
-    --runtime) selected_runtime="${2:-}"; shift 2 ;;
-    *) dm_die "usage: dm-doctor.sh [check] [--runtime auto|claude|codex|both]" ;;
+    *) dm_die "usage: dm-doctor.sh [check]" ;;
   esac
 done
-case "$selected_runtime" in auto|claude|codex|both) ;; *) dm_die "runtime must be auto|claude|codex|both" ;; esac
 case "$mode" in
   check)
     # Compact readiness probe for dm-session-start; no scaffold, no headings.
     # Tooling first, then state-JSON integrity so a corrupt registry surfaces its
     # recovery hint here (session-start runs `check` before its repo/backlog
     # sections) instead of as raw jq errors later.
-    miss=0; report_tools 1 "$selected_runtime" || miss=$?
+    miss=0; report_tools 1 || miss=$?
     badjson=0; probe_state_json || badjson=$?
     if [ "$miss" -gt 0 ]; then exit "$miss"; fi
     if [ "$badjson" -gt 0 ]; then exit 1; fi
@@ -271,7 +231,7 @@ case "$mode" in
 
   full|"")
     section "TOOLING"
-    miss=0; report_tools 0 "$selected_runtime" || miss=$?
+    miss=0; report_tools 0 || miss=$?
 
     section "HOME (scaffolded if missing)"
     dm_ensure_dirs
@@ -320,6 +280,6 @@ case "$mode" in
     ;;
 
   *)
-    dm_die "usage: dm-doctor.sh [check] [--runtime auto|claude|codex|both]"
+    dm_die "usage: dm-doctor.sh [check]"
     ;;
 esac

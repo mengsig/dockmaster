@@ -10,10 +10,10 @@ export const meta = {
   ],
 }
 
-// OPTIONAL, opt-in runner for the modular PR pipeline described in
-// the active runtime's pr-workflow skill. It is NOT the default executor and NOT
+// OPTIONAL, opt-in runner for the modular PR pipeline described in the
+// pr-workflow skill. It is NOT the default executor and NOT
 // wired to anything: nothing auto-discovers it, no bin/ script invokes it. The
-// dockmaster's default path is to drive gates with runtime-native subagents
+// dockmaster's default path is to drive gates with subagents
 // following pr-workflow. Run this only on a host that injects the documented
 // workflow API, and only after the operator opts in. A live
 // rigorous run is a dockmaster/operator action — this file has been verified for

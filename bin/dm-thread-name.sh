@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dm-thread-name.sh - derive a valid, collision-resistant Codex thread label.
+# dm-thread-name.sh - derive a valid, collision-resistant agent thread label.
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -23,6 +23,6 @@ esac
 normalized="${normalized:0:27}"
 role="${role:0:16}"
 thread_name="task_${normalized}_${role}_${digest:0:12}"
-case "$thread_name" in *[!a-z0-9_]*) dm_die "derived invalid Codex thread name" ;; esac
-[ "${#thread_name}" -le 64 ] || dm_die "derived Codex thread name exceeds 64 characters"
+case "$thread_name" in *[!a-z0-9_]*) dm_die "derived invalid thread name" ;; esac
+[ "${#thread_name}" -le 64 ] || dm_die "derived thread name exceeds 64 characters"
 printf '%s\n' "$thread_name"

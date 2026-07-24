@@ -19,12 +19,11 @@ delivered. The contract a crewmate follows lives in the `task-lifecycle` and
   committed-unlanded worktree), never from the last status line;
   `state/tasks/<id>.status` is an append-only event log. Add new signals to
   `dm-task.sh state`, not to callers.
-- **[convention]** Dispatch right-sizing is ADVISORY, not a gate (the Codex
-  adapter has no per-spawn model field to enforce one): `dm_recommended_model
-  <kind> <text>` (dm-lib, pure) picks haiku|sonnet|opus; `dm-brief` surfaces it
-  in the header and records `model_recommended` in meta; `dm-status` flags a
-  `working` task with no `model` as UNSIZED. Claude sets the Agent `model`;
-  Codex biases effort/granularity. Additive — never blocks dispatch.
+- **[convention]** Dispatch right-sizing is ADVISORY, not a gate:
+  `dm_recommended_model <kind> <text>` (dm-lib, pure) picks haiku|sonnet|opus;
+  `dm-brief` surfaces it in the header and records `model_recommended` in meta;
+  `dm-status` flags a `working` task with no `model` as UNSIZED. The dockmaster
+  passes it as the Agent `model`. Additive — never blocks dispatch.
 - **[decision]** Requested-change delivery flow: crewmate implements in a
   worktree and renders a lavish artifact (review-ready) → operator approves via
   lavish (mediated by the dockmaster) → ask PR-or-local → on PR: coldstart

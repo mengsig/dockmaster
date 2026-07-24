@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 # dm-command-guard.sh - classify a shell command before execution and refuse the
-# Git forms that can lose work. PreToolUse hook; wired from .codex/config.toml.
+# Git forms that can lose work. Runs as `check <command>` or as a PreToolUse
+# hook reading the tool JSON on stdin.
+#
+# UNWIRED TODAY — do not read this file as an active control. Its only caller was
+# the Codex `.codex/config.toml` PreToolUse hook, removed with that runtime; no
+# Claude `settings.json` installs it. #89 owns the Claude-side wiring, and it is
+# deliberately not armed yet: #143 (prose false positives — the guard refuses
+# e.g. `gh pr create --body "watch the git log"`) must land first, or arming it
+# blocks ordinary work. Until then the logic is exercised only by the tests.
 #
 # SHAPE: allowlist, not denylist (#121). A denylist has to enumerate every
 # destructive Git form and every wrapper that reaches one, and loses that race

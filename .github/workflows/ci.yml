@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Node 20 runs the full suite and the pinned Codex CLI on both platforms.
+      # Node 20 runs the full suite on both platforms.
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -65,9 +65,6 @@ jobs:
       - name: Run smoke tests (system bash)
         run: /bin/bash tests/smoke.sh
 
-      - name: Install pinned Codex CLI
-        run: npm install --global @openai/codex@0.144.6
-
       - name: Check workflows/pr-pipeline.js syntax
         run: node --check workflows/pr-pipeline.js
 
@@ -80,11 +77,8 @@ jobs:
       - name: Check deterministic waiter child (mailbox wake remains manual)
         run: test "$(bash tests/runtime-waiter-child.sh 0)" = "WAITER_COMPLETION_OK"
 
-      - name: Check Codex strict config/discovery/policy offline
-        run: bash tests/runtime-codex-offline.sh
-
-      - name: Check Claude/Codex runtime parity
-        run: node tests/check-runtime-parity.js
+      - name: Check skill/trigger coverage
+        run: node tests/check-skill-triggers.js
 
       - name: Check runtime context-performance guardrails
         run: /bin/bash tests/runtime-performance.sh
@@ -98,9 +92,8 @@ jobs:
 
       - name: Check runtime test syntax
         run: |
-          bash -n tests/runtime-codex-offline.sh tests/runtime-evidence-dir.sh tests/runtime-performance.sh tests/runtime-smoke.sh tests/runtime-waiter-child.sh
-          node --check tests/check-codex-skill-discovery.js
-          node --check tests/check-runtime-parity.js
+          bash -n tests/runtime-evidence-dir.sh tests/runtime-performance.sh tests/runtime-smoke.sh tests/runtime-waiter-child.sh
+          node --check tests/check-skill-triggers.js
           node --check tests/check-pr-runner.js
           node --check tests/runtime-performance.js
 
@@ -118,5 +111,5 @@ jobs:
             | node --input-type=module --check
           node tests/check-gate-drift.js
           node tests/check-pr-runner.js
-          node tests/check-runtime-parity.js
+          node tests/check-skill-triggers.js
           node tests/runtime-performance.js >/dev/null
