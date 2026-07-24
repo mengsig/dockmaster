@@ -246,6 +246,16 @@ case "$cmd" in
     # a kind-less meta that `dm-task.sh state` cannot classify (it reconciles by
     # kind). Fail closed and point at the record-creating command.
     [ -n "$(dm_meta_get "$id" kind)" ] || dm_die "no task record for '$id' (or it has no kind); create it first: dm-task.sh new $id --kind ship|scout --repo $repo"
+    # The record's repo decides which clone the work lands in and whose merge
+    # authority gates it, so `dm-task.sh set` reserves the field — but create
+    # WROTE it unconditionally below, which made this the one-command way around
+    # that reservation: point a task recorded against a `never` repo at a
+    # permissive one, and the land succeeds. The argument may only ever confirm
+    # what the record already says.
+    recorded_repo="$(dm_meta_get "$id" repo)"
+    if [ -n "$recorded_repo" ] && [ "$recorded_repo" != "$repo" ]; then
+      dm_die "REFUSED: task '$id' is recorded against repo '$recorded_repo', not '$repo'. A task's repo is fixed when it is created; re-pointing it would land its work in the wrong clone, under the wrong merge authority. Create the worktree for '$recorded_repo', or create a separate task for '$repo'."
+    fi
     dir="$(dm_repo_dir "$repo")"
     # THE ONE EXEMPTION to "never operate on the distro" (#119). Cutting a
     # worktree off DM_HOME is exactly how dockmaster ships changes to itself
@@ -440,10 +450,26 @@ $undisposable"
       fi
     fi
     # Resolve the clone tolerantly: removal must not be held hostage by an
-    # unregistered/renamed repo, or the worktree is uncleanable even with --force
-    # and its task pins at `working` (#119). dm_repo_dir would die here.
-    discarded_head=""
-    dir="$(dm_repo_dir_or_none "$repo")" || dir=""
+    # unregistered/renamed repo, or by a clone that escapes repos/ (#141), or the
+    # worktree is uncleanable even with --force and its task pins at `working`
+    # (#119). dm_repo_dir would die here.
+    #
+    # CAPTURE the resolver's reason rather than let it surface: it states its
+    # refusal on stderr, and a bare "REFUSED: …" printed by a command that then
+    # succeeds reads as a failed teardown. On success it prints only the path, so
+    # the merged capture is exactly that. The reason is reported below either way,
+    # so nothing is hidden.
+    discarded_head=""; resolve_why=""; rd_rc=0
+    rd_out="$(dm_repo_dir_or_none "$repo" 2>&1)" || rd_rc=$?
+    if [ "$rd_rc" -eq 0 ]; then
+      dir="$rd_out"
+    else
+      dir=""; resolve_why="$(dm_first_line "${rd_out:-repo '$repo' does not resolve}")"
+      # Quote the reason, not its framing: this command is reporting why it could
+      # not reach a clone, and re-emitting "error:"/"REFUSED:" inside its own line
+      # would restate someone else's verdict as this command's.
+      resolve_why="${resolve_why#error: }"; resolve_why="${resolve_why#REFUSED: }"
+    fi
     if [ -n "$dir" ] && [ -d "$dir/.git" ]; then
       # Park the head BEFORE anything is deleted: after the directory is gone the
       # sha is unrecoverable (detached worktree, its reflog goes with it).
@@ -467,9 +493,10 @@ Inspect $wt. If its git record is broken or the work is expendable, re-run with 
       # that clone's object store, so it CANNOT be preserved — refuse without
       # --force (the landed_rc=2 refusal above already covers the unforced path),
       # then delete only after re-confirming the confined managed path (#119).
-      [ "$force" -eq 1 ] || dm_die "REFUSED: cannot resolve repo '$repo' to remove $id's worktree; its commit cannot be preserved without the clone. Re-run with --force (explicit discard authority) to discard the managed directory."
+      [ "$force" -eq 1 ] || dm_die "REFUSED: cannot resolve repo '$repo' to remove $id's worktree: ${resolve_why:-no clone resolved}
+Its commit cannot be preserved without the clone. Re-run with --force (explicit discard authority) to discard the managed directory."
       discard_orphan_worktree "$wt" "$id"
-      dm_warn "removed $id's worktree directly: repo '$repo' does not resolve, so no clone to park its head into or prune its admin entry; any discarded commit could not be preserved"
+      dm_warn "removed $id's worktree directly: ${resolve_why:-repo '$repo' does not resolve}; no clone to park its head into or prune its admin entry, so any discarded commit could not be preserved"
     fi
     dm_meta_set "$id" worktree ""
     # Written here, not via dm-task.sh event, to bar forgery. Skipped only when

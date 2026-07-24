@@ -4,7 +4,9 @@
 # Two operations, both fail closed:
 #   local <id>    land a local-only task branch into its clone's default branch
 #                 by FAST-FORWARD ONLY. A diverged branch is refused with a
-#                 rebase instruction, never force-merged.
+#                 rebase instruction, never force-merged. The repo must be
+#                 REGISTERED for local-only delivery; a task's own `mode` field
+#                 is not authority for it.
 #   rebase <id>   update a task's worktree branch onto the latest default. On a
 #                 clean rebase it reports success; on conflicts it stops and
 #                 reports the conflicted files, then aborts to leave the worktree
@@ -26,8 +28,6 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   local)
     id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-merge.sh local <id>"
-    mode="$(dm_meta_get "$id" mode)"
-    [ "$mode" = "local-only" ] || dm_die "task $id is mode '$mode', not local-only; use dm-pr.sh for PR-based landing"
     repo="$(dm_meta_get "$id" repo)"; wt="$(dm_require_worktree "$id")"
     # A local fast-forward land IS a merge, so the merge-authority `never` hard
     # stop applies here too (same gate dm-pr.sh merge uses). Refuse before touching
@@ -38,7 +38,25 @@ case "$cmd" in
       refuse-invalid) dm_die "REFUSED: cannot resolve merge authority for repo '$repo': it is unregistered, or has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to land. Register it (dm-repo.sh add) or set a valid authority: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
       *) dm_die "REFUSED: repo $repo merge authority could not be resolved; refusing to land" ;;
     esac
-    branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
+    # THE REGISTRY IS THE SOLE AUTHORITY for whether this repo delivers locally,
+    # and it is checked after the authority gate so an unregistered repo still
+    # refuses with the message that names it. A forged or stale task `mode` can
+    # therefore not fast-forward unreviewed work onto a pipeline repo's default
+    # branch — the #127 bypass: no PR, no review, no operator word, and a real
+    # `merged` event afterwards. An empty answer fails closed.
+    #
+    # The task's own `mode` is deliberately NOT consulted. It is inherited at
+    # CREATION, so it still says `pipeline` at exactly the moment the operator
+    # records the repo as local-only and lands — the documented route. Gating on
+    # that stale copy made the documented sequence fail and left FORGING the copy
+    # the only way through, which is the bug, not the guard.
+    registry_mode="$(dm_registry_get "$repo" mode)"
+    [ "$registry_mode" = "local-only" ] || dm_die "REFUSED: repo '$repo' is registered for '${registry_mode:-no}' delivery, not local-only; local landing is not this repo's delivery route. Deliver it as a PR (dm-pr.sh), or have the operator record the change where it belongs: dm-repo.sh set $repo mode local-only"
+    # Guarded: the local copy's gitdir pointer breaks whenever its clone is moved,
+    # replaced or symlinked away, and a bare substitution let git's raw
+    # "fatal: not a git repository: (null)" (rc 128) out instead of a refusal.
+    branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" \
+      || dm_die "REFUSED: cannot read $id's local copy at $wt as a git worktree; refusing to land. Its clone was probably moved, replaced or removed — check repo '$repo' with dm-repo.sh list."
     [ "$branch" != "HEAD" ] || dm_die "worktree on detached HEAD; nothing to land"
     ! dm_tracked_dirty "$wt" || dm_die "worktree has uncommitted changes to tracked files; commit before landing"
     dir="$(dm_repo_dir "$repo")"
@@ -78,7 +96,10 @@ case "$cmd" in
     # local landings and origin lags, so prefer local <def>; a stacked parent
     # ref (or any non-local-only default) usually lives on origin, so prefer
     # origin/<base_ref> there.
-    mode="$(dm_meta_get "$id" mode)"
+    # From the REGISTRY, for the same reason `local` reads it there: the task's
+    # inherited copy goes stale the moment the operator records local-only
+    # delivery, and a stale copy here silently picks the wrong base.
+    mode="$(dm_registry_get "$repo" mode)"
     if [ "$mode" = "local-only" ] && [ "$base_ref" = "$def" ]; then
       base="$(git -C "$dir" rev-parse --verify --quiet "$base_ref" 2>/dev/null || git -C "$dir" rev-parse "origin/$base_ref")"
     else

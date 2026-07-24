@@ -20,6 +20,8 @@
 #   get <id> [<key>]
 #   event <id> <state> [<note>]
 #   state <id>            reconcile and print current state
+#   close <id> --reason R end a task that concluded WITHOUT landing work (the
+#                         answer was "do not build it"), recording why
 #   archive <id>          move a terminal (done/discarded) task's records +
 #                         artifacts to state/archive/ (fails closed otherwise)
 #   list
@@ -51,6 +53,15 @@ case "$cmd" in
     # the library-side boundary. Also keeps an empty repo out of the registry read.
     dm_valid_task_kind "$kind" || dm_die "--kind must be ship|scout"
     [ -n "$repo" ] || dm_die "--repo is required"
+    # An unregistered repo used to be accepted here and only failed much later,
+    # at worktree-create, with an error about a missing clone (#124). The
+    # registry is the authority for what the fleet contains, so refuse at the
+    # record's birth and name the repo. The reserved distro name has no registry
+    # entry BY DESIGN (it resolves to $DM_HOME), so it is the one accepted
+    # non-registry name — the distro ships changes to itself through these tasks.
+    if [ "$repo" != "$DM_DISTRO_REPO" ] && ! dm_registry_has "$repo"; then
+      dm_die "repo '$repo' is not registered, so no task can be created against it; check the name with dm-repo.sh list, or register it with dm-repo.sh add $repo <remote>"
+    fi
     # inherit mode from the repo registry unless overridden
     [ -n "$mode" ] || mode="$(dm_registry_get "$repo" mode)"
     [ -n "$mode" ] || mode="pipeline"
@@ -76,6 +87,40 @@ case "$cmd" in
       pr|pr_state|merge_state|pr_check_snapshot|pr_head) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
       base) dm_die "'base' is recorded by dm-worktree.sh create --base; it must not be set by hand" ;;
       worktree) dm_die "'worktree' is maintained by dm-worktree.sh create/remove; it must not be set by hand" ;;
+      # A task's repo decides which clone its work lands in and whose merge
+      # authority gates it. Re-pointing a live record at another repo would carry
+      # both decisions over to a repo that never consented to them, so the repo is
+      # fixed at creation (`new --repo`) and recorded by dm-worktree.sh create.
+      repo) dm_die "'repo' is fixed when the task is created (dm-task.sh new --repo) and recorded by dm-worktree.sh create; re-pointing a task at another repo would land its work in the wrong clone, under the wrong merge authority" ;;
+      # `kind` is DIRECTIONAL, not free. scout -> ship is the documented
+      # promotion (task-lifecycle). ship -> scout is the forge: kind selects how
+      # `state` reconciles, so a fabricated data/<id>/report.md turns the task
+      # terminal-done, and teardown then reads real committed work as
+      # investigation scratch. A ship task that should not be built ends with
+      # `close --reason`, not by pretending it was an investigation.
+      kind)
+        dm_require_id "$id"
+        current_kind="$(dm_meta_get "$id" kind)"
+        if [ "$current_kind" = "ship" ] && [ "$value" = "scout" ]; then
+          dm_die "REFUSED: task '$id' is a ship task; demoting it to scout would let a report file reconcile it to done and let teardown discard its committed work as scratch. If it must not be built, end it honestly: dm-task.sh close $id --reason \"<why>\""
+        fi
+        ;;
+      # The REGISTRY owns a repo's delivery mode; the task field is a per-task
+      # copy of it. Setting `mode local-only` on a pipeline repo made
+      # `dm-merge.sh local` fast-forward unreviewed work straight onto that
+      # clone's default branch — no PR, no review, no operator word (#127). So a
+      # task's mode may only be re-synced to what its repo is REGISTERED as;
+      # changing how a repo delivers is dm-repo.sh set <repo> mode, an operator
+      # decision recorded in the registry. dm-merge.sh local re-checks the
+      # registry itself, so a meta value forged past this guard still cannot land.
+      mode)
+        dm_require_id "$id"
+        task_repo="$(dm_meta_get "$id" repo)"
+        [ -n "$task_repo" ] || dm_die "task '$id' records no repo, so its delivery mode cannot be checked against the registry"
+        registry_mode="$(dm_registry_get "$task_repo" mode)"
+        [ -n "$registry_mode" ] || dm_die "repo '$task_repo' has no registered delivery mode (is it registered? dm-repo.sh list); refusing to set a mode that nothing vouches for"
+        [ "$value" = "$registry_mode" ] || dm_die "REFUSED: repo '$task_repo' is registered for '$registry_mode' delivery, not '$value'. A task cannot opt itself out of its repo's delivery route. If the operator wants '$value' for this repo, record it where it belongs: dm-repo.sh set $task_repo mode $value"
+        ;;
     esac
     dm_meta_set "$id" "$key" "$value"
     ;;
@@ -99,9 +144,10 @@ case "$cmd" in
     # unregistered over a live worktree).
     case "$st" in
       merged) dm_die "'merged' is a landing signal appended only by dm-merge/dm-pr; dm-task.sh event must not forge it" ;;
-      # Appended only by dm-worktree.sh remove --force, so a crewmate cannot
-      # flip its own live task terminal.
-      discarded) dm_die "'discarded' is appended only by dm-worktree.sh remove --force (operator discard); dm-task.sh event must not forge it" ;;
+      # Appended only by the two guarded terminal paths — dm-worktree.sh remove
+      # --force (operator discard) and `dm-task.sh close` (nothing was built) —
+      # so a crewmate cannot flip its own live task terminal here.
+      discarded) dm_die "'discarded' is appended only by dm-worktree.sh remove --force (operator discard) or dm-task.sh close --reason (the task ends with nothing landed); dm-task.sh event must not forge it" ;;
       working|review-ready|ready|done|blocked|needs-decision|failed|paused) ;;
       *) dm_die "state must be working|review-ready|ready|done|blocked|needs-decision|failed|paused" ;;
     esac
@@ -185,6 +231,53 @@ case "$cmd" in
     esac
     ;;
 
+  close)
+    # The terminal state for a task whose honest answer is "do not build it"
+    # (#103). Without it such a task had NO reachable end: `state` derives done
+    # only from positive landing evidence, so it reconciled to `working` forever
+    # unless it was laundered — flipped to a scout with a report, or its mode
+    # forged so a local land could append a `merged` event. Both of those claim
+    # something happened that did not. This claims exactly what did: nothing
+    # landed, and here is why.
+    #
+    # It records the existing `discarded` verb rather than inventing a state:
+    # `state`, `archive`, and `dm-repo.sh remove` already treat that as terminal,
+    # and a new token would read as non-terminal to every one of them. The verb
+    # stays barred from `dm-task.sh event`, so this command — with its own
+    # guards — remains the only hand-driven route to it.
+    id="${1:-}"; shift || true
+    [ -n "$id" ] || dm_die "usage: dm-task.sh close <id> --reason \"<why nothing was built>\""
+    dm_require_id "$id"
+    reason=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --reason) [ "$#" -ge 2 ] || dm_die "--reason requires a value"; reason="$2"; shift 2 ;;
+        *) dm_die "unknown flag: $1" ;;
+      esac
+    done
+    [ -n "$reason" ] || dm_die "--reason is required: the record must say WHY this task ends with nothing landed"
+    [ -f "$(dm_meta_path "$id")" ] || dm_die "no such task: $id"
+    # ANY recorded worktree refuses, present or absent. A present one may hold
+    # work nobody has looked at, and teardown is what inspects it. An ABSENT one
+    # is the interrupted-cleanup shape that `dm-worktree.sh remove` refuses
+    # without --force precisely because nothing remains to prove the work landed
+    # — closing there would reach `discarded` with none of that discard
+    # authority, making this a weaker second writer of the same state.
+    wt="$(dm_meta_get "$id" worktree)"
+    if [ -n "$wt" ] && [ -d "$wt" ]; then
+      dm_die "refusing to close '$id': its local copy is still present at $wt. Tear it down first (dm-worktree.sh remove $id) — that is what checks whether it holds work nobody has landed."
+    fi
+    if [ -n "$wt" ]; then
+      dm_die "refusing to close '$id': it still records a local copy at $wt whose directory is already absent, so nothing here can prove its work landed. Clear it where that costs explicit discard authority: dm-worktree.sh remove $id --force"
+    fi
+    st="$("$0" state "$id" | sed 's/ · .*//; s/^state: //')"
+    case "$st" in
+      done|discarded) dm_die "refusing to close '$id': it is already terminal ('$st')" ;;
+    esac
+    dm_status_append "$id" discarded "closed without landing work: $reason"
+    dm_info "closed $id — nothing landed: $reason"
+    ;;
+
   archive)
     id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-task.sh archive <id>"
     dm_require_id "$id"
@@ -235,5 +328,5 @@ case "$cmd" in
     ;;
 
   *)
-    echo "usage: dm-task.sh {new|set|get|event|state|archive|list} ..." >&2; exit 2 ;;
+    echo "usage: dm-task.sh {new|set|get|event|state|close|archive|list} ..." >&2; exit 2 ;;
 esac

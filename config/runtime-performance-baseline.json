@@ -3,11 +3,11 @@
   "base_commit": "#154",
   "shared_agents_bytes": 12533,
   "claude_settings_bytes": 1579,
-  "claude_skill_bytes": 84130,
+  "claude_skill_bytes": 85156,
   "claude_skill_description_bytes": 4603,
   "claude_files_sha256": {
     ".claude/settings.json": "2efe4d84bb21b43c94cb2782093f4b75432ea7de8e425f3edb8a1c721acade35",
-    ".claude/skills/change-review/SKILL.md": "b0ed49a1e46c6f9e154f8281f079f7bf07a6ef397a13b52f4a3c6cce2a987ce0",
+    ".claude/skills/change-review/SKILL.md": "8ac9280934e810571d8218040d99d3c1f455c866eed3f65ba16bcd0dd8df49fc",
     ".claude/skills/coding-guidelines/SKILL.md": "38e89cd6d4352fb30f148fc1b343063f3f4be9ba21bcd47098623f200a1b036d",
     ".claude/skills/credential-handoff/SKILL.md": "03bd5a829ee39de335263931599e0e5829798c0575d0507c39f39b135dd23b08",
     ".claude/skills/decision-hold/SKILL.md": "2ecaeebd4ddeae7f139740d5a10ebeb70a9b594ae87b8d2d520a79b25d21efb6",
@@ -23,7 +23,7 @@
     ".claude/skills/secondmate/SKILL.md": "de070f494e3c27d54bcd4f8b6dccbf3a13dccf6e7a599bf793dfc5e8457d32d4",
     ".claude/skills/stuck-worker/SKILL.md": "a0713e0d518cbfb288ca456ebafd3e4f65344c9f79437823c10986e4b446c193",
     ".claude/skills/supervision/SKILL.md": "77288dd8aa1423ce769583be33f736af0361cb0b90509f3b3c681663960c3105",
-    ".claude/skills/task-lifecycle/SKILL.md": "4dc8e1b0c90a4d798fb1f1f56080e536a4ecce19e57912de8aeef86ca3e025ca",
+    ".claude/skills/task-lifecycle/SKILL.md": "293791c710dc7967accf9c83958337e81e24e7fa7d98949866f246a59c516d73",
     ".claude/skills/testing-policy/SKILL.md": "3632ab3a7c0e39b4c6ad35acfa2178e753d73ec0f4df45542e5d29f86ceef475"
   },
   "limits": {
