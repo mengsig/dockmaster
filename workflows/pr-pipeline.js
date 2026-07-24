@@ -64,6 +64,7 @@ const FAST_GATES = [
 const DEFAULT_GATES = [
   { gate: 'review', pass: 'coldstart' }, { gate: 'fix', max_rounds: 2 }, { gate: 'tests' },
   { gate: 'review', pass: 'merge-gate' }, { gate: 'fix', max_rounds: 2 }, { gate: 'tests' },
+  { gate: 'verify', optional: true },
   { gate: 'security', optional: true },
   { gate: 'pr' },
 ]
@@ -341,13 +342,19 @@ for (const g of gates) {
       return { ok: false, stage: 'fix', detail: `unresolved ${currentPass} findings after ${max} rounds`, findings: lastReview.findings }
     }
   } else if (g.gate === 'verify') {
-    // Rigorous behavioral gate: drive the changed behavior end to end, not just
-    // the test suite. Skippable only when the diff has no runtime surface.
-    if (g.optional && t.noRuntimeSurface) { log('verify: diff has no runtime surface (docs/config-only) — behavioral gate skipped'); continue }
+    // Behavioral gate: boot the app and drive the changed surface, not just the
+    // test suite. The skip is MECHANICAL (dm-verify.sh gate exits 1 for a diff
+    // with no user-facing surface); a caller-declared noRuntimeSurface is only
+    // an override, so a caller that wires nothing still gets the real decision.
+    if (g.optional && t.noRuntimeSurface) { log('verify: caller declared no runtime surface (docs/config-only) — behavioral gate skipped'); continue }
     const v = await agent(
-      `Behavioral verification of task ${t.taskId}. In ${t.worktree}, drive the behavior changed by ${base}...HEAD end to end without ` +
-      `editing files. Use a real browser for an affected web flow; otherwise use the narrowest executable CLI or API path. Observe the ` +
-      `actual result, not just that tests pass. Set passed=false if behavior is wrong or any required runtime/browser capability is unavailable.`,
+      `Behavioral verification of task ${t.taskId}, following the e2e-verification skill. First run exactly:\n\n` +
+      `    ${t.binDir}/dm-verify.sh gate ${t.taskId}\n\n` +
+      `Exit 1 means no user-facing surface moved: set passed=true and say so explicitly. Exit 3 means a surface moved but the repo has no ` +
+      `app config, so NOTHING could be verified: set passed=false and report it as unavailable. Exit 0 means run the gate — ` +
+      `${t.binDir}/dm-verify.sh up ${t.taskId} (arm a trap that always runs \`down\`), then session, then drive the flows the diff ` +
+      `${base}...HEAD implies, shot each asserted state, record each with \`flow\`, and finish with \`report\`. Never edit files. ` +
+      `report's exit code is the verdict: set passed=false if it is non-zero, if the app will not boot, or if a flow cannot be driven.`,
       { label: 'verify', phase: 'Verify', effort: g.effort || 'high', schema: TEST_SCHEMA },
     )
     if (!v.passed) return { ok: false, stage: 'verify', detail: v.summary }

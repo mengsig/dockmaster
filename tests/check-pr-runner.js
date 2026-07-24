@@ -58,7 +58,7 @@ function assertFullStatusPrompt(runResult) {
 async function checkTierOrder() {
   const cases = [
     ['fast', ['state:before-review', 'review:coldstart', 'state:before-tests', 'tests:gate', 'state:before-pr', 'pr']],
-    ['default', ['state:before-review', 'review:coldstart', 'state:before-tests', 'tests:gate', 'state:before-review', 'review:merge-gate', 'state:before-tests', 'tests:gate', 'security', 'state:before-pr', 'pr']],
+    ['default', ['state:before-review', 'review:coldstart', 'state:before-tests', 'tests:gate', 'state:before-review', 'review:merge-gate', 'state:before-tests', 'tests:gate', 'verify', 'security', 'state:before-pr', 'pr']],
     ['rigorous', [
       'state:before-review', 'review:coldstart:correctness', 'review:coldstart:security',
       'review:coldstart:concurrency', 'review:coldstart:portability', 'review:coldstart:tests',
