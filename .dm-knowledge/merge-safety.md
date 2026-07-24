@@ -25,10 +25,8 @@ gate here is deliberately pure and offline-testable, so keep new gates that way.
   load-bearing one, and it runs AFTER the authority gate so an unregistered repo
   still refuses with the authority message that names it. Changing how a repo
   delivers is `dm-repo.sh set <repo> mode` — an operator decision, in the
-  registry. NOTE: the `task-lifecycle` / `change-review` skills still tell the
-  dockmaster to `dm-task.sh set <id> mode local-only` when the operator picks a
-  local landing on a pipeline repo; that route is now refused and the skills need
-  to point at `dm-repo.sh set <repo> mode local-only` instead.
+  registry, and that is what `task-lifecycle` §4.3 and `change-review` §4 now
+  tell the dockmaster to do for a local landing on a pipeline repo.
 - **[invariant]** Never merge red: `dm-pr.sh merge` refuses
   `failing`/`pending`/`unknown`, and refuses `none` (no checks reported) unless
   `--allow-no-checks` AND the repo has no CI (`has_ci=0`, from
