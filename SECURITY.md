@@ -22,10 +22,11 @@ but only after the unlanded-work and untracked-file refusals above have passed.)
 Be explicit about the boundary, because the guardrails are narrower than they
 look:
 
-- **The destructive-command guard is a guardrail, not a security boundary.**
-  `bin/dm-command-guard.sh` parses shell commands and refuses destructive Git
-  forms; the script is the authority and [Command guard](#command-guard) below
-  describes it.
+- **The destructive-command guard is a guardrail, not a security boundary — and
+  it is not wired into any runtime today.** `bin/dm-command-guard.sh` parses
+  shell commands and refuses destructive Git forms; the script is the authority
+  and [Command guard](#command-guard) below describes it, including why it is
+  currently dormant.
 
   Be precise about what the guard is for. It raises the cost of an *accidental*
   destructive command and catches the forms an agent actually emits — which is
@@ -59,6 +60,11 @@ look:
   but storing it encrypted, and keeping it out of any repository, is on you.
 
 ## Command guard
+
+> **Dormant today.** Nothing installs this guard as a PreToolUse hook, so it is
+> not currently protecting any session. Read this section as the contract it will
+> enforce once #89 wires it up (held behind #143). The rest of this page assumes
+> nothing from it.
 
 `bin/dm-command-guard.sh` is a PreToolUse hook handler that parses a shell
 command and refuses Git forms that can lose work. It is an
@@ -168,9 +174,12 @@ the only thing standing between an agent and a repository:
   one on the command line is.
 - It does not restrict non-Git destruction (`rm -rf`, a build script, an
   interpreter). Worktree isolation and the operating contract carry that.
-- It is **not wired into a runtime today**: it is reachable as
-  `dm-command-guard.sh check <command>` and as a hook handler, but nothing
-  installs it as a PreToolUse hook. Claude-side wiring is #89.
+- It is **not wired into a runtime today**, so it currently guards nothing. It is
+  reachable as `dm-command-guard.sh check <command>` and as a hook handler, but
+  no `settings.json` installs it as a PreToolUse hook — its only caller was the
+  removed Codex project config. Claude-side wiring is #89, held until #143 (prose
+  false positives that refuse legitimate commands) lands; arming it first would
+  block ordinary work.
 
 Guarded toolbelt paths and the operating contract remain the primary controls.
 
