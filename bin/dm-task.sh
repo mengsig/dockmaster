@@ -111,14 +111,18 @@ case "$cmd" in
     dm_require_id "$id"
     valid_pipeline_tier "$tier" || dm_die "pipeline tier must be fast|default|rigorous"
     valid_pipeline_gate "$gate" || dm_die "invalid pipeline gate: '$gate'"
+    meta="$(dm_meta_path "$id")"
+    dm_lock "$meta"
+    dm_require_complete_task_locked "$id"
     [ "$(dm_meta_get "$id" kind)" = "ship" ] || dm_die "only ship tasks enter a delivery pipeline"
     [ "$(dm_meta_get "$id" mode)" != "local-only" ] || dm_die "local-only tasks do not enter a PR pipeline"
     approved_at="$(dm_meta_get "$id" approved_at)"
     [ -z "$approved_at" ] || dm_die "task '$id' is already approved at $approved_at"
     approved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    dm_meta_set_fields "$id" \
+    dm_meta_set_fields_locked "$id" \
       approved_at "$approved_at" pipeline_tier "$tier" pipeline_gate "$gate" \
       pipeline_state ready gate_started_at "" pipeline_blocked_by "" pipeline_blocked_reason ""
+    dm_unlock "$meta"
     dm_status_append "$id" working "approved; $tier pipeline gate '$gate' ready to schedule"
     ;;
 
@@ -128,34 +132,14 @@ case "$cmd" in
       || dm_die "usage: dm-task.sh gate <id> <ready|start|block|complete> <gate> [<blocker-id> <reason>]"
     dm_require_id "$id"
     valid_pipeline_gate "$gate" || dm_die "invalid pipeline gate: '$gate'"
-    [ -n "$(dm_meta_get "$id" approved_at)" ] || dm_die "task '$id' has no recorded approval; run dm-task.sh approve first"
-    current_gate="$(dm_meta_get "$id" pipeline_gate)"
-    current_state="$(dm_meta_get "$id" pipeline_state)"
-    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    status_state=working
+    status_note=""
     case "$action" in
       ready)
         [ "$#" -eq 0 ] || dm_die "usage: dm-task.sh gate <id> ready <gate>"
-        if [ "$current_state" = "blocked" ]; then
-          blocker="$(dm_meta_get "$id" pipeline_blocked_by)"
-          if [ -f "$(dm_meta_path "$blocker")" ]; then
-            blocker_state="$("$0" state "$blocker" | sed 's/ · .*//; s/^state: //')"
-            [ "$blocker_state" = "done" ] \
-              || dm_die "integration blocker '$blocker' is still '$blocker_state'; gate remains blocked"
-          elif [ ! -f "$DM_STATE/archive/$blocker.meta" ]; then
-            dm_die "integration blocker '$blocker' has no active or archived task record"
-          fi
-        fi
-        dm_meta_set_fields "$id" \
-          pipeline_gate "$gate" pipeline_state ready gate_started_at "" \
-          pipeline_blocked_by "" pipeline_blocked_reason ""
-        dm_status_append "$id" working "pipeline gate '$gate' ready to schedule"
         ;;
       start)
         [ "$#" -eq 0 ] || dm_die "usage: dm-task.sh gate <id> start <gate>"
-        [ "$current_state" = "ready" ] && [ "$current_gate" = "$gate" ] \
-          || dm_die "cannot start '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
-        dm_meta_set_fields "$id" pipeline_state running gate_started_at "$now"
-        dm_status_append "$id" working "pipeline gate '$gate' started"
         ;;
       block)
         blocker="${1:-}"; reason="${2:-}"
@@ -167,29 +151,70 @@ case "$cmd" in
         [ "$blocker" != "$id" ] || dm_die "a task cannot block its own pipeline"
         [ -f "$(dm_meta_path "$blocker")" ] || dm_die "no active blocker task: $blocker"
         dm_require_single_line "pipeline blocker reason" "$reason"
-        dm_meta_set_fields "$id" \
-          pipeline_gate "$gate" pipeline_state blocked gate_started_at "" \
-          pipeline_blocked_by "$blocker" pipeline_blocked_reason "$reason"
-        dm_status_append "$id" paused "integration gate '$gate' waits for '$blocker': $reason"
         ;;
       complete)
         [ "$#" -le 1 ] || dm_die "usage: dm-task.sh gate <id> complete <gate> [<next-gate>]"
-        [ "$current_state" = "running" ] && [ "$current_gate" = "$gate" ] \
-          || dm_die "cannot complete '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
         next_gate="${1:-}"
-        if [ -n "$next_gate" ]; then
-          valid_pipeline_gate "$next_gate" || dm_die "invalid next pipeline gate: '$next_gate'"
-          dm_meta_set_fields "$id" \
-            pipeline_gate "$next_gate" pipeline_state ready gate_started_at "" \
-            pipeline_blocked_by "" pipeline_blocked_reason ""
-          dm_status_append "$id" working "pipeline gate '$gate' complete; '$next_gate' ready to schedule"
-        else
-          dm_meta_set_fields "$id" pipeline_state complete
-          dm_status_append "$id" working "pipeline gate '$gate' complete"
-        fi
+        [ -z "$next_gate" ] || valid_pipeline_gate "$next_gate" \
+          || dm_die "invalid next pipeline gate: '$next_gate'"
         ;;
       *) dm_die "gate action must be ready|start|block|complete" ;;
     esac
+    meta="$(dm_meta_path "$id")"
+    dm_lock "$meta"
+    dm_require_complete_task_locked "$id"
+    [ -n "$(dm_meta_get "$id" approved_at)" ] \
+      || dm_die "task '$id' has no recorded approval; run dm-task.sh approve first"
+    current_gate="$(dm_meta_get "$id" pipeline_gate)"
+    current_state="$(dm_meta_get "$id" pipeline_state)"
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    case "$action" in
+      ready)
+        [ "$current_state" = "blocked" ] && [ "$current_gate" = "$gate" ] \
+          || dm_die "cannot ready '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
+        blocker="$(dm_meta_get "$id" pipeline_blocked_by)"
+        if [ -f "$(dm_meta_path "$blocker")" ]; then
+          blocker_state="$(DM_NO_FETCH=1 "$0" state "$blocker" | sed 's/ · .*//; s/^state: //')"
+          [ "$blocker_state" = "done" ] \
+            || dm_die "integration blocker '$blocker' is still '$blocker_state'; gate remains blocked"
+        elif [ ! -f "$DM_STATE/archive/$blocker.meta" ]; then
+          dm_die "integration blocker '$blocker' has no active or archived task record"
+        fi
+        dm_meta_set_fields_locked "$id" \
+          pipeline_state ready gate_started_at "" pipeline_blocked_by "" pipeline_blocked_reason ""
+        status_note="pipeline gate '$gate' ready to schedule"
+        ;;
+      start)
+        [ "$current_state" = "ready" ] && [ "$current_gate" = "$gate" ] \
+          || dm_die "cannot start '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
+        dm_meta_set_fields_locked "$id" pipeline_state running gate_started_at "$now"
+        status_note="pipeline gate '$gate' started"
+        ;;
+      block)
+        [ "$current_state" = "ready" ] && [ "$current_gate" = "$gate" ] \
+          || dm_die "cannot block '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
+        dm_meta_set_fields_locked "$id" \
+          pipeline_state blocked gate_started_at "" \
+          pipeline_blocked_by "$blocker" pipeline_blocked_reason "$reason"
+        status_state=paused
+        status_note="integration gate '$gate' waits for '$blocker': $reason"
+        ;;
+      complete)
+        [ "$current_state" = "running" ] && [ "$current_gate" = "$gate" ] \
+          || dm_die "cannot complete '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
+        if [ -n "$next_gate" ]; then
+          dm_meta_set_fields_locked "$id" \
+            pipeline_gate "$next_gate" pipeline_state ready gate_started_at "" \
+            pipeline_blocked_by "" pipeline_blocked_reason ""
+          status_note="pipeline gate '$gate' complete; '$next_gate' ready to schedule"
+        else
+          dm_meta_set_fields_locked "$id" pipeline_state complete
+          status_note="pipeline gate '$gate' complete"
+        fi
+        ;;
+    esac
+    dm_unlock "$meta"
+    dm_status_append "$id" "$status_state" "$status_note"
     ;;
 
   ready-gates)
@@ -213,15 +238,33 @@ case "$cmd" in
           || dm_die "usage: dm-task.sh waiter <id> prepare <thread-name>"
         case "$thread" in ''|*[!a-z0-9_]*) dm_die "waiter thread name must match [a-z0-9_]+" ;; esac
         [ "${#thread}" -le 64 ] || dm_die "waiter thread name must be <= 64 characters"
+        meta="$(dm_meta_path "$id")"
+        dm_lock "$meta"
+        dm_require_complete_task_locked "$id"
         old_state="$(dm_meta_get "$id" waiter_state)"
         old_thread="$(dm_meta_get "$id" waiter_thread_name)"
-        if [ "$old_state" = "active" ]; then
-          dm_die "task '$id' already has an active waiter; reconcile it before preparing another"
-        fi
-        if [ -n "$old_thread" ] && [ "$old_thread" != "$thread" ] && [ "$old_state" != "terminal" ]; then
-          dm_die "task '$id' already records waiter thread '$old_thread'; refusing ambiguous replacement"
-        fi
-        dm_meta_set_fields "$id" waiter_thread_name "$thread" waiter_agent_id "" waiter_state prepared
+        old_agent="$(dm_meta_get "$id" waiter_agent_id)"
+        case "$old_state" in
+          prepared)
+            [ "$old_thread" = "$thread" ] && [ -z "$old_agent" ] \
+              || dm_die "task '$id' has malformed or ambiguous prepared waiter state; reconcile it before launch"
+            ;;
+          ''|terminal)
+            [ -z "$old_thread" ] && [ -z "$old_agent" ] \
+              || dm_die "task '$id' has legacy waiter identity without a live state; reconcile it before launch"
+            ;;
+          idle)
+            dm_die "task '$id' has idle waiter '$old_agent'; reuse that exact identity instead of preparing another"
+            ;;
+          active)
+            dm_die "task '$id' already has an active waiter; reconcile it before preparing another"
+            ;;
+          *)
+            dm_die "task '$id' has unknown waiter state '$old_state'; reconcile it before launch"
+            ;;
+        esac
+        dm_meta_set_fields_locked "$id" waiter_thread_name "$thread" waiter_agent_id "" waiter_state prepared
+        dm_unlock "$meta"
         ;;
       active)
         thread="${1:-}"; agent="${2:-}"
@@ -230,26 +273,49 @@ case "$cmd" in
         case "$thread" in ''|*[!a-z0-9_]*) dm_die "waiter thread name must match [a-z0-9_]+" ;; esac
         [ "${#thread}" -le 64 ] || dm_die "waiter thread name must be <= 64 characters"
         dm_require_single_line "waiter agent id" "$agent"
+        meta="$(dm_meta_path "$id")"
+        dm_lock "$meta"
+        dm_require_complete_task_locked "$id"
         old_state="$(dm_meta_get "$id" waiter_state)"
         old_thread="$(dm_meta_get "$id" waiter_thread_name)"
         old_agent="$(dm_meta_get "$id" waiter_agent_id)"
-        [ -z "$old_thread" ] || [ "$old_thread" = "$thread" ] \
-          || dm_die "task '$id' prepared waiter '$old_thread'; refusing different thread '$thread'"
-        if [ "$old_state" = "active" ] && [ -n "$old_agent" ] && [ "$old_agent" != "$agent" ]; then
-          dm_die "task '$id' already has active waiter '$old_agent'; refusing ambiguous replacement"
-        fi
-        dm_meta_set_fields "$id" waiter_thread_name "$thread" waiter_agent_id "$agent" waiter_state active
+        case "$old_state" in
+          prepared)
+            [ "$old_thread" = "$thread" ] && [ -z "$old_agent" ] \
+              || dm_die "task '$id' prepared waiter '$old_thread'; refusing mismatched or malformed activation"
+            ;;
+          idle|active)
+            [ "$old_thread" = "$thread" ] && [ "$old_agent" = "$agent" ] \
+              || dm_die "task '$id' already records waiter '${old_agent:-missing}'; refusing ambiguous replacement"
+            ;;
+          *)
+            dm_die "task '$id' has no prepared or reusable waiter; prepare its identity before activation"
+            ;;
+        esac
+        dm_meta_set_fields_locked "$id" waiter_thread_name "$thread" waiter_agent_id "$agent" waiter_state active
+        dm_unlock "$meta"
         ;;
       idle)
         [ "$#" -eq 0 ] || dm_die "usage: dm-task.sh waiter <id> idle"
+        meta="$(dm_meta_path "$id")"
+        dm_lock "$meta"
+        dm_require_complete_task_locked "$id"
+        old_state="$(dm_meta_get "$id" waiter_state)"
+        [ "$old_state" = "active" ] || [ "$old_state" = "idle" ] \
+          || dm_die "task '$id' has no active waiter to keep idle"
         [ -n "$(dm_meta_get "$id" waiter_thread_name)" ] \
           && [ -n "$(dm_meta_get "$id" waiter_agent_id)" ] \
           || dm_die "task '$id' has no waiter identity to keep idle"
-        dm_meta_set_fields "$id" waiter_state idle
+        dm_meta_set_fields_locked "$id" waiter_state idle
+        dm_unlock "$meta"
         ;;
       terminal)
         [ "$#" -eq 0 ] || dm_die "usage: dm-task.sh waiter <id> terminal"
-        dm_meta_set_fields "$id" waiter_thread_name "" waiter_agent_id "" waiter_state terminal
+        meta="$(dm_meta_path "$id")"
+        dm_lock "$meta"
+        dm_require_complete_task_locked "$id"
+        dm_meta_set_fields_locked "$id" waiter_thread_name "" waiter_agent_id "" waiter_state terminal
+        dm_unlock "$meta"
         ;;
       *) dm_die "waiter state must be prepare|active|idle|terminal" ;;
     esac

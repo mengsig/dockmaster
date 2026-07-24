@@ -30,6 +30,56 @@ bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 
+gate_start_race_has_one_winner() {
+  local id="gate-start-race" lockdir pids="" pid i winners=0
+  b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
+  b dm-task.sh approve "$id" default coldstart-review >/dev/null
+  lockdir="$DM_HOME/state/tasks/$id.meta.lock"
+  mkdir "$lockdir"
+  for i in 1 2 3 4 5 6; do
+    (
+      if b dm-task.sh gate "$id" start coldstart-review >/dev/null 2>&1; then
+        : > "$TMP/gate-start-race.$i.ok"
+      fi
+    ) &
+    pids="$pids $!"
+  done
+  sleep 1
+  rmdir "$lockdir"
+  for pid in $pids; do wait "$pid"; done
+  for i in 1 2 3 4 5 6; do
+    [ ! -e "$TMP/gate-start-race.$i.ok" ] || winners=$((winners + 1))
+  done
+  [ "$winners" -eq 1 ] \
+    && [ "$(grep -c "pipeline gate 'coldstart-review' started" "$DM_HOME/state/tasks/$id.status")" -eq 1 ]
+}
+
+waiter_activation_race_has_one_winner() {
+  local id="waiter-activation-race" thread lockdir pids="" pid i winners=0
+  b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
+  thread="$(b dm-thread-name.sh "$id" review_waiter)"
+  b dm-task.sh waiter "$id" prepare "$thread" >/dev/null
+  lockdir="$DM_HOME/state/tasks/$id.meta.lock"
+  mkdir "$lockdir"
+  for i in 1 2 3 4 5 6; do
+    (
+      if b dm-task.sh waiter "$id" active "$thread" "agent-$i" >/dev/null 2>&1; then
+        : > "$TMP/waiter-activation-race.$i.ok"
+      fi
+    ) &
+    pids="$pids $!"
+  done
+  sleep 1
+  rmdir "$lockdir"
+  for pid in $pids; do wait "$pid"; done
+  for i in 1 2 3 4 5 6; do
+    [ ! -e "$TMP/waiter-activation-race.$i.ok" ] || winners=$((winners + 1))
+  done
+  [ "$winners" -eq 1 ] \
+    && [ "$(b dm-task.sh get "$id" waiter_state)" = active ] \
+    && [ -n "$(b dm-task.sh get "$id" waiter_agent_id)" ]
+}
+
 # Hermetic authenticated runtime snapshot. Production doctor still probes real
 # auth; smoke must not inherit developer login state or hosted-CI anonymity.
 RUNTIME_OK="$TMP/runtime-ok"
@@ -429,6 +479,8 @@ check "completed gate can expose the next ready gate" \
   'b dm-task.sh gate gate-ready complete coldstart-review branch-tests >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*branch-tests"'
 check "overlap cannot block a branch-local gate" \
   '! b dm-task.sh gate gate-ready block branch-tests gate-blocker overlap >/dev/null 2>&1'
+check "branch-local work runs before overlap reaches integration" \
+  'b dm-task.sh gate gate-ready start branch-tests >/dev/null && b dm-task.sh gate gate-ready complete branch-tests rebase >/dev/null'
 check "integration blocker and reason are durable" \
   'b dm-task.sh gate gate-ready block rebase gate-blocker "same deployment files" >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = blocked ] && [ "$(b dm-task.sh get gate-ready pipeline_blocked_by)" = gate-blocker ] && [ "$(b dm-task.sh get gate-ready pipeline_blocked_reason)" = "same deployment files" ]'
 check "integration gate cannot ready before blocker completes" \
@@ -441,6 +493,7 @@ GATE_STATUS="$(b dm-status.sh)"
 check "released integration work is visible as unscheduled" 'grep -q "READY-GATE.*gate-ready.*rebase" <<<"$GATE_STATUS"'
 check "generic set cannot forge pipeline state" \
   '! b dm-task.sh set gate-ready pipeline_state running >/dev/null 2>&1'
+check "concurrent gate starts have exactly one owner" 'gate_start_race_has_one_winner'
 
 echo "== fast pipeline config =="
 FAST="$ROOT/config/pr-pipeline.fast.json"
@@ -488,14 +541,32 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
 axilav() { PATH="$FAKE_LAVISH:$PATH" "$ROOT/bin/dm-lavish.sh" "$@"; }
 WAITER_THREAD="$(b dm-thread-name.sh demo-1 review_waiter)"
+UNPREPARED_THREAD="$(b dm-thread-name.sh waiter-unprepared review_waiter)"
+b dm-task.sh new waiter-unprepared --kind ship --repo demo --mode pipeline >/dev/null
+check "waiter activation refuses a missing durable preparation" \
+  '! b dm-task.sh waiter waiter-unprepared active "$UNPREPARED_THREAD" /root/unprepared >/dev/null 2>&1'
+( . "$ROOT/bin/dm-lib.sh"
+  dm_meta_set_fields waiter-unprepared waiter_thread_name "$UNPREPARED_THREAD" waiter_agent_id /root/legacy waiter_state ""
+)
+check "legacy identity without state fails closed as ambiguous" \
+  '! b dm-task.sh waiter waiter-unprepared prepare "$UNPREPARED_THREAD" >/dev/null 2>&1 && [ "$(b dm-task.sh get waiter-unprepared waiter_agent_id)" = /root/legacy ]'
+check "explicit terminal recovery clears malformed waiter identity" \
+  'b dm-task.sh waiter waiter-unprepared terminal >/dev/null && [ -z "$(b dm-task.sh get waiter-unprepared waiter_thread_name)" ] && [ -z "$(b dm-task.sh get waiter-unprepared waiter_agent_id)" ]'
 check "waiter name is durable before spawn" \
   'b dm-task.sh waiter demo-1 prepare "$WAITER_THREAD" >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_state)" = prepared ]'
+check "prepared launch ambiguity prevents worktree cleanup" \
+  'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
 check "waiter identity activates atomically" \
   'b dm-task.sh waiter demo-1 active "$WAITER_THREAD" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_thread_name)" = "$WAITER_THREAD" ] && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = active ]'
+check "concurrent waiter activations preserve one exact owner" 'waiter_activation_race_has_one_winner'
 check "active waiter prevents worktree cleanup even with force" \
   'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
 check "idle waiter keeps exact identity for reuse" \
   'b dm-task.sh waiter demo-1 idle >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ]'
+check "prepare refuses to erase a reusable idle identity" \
+  '! b dm-task.sh waiter demo-1 prepare "$WAITER_THREAD" >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ]'
+check "idle waiter reactivation requires its exact identity" \
+  '! b dm-task.sh waiter demo-1 active "$WAITER_THREAD" /root/different-waiter >/dev/null 2>&1 && b dm-task.sh waiter demo-1 active "$WAITER_THREAD" /root/review-waiter >/dev/null'
 check "opening Lavish records active session" \
   'axilav open demo-1 >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = active ] && [ -n "$(b dm-task.sh get demo-1 review_session_started_at)" ]'
 check "poll requires and accepts active session" 'axilav poll demo-1 >/dev/null'
@@ -517,6 +588,16 @@ check "active waiter prevents otherwise-valid archive" \
   'ERR="$(b dm-task.sh archive review-archive 2>&1 || true)"; grep -q "Lavish review session or notification waiter is active" <<<"$ERR" && [ -f "$DM_HOME/state/tasks/review-archive.meta" ]'
 check "terminal waiter permits archive" \
   'b dm-task.sh waiter review-archive terminal >/dev/null && b dm-task.sh archive review-archive >/dev/null && [ -f "$DM_HOME/state/archive/review-archive.meta" ]'
+b dm-task.sh new malformed-review --kind scout --repo demo >/dev/null
+mkdir -p "$DM_HOME/data/malformed-review"
+printf '# report\n' > "$DM_HOME/data/malformed-review/report.md"
+( . "$ROOT/bin/dm-lib.sh"
+  dm_meta_set_fields malformed-review waiter_thread_name "" waiter_agent_id "" waiter_state active
+)
+check "malformed active waiter still prevents archive" \
+  '! b dm-task.sh archive malformed-review >/dev/null 2>&1 && [ -f "$DM_HOME/state/tasks/malformed-review.meta" ]'
+check "explicit terminal recovery releases malformed active state" \
+  'b dm-task.sh waiter malformed-review terminal >/dev/null && b dm-task.sh archive malformed-review >/dev/null && [ -f "$DM_HOME/state/archive/malformed-review.meta" ]'
 
 echo "== state reconciliation =="
 check "state pending pre-work" 'OUT="$(b dm-task.sh state demo-1)"; grep -q pending <<<"$OUT"'
