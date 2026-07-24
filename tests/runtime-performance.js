@@ -5,8 +5,8 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawnSync } = require('child_process')
 
-const ROOT = process.env.DM_PARITY_ROOT
-  ? path.resolve(process.env.DM_PARITY_ROOT)
+const ROOT = process.env.DM_CHECK_ROOT
+  ? path.resolve(process.env.DM_CHECK_ROOT)
   : path.join(__dirname, '..')
 const BASELINE = json('config/runtime-performance-baseline.json')
 
@@ -87,13 +87,13 @@ function assertGuardrails(metrics) {
     throw new Error(`shared AGENTS.md grew beyond ${limits.shared_agents_growth_bytes}B allowance`)
   }
   if (metrics.claude.settings !== BASELINE.claude_settings_bytes) {
-    throw new Error('Codex support changed Claude always-loaded settings')
+    throw new Error('always-loaded Claude settings changed without a baseline update')
   }
   if (metrics.claude.skills.total !== BASELINE.claude_skill_bytes) {
-    throw new Error('Codex support changed Claude skill bodies')
+    throw new Error('Claude skill bodies changed without a baseline update')
   }
   if (metrics.claude.skills.descriptions !== BASELINE.claude_skill_description_bytes) {
-    throw new Error('Codex support changed Claude skill discovery descriptions')
+    throw new Error('Claude skill discovery descriptions changed without a baseline update')
   }
   for (const [file, expected] of Object.entries(BASELINE.claude_files_sha256)) {
     if (metrics.claude.files_sha256[file] !== expected) {
@@ -105,12 +105,9 @@ function assertGuardrails(metrics) {
   if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
     throw new Error('Claude runtime file hash inventory changed')
   }
-  for (const [runtime, skill] of Object.entries({ claude: metrics.claude.skills, codex: metrics.codex.skills })) {
-    if (skill.descriptions > limits.skill_description_bytes_per_runtime) {
-      throw new Error(`${runtime} descriptions exceed ${limits.skill_description_bytes_per_runtime}B`)
-    }
+  if (metrics.claude.skills.descriptions > limits.skill_description_bytes) {
+    throw new Error(`skill descriptions exceed ${limits.skill_description_bytes}B`)
   }
-  if (metrics.shared.agents > limits.codex_project_doc_bytes) throw new Error('AGENTS.md exceeds Codex project cap')
 }
 
 function collect() {
@@ -128,12 +125,6 @@ function collect() {
       skills: skillMetrics('.claude/skills'),
       files_sha256: Object.fromEntries(claudeFiles.map((file) => [file, sha256(file)])),
       cli_startup_median_ms: sampleStartup ? medianStartup('claude') : null,
-    },
-    codex: {
-      config: bytes('.codex/config.toml'),
-      rules: bytes('.codex/rules/dockmaster.rules'),
-      skills: skillMetrics('.agents/skills'),
-      cli_startup_median_ms: sampleStartup ? medianStartup('codex') : null,
     },
     startup_sampling: sampleStartup ? 'bounded diagnostic' : 'disabled (set DM_RUNTIME_STARTUP_SAMPLE=1)',
   }

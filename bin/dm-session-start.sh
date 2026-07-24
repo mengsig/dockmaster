@@ -6,19 +6,18 @@
 # in-flight, and the operator/fleet memory. It mutates only the guarded
 # fast-forward clone sync; everything else is read-only.
 #
-# Usage: dm-session-start.sh [--no-sync] [--runtime auto|claude|codex|both]
+# Usage: dm-session-start.sh [--no-sync]
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_ensure_dirs
 here="$(dirname "${BASH_SOURCE[0]}")"
 
-do_sync=1; selected_runtime="auto"
+do_sync=1
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-sync) do_sync=0; shift ;;
-    --runtime) selected_runtime="${2:-}"; shift 2 ;;
-    *) dm_die "usage: dm-session-start.sh [--no-sync] [--runtime auto|claude|codex|both]" ;;
+    *) dm_die "usage: dm-session-start.sh [--no-sync]" ;;
   esac
 done
 
@@ -30,7 +29,7 @@ section "TOOLING"
 # than swallowing it (the old `|| true` always exited 0, hiding a broken
 # environment behind a green-looking digest); still render the full digest, then
 # surface an explicit NOT READY banner and a non-zero exit at the end.
-if "$here/dm-doctor.sh" check --runtime "$selected_runtime"; then ready=1; else ready=0; fi
+if "$here/dm-doctor.sh" check; then ready=1; else ready=0; fi
 
 section "MANAGED REPOS"
 "$here/dm-repo.sh" list || echo "  (repo listing unavailable — see TOOLING above)"

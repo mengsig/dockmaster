@@ -48,8 +48,8 @@ require_single_line() {
 }
 
 validate_thread_name() {
-  case "$1" in ''|*[!a-z0-9_]*) dm_die "invalid Codex thread name: '$1'" ;; esac
-  [ "${#1}" -le 64 ] || dm_die "Codex thread name exceeds 64 characters"
+  case "$1" in ''|*[!a-z0-9_]*) dm_die "invalid thread name: '$1'" ;; esac
+  [ "${#1}" -le 64 ] || dm_die "thread name exceeds 64 characters"
 }
 
 validate_repos() {

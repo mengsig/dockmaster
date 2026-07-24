@@ -966,8 +966,8 @@ dm_open_pr_tasks() {
 # --- dispatch right-sizing: advisory model-tier recommendation ----------------
 # Recommend the least model tier that still fits the work, as a pure function
 # (offline, no side effects) so dm-brief can surface it and smoke can test it.
-# ADVISORY, not a gate: the Codex adapter exposes no per-spawn model field, so
-# this can only be surfaced, never enforced. Risk signals dominate (size UP when
+# ADVISORY, not a gate: the dockmaster decides the final resourcing, so this is
+# surfaced in the brief, never enforced. Risk signals dominate (size UP when
 # unsure); a scout or mechanical change sizes down. Matching is case-insensitive
 # and substring, so `auth` also fires on author/authority — a deliberate
 # over-size bias, the safe direction for an advisory hint. Prints: haiku|sonnet|opus.
