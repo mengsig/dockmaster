@@ -19,11 +19,11 @@
 #   set <id> <key> <value>
 #   approve <id> <fast|default|rigorous>
 #   gate <id> claim <gate> <thread>
-#   gate <id> start <gate> <epoch> <agent-id>
-#   gate <id> release <gate> <epoch> <reason>
+#   gate <id> start <gate> <epoch> <thread> <agent-id>
+#   gate <id> release <gate> <epoch> <thread> <reason>
 #   gate <id> block <gate> <blocker-id> <reason>
 #   gate <id> ready <gate>
-#   gate <id> complete <gate> <epoch> <evidence>
+#   gate <id> complete <gate> <epoch> <agent-id> <evidence>
 #   ready-gates            list approved gates waiting for a runtime owner
 #   waiter <id> <prepare|active|idle|terminal|cancel|recover> [...]
 #   get <id> [<key>]
@@ -48,18 +48,55 @@ valid_pipeline_gate() {
   [ "${#1}" -le 64 ]
 }
 pipeline_config() {
-  local tier="$1" file
-  file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/config/pr-pipeline.$tier.json"
+  local repo="$1" tier="$2" file
+  file="$DM_CONFIG/pr-pipeline.$repo.json"
+  [ -f "$file" ] || file="$DM_CONFIG/pr-pipeline.$tier.json"
   [ -f "$file" ] || dm_die "missing pipeline definition: $file"
   printf '%s\n' "$file"
 }
-pipeline_first_gate() { jq -er '.gates[0].id' "$(pipeline_config "$1")"; }
-pipeline_next_gate() {
+pipeline_plan_from_file() {
+  jq -cer '
+    .gates as $g
+    | if ($g | type) != "array" or ($g | length) == 0 then error("gates must be a non-empty array") else . end
+    | [$g[].id] as $ids
+    | if ($ids | all(type == "string" and test("^[a-z][a-z0-9-]{0,63}$")))
+         and (($ids | unique | length) == ($ids | length))
+         and ($g | all(.gate | type == "string" and length > 0))
+      then $g else error("gate ids/types are invalid or duplicated") end
+  ' "$1" || dm_die "invalid pipeline definition: $1"
+}
+pipeline_plan_hash() {
+  printf '%s' "$1" | git -c extensions.objectFormat=sha1 hash-object --stdin
+}
+pipeline_plan_locked() {
+  local id="$1" plan expected actual
+  plan="$(dm_meta_get "$id" pipeline_plan)"
+  expected="$(dm_meta_get "$id" pipeline_plan_hash)"
+  [ -n "$plan" ] && [ -n "$expected" ] \
+    || dm_die "task '$id' has no immutable pipeline plan snapshot"
+  actual="$(pipeline_plan_hash "$plan")"
+  [ "$actual" = "$expected" ] \
+    || dm_die "task '$id' pipeline plan snapshot hash mismatch; refusing live-config fallback"
+  printf '%s\n' "$plan"
+}
+pipeline_first_gate_locked() {
+  pipeline_plan_locked "$1" | jq -er '.[0].id'
+}
+pipeline_next_gate_locked() {
+  local plan
+  plan="$(pipeline_plan_locked "$1")"
   jq -r --arg gate "$2" '
-    [.gates[].id] as $ids
+    [.[].id] as $ids
     | ($ids | index($gate)) as $i
     | if $i == null then error("unknown gate") else ($ids[$i + 1] // "") end
-  ' "$(pipeline_config "$1")"
+  ' <<<"$plan"
+}
+pipeline_gate_kind_locked() {
+  local plan
+  plan="$(pipeline_plan_locked "$1")"
+  jq -er --arg gate "$2" '
+    ([.[] | select(.id == $gate) | .gate][0] // error("unknown gate"))
+  ' <<<"$plan"
 }
 next_generation() {
   case "${1:-}" in ''|*[!0-9]*) printf '1\n' ;; *) printf '%s\n' "$(( $1 + 1 ))" ;; esac
@@ -70,7 +107,7 @@ require_nonterminal_locked() {
   return 0
 }
 gate_next_locked() {
-  local id="$1" tier="$2" gate="$3" recovery
+  local id="$1" gate="$2" recovery
   recovery="$(dm_meta_get "$id" pipeline_recovery_resume_gate)"
   if [ -n "$recovery" ]; then
     case "$gate" in
@@ -80,7 +117,7 @@ gate_next_locked() {
       *) dm_die "task '$id' has malformed recovery sequence at gate '$gate'" ;;
     esac
   else
-    pipeline_next_gate "$tier" "$gate"
+    pipeline_next_gate_locked "$id" "$gate"
   fi
 }
 valid_thread_name() {
@@ -91,6 +128,82 @@ valid_integration_gate() {
   case "${1:-}" in
     rebase|merge-gate-review|final-tests|verify|security|pr|land) return 0 ;;
     *) return 1 ;;
+  esac
+}
+
+pipeline_snapshot_locked() {
+  local snapshot
+  snapshot="$(dm_task_git_snapshot "$1")"
+  PIPELINE_BASE_SHA="${snapshot%%$'\t'*}"
+  PIPELINE_HEAD_SHA="${snapshot#*$'\t'}"
+  [ -n "$PIPELINE_BASE_SHA" ] && [ -n "$PIPELINE_HEAD_SHA" ] \
+    || dm_die "could not capture exact pipeline git snapshot for '$1'"
+}
+
+pipeline_rewind_if_changed_locked() {
+  local id="$1" state anchor_base anchor_head first
+  state="$(dm_meta_get "$id" pipeline_state)"
+  case "$state" in ready|complete) ;; *) return 0 ;; esac
+  anchor_base="$(dm_meta_get "$id" pipeline_last_base_sha)"
+  anchor_head="$(dm_meta_get "$id" pipeline_last_head_sha)"
+  [ -n "$anchor_base" ] && [ -n "$anchor_head" ] || return 0
+  pipeline_snapshot_locked "$id"
+  [ "$PIPELINE_BASE_SHA" = "$anchor_base" ] && [ "$PIPELINE_HEAD_SHA" = "$anchor_head" ] \
+    && return 0
+  first="$(pipeline_first_gate_locked "$id")"
+  dm_task_transition_locked "$id" working "git snapshot changed after gate completion; proofs invalidated and '$first' ready" \
+    pipeline_gate "$first" pipeline_state ready pipeline_epoch "" \
+    pipeline_owner_thread "" pipeline_owner_agent "" gate_started_at "" \
+    pipeline_claim_base_sha "" pipeline_claim_head_sha "" \
+    pipeline_last_gate "" pipeline_last_evidence "" \
+    pipeline_last_base_sha "$PIPELINE_BASE_SHA" pipeline_last_head_sha "$PIPELINE_HEAD_SHA" \
+    tests "" tests_base_sha "" tests_head_sha "" \
+    security_scan "" security_scan_base_sha "" security_scan_head_sha ""
+}
+
+pipeline_validate_evidence_locked() {
+  local id="$1" gate="$2" base_sha="$3" head_sha="$4" supplied="$5"
+  local kind result scan url pr_head
+  case "$gate" in
+    rebase) kind=rebase ;;
+    merge-gate-review) kind=review ;;
+    final-tests) kind=tests ;;
+    *) kind="$(pipeline_gate_kind_locked "$id" "$gate")" ;;
+  esac
+  case "$kind" in
+    tests)
+      result="$(dm_meta_get "$id" tests)"
+      case "$result" in pass|skip) ;; *) dm_die "cannot complete '$gate': no sanctioned tests pass/skip signal" ;; esac
+      [ "$(dm_meta_get "$id" tests_base_sha)" = "$base_sha" ] \
+        && [ "$(dm_meta_get "$id" tests_head_sha)" = "$head_sha" ] \
+        || dm_die "cannot complete '$gate': tests signal is stale for the current base/HEAD"
+      PIPELINE_VALIDATED_EVIDENCE="tests:$result"
+      ;;
+    security)
+      scan="$(dm_meta_get "$id" security_scan)"
+      case "$scan" in clear|hit) ;; *) dm_die "cannot complete '$gate': run sanctioned dm-pr.sh security-scan first" ;; esac
+      [ "$(dm_meta_get "$id" security_scan_base_sha)" = "$base_sha" ] \
+        && [ "$(dm_meta_get "$id" security_scan_head_sha)" = "$head_sha" ] \
+        || dm_die "cannot complete '$gate': security scan is stale for the current base/HEAD"
+      if [ "$scan" = "hit" ]; then
+        [ "$supplied" = "security-review-pass" ] \
+          || dm_die "cannot complete '$gate': scan hit requires the scheduler assertion 'security-review-pass'"
+      fi
+      PIPELINE_VALIDATED_EVIDENCE="security:$scan:$supplied"
+      ;;
+    pr)
+      url="$(dm_meta_get "$id" pr)"
+      pr_head="$(dm_meta_get "$id" pr_head)"
+      [ -n "$url" ] && [ "$pr_head" = "$head_sha" ] \
+        || dm_die "cannot complete '$gate': sanctioned PR signal is missing or stale for current HEAD"
+      PIPELINE_VALIDATED_EVIDENCE="pr:$url"
+      ;;
+    *)
+      # Runtime identities are correlation, not OS authentication. Git snapshots
+      # and sanctioned tool signals are enforced; reviewer assertions remain in
+      # the same-user scheduler trust boundary.
+      PIPELINE_VALIDATED_EVIDENCE="$supplied"
+      ;;
   esac
 }
 
@@ -139,8 +252,12 @@ case "$cmd" in
       pr|pr_state|merge_state|pr_check_snapshot|pr_head) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
       base) dm_die "'base' is recorded by dm-worktree.sh create --base; it must not be set by hand" ;;
       worktree) dm_die "'worktree' is maintained by dm-worktree.sh create/remove; it must not be set by hand" ;;
-      approved_at|pipeline_tier|pipeline_gate|pipeline_state|pipeline_generation|pipeline_epoch|pipeline_owner_thread|pipeline_owner_agent|gate_started_at|pipeline_blocked_by|pipeline_blocked_reason|pipeline_recovery_resume_gate|pipeline_last_gate|pipeline_last_evidence)
+      approved_at|pipeline_tier|pipeline_plan|pipeline_plan_hash|pipeline_plan_source|pipeline_gate|pipeline_state|pipeline_generation|pipeline_epoch|pipeline_owner_thread|pipeline_owner_agent|gate_started_at|pipeline_blocked_by|pipeline_blocked_reason|pipeline_recovery_resume_gate|pipeline_claim_base_sha|pipeline_claim_head_sha|pipeline_last_base_sha|pipeline_last_head_sha|pipeline_last_gate|pipeline_last_evidence)
         dm_die "'$key' is pipeline state maintained by dm-task.sh approve/gate; it must not be set by hand" ;;
+      tests|tests_base_sha|tests_head_sha)
+        dm_die "'$key' is test evidence maintained by dm-test.sh; it must not be set by hand" ;;
+      security_scan|security_scan_base_sha|security_scan_head_sha)
+        dm_die "'$key' is security evidence maintained by dm-pr.sh security-scan; it must not be set by hand" ;;
       waiter_thread_name|waiter_agent_id|waiter_state|waiter_generation|waiter_epoch)
         dm_die "'$key' is review-waiter state maintained by dm-task.sh waiter; it must not be set by hand" ;;
       review_session_state|review_session_started_at|review_session_generation|review_session_epoch|review_session_mode)
@@ -157,7 +274,13 @@ case "$cmd" in
       || dm_die "usage: dm-task.sh approve <id> <fast|default|rigorous>"
     dm_require_id "$id"
     valid_pipeline_tier "$tier" || dm_die "pipeline tier must be fast|default|rigorous"
-    gate="$(pipeline_first_gate "$tier")"
+    repo="$(dm_meta_get "$id" repo)"
+    dm_require_id "$repo"
+    config="$(pipeline_config "$repo" "$tier")"
+    plan="$(pipeline_plan_from_file "$config")"
+    plan_hash="$(pipeline_plan_hash "$plan")"
+    gate="$(jq -er '.[0].id' <<<"$plan")"
+    plan_source="${config##*/}"
     meta="$(dm_meta_path "$id")"
     dm_lock "$meta"
     dm_require_complete_task_locked "$id"
@@ -166,12 +289,16 @@ case "$cmd" in
     [ "$(dm_meta_get "$id" mode)" != "local-only" ] || dm_die "local-only tasks do not enter a PR pipeline"
     approved_at="$(dm_meta_get "$id" approved_at)"
     [ -z "$approved_at" ] || dm_die "task '$id' is already approved at $approved_at"
+    pipeline_snapshot_locked "$id"
     approved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    dm_task_transition_locked "$id" working "approved; $tier pipeline gate '$gate' ready to schedule" \
-      approved_at "$approved_at" pipeline_tier "$tier" pipeline_gate "$gate" \
+    dm_task_transition_locked "$id" working "approved; snapshotted $plan_source ($plan_hash); gate '$gate' ready to schedule" \
+      approved_at "$approved_at" pipeline_tier "$tier" pipeline_plan "$plan" \
+      pipeline_plan_hash "$plan_hash" pipeline_plan_source "$plan_source" pipeline_gate "$gate" \
       pipeline_state ready pipeline_generation 0 pipeline_epoch "" \
       pipeline_owner_thread "" pipeline_owner_agent "" gate_started_at "" \
-      pipeline_blocked_by "" pipeline_blocked_reason "" pipeline_recovery_resume_gate ""
+      pipeline_blocked_by "" pipeline_blocked_reason "" pipeline_recovery_resume_gate "" \
+      pipeline_claim_base_sha "" pipeline_claim_head_sha "" \
+      pipeline_last_base_sha "$PIPELINE_BASE_SHA" pipeline_last_head_sha "$PIPELINE_HEAD_SHA"
     dm_unlock "$meta"
     ;;
 
@@ -191,15 +318,15 @@ case "$cmd" in
           || dm_die "usage: dm-task.sh gate <id> claim <gate> <thread-name matching [a-z0-9_]+>"
         ;;
       start)
-        epoch="${1:-}"; agent="${2:-}"
-        [ "$#" -eq 2 ] && [ -n "$epoch" ] && [ -n "$agent" ] \
-          || dm_die "usage: dm-task.sh gate <id> start <gate> <epoch> <agent-id>"
+        epoch="${1:-}"; thread="${2:-}"; agent="${3:-}"
+        [ "$#" -eq 3 ] && [ -n "$epoch" ] && valid_thread_name "$thread" && [ -n "$agent" ] \
+          || dm_die "usage: dm-task.sh gate <id> start <gate> <epoch> <thread-name> <agent-id>"
         dm_require_single_line "pipeline owner agent id" "$agent"
         ;;
       release)
-        epoch="${1:-}"; reason="${2:-}"
-        [ "$#" -eq 2 ] && [ -n "$epoch" ] && [ -n "$reason" ] \
-          || dm_die "usage: dm-task.sh gate <id> release <gate> <epoch> <reason>"
+        epoch="${1:-}"; thread="${2:-}"; reason="${3:-}"
+        [ "$#" -eq 3 ] && [ -n "$epoch" ] && valid_thread_name "$thread" && [ -n "$reason" ] \
+          || dm_die "usage: dm-task.sh gate <id> release <gate> <epoch> <thread-name> <reason>"
         dm_require_single_line "pipeline claim release reason" "$reason"
         ;;
       block)
@@ -214,9 +341,10 @@ case "$cmd" in
         dm_require_single_line "pipeline blocker reason" "$reason"
         ;;
       complete)
-        epoch="${1:-}"; evidence="${2:-}"
-        [ "$#" -eq 2 ] && [ -n "$epoch" ] && [ -n "$evidence" ] \
-          || dm_die "usage: dm-task.sh gate <id> complete <gate> <epoch> <evidence>"
+        epoch="${1:-}"; agent="${2:-}"; evidence="${3:-}"
+        [ "$#" -eq 3 ] && [ -n "$epoch" ] && [ -n "$agent" ] && [ -n "$evidence" ] \
+          || dm_die "usage: dm-task.sh gate <id> complete <gate> <epoch> <agent-id> <evidence>"
+        dm_require_single_line "pipeline owner agent id" "$agent"
         dm_require_single_line "pipeline gate evidence" "$evidence"
         ;;
       *) dm_die "gate action must be claim|start|release|block|ready|complete" ;;
@@ -230,7 +358,6 @@ case "$cmd" in
     current_gate="$(dm_meta_get "$id" pipeline_gate)"
     current_state="$(dm_meta_get "$id" pipeline_state)"
     current_epoch="$(dm_meta_get "$id" pipeline_epoch)"
-    tier="$(dm_meta_get "$id" pipeline_tier)"
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     case "$action" in
       ready)
@@ -252,12 +379,17 @@ case "$cmd" in
           pipeline_recovery_resume_gate "$recovery_resume"
         ;;
       claim)
+        pipeline_rewind_if_changed_locked "$id"
+        current_gate="$(dm_meta_get "$id" pipeline_gate)"
+        current_state="$(dm_meta_get "$id" pipeline_state)"
         [ "$current_state" = "ready" ] && [ "$current_gate" = "$gate" ] \
           || dm_die "cannot claim '$gate': current gate is '${current_gate:-unset}' in state '${current_state:-unset}'"
+        pipeline_snapshot_locked "$id"
         generation="$(next_generation "$(dm_meta_get "$id" pipeline_generation)")"
         dm_task_transition_locked "$id" working "pipeline gate '$gate' claimed by '$thread' (epoch $generation)" \
           pipeline_state claimed pipeline_generation "$generation" pipeline_epoch "$generation" \
-          pipeline_owner_thread "$thread" pipeline_owner_agent "" gate_started_at ""
+          pipeline_owner_thread "$thread" pipeline_owner_agent "" gate_started_at "" \
+          pipeline_claim_base_sha "$PIPELINE_BASE_SHA" pipeline_claim_head_sha "$PIPELINE_HEAD_SHA"
         dm_unlock "$meta"
         printf '%s\n' "$generation"
         exit 0
@@ -265,17 +397,24 @@ case "$cmd" in
       start)
         [ "$current_state" = "claimed" ] && [ "$current_gate" = "$gate" ] && [ "$current_epoch" = "$epoch" ] \
           || dm_die "cannot start '$gate' epoch '$epoch': current gate is '${current_gate:-unset}' in state '${current_state:-unset}' epoch '${current_epoch:-unset}'"
-        [ -n "$(dm_meta_get "$id" pipeline_owner_thread)" ] \
-          || dm_die "cannot start '$gate': claim has no owner thread"
+        [ "$(dm_meta_get "$id" pipeline_owner_thread)" = "$thread" ] \
+          || dm_die "cannot start '$gate': claim owner thread does not match '$thread'"
+        pipeline_snapshot_locked "$id"
+        [ "$PIPELINE_BASE_SHA" = "$(dm_meta_get "$id" pipeline_claim_base_sha)" ] \
+          && [ "$PIPELINE_HEAD_SHA" = "$(dm_meta_get "$id" pipeline_claim_head_sha)" ] \
+          || dm_die "cannot start '$gate': base/HEAD changed after claim"
         dm_task_transition_locked "$id" working "pipeline gate '$gate' started by '$agent' (epoch $epoch)" \
           pipeline_state running pipeline_owner_agent "$agent" gate_started_at "$now"
         ;;
       release)
         [ "$current_state" = "claimed" ] && [ "$current_gate" = "$gate" ] && [ "$current_epoch" = "$epoch" ] \
           || dm_die "cannot release '$gate' epoch '$epoch': claim no longer matches"
+        [ "$(dm_meta_get "$id" pipeline_owner_thread)" = "$thread" ] \
+          || dm_die "cannot release '$gate': claim owner thread does not match '$thread'"
         dm_task_transition_locked "$id" working "pipeline gate '$gate' claim released: $reason" \
           pipeline_state ready pipeline_epoch "" pipeline_owner_thread "" \
-          pipeline_owner_agent "" gate_started_at ""
+          pipeline_owner_agent "" gate_started_at "" \
+          pipeline_claim_base_sha "" pipeline_claim_head_sha ""
         ;;
       block)
         [ "$current_state" = "ready" ] && [ "$current_gate" = "$gate" ] \
@@ -287,9 +426,33 @@ case "$cmd" in
       complete)
         [ "$current_state" = "running" ] && [ "$current_gate" = "$gate" ] && [ "$current_epoch" = "$epoch" ] \
           || dm_die "cannot complete '$gate' epoch '$epoch': current gate is '${current_gate:-unset}' in state '${current_state:-unset}' epoch '${current_epoch:-unset}'"
-        [ -n "$(dm_meta_get "$id" pipeline_owner_agent)" ] \
-          || dm_die "cannot complete '$gate': running gate has no worker identity"
-        next_gate="$(gate_next_locked "$id" "$tier" "$gate")"
+        [ "$(dm_meta_get "$id" pipeline_owner_agent)" = "$agent" ] \
+          || dm_die "cannot complete '$gate': runtime owner does not match '$agent'"
+        claim_base="$(dm_meta_get "$id" pipeline_claim_base_sha)"
+        claim_head="$(dm_meta_get "$id" pipeline_claim_head_sha)"
+        [ -n "$claim_base" ] && [ -n "$claim_head" ] \
+          || dm_die "cannot complete '$gate': claim has no exact git snapshot"
+        pipeline_snapshot_locked "$id"
+        kind="$gate"
+        case "$gate" in
+          rebase) kind=rebase ;;
+          merge-gate-review) kind=review ;;
+          final-tests) kind=tests ;;
+          *) kind="$(pipeline_gate_kind_locked "$id" "$gate")" ;;
+        esac
+        case "$kind" in
+          rebase) ;;
+          fix)
+            [ "$PIPELINE_BASE_SHA" = "$claim_base" ] \
+              || dm_die "cannot complete '$gate': base changed during a fix gate"
+            ;;
+          *)
+            [ "$PIPELINE_BASE_SHA" = "$claim_base" ] && [ "$PIPELINE_HEAD_SHA" = "$claim_head" ] \
+              || dm_die "cannot complete '$gate': exact base/HEAD changed during a non-mutating gate"
+            ;;
+        esac
+        pipeline_validate_evidence_locked "$id" "$gate" "$PIPELINE_BASE_SHA" "$PIPELINE_HEAD_SHA" "$evidence"
+        next_gate="$(gate_next_locked "$id" "$gate")"
         if [ -n "$next_gate" ]; then
           if [ "$gate" = "final-tests" ] && [ -n "$(dm_meta_get "$id" pipeline_recovery_resume_gate)" ]; then
             recovery_resume=""
@@ -299,14 +462,18 @@ case "$cmd" in
           dm_task_transition_locked "$id" working "pipeline gate '$gate' complete ($evidence); '$next_gate' ready" \
             pipeline_gate "$next_gate" pipeline_state ready gate_started_at "" \
             pipeline_epoch "" pipeline_owner_thread "" pipeline_owner_agent "" \
+            pipeline_claim_base_sha "" pipeline_claim_head_sha "" \
             pipeline_blocked_by "" pipeline_blocked_reason "" \
             pipeline_recovery_resume_gate "$recovery_resume" \
-            pipeline_last_gate "$gate" pipeline_last_evidence "$evidence"
+            pipeline_last_gate "$gate" pipeline_last_evidence "$PIPELINE_VALIDATED_EVIDENCE" \
+            pipeline_last_base_sha "$PIPELINE_BASE_SHA" pipeline_last_head_sha "$PIPELINE_HEAD_SHA"
         else
           dm_task_transition_locked "$id" working "pipeline gate '$gate' complete ($evidence); pipeline complete" \
             pipeline_state complete pipeline_epoch "" pipeline_owner_thread "" \
-            pipeline_owner_agent "" gate_started_at "" pipeline_last_gate "$gate" \
-            pipeline_last_evidence "$evidence"
+            pipeline_owner_agent "" gate_started_at "" \
+            pipeline_claim_base_sha "" pipeline_claim_head_sha "" \
+            pipeline_last_gate "$gate" pipeline_last_evidence "$PIPELINE_VALIDATED_EVIDENCE" \
+            pipeline_last_base_sha "$PIPELINE_BASE_SHA" pipeline_last_head_sha "$PIPELINE_HEAD_SHA"
         fi
         ;;
     esac
@@ -318,10 +485,13 @@ case "$cmd" in
     trap 'rm -f "$rows"' EXIT
     printf 'ID\tTIER\tGATE\tAPPROVED\n' >"$rows"
     while IFS= read -r id; do
-      [ "$(dm_meta_get "$id" pipeline_state)" = "ready" ] || continue
+      case "$(dm_meta_get "$id" pipeline_state)" in ready|complete) ;; *) continue ;; esac
       meta="$(dm_meta_path "$id")"
       dm_lock "$meta"
       dm_transition_reconcile_locked "$id"
+      if ! dm_task_terminal_locked "$id"; then
+        pipeline_rewind_if_changed_locked "$id"
+      fi
       if [ "$(dm_meta_get "$id" pipeline_state)" = "ready" ] && ! dm_task_terminal_locked "$id"; then
         printf '%s\t%s\t%s\t%s\n' "$id" "$(dm_meta_get "$id" pipeline_tier)" \
           "$(dm_meta_get "$id" pipeline_gate)" "$(dm_meta_get "$id" approved_at)" >>"$rows"

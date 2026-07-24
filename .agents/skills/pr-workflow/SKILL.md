@@ -13,7 +13,11 @@ reorder, drop, or add gates by editing one array.
 ## Where the pipeline comes from
 
 1. Per repo: `config/pr-pipeline.<repo>.json` if it exists.
-2. Otherwise: `config/pr-pipeline.default.json`.
+2. Otherwise: the selected `config/pr-pipeline.<fast|default|rigorous>.json`.
+
+Approval snapshots the canonical gate array and its hash into task meta. Run
+that snapshot to completion; a later live-config edit never changes an approved
+task's order.
 
 ## Rigor tiers
 
@@ -106,15 +110,27 @@ For every gate, reserve ownership first:
 ```
 epoch="$(dm-task.sh gate <id> claim <gate> <thread-name>)"
 spawn_agent(...)
-dm-task.sh gate <id> start <gate> "$epoch" <returned-agent-id>
+dm-task.sh gate <id> start <gate> "$epoch" <thread-name> <returned-agent-id>
 ```
 
-If assignment fails, run `gate <id> release <gate> "$epoch" "<reason>"`.
-After success, run `gate <id> complete <gate> "$epoch" "<evidence>"`. The task
+If assignment fails, run
+`gate <id> release <gate> "$epoch" <thread-name> "<reason>"`.
+After success, run
+`gate <id> complete <gate> "$epoch" <returned-agent-id> "<evidence>"`. The task
 derives the next gate from the selected config; callers cannot skip or invent
 gates. A ready gate is approved-but-unscheduled work;
 `dm-task.sh ready-gates` and `dm-status.sh` surface it across restarts. Do not
 describe it as in progress unless `start` succeeded and a real owner exists.
+
+The task binds each claim to the exact local base and HEAD SHAs. Completion
+requires the same epoch and recorded runtime identity; non-mutating gates refuse
+if either SHA changed. Test, security, and PR gates also require matching
+signals written by `dm-test.sh`, `dm-pr.sh security-scan`, and `dm-pr.sh`
+respectively. These identities correlate scheduler state; they are not
+authentication against another process running as the same OS user. The
+mechanical boundary is immutable plan/order, exact SHAs, and sanctioned signals.
+Any commit after completion rewinds to the first snapshotted gate and clears
+downstream proofs.
 
 File/subsystem overlap does not stop branch-local implementation, cold review,
 or branch-local tests. At the integration horizon only, record the concrete

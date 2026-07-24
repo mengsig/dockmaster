@@ -361,6 +361,8 @@ case "$cmd" in
       dm_die "cannot inspect untracked files before opening a PR; nothing pushed. ${untracked:-No detail from git.}"
     fi
     [ -z "$untracked" ] || dm_die "worktree has untracked files; clean or commit them before opening a PR: $(dm_first_line "$untracked")"
+    open_snapshot="$(dm_task_git_snapshot "$id")"
+    open_head="${open_snapshot#*$'\t'}"
     dir="$(dm_repo_dir "$repo")"; slug="$(repo_slug "$repo")"
     # No explicit --base: default to the recorded parent (a stacked sub-PR
     # created via `dm-worktree.sh create --base`), else the default branch.
@@ -398,8 +400,9 @@ case "$cmd" in
     # parse leaves a real PR the task record does not know about. Name the
     # recovery instead of leaving the operator to discover `adopt`.
     [ -n "$url" ] || dm_die "$gh_cli reported success but printed no PR url: branch '$branch' IS pushed and the PR probably exists. Find it on GitHub, then record it with: dm-pr.sh adopt $id <url>"
-    dm_meta_set "$id" branch "$branch"
-    dm_meta_set "$id" pr "$url"
+    [ "$(dm_task_git_snapshot "$id")" = "$open_snapshot" ] \
+      || dm_die "PR created at $url, but task base/HEAD changed during open; rerun the required gates before recording completion"
+    dm_meta_set_fields "$id" branch "$branch" pr "$url" pr_head "$open_head"
     dm_status_append "$id" done "PR $url"
     dm_info "$url"
     ;;
@@ -736,20 +739,11 @@ case "$cmd" in
     # dm_die. Local-only: no GitHub tools required.
     id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-pr.sh security-scan <id>"
     dm_require_id "$id"
-    wt="$(dm_require_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
-    # Same nesting hazard: an unresolvable repo left $base empty, and the scan
-    # silently fell back to `git diff HEAD` — the wrong range, reported as a
-    # clean advisory result.
-    repo_dir="$(dm_repo_dir "$repo")" \
-      || dm_die "cannot resolve repo '$repo' to determine the diff base for the scan"
-    base="$(dm_default_branch "$repo_dir")"
-    # Diff the branch against the default branch when that ref is reachable from
-    # the worktree; otherwise fall back to the working diff against HEAD.
-    if git -C "$wt" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
-      diff="$(git -C "$wt" diff "$base"...HEAD 2>/dev/null || true)"
-    else
-      diff="$(git -C "$wt" diff HEAD 2>/dev/null || true)"
-    fi
+    wt="$(dm_require_worktree "$id")"
+    snapshot="$(dm_task_git_snapshot "$id")"
+    base_sha="${snapshot%%$'\t'*}"; head_sha="${snapshot#*$'\t'}"
+    diff="$(git -C "$wt" diff "$base_sha...$head_sha" 2>/dev/null)" \
+      || dm_die "security-scan could not read exact diff $base_sha...$head_sha"
     # Match on a here-string, not a pipe: `grep -q` on a pipe would SIGPIPE the
     # producer (exit 141), which pipefail reports as failure.
     hits=""
@@ -759,9 +753,13 @@ case "$cmd" in
     grep -iEq -- 'https?://|fetch\(|socket|urlopen|requests\.|\bcurl\b|\bsql\b|execute\(|redirect|open\(' <<<"$diff" && hits="$hits external-io" || true
     hits="${hits# }"
     if [ -n "$hits" ]; then
+      dm_meta_set_fields "$id" security_scan hit \
+        security_scan_base_sha "$base_sha" security_scan_head_sha "$head_sha"
       dm_info "security-scan: signals present ($hits) — run security-review on this diff before merge"
       exit 0
     fi
+    dm_meta_set_fields "$id" security_scan clear \
+      security_scan_base_sha "$base_sha" security_scan_head_sha "$head_sha"
     dm_info "security-scan: no security-surface signals — a security-review skip is defensible (record it)"
     exit 1
     ;;

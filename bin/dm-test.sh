@@ -23,9 +23,11 @@ id="${1:-}"; [ -n "$id" ] || { echo "usage: dm-test.sh <id>" >&2; exit 2; }
 dm_require_id "$id"
 wt="$(dm_require_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
 cmd="$(dm_registry_get "$repo" test_cmd)"
+before="$(dm_task_git_snapshot "$id")"
+base_sha="${before%%$'\t'*}"; head_sha="${before#*$'\t'}"
 
 if [ -z "$cmd" ]; then
-  dm_meta_set "$id" tests "skip"
+  dm_meta_set_fields "$id" tests skip tests_base_sha "$base_sha" tests_head_sha "$head_sha"
   dm_status_append "$id" working "tests: no test command registered (soft skip, not a pass)"
   echo "SKIP: no test command registered for $repo (register one: dm-repo.sh set $repo test_cmd \"<cmd>\")"
   exit 0
@@ -33,13 +35,20 @@ fi
 
 echo "running in $wt: $cmd"
 if ( cd "$wt" && eval "$cmd" ); then
-  dm_meta_set "$id" tests "pass"
+  after="$(dm_task_git_snapshot "$id")"
+  if [ "$after" != "$before" ]; then
+    dm_meta_set_fields "$id" tests fail tests_base_sha "" tests_head_sha ""
+    dm_status_append "$id" blocked "tests: git snapshot changed during the test run"
+    echo "FAIL: base/HEAD changed during tests; result is stale" >&2
+    exit 1
+  fi
+  dm_meta_set_fields "$id" tests pass tests_base_sha "$base_sha" tests_head_sha "$head_sha"
   dm_status_append "$id" working "tests: pass"
   echo "PASS: $cmd"
   exit 0
 else
   rc=$?
-  dm_meta_set "$id" tests "fail"
+  dm_meta_set_fields "$id" tests fail tests_base_sha "$base_sha" tests_head_sha "$head_sha"
   dm_status_append "$id" blocked "tests: FAILED (exit $rc)"
   echo "FAIL: $cmd (exit $rc)" >&2
   exit 1

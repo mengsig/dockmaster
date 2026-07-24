@@ -33,6 +33,7 @@ file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 gate_start_race_has_one_winner() {
   local id="gate-start-race" pids="" pid i winners=0
   b dm-task.sh new "$id" --kind ship --repo demo --mode pipeline >/dev/null
+  b dm-worktree.sh create "$id" demo >/dev/null 2>&1
   b dm-task.sh approve "$id" default >/dev/null
   for i in 1 2 3 4 5 6; do
     (
@@ -73,10 +74,19 @@ waiter_activation_race_has_one_winner() {
 }
 
 run_gate() {
-  local id="$1" gate="$2" owner="$3" epoch
-  epoch="$(b dm-task.sh gate "$id" claim "$gate" "${id//[^a-z0-9]/_}_${gate//-/_}")"
-  b dm-task.sh gate "$id" start "$gate" "$epoch" "$owner" >/dev/null
-  b dm-task.sh gate "$id" complete "$gate" "$epoch" "smoke evidence" >/dev/null
+  local id="$1" gate="$2" owner="$3" epoch thread evidence="smoke evidence"
+  thread="${id//[^a-z0-9]/_}_${gate//-/_}"
+  epoch="$(b dm-task.sh gate "$id" claim "$gate" "$thread")"
+  b dm-task.sh gate "$id" start "$gate" "$epoch" "$thread" "$owner" >/dev/null
+  case "$gate" in
+    branch-tests|final-tests) b dm-test.sh "$id" >/dev/null ;;
+    security)
+      if b dm-pr.sh security-scan "$id" >/dev/null; then evidence=security-review-pass
+      else evidence=security-scan-clear
+      fi
+      ;;
+  esac
+  b dm-task.sh gate "$id" complete "$gate" "$epoch" "$owner" "$evidence" >/dev/null
 }
 
 # Hermetic authenticated runtime snapshot. Production doctor still probes real
@@ -97,6 +107,8 @@ git init -q -b main "$TMP/seed"
 
 cd "$ROOT"
 b() { "$ROOT/bin/$@"; }
+mkdir -p "$DM_HOME/config"
+cp "$ROOT"/config/pr-pipeline.{fast,default,rigorous}.json "$DM_HOME/config/"
 
 # Build a hermetic PATH with one executable omitted while retaining every other
 # first-match executable. Used to test real absence, not a failing stub.
@@ -505,6 +517,7 @@ check "status shows task age"       'grep -E "age.*demo-1" <<<"$STATUS" >/dev/nu
 echo "== durable pipeline scheduling =="
 b dm-task.sh new gate-blocker --kind scout --repo demo >/dev/null
 b dm-task.sh new gate-ready --kind ship --repo demo --mode pipeline >/dev/null
+b dm-worktree.sh create gate-ready demo >/dev/null 2>&1
 check "approval exposes the first gate as ready" \
   'b dm-task.sh approve gate-ready fast >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*fast.*coldstart-review"'
 
@@ -536,9 +549,11 @@ check "no-column status never consumes caller stdin" \
 GATE_STATUS="$(b dm-status.sh)"
 check "status names approved-but-unscheduled work" 'grep -q "READY-GATE.*gate-ready.*coldstart-review" <<<"$GATE_STATUS"'
 check "gate start records owner horizon" \
-  'E="$(b dm-task.sh gate gate-ready claim coldstart-review smoke_gate)" && b dm-task.sh gate gate-ready start coldstart-review "$E" /root/gate >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = running ] && [ "$(b dm-task.sh get gate-ready pipeline_owner_agent)" = /root/gate ]'
+  'E="$(b dm-task.sh gate gate-ready claim coldstart-review smoke_gate)" && b dm-task.sh gate gate-ready start coldstart-review "$E" smoke_gate /root/gate >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = running ] && [ "$(b dm-task.sh get gate-ready pipeline_owner_agent)" = /root/gate ]'
+check "completion requires the exact recorded runtime owner" \
+  'E="$(b dm-task.sh get gate-ready pipeline_epoch)" && ! b dm-task.sh gate gate-ready complete coldstart-review "$E" /root/wrong review-pass >/dev/null 2>&1 && [ "$(b dm-task.sh get gate-ready pipeline_state)" = running ]'
 check "completed gate can expose the next ready gate" \
-  'E="$(b dm-task.sh get gate-ready pipeline_epoch)" && b dm-task.sh gate gate-ready complete coldstart-review "$E" review-pass >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*fix-1"'
+  'E="$(b dm-task.sh get gate-ready pipeline_epoch)" && b dm-task.sh gate gate-ready complete coldstart-review "$E" /root/gate review-pass >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*fix-1"'
 check "overlap cannot block a branch-local gate" \
   '! b dm-task.sh gate gate-ready block fix-1 gate-blocker overlap >/dev/null 2>&1'
 check "branch-local work runs before overlap reaches integration" \
@@ -556,30 +571,151 @@ check "released integration work is visible as unscheduled" 'grep -q "READY-GATE
 check "recovery cannot skip rebase, final review, or final tests" \
   'run_gate gate-ready rebase /root/rebase && [ "$(b dm-task.sh get gate-ready pipeline_gate)" = merge-gate-review ] && run_gate gate-ready merge-gate-review /root/review && [ "$(b dm-task.sh get gate-ready pipeline_gate)" = final-tests ] && run_gate gate-ready final-tests /root/final-tests && [ "$(b dm-task.sh get gate-ready pipeline_gate)" = pr ]'
 CLAIM_ONE="$(b dm-task.sh gate gate-ready claim pr rollback_claim)"
+check "claim release requires the exact owner thread" \
+  '! b dm-task.sh gate gate-ready release pr "$CLAIM_ONE" wrong_claim spawn-failed >/dev/null 2>&1'
 check "failed assignment can release its exact claim" \
-  'b dm-task.sh gate gate-ready release pr "$CLAIM_ONE" spawn-failed >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = ready ]'
+  'b dm-task.sh gate gate-ready release pr "$CLAIM_ONE" rollback_claim spawn-failed >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = ready ]'
 CLAIM_TWO="$(b dm-task.sh gate gate-ready claim pr second_claim)"
 check "released claim epoch cannot start a successor claim" \
-  '[ "$CLAIM_ONE" != "$CLAIM_TWO" ] && ! b dm-task.sh gate gate-ready start pr "$CLAIM_ONE" stale-agent >/dev/null 2>&1'
+  '[ "$CLAIM_ONE" != "$CLAIM_TWO" ] && ! b dm-task.sh gate gate-ready start pr "$CLAIM_ONE" rollback_claim stale-agent >/dev/null 2>&1'
 check "claimed gate exposes its durable thread owner" \
   'CLAIM_STATUS="$(b dm-status.sh)"; grep -q "GATE-CLAIMED.*gate-ready.*second_claim" <<<"$CLAIM_STATUS"'
 check "generic set cannot forge pipeline state" \
   '! b dm-task.sh set gate-ready pipeline_state running >/dev/null 2>&1'
 check "concurrent gate claims have exactly one owner" 'gate_start_race_has_one_winner'
 b dm-task.sh new canonical-gates --kind ship --repo demo --mode pipeline >/dev/null
+b dm-worktree.sh create canonical-gates demo >/dev/null 2>&1
 check "callers cannot choose a first gate" \
   '! b dm-task.sh approve canonical-gates default pr >/dev/null 2>&1'
 b dm-task.sh approve canonical-gates default >/dev/null
 CANONICAL_EPOCH="$(b dm-task.sh gate canonical-gates claim coldstart-review canonical_gate)"
-b dm-task.sh gate canonical-gates start coldstart-review "$CANONICAL_EPOCH" canonical-agent >/dev/null
+b dm-task.sh gate canonical-gates start coldstart-review "$CANONICAL_EPOCH" canonical_gate canonical-agent >/dev/null
 check "callers cannot supply or skip to a next gate" \
-  '! b dm-task.sh gate canonical-gates complete coldstart-review "$CANONICAL_EPOCH" evidence branch-tests >/dev/null 2>&1'
-b dm-task.sh gate canonical-gates complete coldstart-review "$CANONICAL_EPOCH" evidence >/dev/null
+  '! b dm-task.sh gate canonical-gates complete coldstart-review "$CANONICAL_EPOCH" canonical-agent evidence branch-tests >/dev/null 2>&1'
+b dm-task.sh gate canonical-gates complete coldstart-review "$CANONICAL_EPOCH" canonical-agent evidence >/dev/null
 check "canonical config derives the next gate" \
   '[ "$(b dm-task.sh get canonical-gates pipeline_gate)" = fix-1 ]'
+
+# A repo override wins before the selected tier, then the approved plan remains
+# immutable even if that live override is weakened.
+jq '.gates = [.gates[0], .gates[1]]' "$ROOT/config/pr-pipeline.default.json" \
+  >"$DM_HOME/config/pr-pipeline.demo.json"
+b dm-task.sh new snapshotted-plan --kind ship --repo demo --mode pipeline >/dev/null
+b dm-worktree.sh create snapshotted-plan demo >/dev/null 2>&1
+b dm-task.sh approve snapshotted-plan rigorous >/dev/null
+jq '.gates = [.gates[-1]]' "$ROOT/config/pr-pipeline.default.json" \
+  >"$DM_HOME/config/pr-pipeline.demo.json"
+run_gate snapshotted-plan coldstart-review /root/snapshot-review
+check "repo-specific plan wins before tier fallback" \
+  '[ "$(b dm-task.sh get snapshotted-plan pipeline_plan_source)" = pr-pipeline.demo.json ] && [ "$(b dm-task.sh get snapshotted-plan pipeline_gate)" = fix-1 ]'
+check "approval snapshots a hashed plan immune to live config weakening" \
+  '[ -n "$(b dm-task.sh get snapshotted-plan pipeline_plan_hash)" ] && [ "$(jq -r ".[1].id" <<<"$(b dm-task.sh get snapshotted-plan pipeline_plan)")" = fix-1 ]'
+rm -f "$DM_HOME/config/pr-pipeline.demo.json"
+
+b dm-task.sh new stale-head-proof --kind ship --repo demo --mode pipeline >/dev/null
+STALE_HEAD_WT="$(b dm-worktree.sh create stale-head-proof demo | tail -n1)"
+b dm-task.sh approve stale-head-proof fast >/dev/null
+STALE_HEAD_EPOCH="$(b dm-task.sh gate stale-head-proof claim coldstart-review stale_head_review)"
+b dm-task.sh gate stale-head-proof start coldstart-review "$STALE_HEAD_EPOCH" stale_head_review /root/stale-head >/dev/null
+printf 'changed during review\n' >"$STALE_HEAD_WT/stale-head.txt"
+git -C "$STALE_HEAD_WT" add stale-head.txt
+git -C "$STALE_HEAD_WT" commit -qm "change during review"
+check "non-mutating gate completion refuses a changed HEAD" \
+  '! b dm-task.sh gate stale-head-proof complete coldstart-review "$STALE_HEAD_EPOCH" /root/stale-head review-pass >/dev/null 2>&1 && [ "$(b dm-task.sh get stale-head-proof pipeline_state)" = running ]'
+
+b dm-task.sh new stale-claim-proof --kind ship --repo demo --mode pipeline >/dev/null
+STALE_CLAIM_WT="$(b dm-worktree.sh create stale-claim-proof demo | tail -n1)"
+b dm-task.sh approve stale-claim-proof fast >/dev/null
+STALE_CLAIM_EPOCH="$(b dm-task.sh gate stale-claim-proof claim coldstart-review stale_claim_review)"
+printf 'changed after claim\n' >"$STALE_CLAIM_WT/stale-claim.txt"
+git -C "$STALE_CLAIM_WT" add stale-claim.txt
+git -C "$STALE_CLAIM_WT" commit -qm "change after claim"
+check "gate start refuses a git snapshot changed after claim" \
+  '! b dm-task.sh gate stale-claim-proof start coldstart-review "$STALE_CLAIM_EPOCH" stale_claim_review /root/stale-claim >/dev/null 2>&1 && [ "$(b dm-task.sh get stale-claim-proof pipeline_state)" = claimed ]'
+
+git -C "$DM_HOME/repos/demo" branch pipeline-base main
+git -C "$DM_HOME/repos/demo" push -q origin pipeline-base
+b dm-task.sh new stale-base-proof --kind ship --repo demo --mode pipeline >/dev/null
+b dm-worktree.sh create stale-base-proof demo --base pipeline-base >/dev/null 2>&1
+b dm-task.sh approve stale-base-proof fast >/dev/null
+STALE_BASE_EPOCH="$(b dm-task.sh gate stale-base-proof claim coldstart-review stale_base_review)"
+b dm-task.sh gate stale-base-proof start coldstart-review "$STALE_BASE_EPOCH" stale_base_review /root/stale-base >/dev/null
+git clone -q "$TMP/origin.git" "$TMP/base-updater"
+printf 'new base\n' >"$TMP/base-updater/base-update.txt"
+git -C "$TMP/base-updater" add base-update.txt
+git -C "$TMP/base-updater" commit -qm "advance pipeline base"
+git -C "$TMP/base-updater" push -q origin HEAD:pipeline-base
+git -C "$DM_HOME/repos/demo" fetch -q origin pipeline-base
+check "non-mutating gate completion refuses a changed base SHA" \
+  '! b dm-task.sh gate stale-base-proof complete coldstart-review "$STALE_BASE_EPOCH" /root/stale-base review-pass >/dev/null 2>&1 && [ "$(b dm-task.sh get stale-base-proof pipeline_state)" = running ]'
+
+b dm-task.sh new rewind-proofs --kind ship --repo demo --mode pipeline >/dev/null
+REWIND_WT="$(b dm-worktree.sh create rewind-proofs demo | tail -n1)"
+b dm-task.sh approve rewind-proofs fast >/dev/null
+run_gate rewind-proofs coldstart-review /root/rewind-review
+run_gate rewind-proofs fix-1 /root/rewind-fix
+run_gate rewind-proofs branch-tests /root/rewind-tests
+printf 'after tests\n' >"$REWIND_WT/after-tests.txt"
+git -C "$REWIND_WT" add after-tests.txt
+git -C "$REWIND_WT" commit -qm "change after tests"
+check "a post-gate commit rewinds and clears downstream proofs" \
+  '! b dm-task.sh gate rewind-proofs claim pr rewind_pr >/dev/null 2>&1 && [ "$(b dm-task.sh get rewind-proofs pipeline_gate)" = coldstart-review ] && [ "$(b dm-task.sh get rewind-proofs pipeline_state)" = ready ] && [ -z "$(b dm-task.sh get rewind-proofs tests)" ]'
+
+# Tests, security, and PR gates accept only matching sanctioned tool signals.
+jq '.gates = [.gates[] | select(.id == "branch-tests")]' "$ROOT/config/pr-pipeline.fast.json" \
+  >"$DM_HOME/config/pr-pipeline.demo.json"
+b dm-task.sh new test-proof --kind ship --repo demo --mode pipeline >/dev/null
+b dm-worktree.sh create test-proof demo >/dev/null 2>&1
+b dm-task.sh approve test-proof fast >/dev/null
+TEST_PROOF_EPOCH="$(b dm-task.sh gate test-proof claim branch-tests test_proof)"
+b dm-task.sh gate test-proof start branch-tests "$TEST_PROOF_EPOCH" test_proof /root/test-proof >/dev/null
+check "tests gate refuses caller prose without sanctioned test evidence" \
+  '! b dm-task.sh gate test-proof complete branch-tests "$TEST_PROOF_EPOCH" /root/test-proof claimed-pass >/dev/null 2>&1'
+b dm-test.sh test-proof >/dev/null
+check "tests gate accepts exact matching dm-test evidence" \
+  'b dm-task.sh gate test-proof complete branch-tests "$TEST_PROOF_EPOCH" /root/test-proof claimed-pass >/dev/null'
+
+jq '.gates = [.gates[] | select(.id == "security")]' "$ROOT/config/pr-pipeline.rigorous.json" \
+  >"$DM_HOME/config/pr-pipeline.demo.json"
+b dm-task.sh new security-proof --kind ship --repo demo --mode pipeline >/dev/null
+SECURITY_PROOF_WT="$(b dm-worktree.sh create security-proof demo | tail -n1)"
+printf 'token validation surface\n' >"$SECURITY_PROOF_WT/security-proof.txt"
+git -C "$SECURITY_PROOF_WT" add security-proof.txt
+git -C "$SECURITY_PROOF_WT" commit -qm "add security proof surface"
+b dm-task.sh approve security-proof rigorous >/dev/null
+SECURITY_PROOF_EPOCH="$(b dm-task.sh gate security-proof claim security security_proof)"
+b dm-task.sh gate security-proof start security "$SECURITY_PROOF_EPOCH" security_proof /root/security-proof >/dev/null
+check "security gate refuses completion before sanctioned scan" \
+  '! b dm-task.sh gate security-proof complete security "$SECURITY_PROOF_EPOCH" /root/security-proof security-scan-clear >/dev/null 2>&1'
+b dm-pr.sh security-scan security-proof >/dev/null
+check "security scan hit still requires the scheduler review assertion" \
+  '! b dm-task.sh gate security-proof complete security "$SECURITY_PROOF_EPOCH" /root/security-proof security-scan-clear >/dev/null 2>&1'
+check "security gate accepts current scan plus explicit review pass" \
+  'b dm-task.sh gate security-proof complete security "$SECURITY_PROOF_EPOCH" /root/security-proof security-review-pass >/dev/null'
+
+jq '.gates = [.gates[] | select(.id == "pr")]' "$ROOT/config/pr-pipeline.fast.json" \
+  >"$DM_HOME/config/pr-pipeline.demo.json"
+b dm-task.sh new pr-proof --kind ship --repo demo --mode pipeline >/dev/null
+PR_PROOF_WT="$(b dm-worktree.sh create pr-proof demo | tail -n1)"
+git -C "$PR_PROOF_WT" switch -q -c feat/x/pr-proof
+b dm-task.sh approve pr-proof fast >/dev/null
+PR_PROOF_EPOCH="$(b dm-task.sh gate pr-proof claim pr pr_proof)"
+b dm-task.sh gate pr-proof start pr "$PR_PROOF_EPOCH" pr_proof /root/pr-proof >/dev/null
+check "PR gate refuses completion before sanctioned PR creation" \
+  '! b dm-task.sh gate pr-proof complete pr "$PR_PROOF_EPOCH" /root/pr-proof claimed-pr >/dev/null 2>&1'
+PR_PROOF_CLI="$TMP/pr-proof-cli"; mkdir -p "$PR_PROOF_CLI"
+printf '#!/bin/sh\nprintf "https://github.com/o/r/pull/900\\n"\n' >"$PR_PROOF_CLI/gh"
+cp "$PR_PROOF_CLI/gh" "$PR_PROOF_CLI/gh-axi"
+chmod +x "$PR_PROOF_CLI/gh" "$PR_PROOF_CLI/gh-axi"
+PATH="$PR_PROOF_CLI:$PATH" b dm-pr.sh open pr-proof --title proof --body proof >/dev/null
+check "PR gate accepts exact HEAD recorded by sanctioned open" \
+  'b dm-task.sh gate pr-proof complete pr "$PR_PROOF_EPOCH" /root/pr-proof claimed-pr >/dev/null'
+rm -f "$DM_HOME/config/pr-pipeline.demo.json"
+
 check "terminal tasks cannot be approved or assigned waiters" \
   '! b dm-task.sh approve gate-blocker fast >/dev/null 2>&1 && ! b dm-task.sh waiter gate-blocker prepare terminal_waiter >/dev/null 2>&1'
 b dm-task.sh new terminal-gate --kind ship --repo demo --mode pipeline >/dev/null
+b dm-worktree.sh create terminal-gate demo >/dev/null 2>&1
 b dm-task.sh approve terminal-gate fast >/dev/null
 ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set terminal-gate pr_state MERGED )
 check "terminal tasks disappear from ready gates and refuse claims" \
@@ -681,14 +817,25 @@ check "active session prevents worktree cleanup" \
 check "ending session and waiter clears durable identities" \
   'axilav end demo-1 "$REVIEW_EPOCH" >/dev/null && b dm-task.sh waiter demo-1 terminal "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ] && [ -z "$(b dm-task.sh get demo-1 waiter_agent_id)" ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = terminal ]'
 check "poll refuses after session end" '! axilav poll demo-1 "$REVIEW_EPOCH" >/dev/null 2>&1'
-printf '#!/usr/bin/env bash\nexit 9\n' > "$FAKE_LAVISH/lavish-axi"
-check "failed open clears its cleanup reservation visibly" \
+printf '%s\n' '#!/usr/bin/env bash' \
+  'printf "%s\n" "$*" >> "$FAKE_LAVISH_CALLS"' \
+  'exit 9' > "$FAKE_LAVISH/lavish-axi"
+FAKE_LAVISH_CALLS="$TMP/failed-open.calls"; export FAKE_LAVISH_CALLS
+check "partial open failure attempts cleanup and retains an uncertain guard" \
+  '! axilav open demo-1 >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = cleanup-uncertain ] && grep -q "^end " "$FAKE_LAVISH_CALLS"'
+check "uncertain failed-open cleanup still prevents worktree removal" \
+  '! b dm-worktree.sh remove demo-1 --force >/dev/null 2>&1 && [ -d "$WT" ]'
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
+check "uncertain cleanup can be retried by exact epoch" \
+  'UNCERTAIN_EPOCH="$(b dm-task.sh get demo-1 review_session_epoch)" && axilav end demo-1 "$UNCERTAIN_EPOCH" >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ]'
+printf '#!/usr/bin/env bash\nif [ "${1:-}" = end ]; then exit 0; fi\nexit 9\n' > "$FAKE_LAVISH/lavish-axi"
+check "failed open clears only after external cleanup is confirmed" \
   '! axilav open demo-1 >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ]'
 printf '#!/usr/bin/env bash\n[ "${1:-}" != end ]\n' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
 FAIL_END_EPOCH="$(axilav open demo-1)"
 check "failed end remains guarded and rejects stale epochs" \
-  '! axilav end demo-1 "$FAIL_END_EPOCH" >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = closing ] && ! axilav end demo-1 999 >/dev/null 2>&1'
+  '! axilav end demo-1 "$FAIL_END_EPOCH" >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = cleanup-uncertain ] && ! axilav end demo-1 999 >/dev/null 2>&1'
 printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
 check "same epoch can retry a failed end" \
   'axilav end demo-1 "$FAIL_END_EPOCH" >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ]'
@@ -710,6 +857,31 @@ SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav end demo-1 "$SLOW_E
 wait "$SLOW_PID"
 check "close during slow open cannot resurrect the session" \
   '[ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ] && ! axilav poll demo-1 "$SLOW_EPOCH" >/dev/null 2>&1'
+
+POLL_READY="$TMP/stale-poll.ready"
+POLL_RELEASE="$TMP/stale-poll.release"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'if [ "${1:-}" = poll ]; then' \
+  '  : > "$POLL_READY"' \
+  '  while [ ! -e "$POLL_RELEASE" ]; do :; done' \
+  '  printf "stale operator feedback\n"' \
+  '  exit 0' \
+  'fi' \
+  'exit 0' > "$FAKE_LAVISH/lavish-axi"
+chmod +x "$FAKE_LAVISH/lavish-axi"
+POLL_EPOCH="$(POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav open demo-1)"
+POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" \
+  axilav poll demo-1 "$POLL_EPOCH" >"$TMP/stale-poll.out" 2>"$TMP/stale-poll.err" &
+POLL_PID=$!
+while [ ! -e "$POLL_READY" ] && kill -0 "$POLL_PID" 2>/dev/null; do :; done
+[ -e "$POLL_READY" ] || { wait "$POLL_PID" || true; bad "poll reached stale-epoch coordination point"; exit 1; }
+POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav end demo-1 "$POLL_EPOCH" >/dev/null
+: > "$POLL_RELEASE"
+POLL_RC=0; wait "$POLL_PID" || POLL_RC=$?
+STALE_FEEDBACK="$(find "$(dirname "$ART")" -name "stale-feedback.$POLL_EPOCH.*" -type f -print -quit)"
+check "poll revalidates epoch and quarantines stale feedback" \
+  '[ "$POLL_RC" -ne 0 ] && [ -n "$STALE_FEEDBACK" ] && grep -q "stale operator feedback" "$STALE_FEEDBACK" && ! grep -q "stale operator feedback" "$TMP/stale-poll.out"'
+
 b dm-task.sh new review-archive --kind scout --repo demo >/dev/null
 ARCHIVE_WAITER="$(b dm-thread-name.sh review-archive review_waiter)"
 b dm-task.sh waiter review-archive prepare "$ARCHIVE_WAITER" >/dev/null

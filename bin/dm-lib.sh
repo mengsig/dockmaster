@@ -929,6 +929,22 @@ dm_require_worktree() {
   printf '%s\n' "$wt"
 }
 
+# dm_task_git_snapshot <id> -> exact base SHA<TAB>HEAD SHA for gate evidence.
+dm_task_git_snapshot() {
+  local id="$1" wt repo dir base_ref base_sha head_sha
+  wt="$(dm_require_worktree "$id")"
+  repo="$(dm_meta_get "$id" repo)"
+  dir="$(dm_repo_dir "$repo")"
+  base_ref="$(dm_meta_get "$id" base)"
+  [ -n "$base_ref" ] || base_ref="$(dm_default_branch "$dir")"
+  base_sha="$(git -C "$wt" rev-parse --verify --quiet "origin/$base_ref^{commit}" 2>/dev/null \
+    || git -C "$wt" rev-parse --verify --quiet "$base_ref^{commit}" 2>/dev/null)" \
+    || dm_die "cannot resolve exact pipeline base '$base_ref' for task '$id'"
+  head_sha="$(git -C "$wt" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null)" \
+    || dm_die "cannot resolve exact worktree HEAD for task '$id'"
+  printf '%s\t%s\n' "$base_sha" "$head_sha"
+}
+
 # --- FF-sync-with-fallback reaction: shared by callers that best-effort sync a
 # clone around a landing action -----------------------------------------------
 # dm_sync_reaction <repo> <sync_out> <die|warn>  -- given the STUCK/SKIP/OK line

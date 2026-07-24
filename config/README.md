@@ -1,6 +1,7 @@
 # PR pipeline config
 
-`pr-pipeline.default.json` (and per-repo `pr-pipeline.<repo>.json` overrides)
+`pr-pipeline.<repo>.json` when present, otherwise the selected
+`pr-pipeline.<fast|default|rigorous>.json`,
 declare the PR delivery pipeline as an **ordered list of gates**. Two things read
 this file, and they read different parts of it — so keep every field meaningful:
 
@@ -34,6 +35,10 @@ reads:
 
 It also honors the `pr` gate's **`method`** at the merge-authority step, by
 passing it to `bin/dm-pr.sh merge --method <method>`.
+
+Approval stores the selected gate array and its hash in task meta. Every later
+transition reads that immutable snapshot, never the live config, so an edit
+cannot weaken or reorder an already-approved run.
 
 ## The optional executor: `workflows/pr-pipeline.js`
 
