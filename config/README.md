@@ -7,7 +7,7 @@ this file, and they read different parts of it — so keep every field meaningfu
 ## Rigor tiers
 
 Three shipped tiers share one gate schema; the tier is a per-task choice (see
-the active runtime's `pr-workflow` skill for the selection criteria):
+the `pr-workflow` skill for the selection criteria):
 
 - **`pr-pipeline.fast.json`** — objectively trivial changes: one review pass.
 - **`pr-pipeline.default.json`** — the norm: two independent review passes.
@@ -21,9 +21,8 @@ the active runtime's `pr-workflow` skill for the selection criteria):
 
 ## The default executor: the dockmaster (agent-driven)
 
-By default the dockmaster runs the pipeline itself, driving each gate with the
-active runtime's subagent adapter while following `pr-workflow`. It
-reads:
+By default the dockmaster runs the pipeline itself, driving each gate with a
+subagent while following `pr-workflow`. It reads:
 
 - the gate **order** (top to bottom), and
 - each review gate's **`pass`** label (`coldstart` | `merge-gate`), which names
@@ -80,7 +79,7 @@ rather than waiting on a PR it has not opened.
 Every gate may carry a free-form **`note`** — a human comment for whoever edits
 this file. Nothing executes it.
 
-Adding a gate: document its contract in both `pr-workflow` adapters, then add its
+Adding a gate: document its contract in the `pr-workflow` skill, then add its
 name (and any fields above) to the `gates` array here.
 
 `workflows/pr-pipeline.js`'s built-in `FAST_GATES`/`DEFAULT_GATES`/`RIGOROUS_GATES`

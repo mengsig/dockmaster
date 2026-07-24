@@ -62,7 +62,7 @@ The vocabulary below is framed as a working dockyard:
   reporting flows through the dockmaster.
 - **domain agent** ("secondmate") — an optional long-lived background agent that
   owns a domain, keeps durable scope/memory, and can spawn its own crewmates.
-  Addressed through the active runtime's follow-up adapter. Idle by default.
+  Addressed with a follow-up message to the same agent. Idle by default.
 
 ## Task shapes
 
@@ -259,7 +259,7 @@ completion/mailbox events wake the dockmaster; it reconciles real state before
 advancing. CI and deploy waits use the bounded toolbelt wait during an active
 session or a scheduled task for long-running/recurring work.
 
-"Check up on them" uses the runtime adapter's list/message controls plus
+"Check up on them" uses the runtime's list/message controls plus
 `bin/dm-task.sh state`. "Report back" surfaces outcomes, never mechanics.
 
 ## Concurrency & worktrees
@@ -304,7 +304,7 @@ executed by the **dockmaster itself**, driving runtime-native review workers
 while following `pr-workflow`; nothing else runs them.
 `workflows/pr-pipeline.js` is an **optional** deterministic runner for hosts that
 expose its injected workflow API. It is not auto-discovered or wired to a `bin/`
-script. Adding a gate means documenting it in both runtime adapters and listing
+script. Adding a gate means documenting it in the `pr-workflow` skill and listing
 it in the config array. See `config/README.md` for executor coverage.
 
 **Branch naming:** `<type>/<issue>/<slug>` — `type ∈ {feat,fix,bug,chore,refactor,docs,perf,test}`,

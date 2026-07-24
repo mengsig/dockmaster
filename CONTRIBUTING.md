@@ -20,6 +20,10 @@ covers the local-only lifecycle; the PR path has no automated coverage. Run it
 before every change to `bin/`, and add an assertion when you change a script's
 behavior.
 
+`tests/runtime-waiter-live.md` is a manual proof, not a CI check: only a live
+authenticated session can observe whether a background child's completion wakes
+its parent. Run it by hand when changing how background work is awaited.
+
 CI (`.github/workflows/ci.yml`) runs on `ubuntu-latest` and `macos-latest` for
 every pull request and every push to `main` (a push to a feature branch with no
 open PR does not trigger it). Beyond the four commands above it also runs

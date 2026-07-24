@@ -118,8 +118,8 @@ flowchart TD
   passes (coldstart → fix+tests → merge-gate → fix+tests) then PR — declared per
   repo in one JSON array you can reorder. Branches follow `<type>/<issue>/<slug>`;
   descriptions are short and human; nothing merges without your word.
-- **Native supervision.** Crewmates run through the active runtime's background
-  collaboration surface; mailbox/completion events are the wake. External waits
+- **Native supervision.** Crewmates run as background agents; their completion
+  notifications are the wake. External waits
   use bounded command waits or scheduled tasks, never a polling daemon.
 - **Guarded by construction.** The dockmaster is read-only over your repos except
   for narrow, guarded fast-forward paths. Teardown refuses to discard unlanded
