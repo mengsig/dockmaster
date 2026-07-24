@@ -63,6 +63,69 @@ dm_registry_require_valid
 AWAIT_TIMEOUT_SECS=600
 AWAIT_INTERVAL_SECS=15
 
+# gh_api_retry bounds (#107): up to 4 attempts, doubling delay from a 2s base
+# (2s, 4s, 6s...). Overridable so tests can run near-instantly.
+GH_RETRY_MAX="${DM_GH_RETRY_MAX:-4}"
+GH_RETRY_BASE_SECS="${DM_GH_RETRY_BASE_SECS:-2}"
+
+# sweep's circuit breaker (#107): abort the whole sweep after this many
+# CONSECUTIVE PRs each exhaust their full gh_api_retry budget, rather than
+# grinding through the rest of a large fleet at the same degraded rate under
+# sustained rate limiting (worst case ~(2+4+6+...)s of sleeping per exhausted
+# PR with the defaults above).
+GH_CIRCUIT_BREAKER_MAX="${DM_GH_CIRCUIT_BREAKER_MAX:-5}"
+
+# is_transient_gh_error <stderr-text>  -> true if a `gh api` failure looks like
+# a rate limit or a transient transport error worth retrying, false for a
+# permanent error (404, bad request, auth) that retrying cannot fix.
+is_transient_gh_error() {
+  grep -qiE 'rate limit|secondary rate|HTTP 429|HTTP 5[0-9][0-9]|time(d)? ?out|could not resolve host|connection reset|temporary failure|unexpected EOF' <<<"$1"
+}
+
+# Distinct exit code gh_api_retry returns when it stopped specifically because
+# it exhausted the retry budget on a TRANSIENT error, as opposed to any other
+# failure — sweep's circuit breaker watches for exactly this code. Every
+# caller of gh_api_retry is invoked through a `$(...)` command substitution,
+# which bash runs in a subshell, so a global variable set inside gh_api_retry
+# can never be observed by the caller once it returns; the exit code is the
+# only channel that survives that boundary. Chosen far from any real `gh`
+# exit code (which is 1 for essentially every API failure).
+GH_RETRY_EXHAUSTED_RC=99
+
+# gh_api_retry <args to `gh api`...>  -> stdout of the call. Retries a
+# transient/rate-limit failure with bounded exponential backoff; a permanent
+# failure returns the real underlying `gh` exit code, exactly like a single
+# failed `gh api` call would — every existing degrade-to-unknown/dm_die caller
+# is unchanged, only the path to that same failure gets slower and sturdier.
+# Exhausting the attempts on a still-transient error returns
+# GH_RETRY_EXHAUSTED_RC instead, still non-zero so every `||` fallback still
+# fires the same way, just distinguishably so the circuit breaker can tell
+# "rate-limited" apart from "ordinary failure".
+# Reads only: mutations (`pr create`, the merge PUT) are never retried here —
+# retrying a mutation without an idempotency guarantee risks a double side
+# effect, so those keep their own single-attempt handling.
+gh_api_retry() {
+  local attempt=1 out err rc errtext transient
+  while :; do
+    err="$(mktemp "$DM_STATE/.gh-retry.XXXXXX")" || dm_die "mktemp failed for gh api retry buffer"
+    rc=0; out="$(gh api "$@" 2>"$err")" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      rm -f "$err"; printf '%s' "$out"; return 0
+    fi
+    errtext="$(cat "$err" 2>/dev/null || true)"; rm -f "$err"
+    if is_transient_gh_error "$errtext"; then transient=1; else transient=0; fi
+    if [ "$attempt" -ge "$GH_RETRY_MAX" ] || [ "$transient" -eq 0 ]; then
+      printf '%s' "$errtext" >&2
+      if [ "$transient" -eq 1 ] && [ "$attempt" -ge "$GH_RETRY_MAX" ]; then
+        return "$GH_RETRY_EXHAUSTED_RC"
+      fi
+      return "$rc"
+    fi
+    sleep "$((GH_RETRY_BASE_SECS * attempt))"
+    attempt=$((attempt + 1))
+  done
+}
+
 owner_repo() {
   # derive owner/repo from a git remote url (ssh or https), strictly
   local url="$1" slug
@@ -153,7 +216,7 @@ verify_never_exception() {
   local repo="$1" slug="$2" n="$3" url="$4" json base_ref live_default reg_default allowed
   allowed="$(dm_merge_allowed_bases "$repo")"
   reg_default="$(dm_registry_get "$repo" default_branch)"
-  json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" \
+  json="$(gh_api_retry "repos/$slug/pulls/$n" 2>/dev/null)" \
     || dm_die "REFUSED: repo $repo is merge_authority=never and the PR's base branch could not be verified on GitHub — refusing (fail closed): $url"
   base_ref="$(printf '%s' "$json" | jq -r '.base.ref // empty' 2>/dev/null)" || base_ref=""
   live_default="$(printf '%s' "$json" | jq -r '.base.repo.default_branch // empty' 2>/dev/null)" || live_default=""
@@ -215,9 +278,109 @@ load_check_snapshot_json() {
   git check-ref-format "refs/heads/$PR_SNAPSHOT_HEAD_REF" >/dev/null 2>&1
 }
 
+# --- sweep-only GraphQL snapshot (#107) ---------------------------------------
+# `sweep`'s online path needs state + CI rollup + review verdict for every open
+# PR; fetching that via REST costs 4 calls (PR details, check-runs, commit
+# status, reviews) per PR, unpaced. ONE GraphQL query returns all three in one
+# round trip, cutting sweep's call count ~4x. Scoped to sweep's read-only
+# display only: `check`/`merge`/`await-checks` keep their own REST path
+# unchanged, so this never itself feeds a merge decision.
+SWEEP_REVIEWS_PAGE=100
+
+sweep_graphql_query() {
+  cat <<'GQL'
+query($owner: String!, $name: String!, $number: Int!, $reviewsFirst: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      state
+      merged
+      headRefOid
+      commits(last: 1) {
+        nodes { commit { statusCheckRollup { state } } }
+      }
+      reviews(first: $reviewsFirst) {
+        pageInfo { hasNextPage }
+        nodes { state submittedAt author { login } }
+      }
+    }
+  }
+}
+GQL
+}
+
+# sweep_pr_snapshot <owner> <name> <number>  -> compact JSON
+# {state, checks, review, head} on stdout, or nonzero with nothing printed.
+# Every field is validated at this API boundary before being trusted: an
+# unexpected shape, a GraphQL `errors` entry, or more than SWEEP_REVIEWS_PAGE
+# reviews (pageInfo.hasNextPage) all fail CLOSED to "unknown", never a false
+# "clean" (the #107 false-green: the old unpaginated reviews call silently
+# truncated at GitHub's default page size of 30). Propagates gh_api_retry's
+# exact exit code (rather than flattening to 1) so a caller can see
+# GH_RETRY_EXHAUSTED_RC specifically — sweep's circuit breaker needs it.
+sweep_pr_snapshot() {
+  local owner="$1" name="$2" number="$3" json rc
+  rc=0
+  json="$(gh_api_retry graphql -f query="$(sweep_graphql_query)" \
+      -F owner="$owner" -F name="$name" -F number="$number" \
+      -F reviewsFirst="$SWEEP_REVIEWS_PAGE" 2>/dev/null)" || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  printf '%s' "$json" | jq -ce '
+    if (.errors | length) > 0 then error("graphql error") else . end
+    | .data.repository.pullRequest as $pr
+    | if $pr == null then error("no such PR") else . end
+    | if ($pr.reviews.nodes | type) != "array" then error("invalid reviews") else . end
+    | if ($pr.commits.nodes | type) != "array" then error("invalid commits") else . end
+    | ($pr.commits.nodes[0].commit.statusCheckRollup.state // null) as $rollup
+    | (if $pr.merged == true then "MERGED"
+       elif $pr.state == "OPEN" then "OPEN"
+       elif $pr.state == "CLOSED" then "CLOSED"
+       else "UNKNOWN" end) as $state
+    | (if $rollup == null then "none"
+       elif $rollup == "SUCCESS" then "passing"
+       elif $rollup == "FAILURE" or $rollup == "ERROR" then "failing"
+       elif $rollup == "PENDING" or $rollup == "EXPECTED" then "pending"
+       else "unknown" end) as $checks
+    | (if ($pr.reviews.pageInfo.hasNextPage | type) == "boolean"
+       then $pr.reviews.pageInfo.hasNextPage else true end) as $truncated
+    | ( [$pr.reviews.nodes[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")]
+        | group_by(.author.login)
+        | map(max_by(.submittedAt).state)
+        | any(. == "CHANGES_REQUESTED") ) as $cr
+    | { state: $state, checks: $checks,
+        review: (if $truncated then "unknown" elif $cr then "changes-requested" else "clean" end),
+        head: ($pr.headRefOid // "") }
+  ' 2>/dev/null
+}
+
+# read_sweep_snapshot <json>  -> validates and destructures into
+# SWEEP_STATE/SWEEP_CHECKS/SWEEP_REVIEW/SWEEP_HEAD, or returns 1. Mirrors
+# load_check_snapshot_json's boundary validation for the sweep-only shape.
+# SWEEP_HEAD is validated but deliberately never persisted: `check` already
+# owns pr_head as part of its own atomic pr_check_snapshot write, and writing
+# it again from here would give the same field two independent, driftable
+# sources. Validating it anyway is still worth doing — a malformed head is a
+# signal the rest of the response may be untrustworthy too.
+read_sweep_snapshot() {
+  local json="$1" values
+  values="$(printf '%s' "$json" | jq -er '
+    select(type == "object")
+    | [.state, .checks, .review, .head]
+    | if all(.[]; type == "string") then .[] else error("invalid sweep snapshot") end' 2>/dev/null)" || return 1
+  {
+    IFS= read -r SWEEP_STATE
+    IFS= read -r SWEEP_CHECKS
+    IFS= read -r SWEEP_REVIEW
+    IFS= read -r SWEEP_HEAD
+  } <<<"$values"
+  case "$SWEEP_STATE" in OPEN|CLOSED|MERGED|UNKNOWN) ;; *) return 1 ;; esac
+  case "$SWEEP_CHECKS" in passing|failing|pending|none|unknown) ;; *) return 1 ;; esac
+  case "$SWEEP_REVIEW" in clean|changes-requested|unknown) ;; *) return 1 ;; esac
+  [ -z "$SWEEP_HEAD" ] || is_git_oid "$SWEEP_HEAD" || return 1
+}
+
 check_runs_rollup() {
   local slug="$1" sha="$2" json rollup
-  json="$(gh api "repos/$slug/commits/$sha/check-runs?per_page=100" 2>/dev/null)" \
+  json="$(gh_api_retry "repos/$slug/commits/$sha/check-runs?per_page=100" 2>/dev/null)" \
     || { printf 'unknown\n'; return; }
   rollup="$(printf '%s' "$json" | jq -er '
     if type != "object" or (.check_runs | type) != "array"
@@ -245,7 +408,7 @@ check_runs_rollup() {
 
 commit_status_rollup() {
   local slug="$1" sha="$2" json rollup
-  json="$(gh api "repos/$slug/commits/$sha/status" 2>/dev/null)" \
+  json="$(gh_api_retry "repos/$slug/commits/$sha/status" 2>/dev/null)" \
     || { printf 'unknown\n'; return; }
   rollup="$(printf '%s' "$json" | jq -er '
     if type != "object" or (.total_count | type) != "number"
@@ -270,7 +433,7 @@ remote_ref_head() {
   local head_repo="$1" head_ref="$2" encoded json head
   [ -n "$head_repo" ] && [ -n "$head_ref" ] || return 1
   encoded="$(jq -nr --arg ref "$head_ref" '$ref | @uri')" || return 1
-  json="$(gh api "repos/$head_repo/git/ref/heads/$encoded" 2>/dev/null)" || return 1
+  json="$(gh_api_retry "repos/$head_repo/git/ref/heads/$encoded" 2>/dev/null)" || return 1
   head="$(printf '%s' "$json" | jq -er '.object.sha | select(type == "string" and length > 0)' 2>/dev/null)" || return 1
   is_git_oid "$head" || return 1
   printf '%s\n' "$head"
@@ -443,10 +606,11 @@ case "$cmd" in
     snapshot_only=0
     if [ "${1:-}" = "--snapshot" ]; then snapshot_only=1; shift; fi
     [ "$#" -eq 0 ] || dm_die "usage: dm-pr.sh check <id> [--snapshot]"
+    repo="$(dm_meta_get "$id" repo)"; [ -n "$repo" ] || dm_die "no such task: $id"
     url="$(dm_meta_get "$id" pr)"; [ -n "$url" ] || dm_die "no PR recorded for $id"
-    n="$(pr_number_from_url "$url")"; repo="$(dm_meta_get "$id" repo)"
+    n="$(pr_number_from_url "$url")"
     slug="$(repo_slug "$repo")"
-    json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" || dm_die "could not read PR $url"
+    json="$(gh_api_retry "repos/$slug/pulls/$n" 2>/dev/null)" || dm_die "could not read PR $url"
     state="$(printf '%s' "$json" | jq -er '(.state // "unknown") | select(type == "string") | ascii_upcase' 2>/dev/null)" \
       || dm_die "invalid PR response for $url"
     merged="$(printf '%s' "$json" | jq -er '(.merged // false) | if type == "boolean" then tostring else error("invalid merged flag") end' 2>/dev/null)" \
@@ -770,9 +934,21 @@ case "$cmd" in
     # Fleet PR/health sweep (#26): walk every task that records an OPEN PR and
     # report, one line each, its CI rollup and whether a review is requesting
     # changes, plus a summary. Purely READ-ONLY over GitHub and repos — it opens
-    # no PR, pushes nothing, merges nothing. It DOES refresh the cached
-    # pr_state/checks meta via `check` (the same cache dm-status trusts), reusing
-    # that rollup logic rather than recomputing it.
+    # no PR, pushes nothing, merges nothing.
+    #
+    # Online (#107): ONE GraphQL call per PR (sweep_pr_snapshot) replaces the 4
+    # sequential REST calls (`check`'s 3 plus a separate reviews fetch) this
+    # used to cost, retried with bounded backoff on a transient/rate-limit
+    # failure (gh_api_retry), plus a circuit breaker that aborts the sweep
+    # early on sustained rate limiting rather than grinding through the whole
+    # fleet at the same degraded rate (GH_CIRCUIT_BREAKER_MAX below). An OPEN
+    # PR only gets pr_state/checks refreshed in the cache; merge_state/
+    # pr_head/pr_check_snapshot are left as they were (this GraphQL query
+    # does not populate them, and `merge`/`await-checks` always re-derive
+    # them fresh anyway — this path never itself feeds a merge decision). A
+    # PR just observed MERGED is the one case that IS safety-relevant
+    # (dm-worktree.sh landed trusts pr_head), so it falls back to the full
+    # REST `check` there, which writes all five fields exactly as before.
     #
     # Offline (DM_NO_FETCH=1 — how dm-status invokes it): perform NO network. Show
     # the cached pr_state/checks and skip the review query, matching how
@@ -780,7 +956,8 @@ case "$cmd" in
     offline=0
     [ "${DM_NO_FETCH:-0}" = "1" ] && offline=1
     [ "$offline" -eq 1 ] || dm_need gh
-    total=0; red=0; changes=0; missing=0
+    total=0; red=0; changes=0; missing=0; unknown_review=0; unknown_checks=0
+    consecutive_exhausted=0
     while IFS= read -r id; do
       [ -n "$id" ] || continue
       total=$((total + 1))
@@ -801,35 +978,59 @@ case "$cmd" in
         checks="$(dm_meta_get "$id" checks)"; [ -n "$checks" ] || checks="?"
         state="$(dm_meta_get "$id" pr_state)"; [ -n "$state" ] || state="?"
         printf '  %s  state: %s  checks: %s (cached)  reviews: (no fetch)  %s\n' "$id" "$state" "$checks" "$url"
-        case "$checks" in failing) red=$((red + 1)) ;; esac
+        case "$checks" in
+          failing) red=$((red + 1)) ;;
+          unknown) unknown_checks=$((unknown_checks + 1)) ;;
+        esac
         continue
       fi
-      # Online: refresh the rollup through `check` (single owner of the rollup
-      # computation), then read the review state. A failed check is surfaced
-      # per-line, never swallowed.
-      if ! "$0" check "$id" >/dev/null 2>&1; then
+      # Online: one GraphQL call gets state + CI rollup + review verdict
+      # together (#107). A read/parse failure is surfaced per-line, never
+      # swallowed into a false "clean".
+      n="$(pr_number_from_url "$url")"
+      slug="$(repo_slug "$repo")"
+      owner="${slug%%/*}"; name="${slug#*/}"
+      snap=""; snap_rc=0
+      snap="$(sweep_pr_snapshot "$owner" "$name" "$n")" || snap_rc=$?
+      if [ -z "$snap" ] || ! read_sweep_snapshot "$snap"; then
+        # A failure whose exit code is specifically GH_RETRY_EXHAUSTED_RC (as
+        # opposed to an ordinary one-shot failure, e.g. a malformed response)
+        # is the rate-limit signal the circuit breaker watches:
+        # GH_CIRCUIT_BREAKER_MAX of these IN A ROW aborts the sweep rather
+        # than grinding through the rest of a large fleet at the same
+        # degraded rate.
+        if [ "$snap_rc" -eq "$GH_RETRY_EXHAUSTED_RC" ]; then
+          consecutive_exhausted=$((consecutive_exhausted + 1))
+          if [ "$consecutive_exhausted" -ge "$GH_CIRCUIT_BREAKER_MAX" ]; then
+            dm_die "REFUSED: $consecutive_exhausted consecutive PRs exhausted gh's retry budget (sustained rate limiting?) — aborting the sweep early rather than grinding through the rest of the fleet at the same degraded rate. Wait for the rate limit to reset, then retry."
+          fi
+        else
+          consecutive_exhausted=0
+        fi
         printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
         continue
       fi
-      checks="$(dm_meta_get "$id" checks)"; [ -n "$checks" ] || checks="?"
-      state="$(dm_meta_get "$id" pr_state)"; [ -n "$state" ] || state="?"
-      n="$(pr_number_from_url "$url")"
-      slug="$(repo_slug "$repo")"
-      # Unaddressed review = a reviewer whose LATEST actionable review (the last
-      # APPROVED/CHANGES_REQUESTED per author) is CHANGES_REQUESTED. jq returns
-      # true/false; a null/API error becomes "error" so it reads as unknown, never
-      # a false "clean".
-      cr="$(gh api "repos/$slug/pulls/$n/reviews" 2>/dev/null \
-        | jq -r '[.[] | select(.state=="APPROVED" or .state=="CHANGES_REQUESTED")]
-                 | group_by(.user.login)
-                 | map(max_by(.submitted_at).state)
-                 | any(. == "CHANGES_REQUESTED")' 2>/dev/null || echo error)"
-      case "$cr" in
-        true)  review="changes-requested"; changes=$((changes + 1)) ;;
-        false) review="clean" ;;
-        *)     review="unknown" ;;
+      consecutive_exhausted=0
+      state="$SWEEP_STATE"; checks="$SWEEP_CHECKS"; review="$SWEEP_REVIEW"
+      if [ "$state" = "MERGED" ]; then
+        if ! "$0" check "$id" >/dev/null 2>&1; then
+          printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
+          continue
+        fi
+        checks="$(dm_meta_get "$id" checks)"; [ -n "$checks" ] || checks="?"
+        state="$(dm_meta_get "$id" pr_state)"; [ -n "$state" ] || state="?"
+      else
+        dm_meta_set "$id" pr_state "$state"
+        dm_meta_set "$id" checks "$checks"
+      fi
+      case "$checks" in
+        failing) red=$((red + 1)) ;;
+        unknown) unknown_checks=$((unknown_checks + 1)) ;;
       esac
-      case "$checks" in failing) red=$((red + 1)) ;; esac
+      case "$review" in
+        changes-requested) changes=$((changes + 1)) ;;
+        unknown) unknown_review=$((unknown_review + 1)) ;;
+      esac
       printf '  %s  state: %s  checks: %s  reviews: %s  %s\n' "$id" "$state" "$checks" "$review" "$url"
     done < <(dm_open_pr_tasks)
     if [ "$total" -eq 0 ]; then
@@ -838,6 +1039,12 @@ case "$cmd" in
       note=""
       [ "$red" -gt 0 ] && note="$note, $red with red CI"
       [ "$changes" -gt 0 ] && note="$note, $changes with changes requested"
+      # unknown is distinct from clean/red: a review truncated past its
+      # bounded page, or a CI rollup gh could not confirm, must never read
+      # the same as an all-clear fleet — surface it so it gets a look, not
+      # a skim-past.
+      [ "$unknown_review" -gt 0 ] && note="$note, $unknown_review with an unverified review"
+      [ "$unknown_checks" -gt 0 ] && note="$note, $unknown_checks with unknown CI"
       [ "$missing" -gt 0 ] && note="$note, $missing with a missing clone"
       note="${note#, }"
       [ -n "$note" ] && note=" ($note)"
