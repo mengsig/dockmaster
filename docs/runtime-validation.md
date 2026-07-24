@@ -57,7 +57,9 @@ The depth-2 worker returned `NESTED_OK`. A `followup_task` on the same idle
 thread returned `FOLLOWUP_OK`.
 This directly proves the secondmate → worker nesting edge and same-thread
 follow-up surface used by the adapter. No model/effort selector was present in
-the actual spawn call, so the adapters make no per-child selection claim.
+that dated spawn call. Current collaboration exposes both selectors; the adapter
+now maps and records them, with a visible inherited-settings fallback for older
+surfaces.
 
 The approval-wake regression used the repeatable manual procedure in
 `tests/runtime-waiter-live.md`. The no-fork

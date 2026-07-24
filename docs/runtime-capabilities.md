@@ -16,11 +16,11 @@ an authenticated runtime/browser/mailbox observation. Current split: 13 direct,
 | `worktree-isolation` | one guarded copy per task | toolbelt + agent isolation | toolbelt + absolute path in brief | `dm-worktree.sh` + smoke suite |
 | `nested-secondmate` | root → supervisor → worker | nested background agents | depth 2, six-thread cap | **manual** live nesting; direct state/config assertions |
 | `followup-and-steering` | same-worker correction | `SendMessage`/task controls | message/follow-up/interrupt/list controls | **manual** live identity controls; direct adapter assertion |
-| `background-supervision` | no polling daemon | completion notification | mailbox + efficient agent wait | **manual** mailbox wake; deterministic waiter harness in CI |
+| `background-supervision` | no polling daemon | completion notification | one-hour mailbox wait; reconcile + schedule ready work before re-wait | **manual** mailbox wake; deterministic waiter harness in CI |
 | `recovery` | same task/work survives restart | reconcile and relaunch ladder | list/message/interrupt then same-copy relaunch | **contract** + state assertions |
 | `bounded-ci-wait` | terminal CI rollup | Monitor/schedule + `await-checks` | attached command, dedicated waiter, or schedule + `await-checks` | dm-pr + supervision adapters |
 | `scheduled-fleet-sweep` | recurring PR health | runtime schedule/cron | desktop/web scheduled task; CLI prepares it | **manual** desktop/web schedule; direct sweep assertion |
-| `change-review` | pre-delivery approval loop | background Lavish poll | no-fork waiter owns poll; mailbox completion wakes parent | **manual** mailbox wake; direct identity/adapter regressions |
+| `change-review` | pre-delivery approval loop | background Lavish poll | low-cost no-fork waiter owns task/ad-hoc polls; active task review blocks cleanup | **manual** mailbox wake; direct identity/cleanup regressions |
 | `pr-gates` | fast/default/rigorous gates | fresh reviewers | executable no-fork verify/security fallbacks; fail closed | pr-workflow + configs + runner tests |
 | `post-pr-review` | review comments/red CI tail | shared skill | shared skill | **contract** in both skills |
 | `github-tooling` | PR API/checks/merge | gh-axi/gh | gh-axi/gh or plugin tools | dm-pr + smoke |
@@ -35,7 +35,7 @@ an authenticated runtime/browser/mailbox observation. Current split: 13 direct,
 | `fleet-campaigns` | one gated child per repo | background fan-out | bounded collaboration fan-out | backlog + fleet skills + smoke |
 | `deterministic-workflow` | optional configured runner | Workflow host when available | compatible injected host; full native fallback | runner + gate drift test |
 | `merge-safety` | red/authority/unlanded guards | shared toolbelt | shared toolbelt + trusted rules/hook guardrails | dm-pr/dm-merge/rules/hook/smoke |
-| `right-sizing` | quality-aware resource use | per-agent model/effort and tiers | tiers, bounded count, focused no-fork prompts | **contract** + bounded runner test |
+| `right-sizing` | quality-aware resource use | per-agent model/effort and tiers | spawn model/effort mapping: terra low/medium ordinary, sol high safety-critical | **contract** + selector assertions |
 | `plugins-and-fallbacks` | optional tools degrade or fail loudly, never silently vanish | GitHub mutations prefer `gh-axi`, fall back to plain `gh`; lavish/browser degrade | plugins/local tools with focused fallback | **contract** + doctor assertions |
 | `project-safety-config` | project policy | Claude settings allowlist | trusted config + tested rules/PreToolUse hook | configs + guard + runtime smoke |
 
@@ -62,9 +62,10 @@ Codex collaboration names in Claude adapters.
 - Nesting defaults to one edge, so dockmaster explicitly sets depth 2 for
   secondmate → worker. Six concurrent open threads bound fan-out; ordinary work
   uses at most three so approval, recovery, and review retain capacity.
-- The active collaboration call has no per-spawn model/effort field. Codex
-  therefore right-sizes tiers, task shape, prompt scope, and agent count and does
-  not claim a selector it did not invoke.
+- Current collaboration exposes per-spawn `model` and `reasoning_effort`.
+  Dockmaster maps advisory tiers to advertised values, records the actual choice,
+  and falls back visibly to inherited settings on an older surface rather than
+  pretending an override occurred.
 - Scheduled-task management exists in desktop/web, not the CLI. CLI sessions use
   bounded attached waits, a dedicated no-fork waiter when parent notification is
   required, or prepare a scheduled prompt for the supported surface. A raw

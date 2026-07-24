@@ -35,23 +35,32 @@ change; the PR-or-local decision and any pipeline come *after* approval.
 
 ## Codex notification contract
 
-`bin/dm-lavish.sh poll <id>` is a long-running terminal command, but completion
-of a command session does **not** wake the dockmaster's collaboration mailbox.
-The dockmaster therefore delegates each approval wait to one dedicated Codex
-waiter with `spawn_agent(..., fork_turns="none")`.
+`bin/dm-lavish.sh open <id>` records the session active. Its poll is a
+long-running terminal command, but completion of a command session does **not**
+wake the dockmaster's collaboration mailbox. The dockmaster therefore delegates
+each approval wait to one dedicated low-cost Codex waiter with
+`spawn_agent(..., fork_turns="none", model="gpt-5.6-terra",
+reasoning_effort="low")` when those selectors are supported.
 
 Before spawning, derive and persist the waiter identity:
 
 ```
 waiter_thread="$(bin/dm-thread-name.sh <id> review_waiter)"
-bin/dm-task.sh set <id> waiter_thread_name "$waiter_thread"
 ```
 
 Reconcile any saved `waiter_agent_id` and exact thread name with `list_agents`.
 Reuse one exact idle match with `followup_task`; multiple matches are an
-ambiguity blocker. Only a proven zero-owner state permits `spawn_agent`. Persist
-its returned id immediately as `waiter_agent_id`, then set
-`waiter_state=active`.
+ambiguity blocker. Only a proven zero-owner state permits `spawn_agent`. Before
+that spawn, persist the deterministic name; then persist the returned identity:
+
+```
+bin/dm-task.sh waiter <id> prepare "$waiter_thread"
+spawn_agent(...)
+bin/dm-task.sh waiter <id> active "$waiter_thread" <returned-agent-id>
+```
+
+If active persistence fails after spawn, interrupt that exact returned id and
+surface the failure; never leave an owner durable state cannot name.
 
 Give the waiter the absolute dockmaster directory, task id, and this exact job:
 
@@ -66,9 +75,12 @@ while the approval goal is active; when the waiter completes, reconcile the
 review and relay actionable feedback to the implementation crewmate. Never
 treat a raw background or yielded terminal session as a parent wake source.
 Keep the waiter id for this review session. On approval, session end, or visible
-waiter failure, set `waiter_agent_id` to empty and `waiter_state=terminal`. If dispatch fails because no thread
-slot is available, remain attached to the poll or surface the capacity blocker;
-never silently fall back to an unattended terminal wait.
+waiter failure, run `bin/dm-task.sh waiter <id> terminal`; on non-terminal
+feedback run `bin/dm-task.sh waiter <id> idle`. If dispatch fails because no
+thread slot is available, remain attached through the whole current turn or
+surface the capacity blocker; never silently fall back to an unattended terminal
+wait. A raw root poll is allowed only while root explicitly resumes the yielded
+command to exit in that same attached turn.
 
 3. **Back-and-forth.** Feedback from the poll is relayed by the dockmaster to the
    crewmate as one clear instruction. The crewmate revises the code, updates the
@@ -90,6 +102,10 @@ never silently fall back to an unattended terminal wait.
      ```
      See `task-lifecycle`.
    - **PR** → run the PR pipeline (load `pr-workflow`).
+
+`dm-worktree.sh remove` and `dm-task.sh archive` refuse while either the
+task-bound browser session or waiter is active. End both identities before
+cleanup; never bury a live feedback loop.
 
 ## Fast path for trivial changes
 

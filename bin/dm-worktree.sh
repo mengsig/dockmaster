@@ -383,6 +383,8 @@ case "$cmd" in
       esac
     done
     [ -n "$id" ] || dm_die "usage: dm-worktree.sh remove <id> [--force]"
+    dm_review_active "$id" \
+      && dm_die "REFUSED: $id still has an active Lavish review session or notification waiter. End the session and clear the waiter before cleanup."
     repo="$(dm_meta_get "$id" repo)"
     # An interrupted cleanup leaves a recorded path whose directory is already
     # gone. require_managed_worktree dies on that before --force is ever

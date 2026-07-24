@@ -20,13 +20,15 @@ reorder, drop, or add gates by editing one array.
 Scale review rigor to stakes. The tier is a **per-task** choice (not a per-repo
 default); when in doubt, use `default`.
 
-**Right-size each pass, not just the tier.** The current Codex collaboration
-call has no per-spawn model/effort selector, so right-size with gate choice,
-focused prompts, and agent count. Use `fork_turns="none"` for fresh reviewers;
-give each only the diff, changed files, lens, and acceptance criteria. Do not
-claim per-child model control unless the active surface exposes and proves it.
-The advisory tier `dm-brief` surfaces (and `dm-status` flags when a `working`
-task is unsized) is the same signal — use it to bias gate choice and agent count.
+**Right-size each pass, not just the tier.** Use the active `spawn_agent`
+`model` and `reasoning_effort` selectors with `fork_turns="none"`: routine
+read-heavy or mechanical passes use `gpt-5.6-terra` at `low`/`medium`;
+safety-critical, adversarial, and final merge-gate reasoning uses
+`gpt-5.6-sol` at `high`. Give each reviewer only the diff, changed files, lens,
+and acceptance criteria. When a listed slug or selector is unavailable, choose
+the advertised least-sufficient equivalent or fall back visibly to inherited
+settings; never claim an override was applied. Waiters stay on the low-cost
+mapping from `supervision`.
 
 - **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial** changes
   only (see `change-review` for the criteria): one review pass instead of two,
@@ -91,6 +93,34 @@ The file has a `gates` array. Run the gates top to bottom. A repo's delivery
 - **local-only** — no PR; this skill does not apply. Land with
   `bin/dm-merge.sh local <id>` after approval (see `task-lifecycle`).
 
+## Durable gate scheduling
+
+Immediately after approval and tier selection, record the first ready gate:
+
+```
+bin/dm-task.sh approve <id> <fast|default|rigorous> <first-gate>
+```
+
+For every gate, run `dm-task.sh gate <id> start <gate>` immediately before
+assigning its runtime owner; return it to `ready` if assignment fails. After
+success, atomically expose the next gate with
+`dm-task.sh gate <id> complete <gate> <next-gate>` (omit `<next-gate>` only when
+the pipeline is terminal). A ready gate is approved-but-unscheduled work;
+`dm-task.sh ready-gates` and `dm-status.sh` surface it across restarts. Do not
+describe it as in progress unless `start` succeeded and a real owner exists.
+
+File/subsystem overlap does not stop branch-local implementation, cold review,
+or branch-local tests. At the integration horizon only, record the concrete
+blocker and reason:
+
+```
+bin/dm-task.sh gate <id> block <rebase|merge-gate-review|final-tests|verify|security|pr|land> <blocker-id> "<reason>"
+```
+
+After that blocker lands, transition the gate back to ready, rebase onto the new
+base, and rerun final review/tests before PR opening or landing. Never treat a
+cold review on the stale base as the final gate.
+
 ## The canonical pipeline (two review passes)
 
 ```
@@ -116,8 +146,8 @@ worktree/branch from meta, communicates only through the task record, and
   the worktree and records the result. Non-zero fails the gate. No registered
   command → it reports a soft skip (never a fabricated pass).
 - **review (merge-gate)** — a second, independent reviewer pass acting as the
-  final gate before the PR: same cold-read discipline, on the fixed tree. This
-  is the "merge gate."
+  final gate before the PR: same cold-read discipline, on the fixed and rebased
+  tree. This is the "merge gate."
 - **fix / tests** — resolve any merge-gate findings and re-confirm green.
 - **verify** — rigorous only. Unless the diff is proven docs/config-only, spawn a
   fresh no-fork general verifier using a label from `bin/dm-thread-name.sh

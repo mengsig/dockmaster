@@ -23,6 +23,29 @@ until a mailbox update or steered user input rather than polling task files.
    - Read the crewmate's status events (`state/tasks/<id>.status`) as a log of
      *what happened*, never as current truth.
    - Advance the pipeline, report an outcome, or handle a blocker/decision.
+   - Reconcile ready work once (`bin/dm-task.sh ready-gates`, then
+     `bin/dm-backlog.sh ready`) and schedule one safe gate/task when capacity
+     exists before waiting again.
+
+## Productive mailbox waits
+
+Use the native mailbox wait, not short polling. While healthy work is live, call
+`wait_agent(timeout_ms=3600000)` (the longest supported one-hour deadline).
+Worker completion and steered user input interrupt it.
+
+An empty timeout is a scheduling boundary, never an instruction to repeat the
+same wait. After a timeout:
+
+1. Call `list_agents` once and reconcile each relevant task once.
+2. Run `bin/dm-task.sh ready-gates` and `bin/dm-backlog.sh ready`.
+3. Start one safe ready gate/task when a slot exists. Approved ready gates take
+   priority over new work; integration-blocked gates stay blocked.
+4. Only after that reconciliation/scheduling pass may another long mailbox wait
+   begin.
+
+Never issue an immediate identical empty re-wait. Do not shorten the timeout to
+manufacture progress rows. If nothing changed and no safe work is ready, stay
+silent and begin the next long wait only after the pass above.
 
 ## Events vs current state
 
@@ -51,20 +74,43 @@ produce a parent-mailbox wake. It is safe only while the current agent remains
 attached and resumes it explicitly. Never leave a raw background or yielded
 command session behind and assume its completion will wake the dockmaster.
 
-When an external wait must wake the dockmaster after the current turn—especially
-`dm-lavish.sh poll` during operator approval—spawn one dedicated waiter subagent
-with `fork_turns="none"`. Give it the complete command and working directory. It
-must run the command synchronously, resume any yielded session until terminal,
-and return only the result or visible failure. The waiter completion reaches the
-parent mailbox; `wait_agent` then provides the native wake path. Keep this waiter
-read-only and single-purpose, and do not count it as a second owner of the task.
-Derive its identity with `bin/dm-thread-name.sh <id> review_waiter`; persist
-`waiter_thread_name`, `waiter_agent_id`, and `waiter_state=active` in task meta.
-Before spawning, reconcile the saved id and exact name with `list_agents`:
-reattach one exact match, block on multiple, and spawn only after proving zero.
-Reuse an idle waiter with `followup_task`. On terminal approval, session end, or
-visible waiter failure, clear `waiter_agent_id` and set `waiter_state=terminal`;
-never leave a stale waiter recorded as active.
+When an external wait must wake the dockmaster after the current turn—every
+task review and every ad-hoc diagnosis/report/plan Lavish surface included—spawn
+one dedicated low-cost waiter with `fork_turns="none"`,
+`model="gpt-5.6-terra"`, and `reasoning_effort="low"` when supported. Give it the
+complete command and working directory. It must run the command synchronously,
+resume any yielded session until terminal, and return only the result or visible
+failure. The waiter completion reaches the parent mailbox; `wait_agent` is the
+native wake path. Keep this waiter read-only and single-purpose.
+
+For a task-bound review, derive its identity with
+`bin/dm-thread-name.sh <id> review_waiter`. Before spawning, reconcile the saved
+id and exact name with `list_agents`: reattach one exact match, block on multiple,
+and spawn only after proving zero. Persist the name before spawning, then the
+returned identity:
+
+```
+bin/dm-task.sh waiter <id> prepare <thread-name>
+spawn_agent(...)
+bin/dm-task.sh waiter <id> active <thread-name> <agent-id>
+```
+
+When feedback returns, set it `idle`, relay feedback to the artifact/code owner,
+then re-arm that exact waiter with `followup_task`; do not consume another
+thread. On approval, session end, or visible waiter failure, run
+`bin/dm-task.sh waiter <id> terminal`. An active session or waiter makes
+`dm-worktree.sh remove` and `dm-task.sh archive` refuse.
+
+For an ad-hoc surface with no task, derive one stable thread name from the
+artifact label and apply the same exact-id/name reconciliation in the live
+session. If the loop must survive a restart, create a scout task so the waiter
+identity has a durable owner; do not invent a second state file.
+
+A root may poll directly only when it stays attached for the entire current
+turn and explicitly resumes the same yielded command session until exit. Root
+must never leave a raw/yielded `lavish-axi` or `dm-lavish.sh poll` behind and
+expect it to wake a later turn. Capacity or identity ambiguity is a visible
+blocker, never a reason to fall back to an unattended poll.
 
 ## External waits
 
@@ -122,6 +168,6 @@ needs a follow-up — `stuck-worker`'s completed-worker case.
 - One dispatch, one crewmate, one worktree. Do not spawn a second crewmate for a
   task that already has a live one.
 - Never end a turn having *started* work you then forget. Use `wait_agent` while
-  the goal remains active; durable task state is still the source of truth if
-  the session restarts. Keep the backlog current on dispatch, completion, and
-  decision.
+  the goal remains active under the productive long-wait policy above; durable
+  task state is still the source of truth if the session restarts. Keep the
+  backlog and pipeline gate state current on dispatch, completion, and decision.

@@ -91,7 +91,7 @@
       "id": "background-supervision",
       "requirement": "No polling daemon and no idle model turns",
       "claude": "completion notifications",
-      "codex": "mailbox completion and wait_agent",
+      "codex": "one-hour mailbox wait, then one reconciliation plus ready-gate scheduling before any later wait",
       "verification": "manual",
       "evidence": [".claude/skills/supervision/SKILL.md", ".agents/skills/supervision/SKILL.md", "tests/runtime-waiter-child.sh", "tests/runtime-waiter-live.md"]
     },
@@ -123,9 +123,9 @@
       "id": "change-review",
       "requirement": "Lavish approval and feedback loop before delivery",
       "claude": "background poll and worker message",
-      "codex": "no-fork waiter owns the poll; its mailbox completion wakes the parent for worker follow-up",
+      "codex": "low-cost no-fork waiter owns every unattended task/ad-hoc poll; mailbox completion wakes the parent and active task sessions block cleanup",
       "verification": "manual",
-      "evidence": ["bin/dm-lavish.sh", ".claude/skills/change-review/SKILL.md", ".agents/skills/change-review/SKILL.md", "tests/check-runtime-parity.js", "tests/runtime-waiter-live.md"]
+      "evidence": ["bin/dm-lavish.sh", "bin/dm-task.sh", "bin/dm-worktree.sh", ".claude/skills/change-review/SKILL.md", ".agents/skills/change-review/SKILL.md", "tests/check-runtime-parity.js", "tests/runtime-waiter-live.md"]
     },
     {
       "id": "pr-gates",
@@ -241,9 +241,9 @@
     },
     {
       "id": "right-sizing",
-      "requirement": "Preserve quality/performance without unsupported capability claims",
+      "requirement": "Capability-aware child model/effort selection without silent strongest-model inheritance",
       "claude": "per-Agent model/effort plus tier selection",
-      "codex": "tier, task shape, focused fork_turns=none context, and bounded fan-out; no per-spawn model claim",
+      "codex": "spawn_agent model/reasoning_effort mapping: terra low/medium for ordinary work and waiters, sol high for safety-critical work",
       "verification": "contract",
       "evidence": [".claude/skills/task-lifecycle/SKILL.md", ".agents/skills/task-lifecycle/SKILL.md", ".agents/skills/pr-workflow/SKILL.md", "tests/runtime-performance.sh"]
     },

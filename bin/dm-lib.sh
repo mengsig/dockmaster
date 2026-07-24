@@ -350,6 +350,57 @@ dm_meta_set() {
   dm_unlock "$f"
 }
 
+dm_meta_set_fields() {
+  # dm_meta_set_fields <id> <key> <value> [<key> <value> ...]
+  # One locked replacement keeps related state (gate/waiter identity) coherent.
+  [ "$#" -ge 3 ] && [ $((($# - 1) % 2)) -eq 0 ] \
+    || dm_die "dm_meta_set_fields requires <id> and one or more <key> <value> pairs"
+  local id="$1" f tmp drop key value i
+  local keys=() values=()
+  shift
+  dm_require_id "$id"
+  drop=":"
+  while [ "$#" -gt 0 ]; do
+    key="$1"; value="$2"; shift 2
+    dm_require_meta_key "$key"
+    dm_require_single_line "meta value for '$key'" "$value"
+    case "$key" in
+      kind) dm_require_task_kind "$value" ;;
+      mode) dm_require_task_mode "$value" ;;
+    esac
+    case "$drop" in *":$key:"*) dm_die "duplicate meta key in one update: '$key'" ;; esac
+    drop="${drop}${key}:"
+    keys+=("$key"); values+=("$value")
+  done
+
+  f="$(dm_meta_path "$id")"
+  dm_lock "$f"
+  dm_require_complete_task_locked "$id"
+  tmp="$(mktemp "$DM_TASKS/.meta.XXXXXX")" \
+    || { dm_unlock "$f"; dm_die "mktemp failed for meta '$id'"; }
+  awk -v drop="$drop" '
+    {
+      split($0, parts, "=")
+      if (index(drop, ":" parts[1] ":") == 0) print
+    }
+  ' "$f" > "$tmp" \
+    || { rm -f "$tmp"; dm_unlock "$f"; dm_die "failed reading meta for '$id'"; }
+  for ((i = 0; i < ${#keys[@]}; i++)); do
+    printf '%s=%s\n' "${keys[i]}" "${values[i]}" >> "$tmp" \
+      || { rm -f "$tmp"; dm_unlock "$f"; dm_die "failed writing meta for '$id'"; }
+  done
+  mv -f "$tmp" "$f" \
+    || { rm -f "$tmp"; dm_unlock "$f"; dm_die "failed committing meta for '$id'"; }
+  dm_unlock "$f"
+}
+
+# True while a task-bound browser review or its notification waiter is live.
+dm_review_active() {
+  case "$(dm_meta_get "$1" review_session_state)" in opening|active) return 0 ;; esac
+  case "$(dm_meta_get "$1" waiter_state)" in prepared|active) return 0 ;; esac
+  return 1
+}
+
 # --- status event log: append-only -------------------------------------------
 # A status line is a WAKE EVENT, not current-state truth. Current state is
 # reconciled on demand (dm-task.sh state), never stored as a mutable field.

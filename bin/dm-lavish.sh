@@ -8,9 +8,9 @@
 #
 # Commands:
 #   path <id>          print (and create the dir for) the artifact path
-#   open <id>          open/resume the lavish session for the artifact
+#   open <id>          open/resume and durably mark the review session active
 #   poll <id>          long-poll for operator feedback (caller owns wake delivery)
-#   end  <id>          end the lavish session
+#   end  <id>          end the session, then durably mark it terminal
 #
 # lavish-axi is an OPTIONAL review tool: it drives the interactive browser
 # surface. The artifact (change.html) is written by the crewmate regardless, so
@@ -35,7 +35,13 @@ case "${1:-}" in
   open)
     [ -f "$file" ] || dm_die "no artifact at $file (the crewmate writes it first)"
     if have_lavish; then
-      lavish-axi "$file"
+      started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      dm_meta_set_fields "$id" review_session_state opening review_session_started_at "$started_at"
+      if ! lavish-axi "$file"; then
+        dm_meta_set_fields "$id" review_session_state terminal review_session_started_at ""
+        dm_die "lavish-axi failed opening the review; opening reservation cleared"
+      fi
+      dm_meta_set_fields "$id" review_session_state active review_session_started_at "$started_at"
     else
       dm_warn "lavish-axi not installed; the interactive review surface is unavailable."
       dm_info "Open the review artifact directly in a browser: $file"
@@ -45,12 +51,20 @@ case "${1:-}" in
   poll)
     [ -f "$file" ] || dm_die "no artifact at $file"
     if have_lavish; then
+      [ "$(dm_meta_get "$id" review_session_state)" = "active" ] \
+        || dm_die "no active Lavish session recorded for '$id'; run dm-lavish.sh open first"
       lavish-axi poll "$file"
     else
       dm_warn "lavish-axi not installed; live feedback polling is unavailable."
       dm_info "Feedback should come directly in chat rather than through the lavish surface."
     fi
     ;;
-  end)  if have_lavish; then lavish-axi end "$file" 2>/dev/null || true; fi ;;
+  end)
+    if have_lavish; then
+      lavish-axi end "$file" \
+        || dm_die "lavish-axi failed ending the review; session remains active"
+    fi
+    dm_meta_set_fields "$id" review_session_state terminal review_session_started_at ""
+    ;;
   *)    echo "usage: dm-lavish.sh {path|open|poll|end} <id>" >&2; exit 2 ;;
 esac

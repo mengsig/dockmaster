@@ -14,15 +14,15 @@ const RUNTIMES = {
 const CAPABILITY_ASSERTIONS = {
   'guidance-and-triggers': ['AGENTS.md', /load the skill at its trigger/],
   'skill-discovery': ['tests/check-codex-skill-discovery.js', /structured skills block/],
-  'task-dispatch': ['.agents/skills/task-lifecycle/SKILL.md', /status queued[\s\S]*thread_name[\s\S]*agent_id[\s\S]*move <id> inflight/],
+  'task-dispatch': ['.agents/skills/task-lifecycle/SKILL.md', /status queued[\s\S]*model=<selected-model>[\s\S]*reasoning_effort=<selected-effort>[\s\S]*agent_id[\s\S]*move <id> inflight/],
   'worktree-isolation': ['bin/dm-worktree.sh', /unlanded work/],
   'nested-secondmate': ['bin/dm-secondmate.sh', /AMBIGUOUS-LAUNCH/],
   'followup-and-steering': ['.agents/skills/supervision/SKILL.md', /send_message[\s\S]*followup_task/],
-  'background-supervision': ['.agents/skills/supervision/SKILL.md', /wait_agent[\s\S]*native wake path/],
+  'background-supervision': ['.agents/skills/supervision/SKILL.md', /timeout_ms=3600000[\s\S]*ready-gates[\s\S]*Never issue an immediate identical empty re-wait/],
   recovery: ['.agents/skills/stuck-worker/SKILL.md', /Multiple exact-name matches are ambiguous/],
   'bounded-ci-wait': ['bin/dm-pr.sh', /await-checks/],
   'scheduled-fleet-sweep': ['.agents/skills/supervision/SKILL.md', /scheduled task[\s\S]*dm-pr\.sh sweep/],
-  'change-review': ['.agents/skills/change-review/SKILL.md', /waiter_agent_id[\s\S]*waiter_state=terminal/],
+  'change-review': ['.agents/skills/change-review/SKILL.md', /waiter_agent_id[\s\S]*dm-task\.sh waiter <id> terminal[\s\S]*refuse while/],
   'pr-gates': ['config/pr-pipeline.rigorous.json', /"verify"[\s\S]*"security"/],
   'post-pr-review': ['.agents/skills/post-pr-review/SKILL.md', /review comment|review feedback/],
   'github-tooling': ['bin/dm-pr.sh', /gh api/],
@@ -37,7 +37,7 @@ const CAPABILITY_ASSERTIONS = {
   'fleet-campaigns': ['.agents/skills/fleet-change/SKILL.md', /bounded waves[\s\S]*`inflight`/],
   'deterministic-workflow': ['workflows/pr-pipeline.js', /verify-findings[\s\S]*security/],
   'merge-safety': ['bin/dm-lib.sh', /dm_merge_gate/],
-  'right-sizing': ['.agents/skills/task-lifecycle/SKILL.md', /at most three[\s\S]*reserving three/],
+  'right-sizing': ['.agents/skills/task-lifecycle/SKILL.md', /gpt-5\.6-terra[\s\S]*gpt-5\.6-sol[\s\S]*reasoning_effort/],
   'plugins-and-fallbacks': ['README.md', /Every GitHub call the toolbelt makes runs\s+on plain `gh`/i],
   'project-safety-config': ['.codex/config.toml', /dm-command-guard\.sh/],
 }
@@ -150,14 +150,17 @@ function checkCodexLavishWake() {
   const review = read('.agents/skills/change-review/SKILL.md')
   const supervision = read('.agents/skills/supervision/SKILL.md')
   const requirements = [
-    [review, /spawn_agent\([\s\S]*fork_turns="none"\)/, 'no-fork waiter dispatch'],
+    [review, /spawn_agent\([\s\S]*fork_turns="none"[\s\S]*\)/, 'no-fork waiter dispatch'],
     [review, /bin\/dm-lavish\.sh poll <id>/, 'synchronous Lavish poll'],
     [review, /waiter must not return while the command is still live/, 'waiter session ownership'],
     [review, /completion is delivered to the parent mailbox/, 'parent mailbox completion'],
     [review, /Never[\s\S]{0,80}terminal session as a parent wake source/, 'raw-session prohibition'],
-    [review, /followup_task[\s\S]{0,80}instead of consuming another thread/, 'waiter reuse'],
+    [review, /same idle waiter[\s\S]{0,80}followup_task/, 'waiter reuse'],
+    [review, /dm-worktree\.sh remove[\s\S]{0,80}dm-task\.sh archive[\s\S]{0,80}refuse/, 'active-review cleanup guard'],
     [supervision, /exit does not\nproduce a parent-mailbox wake/, 'terminal non-notification'],
     [supervision, /wait_agent[\s\S]{0,80}native wake path/, 'native mailbox wait'],
+    [supervision, /ad-hoc diagnosis\/report\/plan Lavish surface/, 'ad-hoc Lavish coverage'],
+    [supervision, /must never leave a raw\/yielded[\s\S]{0,100}poll/, 'unattended root-poll prohibition'],
   ]
   for (const [content, pattern, label] of requirements) {
     if (!pattern.test(content)) fail(`Codex Lavish wake contract missing ${label}`)
@@ -166,6 +169,50 @@ function checkCodexLavishWake() {
     fail('Codex change review still treats a yielded command as the approval wake')
   }
   console.log('ok   Codex Lavish wait has a notification-producing parent wake')
+}
+
+function checkCodexAutonomyContracts() {
+  const lifecycle = read('.agents/skills/task-lifecycle/SKILL.md')
+  const workflow = read('.agents/skills/pr-workflow/SKILL.md')
+  const supervision = read('.agents/skills/supervision/SKILL.md')
+  const taskTool = read('bin/dm-task.sh')
+  const worktreeTool = read('bin/dm-worktree.sh')
+  const combinedDispatch = `${lifecycle}\n${workflow}`
+
+  if (/does not expose a per-spawn model|has no per-spawn model|no per-spawn model\/effort selector/.test(combinedDispatch)) {
+    fail('Codex adapter still denies available model/reasoning selectors')
+  }
+  const selectorRequirements = [
+    [/haiku` → `gpt-5\.6-terra`, `low`/, 'low-cost ordinary mapping'],
+    [/sonnet` → `gpt-5\.6-terra`, `medium`/, 'balanced ordinary mapping'],
+    [/opus` or safety-critical ownership → `gpt-5\.6-sol`, `high`/, 'safety-critical mapping'],
+    [/model=<selected-model>[\s\S]*reasoning_effort=<selected-effort>/, 'spawn selector invocation'],
+    [/model=inherited[\s\S]*reasoning_effort=inherited/, 'visible old-surface fallback'],
+  ]
+  for (const [pattern, label] of selectorRequirements) {
+    if (!pattern.test(lifecycle)) fail(`Codex right-sizing missing ${label}`)
+  }
+
+  if (!/wait_agent\(timeout_ms=3600000\)/.test(supervision)
+      || !/Never issue an immediate identical empty re-wait/.test(supervision)
+      || !/After a timeout:[\s\S]*ready-gates[\s\S]*backlog\.sh ready/.test(supervision)) {
+    fail('Codex supervision lacks productive bounded-wait scheduling')
+  }
+  if (!/overlap alone is not a dispatch blocker/.test(lifecycle)
+      || !/overlap does not stop branch-local implementation[\s\S]*cold review[\s\S]*branch-local tests/.test(workflow)
+      || !/rerun final review\/tests/.test(workflow)) {
+    fail('Codex overlap policy still serializes before the integration horizon')
+  }
+  if (!/approve\)[\s\S]*pipeline_state ready/.test(taskTool)
+      || !/ready-gates\)/.test(taskTool)
+      || !/valid_integration_gate/.test(taskTool)) {
+    fail('task tool lacks durable ready/integration-gate ownership')
+  }
+  if (!/dm_review_active/.test(worktreeTool)
+      || !/dm_review_active[\s\S]*refusing to archive/.test(taskTool)) {
+    fail('active Lavish state does not guard cleanup and archive')
+  }
+  console.log('ok   Codex waits, selectors, integration horizon, and durable gate/review guards')
 }
 
 function checkFleetOwnershipOrder() {
@@ -242,6 +289,7 @@ function main() {
   checkCodexThreadNames()
   checkCodexRigorousFallbacks()
   checkCodexLavishWake()
+  checkCodexAutonomyContracts()
   checkFleetOwnershipOrder()
   checkCapabilities()
   checkCodexConfig()

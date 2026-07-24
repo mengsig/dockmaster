@@ -38,8 +38,9 @@ Only when the operator opts into hands-off multi-agent orchestration on a host
 that injects the runner's workflow API; nothing auto-discovers it. It reads:
 
 - **`effort`** on `review` / `security` gates — a hint for a workflow host that
-  exposes per-worker effort. The Codex collaboration adapter does not claim this
-  selector; its agent count and prompt scope carry right-sizing instead.
+  exposes per-worker effort. Native Codex dispatch maps it through
+  `spawn_agent`'s advertised `reasoning_effort`; a compatible runner host still
+  owns how its injected worker API represents the same hint.
 - **`dimensions`** on a `review` gate (rigorous) — an array of lenses
   (`correctness`, `security`, `concurrency`, `portability`, `tests`); the runner
   fans out one fresh reviewer per lens with `parallel()` and merges their

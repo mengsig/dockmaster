@@ -40,9 +40,14 @@ against the enrolled repo — never build it outside the framework.
   waiter, recovery, and review/verification. Count live agents with
   `list_agents` before every spawn. If fewer slots remain, leave the item queued;
   never claim it is in flight before a runtime owner exists.
-- Serialize (queue as blocked) when it touches the same repo subsystem as live
-  work or depends on unlanded work. Record it durably:
+- Queue before dispatch only when the task cannot do useful branch-local work
+  without an unlanded dependency. Record that true dependency durably:
   `bin/dm-backlog.sh add <id> "<title>" --repo <repo> --status queued --blocked-by <other-id>`.
+- File or subsystem overlap alone is not a dispatch blocker. Safe implementation,
+  cold review, and branch-local tests may proceed in parallel. Record overlap
+  only when it reaches the integration horizon (rebase, final review/tests, PR
+  opening, or landing) with `bin/dm-task.sh gate ... block`; after the blocker
+  lands, rebase and rerun final review/tests on the combined state.
 - Before spawning a queued item, consult `bin/dm-backlog.sh ready` — it lists
   queued items whose blockers are all complete, judging each blocker by its real
   reconciled task state (`bin/dm-task.sh state`), not a hand-set backlog status.
@@ -70,7 +75,8 @@ such as `fix-a`, `fix.a`, and `fix_a` from colliding:
 thread_name="$(bin/dm-thread-name.sh <id> worker)"
 bin/dm-task.sh set <id> thread_name "$thread_name"
 spawn_agent(task_name=<thread_name>, message=<contents of data/<id>/brief.md>,
-            fork_turns="none")
+            fork_turns="none", model=<selected-model>,
+            reasoning_effort=<selected-effort>)
 ```
 
 **Right-size the dispatch — you decide the shape.** Use one bounded worker for
@@ -80,16 +86,23 @@ required because the generated brief already contains the full task, repository
 memory, isolation contract, and coding standards. Forking the parent history
 would duplicate context and make both runtimes slower and less predictable.
 
-The current Codex collaboration call does not expose a per-spawn model or
-reasoning-effort field. Do not claim or simulate one. Preserve right-sizing with
-task granularity, role-specific prompts, and the smallest sufficient number of
-agents; use a configured custom agent only when the active Codex surface actually
-offers that selector. Bias toward sufficient reasoning for safety-critical work.
-
 `dm-brief.sh` computes an advisory tier (`model_recommended`) from the task kind
 + title and surfaces it in the brief header; `dm-status` flags any `working`
-task with none recorded as UNSIZED. This surface has no per-spawn model selector,
-so use the recommendation to bias task granularity and reviewer count.
+task with none recorded as UNSIZED. Map that tier to the models and efforts the
+active `spawn_agent` declaration actually advertises:
+
+- `haiku` → `gpt-5.6-terra`, `low`
+- `sonnet` → `gpt-5.6-terra`, `medium`
+- `opus` or safety-critical ownership → `gpt-5.6-sol`, `high`
+- single-purpose approval/external waiters → `gpt-5.6-terra`, `low`
+
+Pass `model` and `reasoning_effort` with `fork_turns="none"` when those selector
+fields and values are supported. If a model slug differs, choose the advertised
+least-sufficient equivalent. If the active call exposes no selectors, omit them,
+record `model=inherited` and `reasoning_effort=inherited`, and report that
+fallback; never claim a selector was applied. Ordinary workers and waiters must
+not silently inherit the strongest model/high effort. Task shape and agent count
+still matter, but do not substitute them for available selectors.
 
 The crew already has a dedicated worktree from `dm-worktree.sh`, so pass its
 absolute path in the brief and require the worker to verify and enter it before
@@ -98,6 +111,8 @@ the durable id or thread label for it. Record both values for recovery:
 
 ```
 bin/dm-task.sh set <id> agent_id <returned-agent-id>
+bin/dm-task.sh set <id> model <selected-model|inherited>
+bin/dm-task.sh set <id> reasoning_effort <selected-effort|inherited>
 bin/dm-backlog.sh move <id> inflight
 ```
 
@@ -143,8 +158,10 @@ Every requested change goes through the same gated flow:
      mode isn't `local-only`, and a task on a pipeline/direct-pr repo inherits
      that repo's mode — so set it explicitly here (or classify the task local at
      dispatch with `dm-task.sh new --mode local-only`).
-   - **PR** → load `pr-workflow` and run the pipeline: coldstart review → fix +
-     tests → merge-gate review → fix + tests → PR creation.
+   - **PR** → load `pr-workflow`, choose the tier, and durably expose the first
+     ready gate before dispatching it:
+     `bin/dm-task.sh approve <id> <tier> <first-gate>`. Then run coldstart review
+     → fix + tests → merge-gate review → fix + tests → PR creation.
 4. **Merge gate.** After the PR is open, the operator either merges on GitHub
    (you watch for it and then sync + teardown) or you ask for approval and merge
    with `bin/dm-pr.sh merge`. Never merge red. Report the full `https://…` URL.
@@ -183,9 +200,10 @@ bin/dm-task.sh archive <id>    # move <id>.meta/.status + data/<id>/ to state/ar
 bin/dm-backlog.sh ready        # queued items whose blockers have now cleared
 ```
 Archival fails closed unless the task reconciles to terminal `done` with no live
-worktree, so run it only after landing is confirmed and teardown has removed the
-local copy. It keeps `list`/`status` from re-scanning an unbounded set of
-finished tasks; the records stay recoverable under `state/archive/`.
+worktree and no active Lavish session/waiter, so run it only after landing is
+confirmed, the feedback loop has ended, and teardown has removed the local copy.
+It keeps `list`/`status` from re-scanning an unbounded set of finished tasks; the
+records stay recoverable under `state/archive/`.
 
 ## 6. Scout → ship promotion
 
@@ -205,7 +223,9 @@ A reproduced bug becomes the regression test.
 
 State lives on disk, not in conversation memory. After any restart, reconcile
 each task with `bin/dm-task.sh state <id>` (authoritative current state) before
-acting. For every queued/in-flight item, read both `thread_name` and `agent_id`,
+acting. Run `bin/dm-task.sh ready-gates` before waiting: an approved ready gate
+without a runtime owner is unscheduled work, not healthy progress. For every
+queued/in-flight item, read both `thread_name` and `agent_id`,
 then `list_agents`. An exact live `agent_id` wins; otherwise match the exact
 persisted thread name. Exactly one match is reattached and its id persisted.
 Zero matches permits recovery only after the no-owner proof in `stuck-worker`;

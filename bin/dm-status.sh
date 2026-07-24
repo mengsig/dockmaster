@@ -93,20 +93,45 @@ if [ -n "$tasks" ]; then
   stuck_secs=$((DM_STUCK_AGE_HOURS * 3600))
   agerows=""
   unsized=""
+  pipeline_rows=""
+  review_rows=""
   while IFS= read -r tid; do
     # `state` exits non-zero on a worktree-only or malformed record (no kind);
     # tolerate that here (|| true) — such a record has no start time to age and
     # is skipped by the empty-state guard below. Without the guard, set -e +
     # pipefail would abort the whole snapshot on one odd record.
     short="$("$here/dm-task.sh" state "$tid" 2>/dev/null | sed 's/ · .*//; s/^state: //' || true)"
+    if dm_review_active "$tid"; then
+      review_rows+="  REVIEW-ACTIVE: task $tid cannot be cleaned up or archived until its Lavish session and waiter end"$'\n'
+    fi
     case "$short" in done|'') continue ;; esac
     # Advisory (#77): a live `working` task with no model tier recorded is an
     # unsized dispatch. Soft hint only — never fails or changes the exit code.
-    if [ "$short" = "working" ] && [ -z "$(dm_meta_get "$tid" model)" ]; then
+    task_model="$(dm_meta_get "$tid" model)"
+    if [ "$short" = "working" ] && [ -z "$task_model" ]; then
       rec="$(dm_meta_get "$tid" model_recommended)"
       [ -n "$rec" ] || rec="$(dm_recommended_model "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
       unsized+="  UNSIZED: task $tid is working with no model recorded (recommended: $rec)"$'\n'
+    elif [ "$short" = "working" ] && [ "$task_model" = "inherited" ]; then
+      unsized+="  UNPINNED: task $tid used inherited model/effort because its spawn surface exposed no selectors"$'\n'
     fi
+    pipeline_state="$(dm_meta_get "$tid" pipeline_state)"
+    pipeline_gate="$(dm_meta_get "$tid" pipeline_gate)"
+    case "$pipeline_state" in
+      ready)
+        approved_epoch="$(iso_to_epoch "$(dm_meta_get "$tid" approved_at)")"
+        if [ -n "$approved_epoch" ]; then ready_age="$(human_age $((now - approved_epoch)))"; else ready_age="age unknown"; fi
+        pipeline_rows+="  READY-GATE: task $tid approved $ready_age ago; '$pipeline_gate' has no runtime owner"$'\n'
+        ;;
+      running)
+        gate_epoch="$(iso_to_epoch "$(dm_meta_get "$tid" gate_started_at)")"
+        if [ -n "$gate_epoch" ]; then gate_age="$(human_age $((now - gate_epoch)))"; else gate_age="age unknown"; fi
+        pipeline_rows+="  GATE-RUNNING: task $tid '$pipeline_gate' for $gate_age"$'\n'
+        ;;
+      blocked)
+        pipeline_rows+="  INTEGRATION-BLOCKED: task $tid '$pipeline_gate' waits for $(dm_meta_get "$tid" pipeline_blocked_by): $(dm_meta_get "$tid" pipeline_blocked_reason)"$'\n'
+        ;;
+    esac
     created="$(dm_meta_get "$tid" created)"
     epoch="$(iso_to_epoch "$created")"
     if [ -n "$epoch" ]; then
@@ -125,6 +150,8 @@ if [ -n "$tasks" ]; then
     printf '%s' "$agerows" | column -t -s$'\t' 2>/dev/null || printf '%s' "$agerows"
   fi
   [ -n "$unsized" ] && printf '%s' "$unsized"
+  [ -n "$pipeline_rows" ] && printf '%s' "$pipeline_rows"
+  [ -n "$review_rows" ] && printf '%s' "$review_rows"
 else
   echo "  (no tasks)"
 fi

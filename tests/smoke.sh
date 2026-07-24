@@ -416,6 +416,32 @@ check "status shows managed repo"  'grep -q demo <<<"$STATUS"'
 check "status shows in-flight task" 'grep -q demo-1 <<<"$STATUS"'
 check "status shows task age"       'grep -E "age.*demo-1" <<<"$STATUS" >/dev/null'
 
+echo "== durable pipeline scheduling =="
+b dm-task.sh new gate-blocker --kind scout --repo demo >/dev/null
+b dm-task.sh new gate-ready --kind ship --repo demo --mode pipeline >/dev/null
+check "approval exposes the first gate as ready" \
+  'b dm-task.sh approve gate-ready default coldstart-review >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*default.*coldstart-review"'
+GATE_STATUS="$(b dm-status.sh)"
+check "status names approved-but-unscheduled work" 'grep -q "READY-GATE.*gate-ready.*coldstart-review" <<<"$GATE_STATUS"'
+check "gate start records owner horizon" \
+  'b dm-task.sh gate gate-ready start coldstart-review >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = running ] && [ -n "$(b dm-task.sh get gate-ready gate_started_at)" ]'
+check "completed gate can expose the next ready gate" \
+  'b dm-task.sh gate gate-ready complete coldstart-review branch-tests >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*branch-tests"'
+check "overlap cannot block a branch-local gate" \
+  '! b dm-task.sh gate gate-ready block branch-tests gate-blocker overlap >/dev/null 2>&1'
+check "integration blocker and reason are durable" \
+  'b dm-task.sh gate gate-ready block rebase gate-blocker "same deployment files" >/dev/null && [ "$(b dm-task.sh get gate-ready pipeline_state)" = blocked ] && [ "$(b dm-task.sh get gate-ready pipeline_blocked_by)" = gate-blocker ] && [ "$(b dm-task.sh get gate-ready pipeline_blocked_reason)" = "same deployment files" ]'
+check "integration gate cannot ready before blocker completes" \
+  '! b dm-task.sh gate gate-ready ready rebase >/dev/null 2>&1'
+mkdir -p "$DM_HOME/data/gate-blocker"
+printf '# done\n' > "$DM_HOME/data/gate-blocker/report.md"
+check "completed blocker releases integration gate explicitly" \
+  'b dm-task.sh gate gate-ready ready rebase >/dev/null && b dm-task.sh ready-gates | grep -q "gate-ready.*rebase"'
+GATE_STATUS="$(b dm-status.sh)"
+check "released integration work is visible as unscheduled" 'grep -q "READY-GATE.*gate-ready.*rebase" <<<"$GATE_STATUS"'
+check "generic set cannot forge pipeline state" \
+  '! b dm-task.sh set gate-ready pipeline_state running >/dev/null 2>&1'
+
 echo "== fast pipeline config =="
 FAST="$ROOT/config/pr-pipeline.fast.json"
 check "fast pipeline config exists"       '[ -f "$FAST" ]'
@@ -455,6 +481,42 @@ check "lavish open degrades (exit 0, tool absent)" 'lav open demo-1 >/dev/null 2
 check "lavish poll degrades (exit 0, tool absent)" 'lav poll demo-1 >/dev/null 2>&1'
 OPENOUT="$(lav open demo-1 2>&1)"
 check "lavish open names the artifact path"        'grep -qF "$ART" <<<"$OPENOUT"'
+
+echo "== Lavish session/waiter cleanup guard =="
+FAKE_LAVISH="$TMP/fake-lavish"; mkdir -p "$FAKE_LAVISH"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
+chmod +x "$FAKE_LAVISH/lavish-axi"
+axilav() { PATH="$FAKE_LAVISH:$PATH" "$ROOT/bin/dm-lavish.sh" "$@"; }
+WAITER_THREAD="$(b dm-thread-name.sh demo-1 review_waiter)"
+check "waiter name is durable before spawn" \
+  'b dm-task.sh waiter demo-1 prepare "$WAITER_THREAD" >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_state)" = prepared ]'
+check "waiter identity activates atomically" \
+  'b dm-task.sh waiter demo-1 active "$WAITER_THREAD" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_thread_name)" = "$WAITER_THREAD" ] && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = active ]'
+check "active waiter prevents worktree cleanup even with force" \
+  'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
+check "idle waiter keeps exact identity for reuse" \
+  'b dm-task.sh waiter demo-1 idle >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ]'
+check "opening Lavish records active session" \
+  'axilav open demo-1 >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = active ] && [ -n "$(b dm-task.sh get demo-1 review_session_started_at)" ]'
+check "poll requires and accepts active session" 'axilav poll demo-1 >/dev/null'
+check "active session prevents worktree cleanup" \
+  'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
+check "ending session and waiter clears durable identities" \
+  'axilav end demo-1 >/dev/null && b dm-task.sh waiter demo-1 terminal >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ] && [ -z "$(b dm-task.sh get demo-1 waiter_agent_id)" ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = terminal ]'
+check "poll refuses after session end" '! axilav poll demo-1 >/dev/null 2>&1'
+printf '#!/usr/bin/env bash\nexit 9\n' > "$FAKE_LAVISH/lavish-axi"
+check "failed open clears its cleanup reservation visibly" \
+  '! axilav open demo-1 >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ]'
+b dm-task.sh new review-archive --kind scout --repo demo >/dev/null
+mkdir -p "$DM_HOME/data/review-archive"
+printf '# report\n' > "$DM_HOME/data/review-archive/report.md"
+ARCHIVE_WAITER="$(b dm-thread-name.sh review-archive review_waiter)"
+b dm-task.sh waiter review-archive prepare "$ARCHIVE_WAITER" >/dev/null
+b dm-task.sh waiter review-archive active "$ARCHIVE_WAITER" /root/archive-waiter >/dev/null
+check "active waiter prevents otherwise-valid archive" \
+  'ERR="$(b dm-task.sh archive review-archive 2>&1 || true)"; grep -q "Lavish review session or notification waiter is active" <<<"$ERR" && [ -f "$DM_HOME/state/tasks/review-archive.meta" ]'
+check "terminal waiter permits archive" \
+  'b dm-task.sh waiter review-archive terminal >/dev/null && b dm-task.sh archive review-archive >/dev/null && [ -f "$DM_HOME/state/archive/review-archive.meta" ]'
 
 echo "== state reconciliation =="
 check "state pending pre-work" 'OUT="$(b dm-task.sh state demo-1)"; grep -q pending <<<"$OUT"'

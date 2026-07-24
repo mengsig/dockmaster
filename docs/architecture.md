@@ -20,19 +20,19 @@ preserving one lifecycle and one toolbelt.
 | --- | --- | --- | --- |
 | liaison | `AGENTS.md` | `CLAUDE.md` includes it | Codex discovers it directly |
 | per-task worker | one task / one worktree | background `Agent` | `spawn_agent`, `fork_turns="none"` |
-| supervision | durable state + no daemon | completion notification, task controls | mailbox, `wait_agent`, collaboration controls |
+| supervision | durable state + no daemon | completion notification, task controls | long mailbox wait, then ready-gate scheduling |
 | follow-up / steering | same worker identity | `SendMessage` | `send_message` / `followup_task` |
 | external wait | bounded command + native wake | `Monitor` or schedule | attached command, waiter subagent, or scheduled task |
 | nested domain crew | root → secondmate → worker | native nested agents | `agents.max_depth=2`, six-thread cap |
 | worktree isolation | `bin/dm-worktree.sh` | worktree-aware agent | brief-pinned existing worktree |
-| durable backlog | `state/backlog.json` + rendered markdown | task list mirror | thread list mirror |
+| durable backlog | `state/backlog.json` + task-owned pipeline gates | task list mirror | thread list mirror + ready-gate recovery |
 | project registry | `state/repos.json` + clones under `repos/` | shared | shared |
 | global memory | `state/operator.md`, `state/learnings.md`, optional runtime memory | shared | shared |
 | per-repo memory | committed `.dm-knowledge/` notes + private `.dm/` stores | shared | shared |
 | delivery modes | modular **PR pipeline** (ordered gates) per repo | shared | shared |
 | no-mistakes gate | review/test/security gates + optional runner | Claude reviewers | Codex fresh subagents; focused fallback if optional review skill absent |
-| right-sizing | task shape, review tier, focused context | per-agent model/effort where available | agent count and prompt scope; no unproved per-spawn selector |
-| review surface | lavish-axi | background poll notification | no-fork waiter completion notification |
+| right-sizing | task shape, review tier, focused context | per-agent model/effort where available | capability-aware spawn model/effort mapping |
+| review surface | lavish-axi | background poll notification | low-cost waiter completion; active task review blocks cleanup |
 | self-update / fleet sync | guarded fast-forward via `bin/` | shared | shared |
 | stacked sub-PRs | recorded parent base + guarded PR open | shared | shared |
 
