@@ -42,10 +42,11 @@ reads:
 It also honors the `pr` gate's **`method`** at the merge-authority step, by
 passing it to `bin/dm-pr.sh merge --method <method>`.
 
-Approval stores the selected gate array and its hash, plus immutable repo and
-base-ref/SHA bindings, in task meta. Every later transition reads that snapshot,
-never the live config. PR open and merge additionally require GitHub's live
-base/HEAD to match the latest completed proof.
+Approval stores the selected gate array and its hash, plus immutable repo,
+mode, and base-ref/SHA bindings, in task meta. Every later transition reads
+that snapshot, never the live config. Bound mode changes and local landing are
+refused. PR open and merge additionally require GitHub's live base/HEAD to
+match the latest completed proof.
 
 The binding is the opt-in boundary. Tasks without it retain the established
 Claude/legacy PR and security-scan lifecycle, with no added command, gate,
@@ -82,9 +83,10 @@ that injects the runner's workflow API; nothing auto-discovers it. It reads:
   `method: "auto"` below) and only reviewing on a hit, so no caller wiring is
   required. A caller-declared `securitySurface` is an override: if set, the
   runner reviews directly without re-scanning. **`method: "auto"`** (rigorous)
-  runs `bin/dm-pr.sh security-scan` and performs a focused general security
-  review only on a hit. The runner consumes a structured result: any finding or
-  missing capability fails the gate; no-surface is an explicit skip.
+  runs `bin/dm-pr.sh security-scan` for routing and always performs a focused
+  general security review. A clear heuristic scan is not proof. PASS is
+  recorded for the exact diff with `bin/dm-pr.sh security-review <id> pass`;
+  any finding or missing capability fails the gate.
 - **`method`** on the `pr` gate — surfaced in the runner's result so the
   operator-mediated merge step can honor it (the runner never merges).
 

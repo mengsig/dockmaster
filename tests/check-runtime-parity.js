@@ -141,7 +141,7 @@ function checkCodexRigorousFallbacks() {
   for (const [pattern, label] of requirements) {
     if (!pattern.test(workflow)) fail(`Codex rigorous workflow missing ${label}`)
   }
-  if (/verify skill|security-review|Workflow tool|\bAgent\b/.test(workflow)) {
+  if (/verify skill|security-review skill|Workflow tool|\bAgent\b/.test(workflow)) {
     fail('Codex rigorous workflow contains unavailable runtime vocabulary')
   }
   console.log('ok   Codex rigorous gates have executable fail-closed fallbacks')

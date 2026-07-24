@@ -389,6 +389,11 @@ dm_meta_set() {
     dm_unlock "$f"
     dm_die "task repo is immutable after creation"
   fi
+  if [ "$2" = "mode" ] && [ "$(dm_meta_get "$1" mode)" != "$3" ] \
+    && [ -n "$(dm_meta_get "$1" pipeline_repo)" ]; then
+    dm_unlock "$f"
+    dm_die "task mode is immutable after pipeline approval"
+  fi
   tmp="$(mktemp "$DM_TASKS/.meta.XXXXXX")" || { dm_unlock "$f"; dm_die "mktemp failed for meta '$1'"; }
   # Build into $tmp; on any write failure remove the temp (no orphan) and fail
   # loudly. `|| true` on the read keeps a missing file from tripping set -e.
@@ -433,6 +438,10 @@ dm_meta_set_fields_locked() {
     key="$1"; value="$2"; shift 2
     if [ "$key" = "repo" ] && [ "$(dm_meta_get "$id" repo)" != "$value" ]; then
       dm_die "task repo is immutable after creation"
+    fi
+    if [ "$key" = "mode" ] && [ "$(dm_meta_get "$id" mode)" != "$value" ] \
+      && [ -n "$(dm_meta_get "$id" pipeline_repo)" ]; then
+      dm_die "task mode is immutable after pipeline approval"
     fi
     drop="${drop}${key}:"
     keys+=("$key"); values+=("$value")

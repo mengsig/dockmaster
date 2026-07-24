@@ -82,8 +82,10 @@ The rigorous gate order is
 → pr`. The behavioral `verify` gate drives the changed behavior end to end and
 reports what was actually exercised — not just that tests pass; it is skippable
 only when the diff has no runtime surface (docs/config-only). `security` is
-auto-triggered (`bin/dm-pr.sh security-scan`, then a focused general security
-reviewer only on a hit, else an explicit skip), and `pr` opens the PR. Waiting
+mandatory: `bin/dm-pr.sh security-scan` still routes attention, then a focused
+general security reviewer must return PASS and
+`bin/dm-pr.sh security-review <id> pass` records exact-SHA evidence even when
+the heuristic scan is clear. `pr` opens the PR. Waiting
 for CI is **not** a pipeline gate — it runs in the operator-mediated merge tail
 after the PR opens (see "Merge authority" below). The never-merge-red merge gate
 and the lavish-approval-first ordering are unchanged across all three tiers.
@@ -136,11 +138,12 @@ mechanical boundary is immutable plan/order, exact SHAs, and sanctioned signals.
 Any commit after completion rewinds to the first snapshotted gate and clears
 downstream proofs.
 
-Approval also binds the task's immutable repo and reviewed base ref/SHA. PR open
-cannot retarget that base. GitHub's live base and head must match the latest
-completed proof at PR creation and merge; a base advance enters
-rebase → merge-gate review → final tests recovery, while a new branch commit
-rewinds to the canonical first gate.
+Approval also binds the task's immutable repo, delivery mode, and reviewed base
+ref/SHA. The mode cannot change afterward and local landing refuses a bound
+pipeline task. PR open cannot retarget that base. GitHub's live base and head
+must match the latest completed proof at PR creation and merge; a base advance
+enters rebase → merge-gate review → final tests recovery, while a new branch
+commit rewinds to the canonical first gate.
 
 These proof checks activate only after `dm-task.sh approve` records the immutable
 pipeline binding. Legacy tasks without that binding keep the established Claude
@@ -195,14 +198,17 @@ worktree/branch from meta, communicates only through the task record, and
   browser for a web flow, otherwise the narrowest executable CLI/API path. It
   returns `PASS` with observed evidence or `FAIL` with concrete findings. A
   missing browser/runtime/capability is `FAIL`, never a skip.
-- **security** — optional or auto. Run `bin/dm-pr.sh security-scan <id>` first.
-  On a hit, spawn a fresh no-fork general reviewer using a label from
+- **security** — optional for fast/default; mandatory for rigorous. Run
+  `bin/dm-pr.sh security-scan <id>` first. On a fast/default hit, or always for
+  rigorous, spawn a fresh no-fork general reviewer using a label from
   `bin/dm-thread-name.sh <id> security` with this exact scope: inspect only
   `<base>...HEAD` and changed files for auth/authz, input validation/injection,
   secret exposure, crypto misuse, unsafe external I/O, and privilege/data-loss
   paths; do not edit; return `PASS` or ranked concrete findings with file/line
-  evidence. Any finding or unavailable review capability fails the gate. Exit 1
-  from the scan means an explicit no-security-surface skip, not a pass claim.
+  evidence. Any finding or unavailable review capability fails the gate. After
+  PASS, run `bin/dm-pr.sh security-review <id> pass`; the security gate requires
+  that sanctioned evidence for the exact base/HEAD. Exit 1 from the scan permits
+  an explicit no-security-surface skip only outside rigorous; it is never PASS.
 - **pr** — open the PR (below).
 
 Adding a gate: document it here with the same contract (single responsibility,
@@ -321,6 +327,13 @@ it can never be used to skip real checks that just haven't registered yet.
 checks/reviews not satisfied) all refuse outright — resolve the conflict/draft/
 requirement, then retry. `unknown` does not refuse (GitHub often hasn't
 computed it yet on first fetch); `gh pr merge`'s own failure is the backstop.
+
+**GitHub has no atomic base-SHA precondition.** The toolbelt re-reads and
+re-fetches the live base ref/SHA at the last possible point, and a `never`
+merge-base exception runs its full authority gate both before checks and again
+immediately before mutation. Any observed retarget or base advance refuses.
+Only head SHA is an atomic merge precondition; a residual instant remains after
+the final base read and before GitHub accepts the mutation.
 
 **Rebase a behind-main branch before merging.** If the branch has drifted
 behind the base, rebase it first so CI validates the actual combined state,

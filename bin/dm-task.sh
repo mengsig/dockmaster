@@ -171,6 +171,7 @@ pipeline_clear_proofs_locked() {
   dm_meta_set_fields_locked "$1" \
     tests "" tests_base_sha "" tests_head_sha "" \
     security_scan "" security_scan_base_sha "" security_scan_head_sha "" \
+    security_review "" security_review_base_sha "" security_review_head_sha "" \
     pr_head "" pr_base_ref "" pr_base_sha ""
 }
 
@@ -280,7 +281,7 @@ pipeline_check_merge_locked() {
 
 pipeline_validate_evidence_locked() {
   local id="$1" gate="$2" base_sha="$3" head_sha="$4" supplied="$5"
-  local kind result scan url pr_head pr_base_ref pr_base_sha
+  local kind result scan review tier url pr_head pr_base_ref pr_base_sha
   case "$gate" in
     rebase) kind=rebase ;;
     merge-gate-review) kind=review ;;
@@ -302,9 +303,16 @@ pipeline_validate_evidence_locked() {
       [ "$(dm_meta_get "$id" security_scan_base_sha)" = "$base_sha" ] \
         && [ "$(dm_meta_get "$id" security_scan_head_sha)" = "$head_sha" ] \
         || dm_die "cannot complete '$gate': security scan is stale for the current base/HEAD"
-      if [ "$scan" = "hit" ]; then
+      tier="$(dm_meta_get "$id" pipeline_tier)"
+      if [ "$scan" = "hit" ] || [ "$tier" = "rigorous" ]; then
         [ "$supplied" = "security-review-pass" ] \
-          || dm_die "cannot complete '$gate': scan hit requires the scheduler assertion 'security-review-pass'"
+          || dm_die "cannot complete '$gate': this pipeline requires 'security-review-pass'"
+        review="$(dm_meta_get "$id" security_review)"
+        [ "$review" = "pass" ] \
+          || dm_die "cannot complete '$gate': no sanctioned focused security-review PASS evidence"
+        [ "$(dm_meta_get "$id" security_review_base_sha)" = "$base_sha" ] \
+          && [ "$(dm_meta_get "$id" security_review_head_sha)" = "$head_sha" ] \
+          || dm_die "cannot complete '$gate': security review is stale for the current base/HEAD"
       fi
       PIPELINE_VALIDATED_EVIDENCE="security:$scan:$supplied"
       ;;
@@ -378,8 +386,8 @@ case "$cmd" in
         dm_die "'$key' is pipeline state maintained by dm-task.sh approve/gate; it must not be set by hand" ;;
       tests|tests_base_sha|tests_head_sha)
         dm_die "'$key' is test evidence maintained by dm-test.sh; it must not be set by hand" ;;
-      security_scan|security_scan_base_sha|security_scan_head_sha)
-        dm_die "'$key' is security evidence maintained by dm-pr.sh security-scan; it must not be set by hand" ;;
+      security_scan|security_scan_base_sha|security_scan_head_sha|security_review|security_review_base_sha|security_review_head_sha)
+        dm_die "'$key' is security evidence maintained by dm-pr.sh security-scan/security-review; it must not be set by hand" ;;
       waiter_thread_name|waiter_agent_id|waiter_state|waiter_generation|waiter_epoch)
         dm_die "'$key' is review-waiter state maintained by dm-task.sh waiter; it must not be set by hand" ;;
       review_session_state|review_session_started_at|review_session_generation|review_session_epoch|review_session_mode)

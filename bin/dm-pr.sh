@@ -14,8 +14,8 @@
 # only carve-out is the operator-granted merge_allowed_bases list: a `never`
 # repo's PR proceeds iff its LIVE GitHub base branch exactly matches a listed
 # branch that is neither the LIVE default branch nor the registry default
-# (dm_merge_base_exception, fail closed on anything unverifiable), re-verified
-# immediately before the merge mutation (TOCTOU guard against a retarget);
+# (dm_merge_base_exception, fail closed on anything unverifiable), with live
+# ref/SHA re-verified immediately before mutation (observable retarget/advance);
 # a default-branch PR stays impossible to merge. The
 # operator-approval part of `ask` (vs. standing `yolo`) stays the dockmaster's
 # duty one layer up, per AGENTS.md; this script enforces the never-stop and the
@@ -40,6 +40,8 @@
 #                                 (a `none` rollup keeps polling, not terminal,
 #                                 when the repo has CI configured)
 #   merge <id> [--method squash|merge|rebase] [--delete-branch]
+#   security-scan <id>            advisory exact-diff routing signal
+#   security-review <id> pass     record focused exact-diff review PASS
 #   sweep                         read-only fleet sweep: every task with an open
 #                                 PR, its CI rollup + whether a review requests
 #                                 changes (offline under DM_NO_FETCH: cached only)
@@ -151,16 +153,18 @@ task_has_ci() {
 # atomically (locked temp+mv in dm-repo.sh), so each read sees a complete
 # snapshot, and reading the default LAST means a concurrent default_branch
 # change is judged by the freshest value. Prints the verified base branch on
-# allow; dies on everything else.
+# allow with its observed SHA; dies on everything else.
 verify_never_exception() {
-  local repo="$1" slug="$2" n="$3" url="$4" json base_ref live_default reg_default allowed
+  local repo="$1" slug="$2" n="$3" url="$4" json base_ref base_sha live_default reg_default allowed
   allowed="$(dm_merge_allowed_bases "$repo")"
   reg_default="$(dm_registry_get "$repo" default_branch)"
   json="$(gh api "repos/$slug/pulls/$n" 2>/dev/null)" \
     || dm_die "REFUSED: repo $repo is merge_authority=never and the PR's base branch could not be verified on GitHub — refusing (fail closed): $url"
   base_ref="$(printf '%s' "$json" | jq -r '.base.ref // empty' 2>/dev/null)" || base_ref=""
+  base_sha="$(printf '%s' "$json" | jq -r '.base.sha // empty' 2>/dev/null)" || base_sha=""
   live_default="$(printf '%s' "$json" | jq -r '.base.repo.default_branch // empty' 2>/dev/null)" || live_default=""
   [ -n "$base_ref" ] || dm_die "REFUSED: repo $repo is merge_authority=never and the PR's base branch could not be verified on GitHub — refusing (fail closed): $url"
+  is_git_oid "$base_sha" || dm_die "REFUSED: repo $repo is merge_authority=never and the PR's base SHA could not be verified on GitHub — refusing (fail closed): $url"
   [ -n "$live_default" ] || dm_die "REFUSED: repo $repo is merge_authority=never and the base repository's LIVE default branch could not be verified on GitHub — refusing (fail closed): $url"
   case "$(dm_merge_base_exception never "$base_ref" "$live_default" "$allowed")" in
     allow) : ;;
@@ -170,7 +174,7 @@ verify_never_exception() {
     allow) : ;;
     *) dm_die "REFUSED: repo $repo is merge_authority=never and PR base '$base_ref' matches the registry default_branch ('$reg_default') or the registry default is unset — the default branch is never mergeable under never; the operator merges it on GitHub" ;;
   esac
-  printf '%s\n' "$base_ref"
+  printf '%s\t%s\n' "$base_ref" "$base_sha"
 }
 
 # Combine two CI rollups, worst-wins, in precedence:
@@ -724,7 +728,7 @@ case "$cmd" in
     # keeps today's unconditional, offline refusal.
     repo="$(dm_meta_get "$id" repo)"
     [ -n "$repo" ] || dm_die "no such task: $id"
-    never_exception=0; exception_base=""
+    never_exception=0; exception_identity=""; exception_base=""; exception_base_sha=""
     authority="$(dm_merge_authority "$repo")"
     case "$(dm_merge_authority_gate "$authority")" in
       allow) : ;;
@@ -739,7 +743,9 @@ case "$cmd" in
         url="$(dm_meta_get "$id" pr)"; [ -n "$url" ] || dm_die "no PR recorded for $id"
         n="$(pr_number_from_url "$url")"
         slug="$(repo_slug "$repo")"
-        exception_base="$(verify_never_exception "$repo" "$slug" "$n" "$url")"
+        exception_identity="$(verify_never_exception "$repo" "$slug" "$n" "$url")"
+        exception_base="${exception_identity%%$'\t'*}"
+        exception_base_sha="${exception_identity#*$'\t'}"
         dm_info "merge-authority exception: repo $repo is merge_authority=never, but PR base '$exception_base' is an operator-granted merge base (merge_allowed_bases); proceeding to the normal merge gates"
         never_exception=1
         ;;
@@ -824,19 +830,6 @@ case "$cmd" in
       pipeline_check_live "$id" merge "$repo" "$slug" \
         "$base_ref" "$checked_base" "$checked_head"
     fi
-    if [ "$never_exception" -eq 1 ]; then
-      # TOCTOU guard: the base was verified before the CI/mergeable gates above,
-      # but GitHub merges into whatever the base is AT MERGE TIME and
-      # GitHub has no base-pinned merge — a retarget in that window would land
-      # into the new base. Minimize the window: re-run the FULL exception
-      # decision (fresh list, fresh live base + defaults, fail closed on any
-      # fetch failure) immediately before the mutation, and refuse if the base
-      # changed at all since the first check, even to another allowed branch.
-      # The residual base-retarget instant is inherent to GitHub's API; the head
-      # race is closed separately by the SHA-conditioned merge mutation.
-      recheck_base="$(verify_never_exception "$repo" "$slug" "$n" "$url")"
-      [ "$recheck_base" = "$exception_base" ] || dm_die "REFUSED: PR base changed from '$exception_base' to '$recheck_base' between verification and merge (retargeted on GitHub); refusing: $url"
-    fi
     if [ -n "$pipeline_repo" ]; then
       recheck_out=""
       recheck_out="$("$0" check "$id" --snapshot 2>&1)" \
@@ -856,8 +849,22 @@ case "$cmd" in
       || dm_die "REFUSED: could not re-verify matching local and remote heads immediately before merge: $url"
     [ "$expected_head" = "$checked_head" ] \
       || dm_die "REFUSED: expected task/remote head changed from $checked_head to $expected_head before merge: $url"
-    # GitHub compares sha and merges atomically; a push in the final instant
-    # returns conflict instead of merging unchecked code.
+    if [ "$never_exception" -eq 1 ]; then
+      # GitHub exposes no base-SHA merge precondition. Re-run the full exception
+      # gate after every other read, compare both ref and SHA with the first
+      # authority check and the merge snapshot, then mutate immediately. Any
+      # observable retarget/advance refuses; only the API's residual instant
+      # remains. The head race is separately closed by the merge request's SHA.
+      recheck_identity="$(verify_never_exception "$repo" "$slug" "$n" "$url")"
+      recheck_base="${recheck_identity%%$'\t'*}"
+      recheck_base_sha="${recheck_identity#*$'\t'}"
+      [ "$recheck_identity" = "$exception_identity" ] \
+        || dm_die "REFUSED: PR base changed from '$exception_base@$exception_base_sha' to '$recheck_base@$recheck_base_sha' between authority verification and merge; refusing: $url"
+      [ "$recheck_base" = "$base_ref" ] && [ "$recheck_base_sha" = "$checked_base" ] \
+        || dm_die "REFUSED: final authority base '$recheck_base@$recheck_base_sha' does not match checked PR base '$base_ref@$checked_base'; refusing: $url"
+    fi
+    # GitHub conditions the mutation only on head SHA. A head push in the final
+    # instant conflicts; base changes have the documented residual API instant.
     atomic_merge_pull "$slug" "$n" "$checked_head" "$method"
     dm_meta_set "$id" pr_state MERGED
     dm_status_append "$id" merged "$url"
@@ -896,8 +903,12 @@ case "$cmd" in
     grep -iEq -- 'parse|deserial|unmarshal|unpickle|yaml\.load|json\.load|eval\(|exec\(|subprocess|os\.system|shell=true|system\(' <<<"$diff" && hits="$hits input-parsing" || true
     grep -iEq -- 'https?://|fetch\(|socket|urlopen|requests\.|\bcurl\b|\bsql\b|execute\(|redirect|open\(' <<<"$diff" && hits="$hits external-io" || true
     if [ -n "$(dm_meta_get "$id" pipeline_repo)" ]; then
-      grep -iEq -- '(^|[^[:alnum:]_])((rm|unlink|rmdir|truncate|chmod|chown)(Sync)?|os\.(remove|unlink|rmdir|truncate|chmod|chown)|shutil\.rmtree|fs\.(rm|unlink|rmdir|truncate|chmod|chown)|remove_(file|dir|all))([^[:alnum:]_]|$)' <<<"$diff" \
-        && hits="$hits destructive/privilege" || true
+      destructive=0
+      grep -iEq -- '(^|[^[:alnum:]_.])((rm|unlink|rmdir|truncate|chmod|chown)(Sync)?)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(os\.(remove(all)?|unlink|rmdir|truncate|chmod|chown)|shutil\.rmtree|fs\.(rm|unlink|rmdir|truncate|chmod|chown)|std::fs::remove_(file|dir|dir_all)|files\.delete(ifexists)?)([^[:alnum:]_]|$)' <<<"$diff" \
+        && destructive=1 || true
+      grep -iEq -- '(^|[^[:alnum:]_-])remove-item([^[:alnum:]_-]|$)|(^|[+;&|[:space:]])git[[:space:]]+(reset[[:space:]]+--hard|clean[[:space:]]+-fdx)([^[:alnum:]_-]|$)|(^|[^[:alnum:]_])(drop[[:space:]]+(table|database|schema)|truncate([[:space:]]+table)?|delete[[:space:]]+from)([^[:alnum:]_]|$)' <<<"$diff" \
+        && destructive=1 || true
+      [ "$destructive" -eq 0 ] || hits="$hits destructive/privilege"
     fi
     hits="${hits# }"
     if [ -n "$hits" ]; then
@@ -910,6 +921,27 @@ case "$cmd" in
       security_scan_base_sha "$base_sha" security_scan_head_sha "$head_sha"
     dm_info "security-scan: no security-surface signals — a security-review skip is defensible (record it)"
     exit 1
+    ;;
+
+  security-review)
+    id="${1:-}"; result="${2:-}"
+    [ "$#" -eq 2 ] && [ -n "$id" ] \
+      || dm_die "usage: dm-pr.sh security-review <id> pass"
+    dm_require_id "$id"
+    [ "$result" = "pass" ] || dm_die "security-review result must be pass"
+    [ -n "$(dm_meta_get "$id" pipeline_repo)" ] \
+      || dm_die "security-review evidence is only recorded for an approved opt-in pipeline"
+    snapshot="$(dm_task_git_snapshot "$id")"
+    base_sha="${snapshot%%$'\t'*}"; head_sha="${snapshot#*$'\t'}"
+    case "$(dm_meta_get "$id" security_scan)" in clear|hit) ;; *)
+      dm_die "run dm-pr.sh security-scan before recording focused security-review evidence" ;;
+    esac
+    [ "$(dm_meta_get "$id" security_scan_base_sha)" = "$base_sha" ] \
+      && [ "$(dm_meta_get "$id" security_scan_head_sha)" = "$head_sha" ] \
+      || dm_die "security scan is stale; rerun it before the focused security review"
+    dm_meta_set_fields "$id" security_review pass \
+      security_review_base_sha "$base_sha" security_review_head_sha "$head_sha"
+    dm_info "security-review: PASS recorded for $base_sha...$head_sha"
     ;;
 
   sweep)

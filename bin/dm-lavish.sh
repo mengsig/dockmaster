@@ -8,9 +8,9 @@
 #
 # Commands:
 #   path <id>          print (and create the dir for) the artifact path
-#   open <id>          reserve/open a review and print its epoch
-#   poll <id> <epoch>  long-poll for feedback from that exact session
-#   end  <id> <epoch>  end that exact session
+#   open <id>          open a review; opt-in pipelines print a session epoch
+#   poll <id> [epoch]  legacy poll, or exact opt-in pipeline session poll
+#   end  <id> [epoch]  legacy end, or exact opt-in pipeline session end
 #
 # lavish-axi is an OPTIONAL review tool: it drives the interactive browser
 # surface. The artifact (change.html) is written by the crewmate regardless, so
@@ -28,6 +28,7 @@ dir="$DM_DATA/$id/lavish"
 file="$dir/change.html"
 
 have_lavish() { command -v lavish-axi >/dev/null 2>&1; }
+pipeline_review_session() { [ -n "$(dm_meta_get "$id" pipeline_repo)" ]; }
 next_session_generation() {
   case "${1:-}" in ''|*[!0-9]*) printf '1\n' ;; *) printf '%s\n' "$(( $1 + 1 ))" ;; esac
 }
@@ -37,19 +38,41 @@ session_cas_locked() {
     && [ "$(dm_meta_get "$id" review_session_epoch)" = "$epoch" ]
 }
 lavish_end_bounded() {
-  local pid spins=0
+  local pid spins rc
   lavish-axi end "$file" >/dev/null 2>&1 &
   pid=$!
+  spins=0
   while kill -0 "$pid" 2>/dev/null && [ "$spins" -lt 50 ]; do
     sleep 0.1
     spins=$((spins + 1))
   done
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -TERM "$pid" 2>/dev/null || true
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rc=0
+    wait "$pid" || rc=$?
+    return "$rc"
+  fi
+  kill -TERM "$pid" 2>/dev/null || true
+  spins=0
+  while kill -0 "$pid" 2>/dev/null && [ "$spins" -lt 20 ]; do
+    sleep 0.1
+    spins=$((spins + 1))
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
     wait "$pid" 2>/dev/null || true
     return 124
   fi
-  wait "$pid"
+  kill -KILL "$pid" 2>/dev/null || true
+  spins=0
+  while kill -0 "$pid" 2>/dev/null && [ "$spins" -lt 20 ]; do
+    sleep 0.1
+    spins=$((spins + 1))
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    return 124
+  fi
+  dm_warn "lavish-axi end did not terminate after TERM and KILL; cleanup remains uncertain"
+  return 125
 }
 finish_cleanup() {
   local meta="$1" epoch="$2" note="$3"
@@ -78,6 +101,38 @@ quarantine_feedback() {
   printf '%s\n' "$feedback" >"$quarantine"
   printf '%s\n' "$quarantine"
 }
+
+# Claude and non-pipeline callers predate durable review epochs. Preserve that
+# interface exactly; CAS state belongs only to the opt-in Codex PR pipeline.
+if ! pipeline_review_session; then
+  case "${1:-}" in
+    path) mkdir -p "$dir"; printf '%s\n' "$file" ;;
+    open)
+      [ -f "$file" ] || dm_die "no artifact at $file (the crewmate writes it first)"
+      if have_lavish; then
+        lavish-axi "$file"
+      else
+        dm_warn "lavish-axi not installed; the interactive review surface is unavailable."
+        dm_info "Open the review artifact directly in a browser: $file"
+        dm_info "Give feedback in chat; the dockmaster relays it to the worker."
+      fi
+      ;;
+    poll)
+      [ -f "$file" ] || dm_die "no artifact at $file"
+      if have_lavish; then
+        lavish-axi poll "$file"
+      else
+        dm_warn "lavish-axi not installed; live feedback polling is unavailable."
+        dm_info "Feedback should come directly in chat rather than through the lavish surface."
+      fi
+      ;;
+    end)
+      if have_lavish; then lavish-axi end "$file" 2>/dev/null || true; fi
+      ;;
+    *) echo "usage: dm-lavish.sh {path|open|poll|end} <id>" >&2; exit 2 ;;
+  esac
+  exit 0
+fi
 
 case "${1:-}" in
   path) mkdir -p "$dir"; printf '%s\n' "$file" ;;

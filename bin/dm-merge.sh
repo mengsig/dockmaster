@@ -26,6 +26,8 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   local)
     id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-merge.sh local <id>"
+    [ -z "$(dm_meta_get "$id" pipeline_repo)" ] \
+      || dm_die "task $id is bound to an approved PR pipeline; local landing is permanently refused"
     mode="$(dm_meta_get "$id" mode)"
     [ "$mode" = "local-only" ] || dm_die "task $id is mode '$mode', not local-only; use dm-pr.sh for PR-based landing"
     repo="$(dm_meta_get "$id" repo)"; wt="$(dm_require_worktree "$id")"

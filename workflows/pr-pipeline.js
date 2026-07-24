@@ -270,19 +270,27 @@ async function openPR() {
 
 async function runSecurityGate(g) {
   const auto = g.method === 'auto' || (g.optional && !t.securitySurface)
+  const mandatory = g.method === 'auto' && !g.optional
   const scan = auto
-    ? `First run exactly:\n\n    ${t.binDir}/dm-pr.sh security-scan ${t.taskId}\n\nSet surface=false only when it exits 1 for no signals. `
+    ? `First run exactly:\n\n    ${t.binDir}/dm-pr.sh security-scan ${t.taskId}\n\n` +
+      (mandatory
+        ? 'This rigorous review is mandatory even when the scan exits 1; set surface=true and use the scan only to route attention. '
+        : 'Set surface=false only when it exits 1 for no signals. ')
     : 'The caller declared a security surface; set surface=true. '
   const result = await agent(
     `Security gate for diff ${base}...HEAD in ${t.worktree}. ${scan}` +
     `When surface=true, inspect the changed files for auth/authz, input validation and injection, secret exposure, crypto misuse, ` +
     `unsafe external I/O, and privilege or data-loss paths. Do not change files. Return every concrete finding with severity, file, ` +
     `and summary; return an empty findings array only when the reviewed surface is sound. If a required capability is unavailable, ` +
-    `report a high-severity finding instead of skipping.`,
+    `report a high-severity finding instead of skipping. When the focused review passes, run ` +
+    `${t.binDir}/dm-pr.sh security-review ${t.taskId} pass before returning.`,
     { label: 'security', phase: 'Review', effort: g.effort || 'high', schema: SECURITY_SCHEMA },
   )
   if (result.findings.length) {
     return { passed: false, summary: result.summary, findings: result.findings }
+  }
+  if (mandatory && !result.surface) {
+    return { passed: false, summary: 'rigorous security review cannot skip on a clear heuristic scan', findings: [] }
   }
   if (!result.surface) log(`security: explicit no-surface skip — ${result.summary}`)
   return { passed: true, summary: result.summary, findings: [] }

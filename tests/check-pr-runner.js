@@ -13,7 +13,7 @@ function defaultResponse(label) {
   if (label.startsWith('state:')) return { head: 'a'.repeat(40), porcelain: '' }
   if (label.startsWith('review:')) return { findings: [] }
   if (label.startsWith('tests:') || label === 'verify') return { passed: true, summary: 'passed' }
-  if (label === 'security') return { surface: false, findings: [], summary: 'no surface' }
+  if (label === 'security') return { surface: true, findings: [], summary: 'reviewed' }
   if (label === 'pr') return { url: 'https://github.com/o/r/pull/12' }
   if (label === 'verify-findings') return { refuted: false, rationale: 'real' }
   return {}
@@ -204,6 +204,12 @@ async function checkCompatibilityEdges() {
 
   const verifySkip = await run({ gates: [{ gate: 'verify', optional: true }], noRuntimeSurface: true }, {})
   assert.deepEqual(verifySkip.calls, [])
+
+  const rigorousSecuritySkip = await run({ gates: [{ gate: 'security', method: 'auto' }] }, {
+    security: { surface: false, findings: [], summary: 'scan clear' },
+  })
+  assert.equal(rigorousSecuritySkip.result.stage, 'security')
+  assert.match(rigorousSecuritySkip.result.detail, /cannot skip/)
 
   const untrackedPR = await run({ gates: [{ gate: 'pr' }] }, {
     'state:before-pr': { head: 'b'.repeat(40), porcelain: '?? review-output.json' },

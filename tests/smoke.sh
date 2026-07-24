@@ -81,8 +81,14 @@ run_gate() {
   case "$gate" in
     branch-tests|final-tests) b dm-test.sh "$id" >/dev/null ;;
     security)
-      if b dm-pr.sh security-scan "$id" >/dev/null; then evidence=security-review-pass
-      else evidence=security-scan-clear
+      if b dm-pr.sh security-scan "$id" >/dev/null; then
+        b dm-pr.sh security-review "$id" pass >/dev/null
+        evidence=security-review-pass
+      elif [ "$(b dm-task.sh get "$id" pipeline_tier)" = rigorous ]; then
+        b dm-pr.sh security-review "$id" pass >/dev/null
+        evidence=security-review-pass
+      else
+        evidence=security-scan-clear
       fi
       ;;
   esac
@@ -725,6 +731,18 @@ check "task repo cannot be retargeted after creation" \
    ! ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set gate-ready repo fast ) >/dev/null 2>&1 &&
    [ "$(b dm-task.sh get gate-ready repo)" = demo ] &&
    [ "$(b dm-task.sh get gate-ready pipeline_repo)" = demo ]'
+check "approved pipeline mode is immutable through every sanctioned writer" \
+  '! b dm-task.sh set gate-ready mode local-only >/dev/null 2>&1 &&
+   ! ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set gate-ready mode local-only ) >/dev/null 2>&1 &&
+   ! ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set_fields gate-ready mode local-only title bypass ) >/dev/null 2>&1 &&
+   [ "$(b dm-task.sh get gate-ready mode)" = pipeline ]'
+BOUND_MODE_META="$DM_HOME/state/tasks/gate-ready.meta"
+sed 's/^mode=.*/mode=local-only/' "$BOUND_MODE_META" >"$BOUND_MODE_META.corrupt"
+mv "$BOUND_MODE_META.corrupt" "$BOUND_MODE_META"
+BOUND_MODE_HEAD="$(git -C "$DM_HOME/repos/demo" rev-parse HEAD)"
+check "local landing refuses a bound task even if mode metadata is corrupted" \
+  '! b dm-merge.sh local gate-ready >/dev/null 2>&1 &&
+   [ "$(git -C "$DM_HOME/repos/demo" rev-parse HEAD)" = "$BOUND_MODE_HEAD" ]'
 
 # Tests, security, and PR gates accept only matching sanctioned tool signals.
 jq '.gates = [.gates[] | select(.id == "branch-tests")]' "$ROOT/config/pr-pipeline.fast.json" \
@@ -744,7 +762,7 @@ jq '.gates = [.gates[] | select(.id == "security")]' "$ROOT/config/pr-pipeline.r
   >"$DM_HOME/config/pr-pipeline.repos/demo.json"
 b dm-task.sh new security-proof --kind ship --repo demo --mode pipeline >/dev/null
 SECURITY_PROOF_WT="$(b dm-worktree.sh create security-proof demo | tail -n1)"
-printf 'token validation surface\n' >"$SECURITY_PROOF_WT/security-proof.txt"
+printf 'deterministic formatting surface\n' >"$SECURITY_PROOF_WT/security-proof.txt"
 git -C "$SECURITY_PROOF_WT" add security-proof.txt
 git -C "$SECURITY_PROOF_WT" commit -qm "add security proof surface"
 b dm-task.sh approve security-proof rigorous >/dev/null
@@ -752,9 +770,12 @@ SECURITY_PROOF_EPOCH="$(b dm-task.sh gate security-proof claim security security
 b dm-task.sh gate security-proof start security "$SECURITY_PROOF_EPOCH" security_proof /root/security-proof >/dev/null
 check "security gate refuses completion before sanctioned scan" \
   '! b dm-task.sh gate security-proof complete security "$SECURITY_PROOF_EPOCH" /root/security-proof security-scan-clear >/dev/null 2>&1'
-b dm-pr.sh security-scan security-proof >/dev/null
-check "security scan hit still requires the scheduler review assertion" \
+b dm-pr.sh security-scan security-proof >/dev/null || true
+check "rigorous security gate refuses scan-clear without focused review PASS" \
   '! b dm-task.sh gate security-proof complete security "$SECURITY_PROOF_EPOCH" /root/security-proof security-scan-clear >/dev/null 2>&1'
+check "caller prose cannot forge focused security-review PASS" \
+  '! b dm-task.sh gate security-proof complete security "$SECURITY_PROOF_EPOCH" /root/security-proof security-review-pass >/dev/null 2>&1'
+b dm-pr.sh security-review security-proof pass >/dev/null
 check "security gate accepts current scan plus explicit review pass" \
   'b dm-task.sh gate security-proof complete security "$SECURITY_PROOF_EPOCH" /root/security-proof security-review-pass >/dev/null'
 
@@ -847,18 +868,38 @@ check "lavish-axi absent from probe PATH"   '! PATH="$NB" command -v lavish-axi'
 check "lavish open fails on missing artifact (tool absent)" '! lav open demo-1 >/dev/null 2>&1'
 ART="$(b dm-lavish.sh path demo-1)"
 printf '<!doctype html><title>x</title>\n' > "$ART"
-MANUAL_EPOCH="$(lav open demo-1 2>"$TMP/manual-open.err")"
-check "lavish open creates guarded manual session" '[ -n "$MANUAL_EPOCH" ] && [ "$(b dm-task.sh get demo-1 review_session_state)" = active-manual ]'
-check "lavish manual open names the artifact path" 'grep -qF "$ART" "$TMP/manual-open.err"'
-check "lavish poll fails closed without tool" '! lav poll demo-1 "$MANUAL_EPOCH" >/dev/null 2>&1'
-check "manual review ends by exact epoch" 'lav end demo-1 "$MANUAL_EPOCH" >/dev/null'
+LEGACY_MANUAL_OUT="$(lav open demo-1 2>&1)"
+check "legacy lavish open degrades without tool" 'grep -q "interactive review surface is unavailable" <<<"$LEGACY_MANUAL_OUT"'
+check "legacy lavish open names the artifact path" 'grep -qF "$ART" <<<"$LEGACY_MANUAL_OUT"'
+check "legacy lavish poll degrades without tool or epoch" 'lav poll demo-1 >/dev/null 2>&1'
+check "legacy lavish end accepts no epoch" 'lav end demo-1 >/dev/null'
+check "legacy lavish flow creates no Codex session state" \
+  '[ -z "$(b dm-task.sh get demo-1 review_session_state)" ] && [ -z "$(b dm-task.sh get demo-1 review_session_epoch)" ]'
 
 echo "== Lavish session/waiter cleanup guard =="
 FAKE_LAVISH="$TMP/fake-lavish"; mkdir -p "$FAKE_LAVISH"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
 axilav() { PATH="$FAKE_LAVISH:$PATH" "$ROOT/bin/dm-lavish.sh" "$@"; }
-WAITER_THREAD="$(b dm-thread-name.sh demo-1 review_waiter)"
+LEGACY_REVIEW_ID="review-legacy"
+b dm-task.sh new "$LEGACY_REVIEW_ID" --kind ship --repo demo --mode local-only >/dev/null
+LEGACY_REVIEW_WT="$(b dm-worktree.sh create "$LEGACY_REVIEW_ID" demo | tail -n1)"
+LEGACY_ART="$(b dm-lavish.sh path "$LEGACY_REVIEW_ID")"
+printf '<!doctype html><title>legacy review</title>\n' > "$LEGACY_ART"
+check "Claude legacy open/poll/end keep the no-epoch interface" \
+  'axilav open "$LEGACY_REVIEW_ID" >/dev/null && axilav poll "$LEGACY_REVIEW_ID" >/dev/null && axilav end "$LEGACY_REVIEW_ID" >/dev/null'
+check "Claude legacy review leaves no guarded session and cleans up normally" \
+  '[ -z "$(b dm-task.sh get "$LEGACY_REVIEW_ID" review_session_state)" ] &&
+   [ -z "$(b dm-task.sh get "$LEGACY_REVIEW_ID" review_session_epoch)" ] &&
+   b dm-worktree.sh remove "$LEGACY_REVIEW_ID" --force >/dev/null 2>&1 &&
+   [ ! -d "$LEGACY_REVIEW_WT" ]'
+REVIEW_ID="review-pipeline"
+b dm-task.sh new "$REVIEW_ID" --kind ship --repo demo --mode pipeline >/dev/null
+REVIEW_WT="$(b dm-worktree.sh create "$REVIEW_ID" demo | tail -n1)"
+b dm-task.sh approve "$REVIEW_ID" fast >/dev/null
+PIPE_ART="$(b dm-lavish.sh path "$REVIEW_ID")"
+printf '<!doctype html><title>pipeline review</title>\n' > "$PIPE_ART"
+WAITER_THREAD="$(b dm-thread-name.sh "$REVIEW_ID" review_waiter)"
 UNPREPARED_THREAD="$(b dm-thread-name.sh waiter-unprepared review_waiter)"
 b dm-task.sh new waiter-unprepared --kind ship --repo demo --mode pipeline >/dev/null
 check "waiter activation refuses a missing durable preparation" \
@@ -871,50 +912,69 @@ check "legacy identity without state fails closed as ambiguous" \
 check "explicit terminal recovery clears malformed waiter identity" \
   'b dm-task.sh waiter waiter-unprepared recover - - /root/legacy legacy-recovery >/dev/null && [ -z "$(b dm-task.sh get waiter-unprepared waiter_thread_name)" ] && [ -z "$(b dm-task.sh get waiter-unprepared waiter_agent_id)" ]'
 check "waiter name is durable before spawn" \
-  'WAITER_EPOCH="$(b dm-task.sh waiter demo-1 prepare "$WAITER_THREAD")" && export WAITER_EPOCH && [ "$(b dm-task.sh get demo-1 waiter_state)" = prepared ]'
+  'WAITER_EPOCH="$(b dm-task.sh waiter "$REVIEW_ID" prepare "$WAITER_THREAD")" && export WAITER_EPOCH && [ "$(b dm-task.sh get "$REVIEW_ID" waiter_state)" = prepared ]'
 check "prepared launch ambiguity prevents worktree cleanup" \
-  'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
+  'ERR="$(b dm-worktree.sh remove "$REVIEW_ID" --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$REVIEW_WT" ]'
 check "waiter identity activates atomically" \
-  'b dm-task.sh waiter demo-1 active "$WAITER_THREAD" "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_thread_name)" = "$WAITER_THREAD" ] && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = active ]'
+  'b dm-task.sh waiter "$REVIEW_ID" active "$WAITER_THREAD" "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" waiter_thread_name)" = "$WAITER_THREAD" ] && [ "$(b dm-task.sh get "$REVIEW_ID" waiter_agent_id)" = /root/review-waiter ] && [ "$(b dm-task.sh get "$REVIEW_ID" waiter_state)" = active ]'
 check "concurrent waiter activations preserve one exact owner" 'waiter_activation_race_has_one_winner'
 check "active waiter prevents worktree cleanup even with force" \
-  'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
+  'ERR="$(b dm-worktree.sh remove "$REVIEW_ID" --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$REVIEW_WT" ]'
 check "idle waiter keeps exact identity for reuse" \
-  'b dm-task.sh waiter demo-1 idle "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ]'
+  'b dm-task.sh waiter "$REVIEW_ID" idle "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" waiter_agent_id)" = /root/review-waiter ]'
 check "prepare refuses to erase a reusable idle identity" \
-  '! b dm-task.sh waiter demo-1 prepare "$WAITER_THREAD" >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 waiter_agent_id)" = /root/review-waiter ]'
+  '! b dm-task.sh waiter "$REVIEW_ID" prepare "$WAITER_THREAD" >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" waiter_agent_id)" = /root/review-waiter ]'
 check "idle waiter reactivation requires its exact identity" \
-  '! b dm-task.sh waiter demo-1 active "$WAITER_THREAD" "$WAITER_EPOCH" /root/different-waiter >/dev/null 2>&1 && b dm-task.sh waiter demo-1 active "$WAITER_THREAD" "$WAITER_EPOCH" /root/review-waiter >/dev/null'
+  '! b dm-task.sh waiter "$REVIEW_ID" active "$WAITER_THREAD" "$WAITER_EPOCH" /root/different-waiter >/dev/null 2>&1 && b dm-task.sh waiter "$REVIEW_ID" active "$WAITER_THREAD" "$WAITER_EPOCH" /root/review-waiter >/dev/null'
 check "opening Lavish records active session" \
-  'REVIEW_EPOCH="$(axilav open demo-1)" && export REVIEW_EPOCH && [ "$(b dm-task.sh get demo-1 review_session_state)" = active ] && [ -n "$(b dm-task.sh get demo-1 review_session_started_at)" ]'
-check "poll requires and accepts active session" 'axilav poll demo-1 "$REVIEW_EPOCH" >/dev/null'
+  'REVIEW_EPOCH="$(axilav open "$REVIEW_ID")" && export REVIEW_EPOCH && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = active ] && [ -n "$(b dm-task.sh get "$REVIEW_ID" review_session_started_at)" ]'
+check "poll requires and accepts active session" 'axilav poll "$REVIEW_ID" "$REVIEW_EPOCH" >/dev/null'
 check "active session prevents worktree cleanup" \
-  'ERR="$(b dm-worktree.sh remove demo-1 --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$WT" ]'
+  'ERR="$(b dm-worktree.sh remove "$REVIEW_ID" --force 2>&1 || true)"; grep -q "active Lavish review session or notification waiter" <<<"$ERR" && [ -d "$REVIEW_WT" ]'
 check "ending session and waiter clears durable identities" \
-  'axilav end demo-1 "$REVIEW_EPOCH" >/dev/null && b dm-task.sh waiter demo-1 terminal "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ] && [ -z "$(b dm-task.sh get demo-1 waiter_agent_id)" ] && [ "$(b dm-task.sh get demo-1 waiter_state)" = terminal ]'
-check "poll refuses after session end" '! axilav poll demo-1 "$REVIEW_EPOCH" >/dev/null 2>&1'
+  'axilav end "$REVIEW_ID" "$REVIEW_EPOCH" >/dev/null && b dm-task.sh waiter "$REVIEW_ID" terminal "$WAITER_EPOCH" /root/review-waiter >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ] && [ -z "$(b dm-task.sh get "$REVIEW_ID" waiter_agent_id)" ] && [ "$(b dm-task.sh get "$REVIEW_ID" waiter_state)" = terminal ]'
+check "poll refuses after session end" '! axilav poll "$REVIEW_ID" "$REVIEW_EPOCH" >/dev/null 2>&1'
 printf '%s\n' '#!/usr/bin/env bash' \
   'printf "%s\n" "$*" >> "$FAKE_LAVISH_CALLS"' \
   'exit 9' > "$FAKE_LAVISH/lavish-axi"
 FAKE_LAVISH_CALLS="$TMP/failed-open.calls"; export FAKE_LAVISH_CALLS
 check "partial open failure attempts cleanup and retains an uncertain guard" \
-  '! axilav open demo-1 >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = cleanup-uncertain ] && grep -q "^end " "$FAKE_LAVISH_CALLS"'
+  '! axilav open "$REVIEW_ID" >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = cleanup-uncertain ] && grep -q "^end " "$FAKE_LAVISH_CALLS"'
 check "uncertain failed-open cleanup still prevents worktree removal" \
-  '! b dm-worktree.sh remove demo-1 --force >/dev/null 2>&1 && [ -d "$WT" ]'
+  '! b dm-worktree.sh remove "$REVIEW_ID" --force >/dev/null 2>&1 && [ -d "$REVIEW_WT" ]'
 printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
 check "uncertain cleanup can be retried by exact epoch" \
-  'UNCERTAIN_EPOCH="$(b dm-task.sh get demo-1 review_session_epoch)" && axilav end demo-1 "$UNCERTAIN_EPOCH" >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ]'
+  'UNCERTAIN_EPOCH="$(b dm-task.sh get "$REVIEW_ID" review_session_epoch)" && axilav end "$REVIEW_ID" "$UNCERTAIN_EPOCH" >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
 printf '#!/usr/bin/env bash\nif [ "${1:-}" = end ]; then exit 0; fi\nexit 9\n' > "$FAKE_LAVISH/lavish-axi"
 check "failed open clears only after external cleanup is confirmed" \
-  '! axilav open demo-1 >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ]'
+  '! axilav open "$REVIEW_ID" >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
 printf '#!/usr/bin/env bash\n[ "${1:-}" != end ]\n' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
-FAIL_END_EPOCH="$(axilav open demo-1)"
+FAIL_END_EPOCH="$(axilav open "$REVIEW_ID")"
 check "failed end remains guarded and rejects stale epochs" \
-  '! axilav end demo-1 "$FAIL_END_EPOCH" >/dev/null 2>&1 && [ "$(b dm-task.sh get demo-1 review_session_state)" = cleanup-uncertain ] && ! axilav end demo-1 999 >/dev/null 2>&1'
+  '! axilav end "$REVIEW_ID" "$FAIL_END_EPOCH" >/dev/null 2>&1 && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = cleanup-uncertain ] && ! axilav end "$REVIEW_ID" 999 >/dev/null 2>&1'
 printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
 check "same epoch can retry a failed end" \
-  'axilav end demo-1 "$FAIL_END_EPOCH" >/dev/null && [ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ]'
+  'axilav end "$REVIEW_ID" "$FAIL_END_EPOCH" >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
+
+LAVISH_HANG_PID="$TMP/lavish-hang.pid"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'if [ "${1:-}" = end ]; then' \
+  '  printf "%s\n" "$$" > "$LAVISH_HANG_PID"' \
+  '  trap "" TERM' \
+  '  while :; do :; done' \
+  'fi' \
+  'exit 0' > "$FAKE_LAVISH/lavish-axi"
+chmod +x "$FAKE_LAVISH/lavish-axi"
+HANG_END_EPOCH="$(LAVISH_HANG_PID="$LAVISH_HANG_PID" axilav open "$REVIEW_ID")"
+HANG_END_STATUS=0
+LAVISH_HANG_PID="$LAVISH_HANG_PID" axilav end "$REVIEW_ID" "$HANG_END_EPOCH" >/dev/null 2>&1 || HANG_END_STATUS=$?
+HANG_PID="$(cat "$LAVISH_HANG_PID")"
+check "hung cleanup is TERM/KILL bounded and fails closed" \
+  '[ "$HANG_END_STATUS" -ne 0 ] && ! kill -0 "$HANG_PID" 2>/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = cleanup-uncertain ]'
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_LAVISH/lavish-axi"
+check "bounded cleanup guard remains retryable" \
+  'axilav end "$REVIEW_ID" "$HANG_END_EPOCH" >/dev/null && [ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ]'
 
 SLOW_READY="$TMP/slow-open.ready"
 SLOW_RELEASE="$TMP/slow-open.release"
@@ -923,16 +983,16 @@ printf '%s\n' '#!/usr/bin/env bash' \
   ': > "$SLOW_READY"' \
   'while [ ! -e "$SLOW_RELEASE" ]; do :; done' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
-SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav open demo-1 >"$TMP/slow-open.epoch" &
+SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav open "$REVIEW_ID" >"$TMP/slow-open.epoch" &
 SLOW_PID=$!
 while [ ! -e "$SLOW_READY" ] && kill -0 "$SLOW_PID" 2>/dev/null; do :; done
 [ -e "$SLOW_READY" ] || { wait "$SLOW_PID" || true; bad "slow Lavish open reached coordination point"; exit 1; }
-SLOW_EPOCH="$(b dm-task.sh get demo-1 review_session_epoch)"
-SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav end demo-1 "$SLOW_EPOCH" >/dev/null
+SLOW_EPOCH="$(b dm-task.sh get "$REVIEW_ID" review_session_epoch)"
+SLOW_READY="$SLOW_READY" SLOW_RELEASE="$SLOW_RELEASE" axilav end "$REVIEW_ID" "$SLOW_EPOCH" >/dev/null
 : > "$SLOW_RELEASE"
 wait "$SLOW_PID"
 check "close during slow open cannot resurrect the session" \
-  '[ "$(b dm-task.sh get demo-1 review_session_state)" = terminal ] && ! axilav poll demo-1 "$SLOW_EPOCH" >/dev/null 2>&1'
+  '[ "$(b dm-task.sh get "$REVIEW_ID" review_session_state)" = terminal ] && ! axilav poll "$REVIEW_ID" "$SLOW_EPOCH" >/dev/null 2>&1'
 
 POLL_READY="$TMP/stale-poll.ready"
 POLL_RELEASE="$TMP/stale-poll.release"
@@ -945,16 +1005,16 @@ printf '%s\n' '#!/usr/bin/env bash' \
   'fi' \
   'exit 0' > "$FAKE_LAVISH/lavish-axi"
 chmod +x "$FAKE_LAVISH/lavish-axi"
-POLL_EPOCH="$(POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav open demo-1)"
+POLL_EPOCH="$(POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav open "$REVIEW_ID")"
 POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" \
-  axilav poll demo-1 "$POLL_EPOCH" >"$TMP/stale-poll.out" 2>"$TMP/stale-poll.err" &
+  axilav poll "$REVIEW_ID" "$POLL_EPOCH" >"$TMP/stale-poll.out" 2>"$TMP/stale-poll.err" &
 POLL_PID=$!
 while [ ! -e "$POLL_READY" ] && kill -0 "$POLL_PID" 2>/dev/null; do :; done
 [ -e "$POLL_READY" ] || { wait "$POLL_PID" || true; bad "poll reached stale-epoch coordination point"; exit 1; }
-POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav end demo-1 "$POLL_EPOCH" >/dev/null
+POLL_READY="$POLL_READY" POLL_RELEASE="$POLL_RELEASE" axilav end "$REVIEW_ID" "$POLL_EPOCH" >/dev/null
 : > "$POLL_RELEASE"
 POLL_RC=0; wait "$POLL_PID" || POLL_RC=$?
-STALE_FEEDBACK="$(find "$(dirname "$ART")" -name "stale-feedback.$POLL_EPOCH.*" -type f -print -quit)"
+STALE_FEEDBACK="$(find "$(dirname "$PIPE_ART")" -name "stale-feedback.$POLL_EPOCH.*" -type f -print -quit)"
 check "poll revalidates epoch and quarantines stale feedback" \
   '[ "$POLL_RC" -ne 0 ] && [ -n "$STALE_FEEDBACK" ] && grep -q "stale operator feedback" "$STALE_FEEDBACK" && ! grep -q "stale operator feedback" "$TMP/stale-poll.out"'
 
@@ -981,7 +1041,7 @@ check "explicit terminal recovery releases malformed active state" \
   'b dm-task.sh waiter malformed-review recover active - - malformed-recovery >/dev/null && b dm-task.sh archive malformed-review >/dev/null && [ -f "$DM_HOME/state/archive/malformed-review.meta" ]'
 
 echo "== state reconciliation =="
-check "completed review leaves task working" 'OUT="$(b dm-task.sh state demo-1)"; grep -q working <<<"$OUT"'
+check "completed guarded review leaves task working" 'OUT="$(b dm-task.sh state "$REVIEW_ID")"; grep -q working <<<"$OUT"'
 git -C "$WT" checkout -q -b feat/x/add-multiply
 printf 'def multiply(a,b):\n    return a*b\n' >> "$WT/src/calc.py"
 git -C "$WT" -c user.email=c@c.co -c user.name=c commit -qam "add multiply" >/dev/null
@@ -1050,7 +1110,15 @@ check "security-scan names the signals"             'grep -qi "signals present" 
 check "security-scan clears a benign diff"          '! b dm-pr.sh security-scan demo-1 >/dev/null 2>&1'
 b dm-task.sh new sec-destructive --kind ship --repo demo --mode pipeline >/dev/null
 SEC_DESTRUCTIVE_WT="$(b dm-worktree.sh create sec-destructive demo | tail -n1)"
-printf '#!/bin/sh\nchmod 600 "$1"\nrm -rf "$2"\n' >"$SEC_DESTRUCTIVE_WT/cleanup.sh"
+printf '%s\n' '#!/bin/sh' \
+  'chmod 600 "$1"' \
+  'rm -rf "$2"' \
+  'git reset --hard' \
+  'git clean -fdx' \
+  'Remove-Item -Recurse target' \
+  'os.RemoveAll(target)' \
+  'Files.delete(target);' \
+  'DROP TABLE sessions;' >"$SEC_DESTRUCTIVE_WT/cleanup.sh"
 git -C "$SEC_DESTRUCTIVE_WT" add cleanup.sh
 git -C "$SEC_DESTRUCTIVE_WT" commit -qm "add destructive cleanup"
 b dm-task.sh approve sec-destructive fast >/dev/null
@@ -1058,6 +1126,28 @@ SEC_DESTRUCTIVE_OUT="$(b dm-pr.sh security-scan sec-destructive 2>&1 || true)"
 check "security-scan flags destructive and privilege surfaces" \
   'grep -q "destructive/privilege" <<<"$SEC_DESTRUCTIVE_OUT" &&
    [ "$(b dm-task.sh get sec-destructive security_scan)" = hit ]'
+for SECURITY_PATTERN_CASE in go-remove-all git-reset-hard git-clean-fdx powershell-remove java-delete sql-drop; do
+  case "$SECURITY_PATTERN_CASE" in
+    go-remove-all) PATTERN_LINE='os.RemoveAll(target)' ;;
+    git-reset-hard) PATTERN_LINE='git reset --hard' ;;
+    git-clean-fdx) PATTERN_LINE='git clean -fdx' ;;
+    powershell-remove) PATTERN_LINE='Remove-Item -Recurse target' ;;
+    java-delete) PATTERN_LINE='Files.delete(target);' ;;
+    sql-drop) PATTERN_LINE='DROP TABLE sessions;' ;;
+  esac
+  PATTERN_ID="sec-pattern-$SECURITY_PATTERN_CASE"
+  b dm-task.sh new "$PATTERN_ID" --kind ship --repo demo --mode pipeline >/dev/null
+  PATTERN_WT="$(b dm-worktree.sh create "$PATTERN_ID" demo | tail -n1)"
+  printf '%s\n' "$PATTERN_LINE" >"$PATTERN_WT/pattern.txt"
+  git -C "$PATTERN_WT" add pattern.txt
+  git -C "$PATTERN_WT" commit -qm "add $SECURITY_PATTERN_CASE pattern"
+  b dm-task.sh approve "$PATTERN_ID" fast >/dev/null
+  PATTERN_OUT="$(b dm-pr.sh security-scan "$PATTERN_ID" 2>&1)"
+  check "security-scan flags $SECURITY_PATTERN_CASE" \
+    'grep -q "destructive/privilege" <<<"$PATTERN_OUT" &&
+     [ "$(b dm-task.sh get "$PATTERN_ID" security_scan)" = hit ]'
+  b dm-worktree.sh remove "$PATTERN_ID" --force >/dev/null 2>&1
+done
 b dm-task.sh new sec-destructive-legacy --kind ship --repo demo >/dev/null
 SEC_DESTRUCTIVE_LEGACY_WT="$(b dm-worktree.sh create sec-destructive-legacy demo | tail -n1)"
 printf '#!/bin/sh\nchmod 600 "$1"\n' >"$SEC_DESTRUCTIVE_LEGACY_WT/cleanup.sh"
@@ -1067,12 +1157,13 @@ check "legacy security scan keeps its established signal set" \
   '! b dm-pr.sh security-scan sec-destructive-legacy >/dev/null 2>&1 &&
    [ "$(b dm-task.sh get sec-destructive-legacy security_scan)" = clear ] &&
    [ -z "$(b dm-task.sh get sec-destructive-legacy pipeline_repo)" ]'
-b dm-task.sh new sec-benign-words --kind ship --repo demo >/dev/null
+b dm-task.sh new sec-benign-words --kind ship --repo demo --mode pipeline >/dev/null
 SEC_BENIGN_WT="$(b dm-worktree.sh create sec-benign-words demo | tail -n1)"
-printf 'summary formatting remains deterministic\n' >"$SEC_BENIGN_WT/notes.txt"
+printf 'platform.remove_all(items)\nsummary formatting remains deterministic\n' >"$SEC_BENIGN_WT/notes.txt"
 git -C "$SEC_BENIGN_WT" add notes.txt
 git -C "$SEC_BENIGN_WT" commit -qm "add benign wording"
-check "security-scan does not match destructive command substrings" \
+b dm-task.sh approve sec-benign-words fast >/dev/null
+check "security-scan uses boundaries for destructive API lookalikes" \
   '! b dm-pr.sh security-scan sec-benign-words >/dev/null 2>&1 &&
    [ "$(b dm-task.sh get sec-benign-words security_scan)" = clear ]'
 check "security-scan requires an id"                '! b dm-pr.sh security-scan >/dev/null 2>&1'
@@ -2643,6 +2734,7 @@ b dm-task.sh new mauth-exc --kind ship --repo mauth --mode pipeline >/dev/null
 MAUTH_EXC_WT="$(b dm-worktree.sh create mauth-exc mauth fix/head --base integration | tail -n1)"
 MAUTH_EXC_HEAD="$(complete_pipeline_pr_proof mauth-exc "https://github.com/o/r/pull/9" integration)"
 MAUTH_EXC_BASE="$(git -C "$MAUTH_EXC_WT" rev-parse origin/integration)"
+MAUTH_MAIN_BASE="$(git -C "$MAUTH_EXC_WT" rev-parse origin/main)"
 GHSTUB="$TMP/ghstub"; mkdir -p "$GHSTUB"
 cat > "$GHSTUB/gh" <<STUB
 #!/bin/sh
@@ -2673,11 +2765,11 @@ printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo
 EXCOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a listed live base passes the authority gate"        'grep -q "operator-granted merge base" <<<"$EXCOUT"'
 check "downstream never-merge-red gate still applies"       'grep -qi "no checks reported" <<<"$EXCOUT"'
-printf '{"state":"open","merged":false,"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"base":{"sha":"%s","ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' "$MAUTH_MAIN_BASE" > "$GHSTUB/pr.json"
 check "a default-branch live base still hard-refuses"       '! PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc >/dev/null 2>&1'
 DEFOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "the default-branch refusal names the unallowed base" 'grep -q "not an operator-granted merge base" <<<"$DEFOUT" && grep -q "main" <<<"$DEFOUT"'
-printf '{"state":"open","merged":false,"base":{"ref":"integration-2","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"base":{"sha":"%s","ref":"integration-2","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' "$MAUTH_EXC_BASE" > "$GHSTUB/pr.json"
 check "an unlisted live base still hard-refuses"            '! PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc >/dev/null 2>&1'
 printf 'not json\n' > "$GHSTUB/pr.json"
 UNVEROUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
@@ -2689,7 +2781,7 @@ GHFAILOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a failing gh call fails closed"                      'grep -q "could not be verified" <<<"$GHFAILOUT"'
 rm -f "$GHSTUB/fail"
 # A response missing the live default branch refuses fail-closed too.
-printf '{"state":"open","merged":false,"base":{"ref":"integration","repo":{}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"base":{"sha":"%s","ref":"integration","repo":{}},"mergeable_state":"unknown"}\n' "$MAUTH_EXC_BASE" > "$GHSTUB/pr.json"
 NOLIVEDEF="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a missing live default branch fails closed"          'grep -qi "live default branch could not be verified" <<<"$NOLIVEDEF"'
 
@@ -2699,7 +2791,7 @@ echo "== merge-base exception: live default anchor + pre-merge TOCTOU re-check =
 # trunk-based PR must still refuse (the live anchor wins over a drifted
 # registry default).
 b dm-repo.sh set mauth merge_allowed_bases "integration,trunk" >/dev/null
-printf '{"state":"open","merged":false,"base":{"ref":"trunk","repo":{"default_branch":"trunk"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
+printf '{"state":"open","merged":false,"base":{"sha":"%s","ref":"trunk","repo":{"default_branch":"trunk"}},"mergeable_state":"unknown"}\n' "$MAUTH_EXC_BASE" > "$GHSTUB/pr.json"
 LIVEDEF="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a listed base that IS the live default still refuses" 'grep -q "not an operator-granted merge base" <<<"$LIVEDEF"'
 # Full green path: passing checks + clean mergeable_state. The merge must clear
@@ -2715,7 +2807,7 @@ check "a green listed-base merge reaches the merge mutation" '[ -f "$GHSTUB/ghax
 # TOCTOU: the base is retargeted to the DEFAULT after the first verification —
 # the pre-mutation re-check refuses and the mutation is never invoked.
 rm -f "$GHSTUB/ghaxi-called" "$GHSTUB/seen"
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$MAUTH_EXC_HEAD" > "$GHSTUB/pr2.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"main","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' "$MAUTH_EXC_HEAD" "$MAUTH_MAIN_BASE" > "$GHSTUB/pr2.json"
 : > "$GHSTUB/retarget"
 TOCTOU1_STATUS=0
 TOCTOU1="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1)" || TOCTOU1_STATUS=$?
@@ -2724,11 +2816,18 @@ check "the retargeted merge never reaches the mutation"       '[ ! -f "$GHSTUB/g
 # TOCTOU: retargeted to ANOTHER allowed branch — still refused (the base
 # changed since verification), mutation never invoked.
 rm -f "$GHSTUB/seen"
-printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"ref":"integration2","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' "$MAUTH_EXC_HEAD" > "$GHSTUB/pr2.json"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"integration2","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' "$MAUTH_EXC_HEAD" "$MAUTH_EXC_BASE" > "$GHSTUB/pr2.json"
 TOCTOU2_STATUS=0
 TOCTOU2="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1)" || TOCTOU2_STATUS=$?
 check "a retarget to another ALLOWED base still refuses"      '[ "$TOCTOU2_STATUS" -ne 0 ]'
 check "the allowed-retarget merge never reaches the mutation" '[ ! -f "$GHSTUB/ghaxi-called" ]'
+rm -f "$GHSTUB/seen"
+printf '{"state":"open","merged":false,"head":{"sha":"%s","ref":"fix/head","repo":{"full_name":"o/r"}},"base":{"sha":"%s","ref":"integration","repo":{"full_name":"o/r","default_branch":"main"}},"mergeable_state":"clean"}\n' \
+  "$MAUTH_EXC_HEAD" "$MAUTH_MAIN_BASE" > "$GHSTUB/pr2.json"
+BASE_ADVANCE_STATUS=0
+PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc >/dev/null 2>&1 || BASE_ADVANCE_STATUS=$?
+check "an observable same-ref base advance refuses"           '[ "$BASE_ADVANCE_STATUS" -ne 0 ]'
+check "the base-advance merge never reaches the mutation"     '[ ! -f "$GHSTUB/ghaxi-called" ]'
 rm -f "$GHSTUB/retarget" "$GHSTUB/seen"
 
 echo "== merge-base exception: dm-merge.sh local has NO exception =="
