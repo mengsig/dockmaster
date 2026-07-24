@@ -14,6 +14,21 @@ gate here is deliberately pure and offline-testable, so keep new gates that way.
   invocation, never a concurrently-overwritable cached snapshot. `dm-task.sh
   state`/`landed` refresh `pr_state` live (skipped under `DM_NO_FETCH=1`) so an
   out-of-band merge is seen; bulk `list` and `dm-status` run offline.
+- **[invariant]** The REGISTRY owns a repo's delivery mode; a task's `mode` is
+  only a per-task copy of it. `dm-merge.sh local` therefore re-reads the registry
+  and refuses unless the REPO is registered `local-only`, whatever task meta says
+  (#127) — before the fix, `dm-task.sh set <id> mode local-only` on a pipeline
+  repo fast-forwarded unreviewed work onto that clone's default branch with no
+  PR, no review and no operator word, then appended a real `merged` event so the
+  task reconciled to done. `dm-task.sh set` is the first gate (a mode may only be
+  re-synced to what the repo is registered as); the registry cross-check is the
+  load-bearing one, and it runs AFTER the authority gate so an unregistered repo
+  still refuses with the authority message that names it. Changing how a repo
+  delivers is `dm-repo.sh set <repo> mode` — an operator decision, in the
+  registry. NOTE: the `task-lifecycle` / `change-review` skills still tell the
+  dockmaster to `dm-task.sh set <id> mode local-only` when the operator picks a
+  local landing on a pipeline repo; that route is now refused and the skills need
+  to point at `dm-repo.sh set <repo> mode local-only` instead.
 - **[invariant]** Never merge red: `dm-pr.sh merge` refuses
   `failing`/`pending`/`unknown`, and refuses `none` (no checks reported) unless
   `--allow-no-checks` AND the repo has no CI (`has_ci=0`, from

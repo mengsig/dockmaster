@@ -13,7 +13,23 @@ delivered. The contract a crewmate follows lives in the `task-lifecycle` and
   status log), checked INSIDE the lock so archive cannot race into
   resurrection. `event` allowlists
   `working|review-ready|ready|done|blocked|needs-decision|failed|paused`; `set`
-  also reserves `worktree` (dm-worktree).
+  also reserves `worktree` (dm-worktree) and `repo` (fixed at creation — it
+  decides which clone the work lands in and whose merge authority gates it), and
+  constrains `mode` to the repo's REGISTERED delivery mode (#127, see
+  merge-safety.md). `new` refuses an UNREGISTERED `--repo` outright (#124) rather
+  than failing later at worktree-create; the reserved distro name is the one
+  accepted non-registry name, since it has no entry by design.
+- **[decision]** A ship task whose honest answer is "do not build it" ends with
+  `dm-task.sh close <id> --reason "<why>"` (#103). Before it, such a task had NO
+  reachable terminal state — `state` derives done only from positive landing
+  evidence — so it either pinned at `working` forever or was laundered into
+  looking finished (flipped to a scout with a report; mode forged so a local land
+  appended a `merged` event). `close` records the EXISTING `discarded` verb, not
+  a new token: `state`, `archive`, and `dm-repo.sh remove` already read that as
+  terminal, and a new one would read as non-terminal to all three. It refuses
+  while a local copy is still present (teardown is what inspects the work) and
+  refuses an already-terminal task; `dm-task.sh event` still bars the verb, so
+  `close` and `dm-worktree.sh remove --force` remain its only writers.
 - **[convention]** Task current-state is reconciled on demand by `dm-task.sh
   state` from real signals (merged PR, merge event, report.md,
   committed-unlanded worktree), never from the last status line;

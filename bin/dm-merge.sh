@@ -4,7 +4,9 @@
 # Two operations, both fail closed:
 #   local <id>    land a local-only task branch into its clone's default branch
 #                 by FAST-FORWARD ONLY. A diverged branch is refused with a
-#                 rebase instruction, never force-merged.
+#                 rebase instruction, never force-merged. The repo must be
+#                 REGISTERED for local-only delivery; a task's own `mode` field
+#                 is not authority for it.
 #   rebase <id>   update a task's worktree branch onto the latest default. On a
 #                 clean rebase it reports success; on conflicts it stops and
 #                 reports the conflicted files, then aborts to leave the worktree
@@ -38,6 +40,14 @@ case "$cmd" in
       refuse-invalid) dm_die "REFUSED: cannot resolve merge authority for repo '$repo': it is unregistered, or has an invalid merge_authority ('$(dm_registry_get "$repo" merge_authority)'); refusing to land. Register it (dm-repo.sh add) or set a valid authority: dm-repo.sh set $repo merge_authority yolo|ask|never" ;;
       *) dm_die "REFUSED: repo $repo merge authority could not be resolved; refusing to land" ;;
     esac
+    # The task's `mode` is a per-task COPY of the repo's delivery mode; the
+    # REGISTRY is its authority. Cross-check it here, after the authority gate,
+    # so a forged or stale `mode local-only` cannot fast-forward unreviewed work
+    # onto a pipeline repo's default branch — the exact bypass #127 reported: no
+    # PR, no review, no operator word, and a real `merged` event afterwards.
+    # An empty answer (unregistered repo, or no mode recorded) fails closed.
+    registry_mode="$(dm_registry_get "$repo" mode)"
+    [ "$registry_mode" = "local-only" ] || dm_die "REFUSED: repo '$repo' is registered for '${registry_mode:-no}' delivery, not local-only; task $id says otherwise but the registry decides. Deliver it as a PR (dm-pr.sh), or have the operator change how this repo delivers: dm-repo.sh set $repo mode local-only"
     branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD)"
     [ "$branch" != "HEAD" ] || dm_die "worktree on detached HEAD; nothing to land"
     ! dm_tracked_dirty "$wt" || dm_die "worktree has uncommitted changes to tracked files; commit before landing"
