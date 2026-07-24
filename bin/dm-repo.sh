@@ -353,7 +353,18 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
             fi ;;
       test_cmd|pipeline|remote)
             registry_write --arg n "$name" --arg f "$field" --arg v "$value" '.repos[$n][$f] = $v' ;;
-      *)    dm_die "unknown field '$field'; settable fields: mode, merge_authority, yolo (alias), merge_allowed_bases, test_cmd, pipeline, default_branch, remote" ;;
+      app_start_cmd|app_stop_cmd|app_ready_cmd|app_seed_cmd|app_url|verify_surfaces)
+            # App-lifecycle config for the verify gate (bin/dm-verify.sh). Each is
+            # eval'd or pattern-matched as ONE line; a multi-line value would run
+            # only its first line, so refuse it rather than silently truncate.
+            dm_require_single_line "$field" "$value"
+            if [ -z "$value" ]; then
+              registry_write --arg n "$name" --arg f "$field" 'del(.repos[$n][$f])'
+              report_value="(cleared)"
+            else
+              registry_write --arg n "$name" --arg f "$field" --arg v "$value" '.repos[$n][$f] = $v'
+            fi ;;
+      *)    dm_die "unknown field '$field'; settable fields: mode, merge_authority, yolo (alias), merge_allowed_bases, test_cmd, pipeline, default_branch, remote, app_start_cmd, app_stop_cmd, app_ready_cmd, app_seed_cmd, app_url, verify_surfaces" ;;
     esac
     dm_info "set $name.$report_field = $report_value"
     ;;
