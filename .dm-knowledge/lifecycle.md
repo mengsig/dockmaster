@@ -13,7 +13,35 @@ delivered. The contract a crewmate follows lives in the `task-lifecycle` and
   status log), checked INSIDE the lock so archive cannot race into
   resurrection. `event` allowlists
   `working|review-ready|ready|done|blocked|needs-decision|failed|paused`; `set`
-  also reserves `worktree` (dm-worktree).
+  also reserves `worktree` (dm-worktree) and `repo` (fixed at creation — it
+  decides which clone the work lands in and whose merge authority gates it, and
+  `dm-worktree.sh create` refuses a repo argument that disagrees with the record,
+  because writing it there unconditionally was a one-command way around the
+  reservation), and
+  constrains `mode` to the repo's REGISTERED delivery mode (#127, see
+  merge-safety.md). `kind` is DIRECTIONAL: `scout -> ship` is the documented
+  promotion, `ship -> scout` is refused — kind selects how `state` reconciles, so
+  a demotion turns a fabricated `data/<id>/report.md` into a terminal `done` and
+  lets teardown read committed work as investigation scratch. Teardown's gate is
+  kind-INDEPENDENT as well, so the two hold the same line from both sides.
+  `new` refuses an UNREGISTERED `--repo` outright (#124) rather
+  than failing later at worktree-create; the reserved distro name is the one
+  accepted non-registry name, since it has no entry by design.
+- **[decision]** A ship task whose honest answer is "do not build it" ends with
+  `dm-task.sh close <id> --reason "<why>"` (#103). Before it, such a task had NO
+  reachable terminal state — `state` derives done only from positive landing
+  evidence — so it either pinned at `working` forever or was laundered into
+  looking finished (flipped to a scout with a report; mode forged so a local land
+  appended a `merged` event). `close` records the EXISTING `discarded` verb, not
+  a new token: `state`, `archive`, and `dm-repo.sh remove` already read that as
+  terminal, and a new one would read as non-terminal to all three. It refuses on
+  ANY recorded worktree — present (teardown is what inspects the work) or absent
+  (the interrupted-cleanup shape `remove` refuses without `--force`, so closing
+  there would reach `discarded` with none of that discard authority) — and
+  refuses an already-terminal task; `dm-task.sh event` still bars the verb, so
+  `close` and `dm-worktree.sh remove --force` remain its only writers. When you
+  add a second writer of an existing state, carry over the FIRST writer's
+  preconditions or it becomes the soft way in.
 - **[convention]** Task current-state is reconciled on demand by `dm-task.sh
   state` from real signals (merged PR, merge event, report.md,
   committed-unlanded worktree), never from the last status line;

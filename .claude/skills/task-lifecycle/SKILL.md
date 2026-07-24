@@ -121,12 +121,13 @@ Every requested change goes through the same gated flow:
    feedback (poll as a background task), relay it to the crewmate, loop until the
    operator approves. Nothing lands before this approval.
 3. **Ask how it lands: PR or local?** Put the plain question to the operator.
-   - **local** (or a `local-only` repo) → set the task to local mode, then land
-     after approval: `bin/dm-task.sh set <id> mode local-only` then
-     `bin/dm-merge.sh local <id>`. `dm-merge.sh local` refuses any task whose
-     mode isn't `local-only`, and a task on a pipeline/direct-pr repo inherits
-     that repo's mode — so set it explicitly here (or classify the task local at
-     dispatch with `dm-task.sh new --mode local-only`).
+   - **local** (or a `local-only` repo) → land after approval with
+     `bin/dm-merge.sh local <id>`. The REGISTRY decides a repo's delivery mode,
+     not the task: `dm-merge.sh local` re-reads it and refuses unless the repo is
+     registered `local-only`, and `dm-task.sh set <id> mode` only re-syncs a task
+     to what its repo is registered as. So for a local landing on a
+     pipeline/direct-pr repo, get the operator's word and record it where it
+     belongs: `bin/dm-repo.sh set <repo> mode local-only`.
    - **PR** → load `pr-workflow` and run the pipeline: coldstart review → fix +
      tests → merge-gate review → fix + tests → PR creation.
 4. **Merge gate.** After the PR is open, the operator either merges on GitHub
@@ -183,7 +184,25 @@ bin/dm-task.sh set <id> kind ship
 bin/dm-brief.sh <id>     # regenerate as a ship brief; fill {TASK} with the fix scope
 ```
 
-A reproduced bug becomes the regression test.
+A reproduced bug becomes the regression test. The promotion runs one way only:
+`ship → scout` is refused, because demoting a ship task would let a report file
+reconcile it to done and let teardown discard its committed work as scratch.
+
+## 7. The task that must not be built
+
+A ship task whose honest answer is "do not build it" ends here, not by being
+reshaped into something that looks finished. Tear down the local copy, then:
+
+```
+bin/dm-task.sh close <id> --reason "<why nothing was built>"
+```
+
+It records a terminal state with the reason, claiming nothing landed — then
+`dm-backlog.sh done <id> --note "<why>"` and `dm-task.sh archive <id>` as usual.
+It refuses while a local copy is still present (teardown is what inspects the
+work) and refuses a task that is already terminal. Report the conclusion and the
+reason to the operator; a decision only they can make goes through
+`decision-hold` first.
 
 ## Recovery
 

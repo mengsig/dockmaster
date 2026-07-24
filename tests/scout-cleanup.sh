@@ -72,6 +72,13 @@ record_worktree() {
   ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set "$1" worktree "$2" ) >/dev/null
 }
 
+# Same for `kind`: dm-task.sh set now refuses the ship -> scout demotion (#127),
+# and the case below exists precisely to prove the teardown gate holds even when
+# the field is flipped anyway.
+record_kind() {
+  ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set "$1" kind "$2" ) >/dev/null
+}
+
 expect_refusal() {
   local label="$1" id="$2" pattern="$3" out rc
   shift 3
@@ -151,7 +158,9 @@ echo "== the unlanded gate does not rest on the mutable kind field (#127) =="
 RECLASS="$(new_ship reclassified)"
 commit_in "$RECLASS" "work that must not vanish" >/dev/null
 write_report reclassified
-b dm-task.sh set reclassified kind scout >/dev/null
+check "the CLI refuses demoting a ship task to scout" \
+  '! b dm-task.sh set reclassified kind scout >/dev/null 2>&1 && [ "$(b dm-task.sh get reclassified kind)" = ship ]'
+record_kind reclassified scout
 expect_refusal "reclassifying ship->scout does not switch the gate off" reclassified "not in git history"
 check "reclassified work and metadata remain" 'grep -q "work that must not vanish" "$RECLASS/src/evidence.txt" && [ "$(b dm-task.sh get reclassified worktree)" = "$RECLASS" ]'
 cleanup reclassified --force

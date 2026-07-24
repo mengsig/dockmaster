@@ -86,6 +86,7 @@ guard_new_repo_slot() {
   # this question with a silent "not registered" (#112).
   if dm_registry_has "$name"; then dm_die "repo '$name' already registered"; fi
   dir="$DM_REPOS/$name"
+  dm_assert_within_repos "$dir" "the clone slot for repo '$name'"
   [ -e "$dir" ] && dm_die "path already exists but '$name' is not registered: $dir
 $(slot_obstruction_advice "$dir" "$hint")"
   printf '%s\n' "$dir"
@@ -111,6 +112,7 @@ register_repo() {
 # onboarding.
 seed_memory() {
   local name="$1" dir="$DM_REPOS/$1" out
+  dm_assert_within_repos "$dir" "the clone for repo '$name'"
   [ -d "$dir/.git" ] || dm_die "no clone at $dir"
   if out="$("$(dirname "$0")/dm-memory.sh" seed "$name" 2>&1)"; then
     registry_write --arg n "$name" '.repos[$n].memory = true'
@@ -304,6 +306,7 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
               dm_die "default_branch: '$value' is listed in merge_allowed_bases of '$name'; remove it from the list first (the default branch can never be an allowed merge base)"
             fi
             dir="$DM_REPOS/$name"
+            dm_assert_within_repos "$dir" "the clone for repo '$name'"
             [ -d "$dir/.git" ] || dm_die "cannot set default_branch: no clone at $dir"
             # It must actually resolve as a branch in the clone (local or on origin);
             # a bogus value would break worktree base selection and ff sync.
@@ -356,6 +359,7 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     name="${1:-}"
     [ -n "$name" ] || dm_die "usage: dm-repo.sh remove <name>"
     dir="$DM_REPOS/$name"
+    dm_assert_within_repos "$dir" "the clone for repo '$name'"
     if [ -d "$dir/.git" ]; then
       # Fail closed: never drop a clone that still holds unlanded work.
       if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
