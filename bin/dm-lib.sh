@@ -113,8 +113,12 @@ DM_LOCK_HELD_TOKEN=""
 DM_LOCK_HELD_PID=""
 
 dm_record_current_pid() {
-  # Direct-child PPID is the exact shell, including Bash 3.2 (...) subshells.
-  # Never call through command substitution: that inserts a short-lived helper.
+  # $$ is exact at depth 0, but Bash 3.2 preserves it inside (...) subshells.
+  if [ "${BASH_SUBSHELL:-0}" -eq 0 ]; then
+    printf '%s\n' "$$" > "$1"
+    return
+  fi
+  # Direct-child PPID identifies a subshell without command substitution.
   /bin/sh -c 'printf "%s\n" "$PPID" > "$1"' _ "$1"
 }
 

@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   checks:
-    timeout-minutes: 10
+    # macOS Bash 3.2 full smoke is ~9m30s before runner variance.
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
