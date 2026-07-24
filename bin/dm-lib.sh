@@ -538,7 +538,36 @@ dm_registry_require_valid() {
   ${detail:-not a single JSON object with a .repos object (expected {\"repos\":{…}})}
 This is CORRUPTION, not an empty registry. Every repo you enrolled is still enrolled and every clone under repos/ is untouched; nothing has been changed. Restore the file from a backup or from your last known-good copy, or inspect it with: jq . '$DM_REGISTRY'
 Do NOT delete anything under repos/ to recover from this — a clone may hold work that exists nowhere else. dm-doctor.sh check reports the same fault."
+  dm_registry_require_unique_keys
   DM_REGISTRY_VALID=1
+}
+
+# JSON permits an object to repeat a key and every parser keeps just one of them
+# (jq: the last). So `{"repos":{…},"repos":{}}` PARSES, passes the shape check
+# above, and reads as an EMPTY fleet while the real entries sit in the same file
+# (#151) — the same "corruption must never read as empty" class as #112/#114.
+#
+# Detection counts leaves twice. `--stream` reports every leaf the FILE holds,
+# duplicates included; the parsed document holds only the survivors. Every JSON
+# value contributes at least one leaf event (an empty object/array is itself a
+# leaf event), so a repeated key ALWAYS costs at least one leaf and the two
+# counts differ IFF some key is repeated somewhere in the file — at any depth,
+# whether the duplicate is `repos` itself or a repo name inside it.
+#
+# Both counts come from ONE read of the bytes. Re-reading the file for the second
+# count could straddle a concurrent atomic registry write and report a perfectly
+# healthy registry as corrupt, which is the same lie in the other direction.
+dm_registry_require_unique_keys() {
+  local bytes raw_leaves kept_leaves
+  bytes="$(cat "$DM_REGISTRY")" || dm_die "could not read the repo registry: $DM_REGISTRY"
+  raw_leaves="$(printf '%s' "$bytes" | jq -n --stream '[inputs | select(length == 2)] | length')" \
+    || dm_die "could not scan the repo registry for duplicate keys: $DM_REGISTRY"
+  kept_leaves="$(printf '%s' "$bytes" | jq '[paths((type != "object" and type != "array") or length == 0)] | length')" \
+    || dm_die "could not count the repo registry's entries: $DM_REGISTRY"
+  [ "$raw_leaves" = "$kept_leaves" ] || dm_die "the repo registry has DUPLICATE KEYS: $DM_REGISTRY
+  it holds $raw_leaves values but a parser keeps only $kept_leaves — a repeated key (\"repos\" itself, or a repo name inside it) silently discards everything the earlier copy held.
+This is CORRUPTION, not an empty registry. Every repo you enrolled is still enrolled and every clone under repos/ is untouched; nothing has been changed. Find the repeated key and keep one copy of it — inspect the file with: jq . '$DM_REGISTRY' (jq prints only the surviving copy, so compare against the raw text).
+Do NOT delete anything under repos/ to recover from this — a clone may hold work that exists nowhere else."
 }
 
 # dm_registry_has <name>  -> exit 0 if registered, 1 if not. Single owner of the
@@ -652,6 +681,49 @@ dm_merge_allowed_bases() {
   printf '%s' "$obj" | jq -r '.merge_allowed_bases // [] | if type == "array" then .[] else empty end | select(type == "string")' 2>/dev/null || true
 }
 
+# --- containment: a managed clone lives under repos/ -------------------------
+# dm_repo_dir_or_none COMPOSES "$DM_HOME/<registry path>" but never RESOLVED it,
+# so `repos/<name>` symlinked at a git repo anywhere else on disk resolved fine:
+# the toolbelt cut a worktree in that foreign repo and a crewmate committed to
+# its default branch (#141). Containment is checked PHYSICALLY (cd/pwd -P;
+# `realpath` is not on a stock macOS), and $DM_REPOS is resolved the same way —
+# so an operator who symlinks the WHOLE repos/ tree onto another volume stays
+# supported, and only a per-repo escape is refused.
+#
+# Two narrow exemptions, both deliberate:
+#   - the distro root: it lives AT $DM_HOME, not under repos/, and resolves by
+#     its reserved name so its own PR path works. A hand-edited registry path
+#     that resolves there stays the DISTRO guards' business (dm_assert_not_distro,
+#     dm-sync's control-plane SKIP), which state the real posture; this guard
+#     would only mislabel it.
+#   - a path that does not resolve: there is nothing to escape INTO, and every
+#     caller already refuses a directory with no clone in it.
+dm_within_repos() {
+  # dm_within_repos <dir>  -- exit 0 if <dir> is contained, 1 if it escapes. Pure.
+  local dir="${1:-}" real root
+  [ -n "$dir" ] || return 1
+  real="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
+  if dm_is_distro_dir "$real"; then return 0; fi
+  root="$(cd "$DM_REPOS" 2>/dev/null && pwd -P)" || return 1
+  case "$real" in
+    "$root"|"$root"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+dm_assert_within_repos() {
+  # dm_assert_within_repos <dir> <subject-description>
+  # Empty input is a CALLER BUG, not a pass — same reasoning as
+  # dm_assert_not_distro: empty is what a swallowed resolver failure produces.
+  local real
+  [ -n "${1:-}" ] || dm_die "internal: dm_assert_within_repos called with an empty directory (${2:-unknown subject}); the caller's repo resolution failed silently"
+  if dm_within_repos "$1"; then return 0; fi
+  # Name where it actually LANDS, not just the path that was composed: with a
+  # symlinked repos/<name> the two differ, and the target is the thing at risk.
+  real="$(cd "$1" 2>/dev/null && pwd -P)" || real="$1"
+  dm_die "REFUSED: ${2:-this directory} lands on $real (via $1), OUTSIDE the managed clone root $DM_REPOS. A managed clone must live under repos/; a symlink or hand-edited registry path pointing at a repository elsewhere is never operated on. Check the entry with dm-repo.sh list, then replace the symlink with a real clone: dm-repo.sh add <name> <remote>."
+}
+
 # dm_repo_dir_or_none <name>  -> print the repo's working-tree directory, or exit
 # nonzero with NO output. Single owner of the "$DM_HOME/<registry path>"
 # composition AND of the reserved distro-name alias.
@@ -667,18 +739,27 @@ dm_merge_allowed_bases() {
 # from "the lookup itself failed" and never swallow the latter:
 #   0  resolved (path printed)
 #   2  no such repo — benign; a caller MAY continue (dm-sync's SKIP line)
-#   1 or other  the lookup FAILED (unreadable/corrupt registry, a dm_die raised
-#      inside this call). Callers must propagate it, never report it as "unknown
-#      repo": that would turn registry corruption into a benign skip.
+#   1 or other  the lookup FAILED (unreadable/corrupt registry, a clone that
+#      escapes repos/, any other dm_die raised inside this call). Callers must
+#      propagate it, never report it as "unknown repo": that would turn registry
+#      corruption — or a containment breach — into a benign skip.
 dm_repo_dir_or_none() {
-  local name="${1:-}" path
+  local name="${1:-}" path dir
   [ -n "$name" ] || return 2
   # The distro resolves BY ITS RESERVED NAME, never by an empty path (see
   # DM_DISTRO_REPO). It has no registry entry and must never gain one.
   if [ "$name" = "$DM_DISTRO_REPO" ]; then printf '%s\n' "$DM_HOME"; return 0; fi
   path="$(dm_registry_get "$name" path)" || return 1
   [ -n "$path" ] || return 2
-  printf '%s/%s\n' "$DM_HOME" "$path"
+  dir="$DM_HOME/$path"
+  # Containment is asserted at the single composition owner, so NO consumer can
+  # obtain an escaped path — including the ones that tolerate a failed lookup
+  # (dm-sync's SKIP line, dm-worktree's teardown). Like the corrupt-registry
+  # death raised inside dm_registry_get, this dm_die exits the caller's command
+  # substitution: the caller sees a FAILED lookup (never exit 2, "no such repo")
+  # and the real reason is already on stderr.
+  dm_assert_within_repos "$dir" "the clone registered for repo '$name'"
+  printf '%s\n' "$dir"
 }
 
 # dm_repo_dir <name>  -> print the repo's working-tree directory, or die. Every
@@ -690,7 +771,7 @@ dm_repo_dir() {
   case "$rc" in
     0) : ;;
     2) dm_die "repo '$name' is not registered (no registry entry, or no path recorded); check the name with dm-repo.sh list, or register it with dm-repo.sh add" ;;
-    *) dm_die "repo '$name': could not resolve its directory — the registry could not be read. Fix state/repos.json before retrying." ;;
+    *) dm_die "repo '$name': could not resolve its directory — see the refusal above (the registry could not be read, or its clone is not contained under repos/). Fix state/repos.json or the clone before retrying." ;;
   esac
   [ -d "$dir/.git" ] || dm_die "no clone for repo '$name' (expected $dir); add it with dm-repo.sh add"
   printf '%s\n' "$dir"
@@ -705,8 +786,8 @@ dm_repo_dir() {
 # hand-edited registry path of "." or "repos/..", or a clone symlinked AT the
 # distro). SCOPE, precisely: this protects $DM_HOME only. A registry path
 # pointing OUTSIDE DM_HOME — e.g. repos/<name> symlinked to an unrelated git
-# repo elsewhere — still resolves and is still operated on; containment of
-# repos/ as a whole is a separate, unclosed gap, tracked in #141.
+# repo elsewhere — is the neighbouring question, and it is answered by
+# dm_within_repos / dm_assert_within_repos below (#141).
 #
 # This guards MUTATION, not resolution. The distro legitimately resolves (by its
 # reserved name) so its own worktree lifecycle works; what it may never do is

@@ -53,6 +53,30 @@ these are the constraints that are not obvious from the code you are editing.
   `jq '.repos[$n].path'`, nor a field passed as a variable (`dm-repo.sh get "$n"
   "$f"`). So closing routes at the SOURCE is the durable half — which is why
   `dm-repo.sh get <unknown> <field>` now dies instead of returning empty-success.
+- **[invariant]** A managed clone must live UNDER `repos/`, and the composition
+  owner asserts it (`dm_within_repos` / `dm_assert_within_repos`, #141). The
+  composed path used to be trusted unresolved, so `repos/<name>` symlinked at any
+  git repository elsewhere on disk resolved fine — the toolbelt cut a worktree in
+  that foreign repo and a crewmate committed to its default branch. Containment is
+  PHYSICAL (`cd`/`pwd -P`; `realpath` is absent on a stock macOS) and `$DM_REPOS`
+  is resolved the same way, so symlinking the WHOLE repos/ tree onto another
+  volume stays supported and only a per-repo escape is refused. Asserting it in
+  `dm_repo_dir_or_none` (not just `dm_repo_dir`) is deliberate: the consumers that
+  TOLERATE a failed lookup — dm-sync's SKIP line, dm-worktree's teardown — write
+  to the clone too, so a check one level up would leave them open. The refusal is
+  a `dm_die` inside the caller's command substitution, i.e. a FAILED lookup, never
+  exit 2 "no such repo". Two narrow exemptions: the distro root (it lives AT
+  `$DM_HOME`; the distro guards own that case and state the real posture) and a
+  path that does not resolve (nothing to escape into; the `.git` probe refuses it).
+- **[invariant]** A corrupt registry must never read as an EMPTY one, and
+  duplicate JSON keys are that corruption too (#151, after #112/#114/#150): a
+  second `"repos"` key parses, passes the shape check, and silently discards
+  everything the first one held. `dm_registry_require_valid` catches it by
+  counting leaves twice — `jq --stream` sees every leaf the FILE holds, the parsed
+  document only the survivors, and every JSON value contributes at least one leaf
+  (empty containers included), so the counts differ iff some key repeats at any
+  depth. Both counts come from ONE read of the bytes, because re-reading could
+  straddle a concurrent atomic write and call a healthy registry corrupt.
 - **[invariant]** The distro resolves by RESERVED NAME, not by accident.
   `DM_DISTRO_REPO` (`dockmaster`) has no registry entry and must never gain one
   (`dm-repo.sh` refuses it; `dm-doctor` fails on a pre-existing entry rather than
