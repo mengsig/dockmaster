@@ -3379,6 +3379,132 @@ check "a corrupt registry restores byte-faithfully"   'cmp -s "$SP_CORRUPT/state
 rm -rf "$DM_HOME/state/unknown-extra" "$DM_HOME/state/tasks/subdir" "$DM_HOME/data/sp-artifacts"
 rm -f "$DM_HOME/state/tasks/t1.report" "$DM_HOME/state/archive/stray.json" "$DM_HOME/repos/demo/.dm/keys.txt"
 
+echo "== backlog integrity: corruption never reads as 'no such item' (#152) =="
+# Own throwaway DM_HOME: these deliberately corrupt state/backlog.json, which
+# must never touch the suite's main home.
+BLINT="$TMP/blint"
+mkdir -p "$BLINT"
+DM_HOME="$BLINT" "$ROOT/bin/dm-repo.sh" add gadget "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+DM_HOME="$BLINT" "$ROOT/bin/dm-task.sh" new blint-1 --kind ship --repo gadget >/dev/null
+DM_HOME="$BLINT" "$ROOT/bin/dm-backlog.sh" add blint-1 "corruption fixture item" --repo gadget --status inflight >/dev/null
+check "fixture: a healthy backlog resolves the item" \
+  'jq -e ".items[]|select(.id==\"blint-1\")" "$BLINT/state/backlog.json" >/dev/null'
+
+# Missing and zero-length are legitimate first-run states, not corruption.
+check "a missing backlog.json is a first-run state" \
+  'DM_HOME="$TMP/blint-missing" "$ROOT/bin/dm-backlog.sh" list >/dev/null 2>&1'
+mkdir -p "$TMP/blint-empty/state"; : > "$TMP/blint-empty/state/backlog.json"
+check "a zero-length backlog.json is a first-run state and is re-seeded" \
+  'DM_HOME="$TMP/blint-empty" "$ROOT/bin/dm-backlog.sh" list >/dev/null 2>&1 &&
+   [ "$(jq -c . "$TMP/blint-empty/state/backlog.json")" = "{\"items\":[],\"decisions\":[]}" ]'
+# An object missing .items/.decisions is corruption, not an empty backlog.
+mkdir -p "$TMP/blint-noitems/state"; printf '{}\n' > "$TMP/blint-noitems/state/backlog.json"
+check "an object with no .items/.decisions keys is corruption, not an empty backlog" \
+  '! DM_HOME="$TMP/blint-noitems" "$ROOT/bin/dm-backlog.sh" list >/dev/null 2>&1'
+
+printf '{"items": [broken\n' > "$BLINT/state/backlog.json"
+
+# ENUMERATED consumers: every dm-backlog.sh subcommand must refuse loudly on a
+# corrupt file, distinctly from "id not found" — the exact class #112 closed
+# for the registry, here for backlog.json.
+BLINT_FAILED=""
+while IFS= read -r consumer; do
+  [ -n "$consumer" ] || continue
+  # shellcheck disable=SC2086
+  if DM_HOME="$BLINT" "$ROOT/bin/"$consumer >/dev/null 2>"$TMP/blint-err"; then
+    BLINT_FAILED="$BLINT_FAILED [exited 0: $consumer]"
+  elif [ ! -s "$TMP/blint-err" ]; then
+    BLINT_FAILED="$BLINT_FAILED [silent: $consumer]"
+  elif ! grep -q 'does not parse' "$TMP/blint-err"; then
+    BLINT_FAILED="$BLINT_FAILED [unnamed: $consumer]"
+  fi
+done <<EOF
+dm-backlog.sh list
+dm-backlog.sh add blint-2 freshitem
+dm-backlog.sh move blint-1 done
+dm-backlog.sh done blint-1
+dm-backlog.sh ready
+dm-backlog.sh campaign fleet-x
+dm-backlog.sh decisions
+dm-backlog.sh hold hkey somequestion
+dm-backlog.sh resolve hkey ananswer
+dm-backlog.sh validate
+EOF
+check "every dm-backlog.sh consumer refuses a corrupt backlog, by name$BLINT_FAILED" '[ -z "$BLINT_FAILED" ]'
+
+BLINT_MOVE_ERR="$(DM_HOME="$BLINT" "$ROOT/bin/dm-backlog.sh" move blint-1 done 2>&1 || true)"
+check "corrupt backlog is never reported as 'no backlog item'" \
+  '! grep -q "no backlog item" <<<"$BLINT_MOVE_ERR"'
+check "the corruption message says CORRUPTION and how to inspect it" \
+  'grep -q "CORRUPTION" <<<"$BLINT_MOVE_ERR" && grep -q "jq . " <<<"$BLINT_MOVE_ERR"'
+check "the corruption message advises no destructive command" \
+  '! grep -qE "rm -rf|rm -r " <<<"$BLINT_MOVE_ERR"'
+
+BLINT_STATUS_OUT="$TMP/blint-status-out"; BLINT_STATUS_ERR="$TMP/blint-status-err"
+DM_HOME="$BLINT" "$ROOT/bin/dm-status.sh" >"$BLINT_STATUS_OUT" 2>"$BLINT_STATUS_ERR" && BLINT_STATUS_RC=0 || BLINT_STATUS_RC=$?
+check "dm-status on a corrupt backlog exits non-zero (found alongside #152)" \
+  '[ "$BLINT_STATUS_RC" -ne 0 ]'
+check "dm-status on a corrupt backlog says what is wrong, not silent" \
+  '[ -s "$BLINT_STATUS_ERR" ] || grep -q "FAIL backlog" "$BLINT_STATUS_OUT"'
+check "a corrupt backlog is never rendered as clean drift/ready/decisions" \
+  '! grep -q "(no drift)" "$BLINT_STATUS_OUT" &&
+   ! grep -q "(nothing ready)" "$BLINT_STATUS_OUT" &&
+   ! grep -q "(none open)" "$BLINT_STATUS_OUT"'
+check "every backlog-dependent section reports the failure, not just one" \
+  '[ "$(grep -c "FAIL backlog" "$BLINT_STATUS_OUT")" -eq 4 ]'
+check "dm-status still renders the sections that do not depend on the backlog" \
+  'grep -q "MANAGED REPOS" "$BLINT_STATUS_OUT" && grep -q "IN-FLIGHT WORK" "$BLINT_STATUS_OUT"'
+
+# A well-formed JSON document of the wrong shape is corruption too.
+BLINT_SHAPE=""
+for shape in '{"items": {}, "decisions": []}' '[1,2,3]' '"nope"'; do
+  mkdir -p "$TMP/blint-shape/state"; printf '%s\n' "$shape" > "$TMP/blint-shape/state/backlog.json"
+  DM_HOME="$TMP/blint-shape" "$ROOT/bin/dm-backlog.sh" list >/dev/null 2>&1 &&
+    BLINT_SHAPE="$BLINT_SHAPE [$shape]" || true
+done
+check "a well-formed JSON document of the wrong shape is corruption$BLINT_SHAPE" '[ -z "$BLINT_SHAPE" ]'
+
+echo "== toolbelt papercuts: unknown campaign errors, not silent success (#126.4) =="
+CAMP126_OUT="$TMP/camp126-out"; CAMP126_ERR="$TMP/camp126-err"
+b dm-backlog.sh campaign camp-never-created >"$CAMP126_OUT" 2>"$CAMP126_ERR" && CAMP126_RC=0 || CAMP126_RC=$?
+check "unknown campaign exits non-zero"                    '[ "$CAMP126_RC" -ne 0 ]'
+check "unknown campaign names itself, not a blank success" \
+  '[ ! -s "$CAMP126_OUT" ] && grep -q "no such campaign: camp-never-created" "$CAMP126_ERR"'
+
+echo "== toolbelt papercuts: add shows usage alongside an invalid id (#126.5) =="
+ADD126_ERR="$(b dm-backlog.sh add "fix the flaky test" --repo gadget 2>&1 || true)"
+check "title-as-id add still names the invalid id"                 'grep -q "invalid task/repo id" <<<"$ADD126_ERR"'
+check "title-as-id add also prints usage, not just the bare error" 'grep -q "usage: dm-backlog.sh add" <<<"$ADD126_ERR"'
+
+echo "== dm-status ORPHAN honesty: canonicalized paths, not raw strings (#147) =="
+C147_REAL="$TMP/c147-real"; C147_LINK="$TMP/c147-link"
+mkdir -p "$C147_REAL"
+ln -s "$C147_REAL" "$C147_LINK"
+C147_HOME="$C147_LINK/home"
+C147_CANON_HOME="$C147_REAL/home"
+DM_HOME="$C147_HOME" "$ROOT/bin/dm-repo.sh" add gadget "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+DM_HOME="$C147_HOME" DM_NO_FETCH=1 "$ROOT/bin/dm-task.sh" new c147-task --kind ship --repo gadget >/dev/null
+DM_HOME="$C147_HOME" DM_NO_FETCH=1 "$ROOT/bin/dm-worktree.sh" create c147-task gadget >/dev/null 2>&1
+C147_RECORDED="$(DM_HOME="$C147_HOME" "$ROOT/bin/dm-task.sh" get c147-task worktree)"
+check "fixture: the recorded worktree starts out canonical" \
+  '[ "$C147_RECORDED" = "$C147_CANON_HOME/state/worktrees/c147-task" ]'
+# Rewrite the record to the pre-canonicalization (symlinked-root) form, simulating
+# a task created before DM_HOME canonicalization existed. Same real directory,
+# different string.
+C147_LEGACY="$C147_HOME/state/worktrees/c147-task"
+C147_META="$C147_CANON_HOME/state/tasks/c147-task.meta"
+sed "s#^worktree=.*#worktree=$C147_LEGACY#" "$C147_META" > "$C147_META.new" && mv "$C147_META.new" "$C147_META"
+check "fixture: the meta now holds the non-canonical symlinked path" \
+  'grep -qx "worktree=$C147_LEGACY" "$C147_META"'
+# A genuine orphan: a directory under state/worktrees/ with no task record at all.
+mkdir -p "$C147_CANON_HOME/state/worktrees/c147-genuine-orphan"
+
+C147_STATUS="$(DM_HOME="$C147_HOME" "$ROOT/bin/dm-status.sh" 2>&1)"
+check "a legacy non-canonical worktree record is NOT reported ORPHAN" \
+  '! grep -q "ORPHAN.*worktrees/c147-task$" <<<"$C147_STATUS"'
+check "a genuine orphan is still reported ORPHAN" \
+  'grep -q "ORPHAN.*worktrees/c147-genuine-orphan$" <<<"$C147_STATUS"'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
