@@ -13,6 +13,7 @@
 #   campaign <id>         items grouped under a campaign, with their status
 #   decisions             open operator decisions (key + question), one per line
 #   list                  print the rendered backlog
+#   validate              exit 0 if backlog.json parses, nonzero + message if not
 #
 # A campaign groups the child items of one multi-repo intent (one child task per
 # repo) so it can be tracked and reported as a unit; see the fleet-change skill.
@@ -31,12 +32,34 @@ dm_ensure_dirs
 
 BJSON="$DM_STATE/backlog.json"
 BMD="$DM_STATE/backlog.md"
-[ -f "$BJSON" ] || printf '{"items":[],"decisions":[]}\n' > "$BJSON"
+# Absent or zero-length both mean "first run" — seed the empty backlog, same
+# rule dm_ensure_dirs uses for the registry. A non-empty file is never
+# rewritten here; if it does not parse that is corruption, caught below.
+[ -s "$BJSON" ] || printf '{"items":[],"decisions":[]}\n' > "$BJSON"
 
 # Locked, atomic update of backlog.json. Delegates to the shared dm_json_update
 # (dm-lib.sh) — the single owner of the locked read-modify-write of a JSON file —
 # so the backlog and the registry share one audited path (no format drift).
 bwrite() { dm_json_update "$BJSON" "$@"; }
+
+# --- backlog integrity: corrupt must never read as "no such item" (#152) -----
+# Same shape as dm_registry_require_valid (dm-lib.sh): the `jq -e ... ||
+# dm_die "no backlog item"` guards below fire identically for "id absent" and
+# "file unparseable", so corruption silently looked like a legitimate miss.
+# Validated once, unconditionally, before any subcommand runs — every reader
+# in this file is downstream of this call and needs no guard of its own.
+dm_backlog_require_valid() {
+  local detail
+  detail="$(jq -e -s 'length == 1
+      and (.[0] | type == "object" and has("items") and (.items | type == "array")
+                and has("decisions") and (.decisions | type == "array"))' \
+    "$BJSON" 2>&1 >/dev/null)" \
+    || dm_die "the backlog does not parse: $BJSON
+  ${detail:-not a single JSON object with .items and .decisions arrays (expected {\"items\":[…],\"decisions\":[…]})}
+This is CORRUPTION, not an empty backlog. Every item and decision hold you recorded is still there; nothing has been changed. Restore the file from a backup or from your last known-good copy, or inspect it with: jq . '$BJSON'
+Do NOT delete anything to recover from this — a backlog item or decision hold may exist nowhere else. dm-doctor.sh check reports the same fault."
+}
+dm_backlog_require_valid
 
 render() {
   {
@@ -71,7 +94,11 @@ case "$cmd" in
   add)
     id="${1:-}"; title="${2:-}"; shift 2 2>/dev/null || true
     [ -n "$id" ] && [ -n "$title" ] || dm_die "usage: dm-backlog.sh add <id> \"<title>\" [--repo R] [--status queued|inflight] [--blocked-by a,b] [--note ...] [--campaign C]"
-    dm_require_id "$id"
+    # An id-shaped-like-a-title (e.g. `add "fix the flaky test" --repo x`, the
+    # title mistakenly passed first) is a natural mistake; print usage
+    # alongside the error rather than only on zero args (#126.5).
+    dm_valid_id "$id" || dm_die "usage: dm-backlog.sh add <id> \"<title>\" [--repo R] [--status queued|inflight] [--blocked-by a,b] [--note ...] [--campaign C]
+invalid task/repo id: '$id' (use [A-Za-z0-9._-], no leading dot, <= 64 chars)"
     repo=""; status="queued"; blocked=""; note=""; campaign=""
     while [ "$#" -gt 0 ]; do case "$1" in
       --repo) repo="${2:-}"; shift 2;; --status) status="${2:-}"; shift 2;;
@@ -126,10 +153,14 @@ case "$cmd" in
 $blockers
 EOF
     complete="$(printf '%s' "$complete_ids" | jq -R -s 'split("\n") | map(select(length>0))')"
-    jq -r --argjson complete "$complete" '
+    # Capture jq's output before piping to `column`, so a jq failure aborts
+    # loudly (set -e) instead of the old `| column ... || true`, which folded
+    # "no matches" and "jq failed" into the same silent empty success.
+    out="$(jq -r --argjson complete "$complete" '
       .items[] | select(.status=="queued") |
       select(all(.blocked_by[]; . as $b | ($complete|index($b))!=null)) |
-      "\(.id)\t\(.title)"' "$BJSON" | column -t -s$'\t' 2>/dev/null || true
+      "\(.id)\t\(.title)"' "$BJSON")"
+    [ -z "$out" ] || { printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"; }
     ;;
   campaign)
     # Rollup view: every item tagged with this campaign id and its current
@@ -138,17 +169,26 @@ EOF
     cid="${1:-}"
     [ -n "$cid" ] || dm_die "usage: dm-backlog.sh campaign <id>"
     dm_require_id "$cid"
-    jq -r --arg c "$cid" '
+    out="$(jq -r --arg c "$cid" '
       .items[] | select((.campaign//"")==$c) |
       "\(.id)\t\(.status)\t\(.title)" +
-      (if (.repo//"")!="" then "  (\(.repo))" else "" end)' "$BJSON" \
-      | column -t -s$'\t' 2>/dev/null || true
+      (if (.repo//"")!="" then "  (\(.repo))" else "" end)' "$BJSON")"
+    # No item ever tagged with this campaign is indistinguishable from a
+    # typo'd/never-created one; items are never deleted, so "zero matches"
+    # reliably means "unknown campaign" (#126.4).
+    [ -n "$out" ] || dm_die "no such campaign: $cid"
+    printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"
     ;;
   decisions)
     # open operator decisions, machine-readable (key<TAB>question); consumed by
     # status views. Resolved holds are omitted.
-    jq -r '.decisions[] | select(.status=="open") | "\(.key)\t\(.question)"' "$BJSON" \
-      | column -t -s$'\t' 2>/dev/null || true
+    out="$(jq -r '.decisions[] | select(.status=="open") | "\(.key)\t\(.question)"' "$BJSON")"
+    [ -z "$out" ] || { printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"; }
+    ;;
+  validate)
+    # No-op: reaching here already proves the backlog parses (dm_backlog_require_valid
+    # ran above). Callers like dm-status.sh want only the exit code.
+    :
     ;;
   hold)
     key="${1:-}"; question="${2:-}"; shift 2 2>/dev/null || true
@@ -172,5 +212,5 @@ EOF
   list|show|"")
     render; cat "$BMD"
     ;;
-  *) echo "usage: dm-backlog.sh {add|move|done|ready|campaign|decisions|hold|resolve|list} ..." >&2; exit 2 ;;
+  *) echo "usage: dm-backlog.sh {add|move|done|ready|campaign|decisions|hold|resolve|list|validate} ..." >&2; exit 2 ;;
 esac
