@@ -92,6 +92,19 @@ case "$cmd" in
       # both decisions over to a repo that never consented to them, so the repo is
       # fixed at creation (`new --repo`) and recorded by dm-worktree.sh create.
       repo) dm_die "'repo' is fixed when the task is created (dm-task.sh new --repo) and recorded by dm-worktree.sh create; re-pointing a task at another repo would land its work in the wrong clone, under the wrong merge authority" ;;
+      # `kind` is DIRECTIONAL, not free. scout -> ship is the documented
+      # promotion (task-lifecycle). ship -> scout is the forge: kind selects how
+      # `state` reconciles, so a fabricated data/<id>/report.md turns the task
+      # terminal-done, and teardown then reads real committed work as
+      # investigation scratch. A ship task that should not be built ends with
+      # `close --reason`, not by pretending it was an investigation.
+      kind)
+        dm_require_id "$id"
+        current_kind="$(dm_meta_get "$id" kind)"
+        if [ "$current_kind" = "ship" ] && [ "$value" = "scout" ]; then
+          dm_die "REFUSED: task '$id' is a ship task; demoting it to scout would let a report file reconcile it to done and let teardown discard its committed work as scratch. If it must not be built, end it honestly: dm-task.sh close $id --reason \"<why>\""
+        fi
+        ;;
       # The REGISTRY owns a repo's delivery mode; the task field is a per-task
       # copy of it. Setting `mode local-only` on a pipeline repo made
       # `dm-merge.sh local` fast-forward unreviewed work straight onto that

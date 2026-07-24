@@ -3534,6 +3534,21 @@ check "set reserves the repo field, unchanged" \
   '! b dm-task.sh set ri-forge repo demo >/dev/null 2>&1 && [ "$(b dm-task.sh get ri-forge repo)" = ripipe ]'
 check "set still writes an ordinary field (guard the guard)" \
   'b dm-task.sh set ri-forge model sonnet >/dev/null 2>&1 && [ "$(b dm-task.sh get ri-forge model)" = sonnet ]'
+# `kind` is directional: promotion is documented, demotion is the forge. Demoting
+# a ship task to scout makes a fabricated report.md reconcile it to done and lets
+# teardown discard its committed work as investigation scratch.
+b dm-task.sh new ri-kind --kind scout --repo demo >/dev/null
+check "set promotes a scout task to ship (the documented path)" \
+  'b dm-task.sh set ri-kind kind ship >/dev/null 2>&1 && [ "$(b dm-task.sh get ri-kind kind)" = ship ]'
+RI_KIND_RC=0
+RI_KINDOUT="$(b dm-task.sh set ri-kind kind scout 2>&1)" || RI_KIND_RC=$?
+check "set refuses demoting a ship task back to scout" '[ "$RI_KIND_RC" -ne 0 ]'
+check "the refused demotion left the kind alone"      '[ "$(b dm-task.sh get ri-kind kind)" = ship ]'
+check "the demotion refusal names the honest way out" 'grep -q "dm-task.sh close ri-kind" <<<"$RI_KINDOUT"'
+mkdir -p "$DM_HOME/data/ri-kind"
+printf '# fabricated\n' > "$DM_HOME/data/ri-kind/report.md"
+check "so a fabricated report cannot reconcile a ship task to done" \
+  '! DM_NO_FETCH=1 b dm-task.sh state ri-kind | grep -q "state: done"'
 RIWT="$(b dm-worktree.sh create ri-forge ripipe | tail -n1)"
 git -C "$RIWT" checkout -q -b feat/x/ri-forge
 printf 'unreviewed\n' > "$RIWT/forged.txt"

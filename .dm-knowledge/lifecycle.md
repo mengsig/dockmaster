@@ -16,7 +16,12 @@ delivered. The contract a crewmate follows lives in the `task-lifecycle` and
   also reserves `worktree` (dm-worktree) and `repo` (fixed at creation — it
   decides which clone the work lands in and whose merge authority gates it), and
   constrains `mode` to the repo's REGISTERED delivery mode (#127, see
-  merge-safety.md). `new` refuses an UNREGISTERED `--repo` outright (#124) rather
+  merge-safety.md). `kind` is DIRECTIONAL: `scout -> ship` is the documented
+  promotion, `ship -> scout` is refused — kind selects how `state` reconciles, so
+  a demotion turns a fabricated `data/<id>/report.md` into a terminal `done` and
+  lets teardown read committed work as investigation scratch. Teardown's gate is
+  kind-INDEPENDENT as well, so the two hold the same line from both sides.
+  `new` refuses an UNREGISTERED `--repo` outright (#124) rather
   than failing later at worktree-create; the reserved distro name is the one
   accepted non-registry name, since it has no entry by design.
 - **[decision]** A ship task whose honest answer is "do not build it" ends with
