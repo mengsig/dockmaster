@@ -1082,72 +1082,38 @@ dm_brief_unready_reason() {
   printf 'placeholder\n'
 }
 
-# --- dispatch right-sizing: advisory model + effort recommendations -----------
-# Two pure functions (offline, no side effects) over the same <kind> <text>
-# inputs, so dm-brief can surface them and smoke can test them. Both ADVISORY,
-# never gates: the dockmaster decides the final resourcing.
+# --- dispatch right-sizing: two independent, enforceable dials ----------------
+# Model tier and reasoning effort are SEPARATE axes and both bind at spawn:
+# `model` is an Agent-tool parameter, and effort comes from the `crew-<level>`
+# subagent definitions under `.claude/agents/`, selected with `subagent_type`.
+# No definition pins a model, so every model x effort pair is reachable —
+# sonnet-low and haiku-high are both ordinary dispatches.
 #
-# Shared signal sets, so the two siblings cannot drift apart on the same input:
-#   RISK       dominates both and sizes UP. Matched as a case-insensitive
-#              SUBSTRING, so `auth` also fires on author/authority — a deliberate
-#              over-size bias, the safe direction for an advisory hint. ONE
-#              exception: `lock` is word-anchored, because it otherwise fires on
-#              block/blocking/unblock, and `blocked` is this distro's own status
-#              word — every routine "unblock X" task would buy the top tier.
-#              Anchoring drops compounds too, so the real hazards are listed
-#              back explicitly: deadlock, flock (the POSIX advisory-lock call
-#              this distro's own mutex notes), spinlock, livelock, rwlock.
-#              `lockfile` is deliberately NOT among them — "add a lockfile" is
-#              dependency work, and a lockfile RACE says concurren/mutex anyway.
-#   MECHANICAL sizes DOWN, so a substring hit is the WRONG direction: `doc`
-#              inside dockmaster and `nit` inside unit would size real work down
-#              to the floor. Whole words only, with a small suffix set; a term
-#              this misses stays at the default tier, which is the safe miss.
-DM_RISK_SIGNAL_RE='authz|permission|auth|migration|alembic|concurren|(^|[^[:alpha:]])(un)?lock(s|ing|ed)?([^[:alpha:]]|$)|deadlock|flock|spinlock|livelock|rwlock|mutex|security|secret|crypto|merge.gate|memory governance'
-DM_MECHANICAL_SIGNAL_RE='(^|[^[:alpha:]])(test|doc|chore|nit|typo|format|comment|rename)(s|es|ed|ing)?([^[:alpha:]]|$)'
+# The levels a dispatch may record. `max` exists in the runtime but is
+# deliberately excluded: a cost ceiling, not a missing case. Do not add it back.
+DM_EFFORT_LEVELS='low medium high xhigh'
 
-# Least model tier that still fits the work: what the crewmate must be able to
-# DO. Prints: haiku|sonnet|opus.
+# The two recommenders are UNBIASED ANCHORS, not heuristics. They used to key
+# off regexes over a task title — a weak signal that nonetheless steered real
+# spend, and one that over-fired (`auth` matched author/authority). The
+# orchestrator holds the task context and makes the call; these only name the
+# middle of each axis to tune away from.
+
+# Anchor model tier. Prints: sonnet.
 dm_recommended_model() {
-  # dm_recommended_model <kind> <title-plus-brief-text>
-  local kind="$1" text="$2"
-  if grep -qiE "$DM_RISK_SIGNAL_RE" <<<"$text"; then
-    printf 'opus\n'; return 0
-  fi
-  if [ "$kind" = "scout" ] || grep -qiE "$DM_MECHANICAL_SIGNAL_RE" <<<"$text"; then
-    printf 'haiku\n'; return 0
-  fi
   printf 'sonnet\n'
 }
 
-# Reasoning effort the work is worth: how long the crewmate must THINK before
-# acting. A different axis from the model tier, so the two disagree by design —
-# a scout is cheap to run but must reason (haiku + high), a rename needs neither
-# (haiku + low), and an ordinary test edit needs a small model but real care
-# (haiku + medium). Same over-size bias; risk dominates. Prints:
-# low|medium|high|xhigh.
-#
-# NOT ENFORCEABLE AT SPAWN, unlike the model tier: the Agent tool takes a
-# per-spawn `model` and has no effort parameter, so this binds only when the
-# work is dispatched through a mechanism that accepts one. Advisory everywhere
-# else — dm-brief says so in as many words.
+# Anchor reasoning effort. Prints: medium.
 dm_recommended_effort() {
-  # dm_recommended_effort <kind> <title-plus-brief-text>
-  local kind="$1" text="$2"
-  if grep -qiE "$DM_RISK_SIGNAL_RE" <<<"$text"; then
-    printf 'xhigh\n'; return 0
-  fi
-  # Understanding-first work: the answer is the deliverable, so deliberation is
-  # the whole job even when the edit is small (or there is no edit at all).
-  if [ "$kind" = "scout" ] \
-     || grep -qiE 'investigat|diagnos|debug|root.cause|reproduc|design|architect|refactor|audit|performance' <<<"$text"; then
-    printf 'high\n'; return 0
-  fi
-  # Only the truly mechanical floor: a rename or a typo needs no deliberation.
-  # `test` is deliberately NOT here — a small model can write a test, but a
-  # careless one writes a test that cannot fail.
-  if grep -qiE '(^|[^[:alpha:]])(nit|typo|format|comment|rename)(s|es|ed|ing)?([^[:alpha:]]|$)' <<<"$text"; then
-    printf 'low\n'; return 0
-  fi
   printf 'medium\n'
+}
+
+# True when <value> is an effort level a dispatch may record. Empty is refused
+# first: the substring test below would otherwise match the separator space.
+dm_effort_is_valid() {
+  local value="${1:-}"
+  [ -n "$value" ] || return 1
+  case " $DM_EFFORT_LEVELS " in *" $value "*) return 0 ;; esac
+  return 1
 }

@@ -398,10 +398,9 @@ b dm-brief.sh demo-1 >/dev/null
 check "brief bakes commandments" 'grep -q "The Ten Commandments" "$DM_HOME/data/demo-1/brief.md"'
 check "brief has review-ready"    'grep -q "review-ready" "$DM_HOME/data/demo-1/brief.md"'
 check "brief labels the private-notes boundary" 'grep -q "never copy or paraphrase them" "$DM_HOME/data/demo-1/brief.md"'
-# Advisory dispatch right-sizing (#77): the recommended tier is surfaced in the
-# header and the same value is recorded in task meta. "add multiply" is ordinary
-# implementation work -> sonnet.
-check "brief surfaces the recommended model tier"     'grep -q "Recommended model tier: sonnet" "$DM_HOME/data/demo-1/brief.md"'
+# Dispatch right-sizing (#77, #166): the anchor tier is surfaced in the header
+# and the same value is recorded in task meta.
+check "brief surfaces the anchor model tier"          'grep -q "Model tier: sonnet" "$DM_HOME/data/demo-1/brief.md"'
 check "brief records model_recommended in task meta"  '[ "$(b dm-task.sh get demo-1 model_recommended)" = sonnet ]'
 
 echo "== status (read-only view) =="
@@ -1504,29 +1503,30 @@ check "gate waits on a CI repo reporting none"          '[ "$(awgate none clean 
 check "gate passes none only on a confirmed CI-less repo" '[ "$(awgate none clean 0)" = pass ]'
 check "gate waits on pending and unknown"               '[ "$(awgate pending clean 1)" = wait ] && [ "$(awgate unknown clean 1)" = wait ]'
 
-echo "== dispatch right-sizing: dm_recommended_model is a pure advisory tier (#77) =="
-# Pure like dm_merge_gate: risk signals -> opus, scout/mechanical -> haiku, else
-# sonnet. Case-insensitive substring match; risk dominates the scout kind.
-rec() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_model "$1" "$2" ); }
-check "recommend opus for auth/security work"      '[ "$(rec ship "harden auth token security")" = opus ]'
-check "recommend opus for a migration"             '[ "$(rec ship "add Alembic migration")" = opus ]'
-check "recommend opus for a concurrency/lock fix"  '[ "$(rec ship "fix mutex lock race")" = opus ]'
-check "recommend haiku for a scout"                '[ "$(rec scout "look into the page layout")" = haiku ]'
-check "recommend haiku for a docs/typo fix"        '[ "$(rec ship "fix docs typo")" = haiku ]'
-check "recommend sonnet for ordinary impl"         '[ "$(rec ship "add a multiply endpoint")" = sonnet ]'
-check "risk signals dominate the scout kind"       '[ "$(rec scout "security audit of auth flow")" = opus ]'
+echo "== dispatch right-sizing: dm_recommended_model is an UNBIASED anchor (#77, #166) =="
+# Deliberately a constant, not a heuristic. A regex over a task title is a weak
+# signal that steered real spend, so the orchestrator decides instead. These
+# checks fail if anyone reintroduces keyword sizing in EITHER direction.
+rec() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_model "$@" ); }
+check "the anchor model tier is sonnet"          '[ "$(rec)" = sonnet ]'
+check "risk words do not size the anchor up"     '[ "$(rec ship "harden auth token security migration mutex")" = sonnet ]'
+check "mechanical words do not size it down"     '[ "$(rec ship "fix docs typo")" = sonnet ]'
+check "the scout kind does not size it"          '[ "$(rec scout "look into the page layout")" = sonnet ]'
 
-echo "== dispatch right-sizing: dm-status flags an unsized dispatch (#77) =="
-# A live `working` task with no `model` recorded is an unsized dispatch; the
-# advisory hint names a recommended tier and clears once a model is recorded.
+echo "== dispatch right-sizing: dm-status flags an unsized dispatch (#77, #166) =="
+# A live `working` task missing EITHER dial is an unsized dispatch; the hint
+# names the anchors and clears only once both are recorded.
 b dm-task.sh new unsized-1 --kind ship --repo demo --title "add a widget" >/dev/null
 b dm-task.sh event unsized-1 working "started" >/dev/null
 UNSIZED_STATUS="$(b dm-status.sh)"   # capture once (grep -q + pipefail)
 check "status flags a working task with no model as UNSIZED" 'grep -q "UNSIZED.*unsized-1" <<<"$UNSIZED_STATUS"'
-check "UNSIZED hint names a recommended tier"                'grep -qE "recommended: (haiku|sonnet|opus)" <<<"$UNSIZED_STATUS"'
+check "UNSIZED hint names a recommended tier"                'grep -qE "recommended: (haiku|sonnet|opus|fable)" <<<"$UNSIZED_STATUS"'
 b dm-task.sh set unsized-1 model sonnet >/dev/null
+HALF_SIZED_STATUS="$(b dm-status.sh)"
+check "a model alone does NOT clear UNSIZED"                 'grep -q "UNSIZED.*unsized-1.*no effort recorded" <<<"$HALF_SIZED_STATUS"'
+b dm-task.sh set unsized-1 effort low >/dev/null
 SIZED_STATUS="$(b dm-status.sh)"
-check "recording a model clears the UNSIZED flag"            '! grep -q "UNSIZED.*unsized-1" <<<"$SIZED_STATUS"'
+check "recording both dials clears the UNSIZED flag"         '! grep -q "UNSIZED.*unsized-1" <<<"$SIZED_STATUS"'
 
 echo "== state-gate-integrity: pr_state cannot be forged via 'set' (#20 F6) =="
 b dm-task.sh new sgi-forge --kind ship --repo sgi >/dev/null 2>&1 || true
@@ -4168,55 +4168,81 @@ check "the refusal names the size limit rather than a git verdict" \
 # fail-open behavior above is answered for.
 check "no settings.json installs the guard as a hook yet (#89 stays open)" \
   '! jq -e ".hooks" "$ROOT/.claude/settings.json" >/dev/null 2>&1'
-echo "== dispatch right-sizing: dm_recommended_effort sizes deliberation, not capability =="
-# Sibling of dm_recommended_model on the same inputs, pure and offline. They are
-# sized on different axes, so the interesting cases are the ones where they
-# DISAGREE — pinned below so a later edit cannot quietly collapse one into the other.
-w6rec() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_model "$1" "$2" ); }
-w6eff() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_effort "$1" "$2" ); }
-check "risk work gets the top effort"           '[ "$(w6eff ship "harden auth token security")" = xhigh ]'
-check "a migration gets the top effort"         '[ "$(w6eff ship "add Alembic migration")" = xhigh ]'
-check "risk dominates the scout kind"           '[ "$(w6eff scout "security audit of auth flow")" = xhigh ]'
-check "a scout must deliberate"                 '[ "$(w6eff scout "look into the page layout")" = high ]'
-check "investigation words reach high"          '[ "$(w6eff ship "diagnose the flaky drain")" = high ]'
-check "a refactor reaches high"                 '[ "$(w6eff ship "refactor the report renderer")" = high ]'
-check "ordinary implementation is medium"       '[ "$(w6eff ship "add a multiply endpoint")" = medium ]'
-check "a typo or rename is the floor"           '[ "$(w6eff ship "fix docs typo")" = low ] && [ "$(w6eff ship "rename a variable")" = low ]'
-check "effort is pure: same input, same answer" '[ "$(w6eff ship "add a multiply endpoint")" = "$(w6eff ship "add a multiply endpoint")" ]'
-check "every answer is one of the four tiers" \
-  '( for w6k in ship scout; do for w6t in "harden auth" "look into it" "add a widget" "fix a typo"; do
-       grep -qE "^(low|medium|high|xhigh)$" <<<"$(w6eff "$w6k" "$w6t")" || exit 1; done; done )'
-# The disagreements, stated as pairs. A scout is cheap to RUN and expensive to
-# THINK; a test edit is the reverse of a rename.
-check "a scout is a small model at high effort"    '[ "$(w6rec scout "look into the page layout")" = haiku ] && [ "$(w6eff scout "look into the page layout")" = high ]'
-check "a test edit is a small model at medium"     '[ "$(w6rec ship "add tests for the parser")" = haiku ] && [ "$(w6eff ship "add tests for the parser")" = medium ]'
-check "the floor agrees on a typo"                 '[ "$(w6rec ship "fix docs typo")" = haiku ] && [ "$(w6eff ship "fix docs typo")" = low ]'
-check "the ceiling agrees on security work"        '[ "$(w6rec ship "rotate the signing secret")" = opus ] && [ "$(w6eff ship "rotate the signing secret")" = xhigh ]'
-# Down-sizing terms match as WORDS, not substrings: `doc` inside dockmaster and
-# `nit` inside unit would otherwise size real work down to the floor, which is
-# the wrong direction for a stated over-size bias.
-check "a down-sizing term does not fire inside a longer word" \
-  '[ "$(w6rec ship "fix dockmaster brief generation")" = sonnet ] && [ "$(w6eff ship "add unit conversion helper")" = medium ] && [ "$(w6eff ship "update the information banner")" = medium ]'
-check "the down-sizing terms still fire as words" \
-  '[ "$(w6rec ship "update the docs")" = haiku ] && [ "$(w6eff ship "rename the helper")" = low ]'
+echo "== dispatch right-sizing: dm_recommended_effort is an UNBIASED anchor (#166) =="
+# medium, always. The keyword heuristics are gone on purpose: the orchestrator
+# holds the task context, and a title regex that steers spend is worse than no
+# signal. These checks fail if keyword sizing comes back in either direction.
+w6rec() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_model "$@" ); }
+w6eff() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_effort "$@" ); }
+check "the anchor effort is medium"             '[ "$(w6eff)" = medium ]'
+check "risk words do not size effort up"        '[ "$(w6eff ship "harden auth token security")" = medium ] && [ "$(w6eff ship "add Alembic migration")" = medium ]'
+check "investigation words do not size up"      '[ "$(w6eff ship "diagnose the flaky drain")" = medium ] && [ "$(w6eff ship "refactor the report renderer")" = medium ]'
+check "the scout kind does not size up"         '[ "$(w6eff scout "look into the page layout")" = medium ]'
+check "mechanical words do not size down"       '[ "$(w6eff ship "fix docs typo")" = medium ] && [ "$(w6eff ship "rename a variable")" = medium ]'
+check "the two dials are anchored independently" '[ "$(w6rec)" = sonnet ] && [ "$(w6eff)" = medium ]'
+# The dead signal sets must stay dead — an orphaned regex is the seed of the
+# next quiet re-bias.
+check "the keyword signal sets are gone"        '! grep -q "DM_RISK_SIGNAL_RE\|DM_MECHANICAL_SIGNAL_RE" "$ROOT/bin/dm-lib.sh"'
 
-echo "== brief: both recommendations are surfaced, and only one is claimed enforceable =="
+echo "== dispatch right-sizing: the effort set is closed, and each level has an agent (#166) =="
+w6valid() { ( . "$ROOT/bin/dm-lib.sh"; dm_effort_is_valid "$@" ); }
+check "the four levels are valid"    '( for w6l in low medium high xhigh; do w6valid "$w6l" || exit 1; done )'
+check "max is refused on purpose"    '! w6valid max'
+check "an empty effort is refused"   '! w6valid ""'
+check "a junk effort is refused"     '! w6valid nonsense && ! w6valid LOW'
+# The drift guard that matters: an effort level the gate ACCEPTS but that names
+# no agent definition on disk is a dispatch that cannot be spawned.
+check "every accepted level has a crew-<level> agent definition" \
+  '( . "$ROOT/bin/dm-lib.sh"; for w6l in $DM_EFFORT_LEVELS; do
+       [ -f "$ROOT/.claude/agents/crew-$w6l.md" ] || exit 1
+       grep -qx "effort: $w6l" "$ROOT/.claude/agents/crew-$w6l.md" || exit 1; done )'
+check "no agent definition pins a model (the dials stay independent)" \
+  '! grep -l "^model:" "$ROOT"/.claude/agents/crew-*.md'
+check "no crew agent exists for the excluded max tier" '[ ! -f "$ROOT/.claude/agents/crew-max.md" ]'
+
+echo "== dispatch gate: set agent_id refuses until BOTH dials are chosen (#166) =="
+b dm-task.sh new w6gate-1 --kind ship --repo demo --title "add a widget" >/dev/null
+b dm-worktree.sh create w6gate-1 demo >/dev/null
+b dm-brief.sh w6gate-1 >/dev/null
+W6GBR="$DM_HOME/data/w6gate-1/brief.md"
+sed 's/{TASK}/Add a widget./' "$W6GBR" > "$TMP/w6g-filled" && mv "$TMP/w6g-filled" "$W6GBR"
+W6NOMODEL="$(b dm-task.sh set w6gate-1 agent_id agent-1 2>&1 || true)"
+check "a filled brief alone does not admit a dispatch" '! b dm-task.sh set w6gate-1 agent_id agent-1 >/dev/null 2>&1'
+check "the refusal names the missing model"            'grep -q "no model recorded" <<<"$W6NOMODEL"'
+b dm-task.sh set w6gate-1 model haiku >/dev/null
+W6NOEFF="$(b dm-task.sh set w6gate-1 agent_id agent-1 2>&1 || true)"
+check "a model alone does not admit a dispatch"        '! b dm-task.sh set w6gate-1 agent_id agent-1 >/dev/null 2>&1'
+check "the refusal names the missing effort"           'grep -q "no reasoning effort recorded" <<<"$W6NOEFF"'
+# An invalid level is refused at the point of RECORDING, not silently stored.
+W6BADEFF="$(b dm-task.sh set w6gate-1 effort max 2>&1 || true)"
+check "an invalid effort is refused, not stored"       '! b dm-task.sh set w6gate-1 effort max >/dev/null 2>&1 && [ -z "$(b dm-task.sh get w6gate-1 effort)" ]'
+check "the refusal names the valid set"                'grep -q "low medium high xhigh" <<<"$W6BADEFF"'
+b dm-task.sh set w6gate-1 effort xhigh >/dev/null
+check "both dials chosen admits the dispatch"          'b dm-task.sh set w6gate-1 agent_id agent-1 >/dev/null 2>&1'
+# The gate forces a CHOICE, never the RECOMMENDED value: haiku+xhigh is neither
+# anchor, and overriding both is the intended workflow.
+check "the recorded choice may differ from both anchors" \
+  '[ "$(b dm-task.sh get w6gate-1 model)" = haiku ] && [ "$(b dm-task.sh get w6gate-1 effort)" = xhigh ]'
+
+echo "== brief: both dials are surfaced as tunable anchors (#166) =="
 b dm-task.sh new w6eff-1 --kind ship --repo demo --title "add a multiply endpoint" >/dev/null
 b dm-worktree.sh create w6eff-1 demo >/dev/null
 b dm-brief.sh w6eff-1 >/dev/null
 W6BR="$DM_HOME/data/w6eff-1/brief.md"
-check "brief surfaces the recommended effort"      'grep -q "Recommended reasoning effort: medium" "$W6BR"'
+check "brief surfaces the anchor effort"           'grep -q "Reasoning effort: medium" "$W6BR"'
+check "brief names the subagent_type to spawn"     'grep -q "subagent_type: crew-medium" "$W6BR"'
 check "brief records effort_recommended in meta"   '[ "$(b dm-task.sh get w6eff-1 effort_recommended)" = medium ]'
 check "brief still records model_recommended"      '[ "$(b dm-task.sh get w6eff-1 model_recommended)" = sonnet ]'
-# The honesty requirement: the Agent tool has a per-spawn `model` and no effort
-# parameter, so presenting effort as binding would be a quiet lie.
-check "brief says the effort tier is not enforceable at spawn" 'grep -q "NOT ENFORCEABLE AT SPAWN" "$W6BR"'
-check "brief names why (no effort parameter)"                  'grep -q "no effort parameter" "$W6BR"'
-check "brief still marks the model tier enforceable"           'grep -q "this one is ENFORCEABLE" "$W6BR"'
-check "the task section carries the recorded title"            'grep -q "Recorded title: add a multiply endpoint" "$W6BR"'
+# The honesty requirement, inverted: effort IS applied at spawn now, so the old
+# "not enforceable" disclaimer must not survive anywhere in the distro.
+check "brief no longer claims effort is unenforceable" \
+  '! grep -qi "NOT ENFORCEABLE AT SPAWN\|no effort parameter" "$W6BR"'
+check "no distro text claims effort is unenforceable" \
+  '! grep -rqi "NOT ENFORCEABLE AT SPAWN\|has no effort parameter\|effort is not a spawn parameter" "$ROOT/bin" "$ROOT/.claude/skills" "$ROOT/AGENTS.md"'
+check "the task section carries the recorded title" 'grep -q "Recorded title: add a multiply endpoint" "$W6BR"'
 b dm-task.sh event w6eff-1 working "started" >/dev/null
 W6STATUS="$(b dm-status.sh 2>&1 || true)"   # capture once (grep -q + pipefail)
-check "status names both tiers on an unsized dispatch" \
+check "status names both anchors on an unsized dispatch" \
   'grep -q "UNSIZED.*w6eff-1.*recommended: sonnet, medium effort" <<<"$W6STATUS"'
 
 echo "== brief: an unfilled {TASK} placeholder is refused before dispatch (#115) =="
@@ -4252,7 +4278,8 @@ check "status flags a live task on an unfilled brief as UNFILLED" \
   'grep -q "UNFILLED.*w6disp" <<<"$W6DISPSTATUS"'
 sed 's/{TASK}/Add a widget to src\/calc.py./' "$DM_HOME/data/w6disp/brief.md" > "$TMP/w6-disp-filled"
 mv "$TMP/w6-disp-filled" "$DM_HOME/data/w6disp/brief.md"
-check "the dispatch records once the brief is filled" \
+b dm-task.sh set w6disp model sonnet >/dev/null; b dm-task.sh set w6disp effort medium >/dev/null
+check "the dispatch records once the brief is filled and both dials are chosen" \
   'b dm-task.sh set w6disp agent_id agent-123 >/dev/null 2>&1 && [ "$(b dm-task.sh get w6disp agent_id)" = agent-123 ]'
 check "a filled brief clears the UNFILLED flag" \
   '! grep -q "UNFILLED.*w6disp" <<<"$(b dm-status.sh 2>&1 || true)"'
@@ -4300,6 +4327,7 @@ check "no bare {TASK} line survives the fill (guard the guard)" \
   '! grep -qx "[[:space:]]*{TASK}[[:space:]]*" "$W6MENTBR"'
 check "a filled brief that MENTIONS {TASK} passes the check" \
   'b dm-brief.sh check w6mention >/dev/null 2>&1'
+b dm-task.sh set w6mention model sonnet >/dev/null; b dm-task.sh set w6mention effort medium >/dev/null
 check "and its dispatch records" \
   'b dm-task.sh set w6mention agent_id agent-789 >/dev/null 2>&1 && [ "$(b dm-task.sh get w6mention agent_id)" = agent-789 ]'
 check "a title holding the token does not bake a second permanent refusal" \
@@ -4335,35 +4363,22 @@ check "the placeholder refusal says edit in place, not regenerate" \
 check "and does not tell you to regenerate over a partial fill" \
   '! grep -q "Regenerate it" <<<"$W6DISPREFUSE"'
 
-echo "== risk sizing: 'lock' is word-anchored so 'blocked' does not buy the top tier =="
-# `blocked` is this distro's own status word; substring-matching `lock` bought
-# opus/xhigh for every routine unblock. Direction was safe, cost was not.
-check "block/blocking/unblock do not reach the top tier" \
-  '[ "$(w6rec ship "commented out the block")" != opus ] && [ "$(w6rec ship "fix blocking scroll")" != opus ] && [ "$(w6rec ship "unblock the docs build")" != opus ]'
-check "neither does a lockfile or a clock" \
-  '[ "$(w6eff ship "add a lockfile")" != xhigh ] && [ "$(w6eff ship "clock drift in the header")" != xhigh ]'
-check "a real lock/mutex/deadlock still does" \
-  '[ "$(w6rec ship "fix mutex lock race")" = opus ] && [ "$(w6rec ship "deadlock in the scheduler")" = opus ] && [ "$(w6eff ship "lock contention on the registry")" = xhigh ]'
-check "so do its inflections" \
-  '[ "$(w6rec ship "locking order audit")" = opus ] && [ "$(w6rec ship "unlock the advisory lock")" = opus ]'
-# Anchoring `lock` cannot match a compound (the preceding char is a letter), so
-# the real hazards are listed back explicitly. This is the DOWN-sizing direction
-# in the one regex that must bias UP, and nothing else covers it.
-check "flock stays top tier — the POSIX advisory-lock call" \
-  '[ "$(w6rec ship "flock the registry before writing")" = opus ] && [ "$(w6eff ship "flock the registry before writing")" = xhigh ]'
-check "so do spinlock, livelock and rwlock" \
-  '[ "$(w6rec ship "spinlock in the ring buffer")" = opus ] && [ "$(w6rec ship "livelock under contention")" = opus ] && [ "$(w6eff ship "rwlock upgrade path")" = xhigh ]'
+# The word-anchored `lock` regex and the rest of the keyword sizing are gone
+# with the heuristics (#166) — the recommenders are constants, so there is no
+# term left to over-fire. The "signal sets are gone" check above guards it.
 
-echo "== dispatch docs: the skill must not contradict the brief about what binds =="
+echo "== dispatch docs: the skill teaches both dials and the mandatory gate (#166) =="
 W6TLSKILL="$ROOT/.claude/skills/task-lifecycle/SKILL.md"
-check "the skill no longer tells you to set an effort parameter" \
-  '! grep -q "set .model. and .effort." "$W6TLSKILL" && ! grep -q "subagent_type/model/effort" "$W6TLSKILL"'
-check "fleet-change does not either" \
-  '! grep -q "subagent_type/model/effort" "$ROOT/.claude/skills/fleet-change/SKILL.md"'
 check "the skill names effort_recommended alongside model_recommended" \
   'grep -q "effort_recommended" "$W6TLSKILL"'
-check "the skill states the same enforceability the brief does" \
-  'grep -q "NO effort parameter" "$W6TLSKILL"'
+check "the skill names the crew-<level> subagent types" \
+  'grep -q "crew-low" "$W6TLSKILL" && grep -q "crew-xhigh" "$W6TLSKILL"'
+check "the skill says choosing both dials is mandatory" \
+  'grep -q "REFUSES until the task" "$W6TLSKILL"'
+check "the skill records that the dials are independent" \
+  'grep -qi "independent" "$W6TLSKILL"'
+check "the skill warns that haiku ignores effort" \
+  'grep -qi "haiku.*silently ignored\|ignored" "$W6TLSKILL"'
 
 echo "== DM_HOME override: a relocated state root still points at real scripts (#116) =="
 # DM_HOME relocates STATE. The scripts stay where they are, so every command the

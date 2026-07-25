@@ -126,6 +126,15 @@ case "$cmd" in
       # brief's "{TASK} is a safety contract" claim becomes one: a crewmate
       # dispatched against an unfilled placeholder has no task at all, and every
       # other section of the brief looks complete on a skim (#115).
+      # A recorded effort selects a real `crew-<level>` subagent definition, so a
+      # value outside the set is a dispatch that cannot be spawned, not a
+      # harmless string. Model is deliberately NOT validated against a list: the
+      # runtime gains models on its own schedule, and an allowlist here would
+      # silently refuse a newly-released one.
+      effort)
+        dm_require_id "$id"
+        dm_effort_is_valid "$value" || dm_die "REFUSED: '$value' is not a reasoning-effort level. Use one of: $DM_EFFORT_LEVELS. ('max' is excluded on purpose — a cost ceiling, not an oversight.)"
+        ;;
       agent_id)
         dm_require_id "$id"
         brief="$DM_DATA/$id/brief.md"
@@ -142,6 +151,13 @@ case "$cmd" in
             *)       dm_die "REFUSED: $id's brief still has its bare {TASK} line unreplaced ($brief), so the crewmate you just spawned has no task. EDIT that file in place — do NOT regenerate, dm-brief.sh $id would overwrite what is already written. Confirm with 'dm-brief.sh check $id', then record the owner." ;;
           esac
         fi
+        # Both sizing dials must be a deliberate CHOICE before a dispatch counts.
+        # Not the RECOMMENDED value — overriding the anchor is the point — but
+        # neither may be left unset, or one axis silently defaults forever.
+        [ -n "$(dm_meta_get "$id" model)" ] || dm_die "REFUSED: $id has no model recorded, so its dispatch was never sized. Choose a model tier for THIS task and record it (dm-task.sh set $id model <tier>), then record the owner."
+        dispatch_effort="$(dm_meta_get "$id" effort)"
+        [ -n "$dispatch_effort" ] || dm_die "REFUSED: $id has no reasoning effort recorded, so its dispatch was never sized. Choose a level for THIS task ($DM_EFFORT_LEVELS), record it (dm-task.sh set $id effort <level>), and spawn with the matching subagent_type crew-<level>."
+        dm_effort_is_valid "$dispatch_effort" || dm_die "REFUSED: $id records effort '$dispatch_effort', which is not a valid level. Re-record one of: $DM_EFFORT_LEVELS."
         ;;
     esac
     dm_meta_set "$id" "$key" "$value"

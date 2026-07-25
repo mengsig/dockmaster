@@ -53,12 +53,11 @@ title="$(dm_meta_get "$id" title)"
 [ -n "$kind" ] || dm_die "task $id has no kind; run dm-task.sh new first"
 [ -n "$wt" ] || dm_die "task $id has no worktree; run dm-worktree.sh create first"
 
-# Advisory dispatch right-sizing (#77): recommend a model tier and a reasoning
-# effort from kind + title, and record both in meta so dm-status can flag an
-# unsized dispatch. Advisory only — and the two are enforceable to different
-# degrees at spawn, which the brief states rather than implies.
-model_rec="$(dm_recommended_model "$kind" "$title")"
-effort_rec="$(dm_recommended_effort "$kind" "$title")"
+# Dispatch right-sizing (#77, #166): the unbiased anchor for each dial, recorded
+# in meta so dm-status can flag a dispatch that never chose. Both bind at spawn,
+# and `dm-task.sh set agent_id` refuses until both are chosen.
+model_rec="$(dm_recommended_model)"
+effort_rec="$(dm_recommended_effort)"
 dm_meta_set "$id" model_recommended "$model_rec"
 dm_meta_set "$id" effort_recommended "$effort_rec"
 
@@ -105,15 +104,15 @@ fleet="$(recall_block "recall(--global)" "(no fleet-wide context recorded yet.)"
 cat <<EOF
 # Task $id ($kind) - repo: $repo
 
-> Recommended model tier: $model_rec - pass it as the Agent \`model\`. Advisory:
-> the dockmaster decides the final resourcing, but this one is ENFORCEABLE, so a
-> dispatch can honor it exactly.
+> Sized for this dispatch on two independent dials, both applied at spawn.
 >
-> Recommended reasoning effort: $effort_rec (low|medium|high|xhigh) - how much
-> deliberation this task is worth. ADVISORY AND NOT ENFORCEABLE AT SPAWN: the
-> Agent tool takes a \`model\` but has no effort parameter, so this binds only if
-> the work is dispatched through a mechanism that accepts one. Otherwise treat it
-> as the intended care level, not a setting that was applied.
+> Model tier: $model_rec - passed as the Agent \`model\`.
+> Reasoning effort: $effort_rec - applied via \`subagent_type: crew-$effort_rec\`.
+>
+> Both are unbiased ANCHORS (default $model_rec / $effort_rec), not judgments about
+> this task: tune either up or down to fit the work - low|medium|high|xhigh for
+> effort, any model tier. Neither dial implies the other, so sonnet at low effort
+> and haiku at high effort are both ordinary choices.
 
 You are a crewmate working one task to completion. You report only to the
 dockmaster through short status lines, never to a human. Work only inside your

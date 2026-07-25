@@ -43,8 +43,11 @@ function regularFiles(relativeRoot) {
 
 function claudeRuntimeFiles() {
   const all = regularFiles('.claude')
+  // Agent definitions count as always-loaded: every one's `description` is
+  // listed to the dispatcher on every turn, so they are part of the budget.
   const runtime = all.filter((file) => file === '.claude/settings.json'
-    || /^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(file))
+    || /^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(file)
+    || /^\.claude\/agents\/[^/]+\.md$/.test(file))
   const unclassified = all.filter((file) => !runtime.includes(file))
   if (unclassified.length) throw new Error(`unclassified Claude runtime files: ${unclassified.join(', ')}`)
   return runtime.sort()

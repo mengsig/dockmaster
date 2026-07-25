@@ -72,37 +72,46 @@ recorded dispatch; `dm-status` flags a live task on an unfilled brief as
 UNFILLED. Every other section of a brief looks complete on a skim, so nothing
 else would catch an empty task section.
 
-**Right-size the dispatch — you decide the resources.** The dockmaster runs on a
-capable model precisely so it can judge how much power each unit of work needs;
-do NOT just inherit your own tier. For every spawn, set `model` to the *least*
-that will still get an excellent result, and judge the deliberation the work is
-worth alongside it:
-- trivial / mechanical (a doc or contract-text edit, a rename, a config value) →
-  a small fast model, low deliberation;
-- ordinary implementation → a mid tier;
-- hard reasoning, adversarial review, or subtle safety / concurrency / security
-  work → the top tier, high deliberation.
+**Right-size the dispatch — two dials, both yours, both enforced.** The
+dockmaster runs on a capable model precisely so it can judge how much each unit
+of work needs. Do NOT inherit your own tier. Every spawn sets both:
 
-**Only `model` is a spawn parameter.** The Agent tool takes a per-spawn `model`
-and has NO effort parameter, so the model tier is the part you can actually
-enforce; the effort tier binds only where the work is dispatched through
-something that accepts one. The brief says this in as many words — do not
-contradict it by reporting an effort tier as applied.
+- **Model** — the Agent `model` parameter: `haiku` | `sonnet` | `opus` | `fable`.
+  What the crewmate must be able to DO.
+- **Reasoning effort** — the Agent `subagent_type`: `crew-low` | `crew-medium` |
+  `crew-high` | `crew-xhigh`. How long it must THINK first. (No `max` tier: a
+  deliberate cost ceiling.)
 
-`dm-brief.sh` computes BOTH recommendations from the task kind + title, surfaces
-them in the brief header, and records `model_recommended` and
-`effort_recommended` in task meta; `dm-status` flags any `working` task with no
-`model` recorded as UNSIZED and names both tiers. They size different axes and
-disagree on purpose — a scout is a small model at high deliberation. Heed the
-model tier by passing it as the Agent `model` (size up when you know more).
-Both are advisory, so you still decide.
+The dials are **independent** — no `crew-*` definition pins a model, so every
+combination is reachable. Sonnet at low effort and haiku at high effort are both
+ordinary, deliberate choices. Small, well-specified work against clear
+instructions does not need a high level even on a strong model; work that needs
+debugging or adversarial reading probably does, whatever the model.
 
-Bias toward *sufficient* power: when unsure, size **up** — never trade
-correctness or quality for tokens. Optimize speed and cost only where they do not
-risk the result. This is the orchestrator's per-task judgment, not a fixed table,
-and it applies to **every** sub-unit you spawn downstream — review passes,
-verification, fix rounds, merge-gate reasoning (see `pr-workflow`) — not just the
-implementing crewmate.
+Effort is honored on `sonnet`, `opus`, and `fable`. On `haiku` it is silently
+ignored — the model has no effort support and always runs at its own default, so
+`crew-low` + haiku buys nothing. Pick haiku for cheapness, not for restraint.
+
+`dm-brief.sh` records `model_recommended` / `effort_recommended` and surfaces
+them in the brief header. These are **unbiased anchors** (sonnet / medium), not
+judgments about the task — no keyword heuristic sizes your work for you. Start
+there and tune either dial per task; you hold the context.
+
+**Choosing is mandatory.** `dm-task.sh set agent_id` REFUSES until the task
+records both `model` and `effort`, and refuses an effort outside the valid set.
+Record your actual choice, not the anchor:
+
+```
+dm-task.sh set <id> model <tier>
+dm-task.sh set <id> effort <level>     # must match the crew-<level> you spawned
+dm-task.sh set <id> agent_id <id>
+```
+
+`dm-status` flags a live task missing either dial as UNSIZED. The same judgment
+applies to **every** sub-unit you spawn downstream — review passes, verification,
+fix rounds, merge-gate reasoning (see `pr-workflow`) — not just the implementing
+crewmate. Never trade correctness for tokens: where being wrong is expensive,
+size up.
 
 For work that mutates files where a plain subagent would collide with siblings,
 prefer `isolation: "worktree"`; here the crew already has a dedicated worktree
