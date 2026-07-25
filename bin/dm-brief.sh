@@ -132,6 +132,17 @@ primary clone. If it is not, do nothing else - append a blocked status and stop:
 
     $bindir/dm-task.sh event $id blocked "not in isolated worktree"
 
+Isolation also covers shared HOST resources - a prior crewmate's bare
+\`docker compose\` derived its project name from cwd, which was the operator's
+live production stack, and took it down:
+
+- every \`docker compose\` call carries an explicit \`-p <project-unique-to-this-task>\`
+  AND an explicit \`-f <absolute path inside your worktree>\` - never bare
+  \`docker compose\` relying on cwd.
+- never bind a host port you were not explicitly handed.
+- kill only PIDs you yourself captured - never \`pkill\`/\`killall\` by name, which
+  reaches sibling sessions' processes.
+
 ## Memory (per-repo, plain markdown - no bespoke tool)
 
 What this repo already knows that bears on your task is injected below. SHARED
