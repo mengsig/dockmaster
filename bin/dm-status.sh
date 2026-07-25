@@ -120,14 +120,20 @@ if [ -n "$tasks" ]; then
   for ((ti = 0; ti < ${#task_ids[@]}; ti++)); do
     tid="${task_ids[ti]}"; short="${task_states[ti]}"
     case "$short" in done|'') continue ;; esac
-    # Advisory (#77): a live `working` task with no model tier recorded is an
-    # unsized dispatch. Soft hint only — never fails or changes the exit code.
-    if [ "$short" = "working" ] && [ -z "$(dm_meta_get "$tid" model)" ]; then
-      rec="$(dm_meta_get "$tid" model_recommended)"
-      [ -n "$rec" ] || rec="$(dm_recommended_model "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
-      erec="$(dm_meta_get "$tid" effort_recommended)"
-      [ -n "$erec" ] || erec="$(dm_recommended_effort "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
-      unsized+="  UNSIZED: task $tid is working with no model recorded (recommended: $rec, $erec effort)"$'\n'
+    # A live `working` task missing EITHER dial is an unsized dispatch (#77,
+    # #166). Soft hint only — never fails or changes the exit code; the hard
+    # refusal lives at `dm-task.sh set agent_id`.
+    if [ "$short" = "working" ]; then
+      missing=""
+      [ -n "$(dm_meta_get "$tid" model)" ]  || missing="model"
+      [ -n "$(dm_meta_get "$tid" effort)" ] || missing="${missing:+$missing and }effort"
+      if [ -n "$missing" ]; then
+        rec="$(dm_meta_get "$tid" model_recommended)"
+        [ -n "$rec" ] || rec="$(dm_recommended_model)"
+        erec="$(dm_meta_get "$tid" effort_recommended)"
+        [ -n "$erec" ] || erec="$(dm_recommended_effort)"
+        unsized+="  UNSIZED: task $tid is working with no $missing recorded (recommended: $rec, $erec effort)"$'\n'
+      fi
     fi
     # A live task working against a brief that was never dispatch-ready (#115).
     # dm-task.sh set agent_id refuses all three reasons at the dispatch record;

@@ -63,7 +63,9 @@ the lifecycle. Confirm it, then spawn the crewmate with the brief as its prompt:
 ```
 bin/dm-brief.sh check <id>        # refuses while {TASK} is still unfilled
 Agent(prompt=<contents of data/<id>/brief.md>, run in background,
-      subagent_type + model per the resourcing policy below)
+      model=<tier>, subagent_type=crew-<level>)   # both dials, see below
+bin/dm-task.sh set <id> model <tier>
+bin/dm-task.sh set <id> effort <level>    # set agent_id refuses without both
 bin/dm-task.sh set <id> agent_id <returned-agent-id>
 ```
 
@@ -72,37 +74,56 @@ recorded dispatch; `dm-status` flags a live task on an unfilled brief as
 UNFILLED. Every other section of a brief looks complete on a skim, so nothing
 else would catch an empty task section.
 
-**Right-size the dispatch — you decide the resources.** The dockmaster runs on a
-capable model precisely so it can judge how much power each unit of work needs;
-do NOT just inherit your own tier. For every spawn, set `model` to the *least*
-that will still get an excellent result, and judge the deliberation the work is
-worth alongside it:
-- trivial / mechanical (a doc or contract-text edit, a rename, a config value) →
-  a small fast model, low deliberation;
-- ordinary implementation → a mid tier;
-- hard reasoning, adversarial review, or subtle safety / concurrency / security
-  work → the top tier, high deliberation.
+**Right-size the dispatch — two dials, both yours, both enforced.** The
+dockmaster runs on a capable model precisely so it can judge how much each unit
+of work needs. Do NOT inherit your own tier. Every spawn sets both:
 
-**Only `model` is a spawn parameter.** The Agent tool takes a per-spawn `model`
-and has NO effort parameter, so the model tier is the part you can actually
-enforce; the effort tier binds only where the work is dispatched through
-something that accepts one. The brief says this in as many words — do not
-contradict it by reporting an effort tier as applied.
+- **Model** — the Agent `model` parameter: `haiku` | `sonnet` | `opus` | `fable`.
+  What the crewmate must be able to DO.
+- **Reasoning effort** — the Agent `subagent_type`: `crew-low` | `crew-medium` |
+  `crew-high` | `crew-xhigh`. How long it must THINK first. (No `max` tier: a
+  deliberate cost ceiling.)
 
-`dm-brief.sh` computes BOTH recommendations from the task kind + title, surfaces
-them in the brief header, and records `model_recommended` and
-`effort_recommended` in task meta; `dm-status` flags any `working` task with no
-`model` recorded as UNSIZED and names both tiers. They size different axes and
-disagree on purpose — a scout is a small model at high deliberation. Heed the
-model tier by passing it as the Agent `model` (size up when you know more).
-Both are advisory, so you still decide.
+The dials are **independent** — no `crew-*` definition pins a model, so every
+combination is reachable. Sonnet at low effort and haiku at high effort are both
+ordinary, deliberate choices. Small, well-specified work against clear
+instructions does not need a high level even on a strong model; work that needs
+debugging or adversarial reading probably does, whatever the model.
 
-Bias toward *sufficient* power: when unsure, size **up** — never trade
-correctness or quality for tokens. Optimize speed and cost only where they do not
-risk the result. This is the orchestrator's per-task judgment, not a fixed table,
-and it applies to **every** sub-unit you spawn downstream — review passes,
-verification, fix rounds, merge-gate reasoning (see `pr-workflow`) — not just the
-implementing crewmate.
+**A model that does not support a level ignores it silently** rather than
+failing, so a dial can be inert without ever saying so. `haiku` ignores effort
+entirely and always runs at its own default — `crew-low` + haiku buys nothing;
+pick haiku for cheapness, never for restraint. `sonnet`, `opus`, and `fable`
+honored all four levels when this was measured, but support is per-build and
+`xhigh` is the level most likely to be unavailable, so treat the top of the
+range as best-effort rather than guaranteed.
+
+`dm-brief.sh` records `model_recommended` / `effort_recommended` and surfaces
+them in the brief header. These are **unbiased anchors** (sonnet / medium), not
+judgments about the task — no keyword heuristic sizes your work for you. Start
+there and tune either dial per task; you hold the context.
+
+**Choosing is mandatory.** `dm-task.sh set agent_id` REFUSES until the task
+records both `model` and `effort`, and refuses an effort outside the valid set.
+Record your actual choice, not the anchor:
+
+```
+dm-task.sh set <id> model <tier>
+dm-task.sh set <id> effort <level>     # must match the crew-<level> you spawned
+dm-task.sh set <id> agent_id <id>
+```
+
+This is a **record gate, not a spawn gate.** The crewmate is already running by
+the time `set agent_id` executes, and nothing compares the recorded effort
+against the `subagent_type` you actually passed — same shape as the `{TASK}`
+brief guard. It guarantees the choice was made and written down; it does NOT
+verify what was spawned. Record what you really passed, or the meta lies.
+
+`dm-status` flags a live task missing either dial as UNSIZED. The same judgment
+applies to **every** sub-unit you spawn downstream — review passes, verification,
+fix rounds, merge-gate reasoning (see `pr-workflow`) — not just the implementing
+crewmate. Never trade correctness for tokens: where being wrong is expensive,
+size up.
 
 For work that mutates files where a plain subagent would collide with siblings,
 prefer `isolation: "worktree"`; here the crew already has a dedicated worktree

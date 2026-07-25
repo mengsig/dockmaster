@@ -36,9 +36,12 @@ passing it to `bin/dm-pr.sh merge --method <method>`.
 Only when the operator opts into hands-off multi-agent orchestration on a host
 that injects the runner's workflow API; nothing auto-discovers it. It reads:
 
-- **`effort`** on `review` / `security` gates — a hint for a workflow host that
-  exposes per-worker effort. A host without that selector carries right-sizing
-  through agent count and prompt scope instead.
+- **`effort`** on `review` / `security` gates — the reasoning effort the RUNNER
+  passes to that gate's workers through its own `agent()` selector. A different
+  executor from the dockmaster's Agent-tool dispatch, where effort is the
+  `crew-<level>` `subagent_type` and choosing it is gated (`task-lifecycle`);
+  this field binds only inside the runner. A host that does not expose the
+  selector carries right-sizing through agent count and prompt scope instead.
 - **`dimensions`** on a `review` gate (rigorous) — an array of lenses
   (`correctness`, `security`, `concurrency`, `portability`, `tests`); the runner
   fans out one fresh reviewer per lens with `parallel()` and merges their

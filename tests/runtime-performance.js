@@ -43,8 +43,12 @@ function regularFiles(relativeRoot) {
 
 function claudeRuntimeFiles() {
   const all = regularFiles('.claude')
+  // Agent definitions are always-loaded (every `description` is listed to the
+  // dispatcher each turn), so they are hash-pinned here — a change must be
+  // deliberate. They are NOT in the byte budget below, which walks only skills.
   const runtime = all.filter((file) => file === '.claude/settings.json'
-    || /^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(file))
+    || /^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(file)
+    || /^\.claude\/agents\/[^/]+\.md$/.test(file))
   const unclassified = all.filter((file) => !runtime.includes(file))
   if (unclassified.length) throw new Error(`unclassified Claude runtime files: ${unclassified.join(', ')}`)
   return runtime.sort()

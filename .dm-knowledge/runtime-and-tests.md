@@ -18,6 +18,14 @@ Read before adding a skill or touching anything the test suite measures.
   Under `set -euo pipefail`, piping output to `grep -q` SIGPIPEs the producer
   (exit 141) which pipefail reports as failure — capture once and match with a
   here-string (`grep -q pat <<<"$VAR"`).
+- **[pitfall]** Alternation in a smoke grep MUST use `grep -E` with a plain `|`.
+  BSD/macOS grep does not implement `\|` in a basic RE — it matches a LITERAL
+  pipe, so the pattern silently never matches. CI runs the whole suite on
+  `macos-latest`, and most such checks are negative (`! grep -q ...`), so they
+  go VACUOUSLY GREEN on the leg that matters while passing honestly on a GNU dev
+  box. Five checks shipped this way in #166. Same class: grep is line-based, so
+  a pattern spanning a wrapped sentence in a `.md` can never match — anchor on a
+  phrase that lives on one line.
 - **[pitfall]** To capture a command's exit code in a test that SOURCES
   `dm-lib.sh`, use `rc=0; cmd || rc=$?`, never `cmd; echo $?`. Sourcing turns on
   `set -e` inside that subshell, so a bare nonzero return aborts it before the
