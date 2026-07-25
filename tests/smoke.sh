@@ -4754,7 +4754,10 @@ check "an unresolvable worktree exits 2, not 1" '[ "$GATE_ERR_RC" = 2 ]'
 VAPP_START='rm -f "$DM_VERIFY_DIR/app.pid"; ( nohup node -e "require(\"net\").createServer(function(c){c.on(\"error\",function(){});c.end(\"ok\\n\")}).listen(process.env.DM_VERIFY_PORT,\"127.0.0.1\")" >"$DM_VERIFY_DIR/app.log" 2>&1 </dev/null & printf "%s" "$!" > "$DM_VERIFY_DIR/app.pid" ); printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"'
 # A genuine ownership probe: the listener must be the process THIS start command
 # spawned, and only then is the boot token echoed back.
-VAPP_READY='kill -0 "$(cat "$DM_VERIFY_DIR/app.pid")" 2>/dev/null && cp "$DM_VERIFY_DIR/token" "$DM_VERIFY_DIR/ready-proof"'
+# The url assertion makes this probe DISCRIMINATING: if a re-probe ever read
+# app_url live instead of the value pinned at boot, a concurrent edit to the
+# shared registry would hand it a different DM_VERIFY_URL and this would fail.
+VAPP_READY='[ "$DM_VERIFY_URL" = "http://localhost:$DM_VERIFY_PORT" ] && kill -0 "$(cat "$DM_VERIFY_DIR/app.pid")" 2>/dev/null && cp "$DM_VERIFY_DIR/token" "$DM_VERIFY_DIR/ready-proof"'
 VAPP_STOP='if [ -f "$DM_VERIFY_DIR/app.pid" ]; then kill "$(cat "$DM_VERIFY_DIR/app.pid")" 2>/dev/null || true; fi; rm -f "$DM_VERIFY_DIR/app.pid" "$DM_VERIFY_DIR/app.state"'
 vapp_register() {
   b dm-repo.sh set demo app_start_cmd "$VAPP_START" >/dev/null
@@ -4971,6 +4974,19 @@ printf '%s\tinject\tfail\t-\tshots/inject.png\t<script>alert(1)</script>\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$VDIR/flows.tsv"
 "$V" report vrf1 >/dev/null 2>&1 || true
 check "no script tag is ever emitted"             '! grep -q "<script>" "$VDIR/report.html" 2>/dev/null'
+# The attribute context, which injecting into the NOTE never exercised: `$shot`
+# and `$name` land inside src="..."/alt="...", where a bare quote closes the
+# attribute. A matching name/shot pair passes the path filter, so the escaper is
+# the only thing standing between a crafted row and a live event handler.
+VINJ='x" onerror="alert(1)'
+printf '%s\t%s\tfail\t-\tshots/%s.png\tnote\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$VINJ" "$VINJ" > "$VDIR/flows.tsv"
+"$V" report vrf1 >/dev/null 2>&1 || true
+check "a crafted name/shot pair is refused"      'grep -q "malformed-flow-name" <<<"$("$V" report vrf1 2>&1 || true)"'
+check "no onerror handler reaches report.html"   '! grep -q "onerror=" "$VDIR/report.html" 2>/dev/null'
+# And the escaper itself must close attributes, not only text.
+check "html_escape escapes double quotes"        '[ -z "$(bash -c "$(sed -n "/^html_escape() {/,/^}/p" "$ROOT/bin/dm-verify.sh")"'"'"'; html_escape "a\"b"'"'"' | grep -F "\"")" ]'
+check "html_escape escapes single quotes"        '[ -z "$(bash -c "$(sed -n "/^html_escape() {/,/^}/p" "$ROOT/bin/dm-verify.sh")"'"'"'; html_escape "a'"'"'"'"'"'"'"'"'b"'"'"' | grep -F "'"'"'")" ]'
+rm -f "$VDIR/flows.tsv"
 rm -f "$VDIR/flows.tsv"
 
 echo "== verify gate: an ownership probe that proves nothing is refused (MED-4) =="
@@ -5055,6 +5071,20 @@ DM_SMOKE_SHOT=png vsh shot vrf1 steady >/dev/null 2>&1 || true
 "$V" flow vrf1 steady pass "steady" >/dev/null 2>&1 || true
 touch "$VWT/src/calc.py"
 check "a no-op touch does not move the pin"       '"$V" report vrf1 >/dev/null 2>&1'
+# The third blindness of the same pin: hashing the three streams FLAT. Moving a
+# line from one untracked file to another leaves the path list and the total
+# bytes identical, so only a per-file digest — path bound to its own content —
+# moves it. The routes moved; the checksum must too.
+"$V" down vrf1 >/dev/null 2>&1 || true
+printf 'routeA\nrouteB\n' > "$VWT/frontend/a.js"; printf 'routeC\n' > "$VWT/frontend/b.js"
+vup vrf1 >/dev/null 2>&1 || true; vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 moved >/dev/null 2>&1 || true
+"$V" flow vrf1 moved pass "routes verified" >/dev/null 2>&1 || true
+check "a green run across two untracked routes"  '"$V" report vrf1 >/dev/null 2>&1'
+printf 'routeA\n' > "$VWT/frontend/a.js"; printf 'routeB\nrouteC\n' > "$VWT/frontend/b.js"
+VMOVE_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VMOVE_RC=$?
+check "a byte-neutral move still moves the pin"  '[ "$VMOVE_RC" = 2 ]'
+rm -f "$VWT/frontend/a.js" "$VWT/frontend/b.js"
 
 echo "== verify gate: a dead app is never a green verdict (probe, not stamp) =="
 # verify_app_state is a stamp `up` wrote; nothing re-checked it, so an app killed
@@ -5080,6 +5110,30 @@ vup vrf1 >/dev/null 2>&1 || true
 vsh session vrf1 >/dev/null 2>&1 || true
 DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1 || true
 "$V" flow vrf1 login pass "signed in" >/dev/null 2>&1 || true
+
+echo "== verify gate: a concurrent registry edit cannot repoint a live run =="
+# Two crewmates share one state/repos.json. The liveness re-probe pins the app
+# url at boot; reading it live would hand the pinned probe a DM_VERIFY_URL for a
+# different instance, and a probe whose ownership test is local would pass there.
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 pinnedurl >/dev/null 2>&1 || true
+"$V" flow vrf1 pinnedurl pass "driven" >/dev/null 2>&1 || true
+b dm-repo.sh set demo app_url 'http://elsewhere.invalid:$DM_VERIFY_PORT' >/dev/null
+check "the run uses the url pinned at boot"     '"$V" report vrf1 >/dev/null 2>&1'
+b dm-repo.sh set demo app_url 'http://localhost:$DM_VERIFY_PORT' >/dev/null
+
+echo "== verify gate: its trust fields are not hand-settable (fix 3's own hole) =="
+# verify_ready_cmd is eval'd and validated only at boot, so a CLI write would
+# bypass the boot check entirely. The pins that say what a verdict MEANS are
+# protected with it.
+for vkey in verify_ready_cmd verify_token verify_head verify_port verify_url verify_cwd; do
+  check "dm-task.sh refuses to set $vkey" "! b dm-task.sh set vrf1 $vkey x >/dev/null 2>&1"
+done
+check "the refusal explains why"                'grep -q "verify-gate trust field" <<<"$(b dm-task.sh set vrf1 verify_ready_cmd x 2>&1 || true)"'
+# Fields the gate does NOT trust stay writable - the browser lease is authoritative
+# in its own directory, which the #80 section proves.
+check "an untrusted verify field is still settable" 'b dm-task.sh set vrf1 verify_browser_lease released >/dev/null 2>&1'
 
 echo "== verify gate: clearing the probe mid-run cannot re-open the fail-open =="
 # Two crewmates share one registry. Clearing app_ready_cmd used to turn the

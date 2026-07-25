@@ -38,10 +38,11 @@
 #     digest + boot token; `flow` and `report` require a matching entry for the
 #     CURRENT boot, so a copied image, one image reused across flows, a symlink,
 #     or a whole archived run copied back over `shots/` is refused.
-#   - A verdict is bound to CODE BY CONTENT. `up` pins HEAD plus a checksum of
-#     `git diff HEAD` and untracked file contents; `flow` and `report` refuse
-#     once it moves. Porcelain status was not enough: it never carries content,
-#     so edits to an already-dirty file left the pin identical.
+#   - A verdict is bound to CODE BY CONTENT AND STRUCTURE. `up` pins HEAD plus a
+#     checksum of `git diff HEAD` and a per-file digest of every untracked path,
+#     so content, names and layout all move it; `flow` and `report` refuse once
+#     it does. Porcelain status alone was blind to content; content alone was
+#     blind to renames and to moving bytes between two untracked files.
 #   - The app is SERVING NOW, not stamped up. `flow … pass` and `report` re-probe
 #     the port and re-run the ownership probe; a killed app fails them both.
 #   - The app is the one WE started. The port must be silent before start, and
@@ -83,6 +84,12 @@ LEASE_TIMEOUT="${DM_VERIFY_LEASE_TIMEOUT:-600}"
 LEASE_DIR="$DM_STATE/browser.lease"
 # A screenshot smaller than this, or without PNG magic, is not evidence.
 MIN_SHOT_BYTES=512
+# One content-digest tool, resolved once: sha256sum (Linux), shasum (macOS), and
+# cksum as the last resort. All three print "<digest...> <path>" for file
+# arguments, which is what binds a path to its own bytes.
+if command -v sha256sum >/dev/null 2>&1; then DIGEST_CMD=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then DIGEST_CMD=(shasum -a 256)
+else DIGEST_CMD=(cksum); fi
 # Paths that cannot change what a user sees. With no `verify_surfaces` set, a
 # repo that HAS app config verifies any change outside this set — under-firing
 # is the one failure mode a verification gate cannot afford, so the default is
@@ -147,6 +154,22 @@ allocate_port() {
 #   - the untracked PATH list — structure
 #   - the untracked file CONTENTS — bytes
 # `git diff HEAD` also carries binary changes, via its `index <blob>..<blob>` line.
+# untracked_digests <worktree> -- "<digest>  <path>" per untracked file, sorted.
+# Each path is bound to ITS OWN content. Concatenating all the bytes into one
+# stream did not: moving a line from one untracked file to another left the path
+# list and the byte total identical, so the pin sat still while the routes moved.
+# Same root as `aa.js` containing the text `zz.js` hashing like an empty pair.
+untracked_digests() {
+  local wt="$1" paths
+  # Emptiness is checked FIRST: GNU xargs runs its command once on empty input,
+  # and a digest tool with no arguments reads stdin and hangs.
+  paths="$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null)" || return 1
+  [ -n "$paths" ] || return 0
+  git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
+    | ( cd "$wt" && xargs -0 -n 50 "${DIGEST_CMD[@]}" 2>/dev/null || true ) \
+    | LC_ALL=C sort
+}
+
 code_state() {
   local wt="$1" head content
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
@@ -158,9 +181,7 @@ code_state() {
   git -C "$wt" diff HEAD >/dev/null 2>&1 || return 1
   git -C "$wt" ls-files --others --exclude-standard >/dev/null 2>&1 || return 1
   content="$( { git -C "$wt" diff HEAD 2>/dev/null
-                git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | LC_ALL=C sort
-                git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
-                  | ( cd "$wt" && xargs -0 -n 50 cat 2>/dev/null || true )
+                untracked_digests "$wt"
               } | cksum | awk '{print $1}' )"
   [ -n "$content" ] || return 1
   printf '%s/%s\n' "$head" "$content"
@@ -190,7 +211,12 @@ require_app_serving() {
   [ -n "$ready" ] \
     || dm_die "refusing $what: no ownership probe was recorded when '$id' booted, so nothing can confirm what is on port $port is this run's app. Re-run: dm-verify.sh down $id && dm-verify.sh up $id"
   cwd="$(app_cwd "$id")" || dm_die "refusing $what: cannot resolve a directory to re-probe the app for '$id'"
-  url="$(app_url_for "$repo" "$port")"
+  # Pinned at boot, like the probe itself. Read live, a concurrent crewmate
+  # editing shared `app_url` would repoint $DM_VERIFY_URL at a different running
+  # instance, and a probe whose ownership test is local would pass against it.
+  url="$(dm_meta_get "$id" verify_url)"
+  [ -n "$url" ] \
+    || dm_die "refusing $what: no app url was recorded when '$id' booted. Re-run: dm-verify.sh down $id && dm-verify.sh up $id"
   token="$(dm_meta_get "$id" verify_token)"
   rm -f "$(verify_dir "$id")/ready-proof"
   run_app_cmd "$cwd" "$port" "$url" "$id" "$ready" >/dev/null 2>&1 || true
@@ -294,7 +320,10 @@ stop_app() {
   [ -n "$port" ] && [ -n "$cmd" ] || return 0
   cwd="$(app_cwd "$id")" \
     || { dm_warn "cannot resolve a directory to stop '$id' from; the app may still be running on port $port"; return 1; }
-  url="$(app_url_for "$repo" "$port")"
+  # Pinned, like every other re-use of boot state: a stop command must target the
+  # instance this task started, not whatever the registry says now.
+  url="$(dm_meta_get "$id" verify_url)"
+  [ -n "$url" ] || url="$(app_url_for "$repo" "$port")"
   run_app_cmd "$cwd" "$port" "$url" "$id" "$cmd" \
     || { dm_warn "app_stop_cmd failed for '$id'"; return 1; }
 }
@@ -648,8 +677,14 @@ EOF
 
 # --- report ------------------------------------------------------------------
 
-# html_escape <text> -- minimal escaping for the rendered report page.
-html_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+# html_escape <text> -- escape for the rendered report page, TEXT and ATTRIBUTE
+# contexts alike. The quotes are the load-bearing pair: every value here also
+# lands inside `src="..."`/`alt="..."`, where a bare `"` closes the attribute and
+# `x" onerror="alert(1)` becomes a working event handler. `&` must go first.
+html_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+    -e 's/"/\&quot;/g' -e "s/'/\&#39;/g"
+}
 
 # flows_tally <file> -- "<total> <bad> <malformed>" from ONE pass. Three separate
 # parsers over this file disagreed about an unterminated last line, which read as
@@ -948,6 +983,12 @@ case "$cmd" in
       # The path check runs for EVERY row, above the pass filter: a `fail` row
       # renders into report.html just the same, so `../../../../x.png` reaching
       # an <img src> does not care what the verdict was.
+      # `$fname` is validated FIRST, against the charset `flow` enforces. Checking
+      # only `$fshot` = "shots/$fname.png" compared two fields from the same
+      # untrusted file, so a crafted matching pair passed the filter unread.
+      case "$fname" in
+        ''|.*|*[!A-Za-z0-9._-]*) missing="$missing <malformed-flow-name>"; continue ;;
+      esac
       case "$fshot" in
         -|"shots/$fname.png") ;;
         *) missing="$missing $fname"; continue ;;

@@ -40,7 +40,7 @@ Read before editing the verify gate or anything that drives a browser.
   the same bytes, did not move it either — and that is a route change). The
   material is `git diff HEAD` + the untracked PATH list + the untracked CONTENTS.
 - **[invariant]** A verdict is bound to CODE. `up` pins `verify_head` =
-  `<sha>/<cksum of porcelain>` — HEAD alone is not enough because crew work is
+  `<sha>/<cksum of the diff plus a per-file digest of every untracked path>` — HEAD alone is not enough because crew work is
   uncommitted for most of its life — and `flow`/`report` refuse once it moves,
   so a green run cannot be carried across the edit that breaks the app.
 - **[pitfall]** One file, three parsers, three answers. `wc -l` counted 0 rows in
@@ -73,8 +73,13 @@ Read before editing the verify gate or anything that drives a browser.
   not `${v//\*\*/\*}`: bash 3.2 yields an ESCAPED star there, which matches a
   literal `*` and therefore no path at all — the gate would silently under-fire
   on macOS while passing every Linux test. Only CI's macOS smoke leg catches it.
-- **[invariant]** Re-checks read what was PINNED AT BOOT, never the live
-  registry. Two crewmates share one `state/repos.json`, so clearing
+- **[scope]** The pin covers what `changed_files` covers: tracked changes plus
+  untracked-but-not-ignored files. A gitignored file (build output, a local
+  `.env`) can change under a green run without moving it. That is deliberate and
+  consistent with the gate's firing rule, not an oversight — but it means the pin
+  answers "did the SOURCE move", not "did anything on disk move".
+- **[invariant]** Re-checks read what was PINNED AT BOOT — the probe, the url,
+  the port, the token, the code state — never the live registry. Two crewmates share one `state/repos.json`, so clearing
   `app_ready_cmd` mid-run turned the liveness re-probe into `return 0` and a
   foreign process on the port passed as the app. `up` records
   `verify_ready_cmd`; `require_app_serving` uses that copy.

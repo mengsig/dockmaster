@@ -87,6 +87,15 @@ case "$cmd" in
       pr|pr_state|merge_state|pr_check_snapshot|pr_head) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
       base) dm_die "'base' is recorded by dm-worktree.sh create --base; it must not be set by hand" ;;
       worktree) dm_die "'worktree' is maintained by dm-worktree.sh create/remove; it must not be set by hand" ;;
+      # The verify gate's TRUST inputs. `verify_ready_cmd` is eval'd, and
+      # dm-verify.sh validates it at boot (it must prove ownership, and a probe
+      # that passes with nothing started is refused) — validation this CLI would
+      # bypass entirely. The rest pin what a verdict means: the port and url the
+      # app was reached on, the boot token evidence is matched against, and the
+      # code state the run verified. Hand-setting any of them re-points a verdict
+      # at something else. dm-verify.sh writes them through dm_meta_set directly.
+      verify_ready_cmd|verify_token|verify_head|verify_port|verify_url|verify_cwd)
+        dm_die "'$key' is a verify-gate trust field recorded by dm-verify.sh up; setting it by hand would re-point a verdict at code, an app, or evidence the run never checked" ;;
       # A task's repo decides which clone its work lands in and whose merge
       # authority gates it. Re-pointing a live record at another repo would carry
       # both decisions over to a repo that never consented to them, so the repo is

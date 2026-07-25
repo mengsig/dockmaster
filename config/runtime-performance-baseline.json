@@ -3,8 +3,8 @@
   "base_commit": "#166",
   "shared_agents_bytes": 12533,
   "claude_settings_bytes": 1579,
-  "claude_skill_bytes": 87680,
-  "claude_skill_description_bytes": 4603,
+  "claude_skill_bytes": 94740,
+  "claude_skill_description_bytes": 4879,
   "claude_files_sha256": {
     ".claude/agents/crew-high.md": "bac99327c5b49a4c220d5c3e98b8d94902e848be827080d552dc9cce39f5cfe0",
     ".claude/agents/crew-low.md": "a16d6c2cd554374923ee9e412fd5f14df4807959347d0df187a6ea82a18a3952",
@@ -16,11 +16,12 @@
     ".claude/skills/credential-handoff/SKILL.md": "03bd5a829ee39de335263931599e0e5829798c0575d0507c39f39b135dd23b08",
     ".claude/skills/decision-hold/SKILL.md": "2ecaeebd4ddeae7f139740d5a10ebeb70a9b594ae87b8d2d520a79b25d21efb6",
     ".claude/skills/diagnostic-reasoning/SKILL.md": "e079d4582c200e5c09a421d61b1a07b1d3203398789e04c9e73b4aa3749ae5a2",
+    ".claude/skills/e2e-verification/SKILL.md": "a16ec10dcb03e5f721193199491f22e9d68375a7fb35ab0eed9e03ba7a0a846b",
     ".claude/skills/fleet-change/SKILL.md": "b71bb80e05a10b200040b67344a0d94d489b3f521a4b37312241061d159f5961",
     ".claude/skills/memory-routing/SKILL.md": "a27ddcbc312125f1b3d6d94c91346c7db8b7d4208f90990d067a798ebf04cc9c",
     ".claude/skills/merge-conflict/SKILL.md": "9fd025b13a754bb561176c86d3f825861896ea384f03cd2ee2d96496dee96b13",
     ".claude/skills/post-pr-review/SKILL.md": "6c7f6a16205561d0301610b86a56b5e9c71dfa3373bfed5257078f1ca7c603b4",
-    ".claude/skills/pr-workflow/SKILL.md": "e29c11bc5f91348777c0def510bce33a91663bad8c6a7cba72a05faee1ab88da",
+    ".claude/skills/pr-workflow/SKILL.md": "75cd45dd948c9138ec4623a3b6e862c018388bf5e15ce3c24668f10aec1a83b7",
     ".claude/skills/project-management/SKILL.md": "7bc3f66ab7229ddc4cfd2f022ac179db06c3d544f5dee2d5e1a98fc8caa92cfe",
     ".claude/skills/repo-sync/SKILL.md": "a8dac0bdae8d3ee31b0631940aeaf8239ada0aebd2008ad3232a521503bce638",
     ".claude/skills/rollback/SKILL.md": "6b6f4b1b4289362b5c50a5b195b19ca4ad01a24e0dd361eef99bd94682ddd284",
@@ -28,7 +29,7 @@
     ".claude/skills/stuck-worker/SKILL.md": "a0713e0d518cbfb288ca456ebafd3e4f65344c9f79437823c10986e4b446c193",
     ".claude/skills/supervision/SKILL.md": "77288dd8aa1423ce769583be33f736af0361cb0b90509f3b3c681663960c3105",
     ".claude/skills/task-lifecycle/SKILL.md": "c8e69bad8c46016ad4542f96ed2b43b507064fb4f98eea416873f8396f7716c6",
-    ".claude/skills/testing-policy/SKILL.md": "3632ab3a7c0e39b4c6ad35acfa2178e753d73ec0f4df45542e5d29f86ceef475"
+    ".claude/skills/testing-policy/SKILL.md": "57fa31e97a96f4d4d7b53ce92b6d148f78333b84e5c7926efe1e807ec926c880"
   },
   "limits": {
     "shared_agents_growth_bytes": 2048,
