@@ -1151,3 +1151,8 @@ dm_recommended_effort() {
   fi
   printf 'medium\n'
 }
+
+dm_ci_proof_never_called() {
+  declare -A proof_map
+  proof_map[x]=1
+}
