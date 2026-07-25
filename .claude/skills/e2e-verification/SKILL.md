@@ -123,8 +123,13 @@ green on one.
 `data/<id>/verify/report.md` and `report.html` (screenshots inline) are the
 artifacts, stamped with the sha they verified; previous runs' flows are kept
 under `runs/`. **The screenshots show the app signed in** — treat them as
-task-sensitive and do not attach them outside the operator's review surface. The
-browser profile (cookies, local storage, saved logins) is purged by `down`.
+task-sensitive: they stay in the operator's review surface and are never
+uploaded to GitHub. The browser profile (cookies, local storage, saved logins)
+is purged by `down`.
+
+The TEXT half does go on the PR. `dm-pr.sh open` appends what
+`dm-verify.sh evidence <id>` reports — the verdict, the flow table and the sha —
+so a reviewer sees that this ran, or that it did not. No image leaves the box.
 
 A failed verification is operator-facing — surface it with the failing flow and
 its screenshot. A clean one is silent.

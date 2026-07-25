@@ -30,6 +30,10 @@
 #
 # Commands:
 #   open  <id> --title T (--body-file F | --body B) [--base B] [--draft]
+#                                 the caller's body stays first and intact;
+#                                 whatever the gates recorded is appended below
+#                                 it (dm-evidence.sh), replacing a section an
+#                                 earlier compose left, never stacking one
 #   adopt <id> <url>              record a PR opened out of band (e.g. direct-pr
 #                                 mode, a revert PR): validates the url is a
 #                                 canonical GitHub PR url for the task's own
@@ -56,6 +60,10 @@ dm_ensure_dirs
 # Merge/landing decisions read the registry (authority, allowed bases, clone
 # path); a corrupt one must stop them before any gate is consulted.
 dm_registry_require_valid
+
+# Sibling toolbelt scripts, resolved from this script's own location so they are
+# reachable from any cwd (mirrors dm-lib's BASH_SOURCE-based resolution).
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # await-checks polling defaults (named once): wait up to ~10 minutes, re-checking
 # every ~15s. GitHub Actions runs are minutes long, so a short interval mostly
@@ -528,6 +536,27 @@ case "$cmd" in
     # No explicit --base: default to the recorded parent (a stacked sub-PR
     # created via `dm-worktree.sh create --base`), else the default branch.
     base="$(dm_pr_base_for "$id" "$base" "$dir")"
+    # Gate evidence (#175). Composed BEFORE the push so a body problem fails with
+    # nothing pushed. Read-only and never fatal on its own: a PR still opens when
+    # the collector cannot be reached, and a gate that recorded nothing yields an
+    # empty block, leaving the body exactly as the caller passed it.
+    evidence=""; body_tmp=""
+    ev_rc=0; evidence="$("$BIN_DIR/dm-evidence.sh" block "$id" 2>/dev/null)" || ev_rc=$?
+    if [ "$ev_rc" -ne 0 ]; then
+      dm_warn "gate evidence could not be collected for $id (dm-evidence.sh exited $ev_rc); opening the PR without it"
+      evidence=""
+    fi
+    if [ -n "$evidence" ]; then
+      body_tmp="$(mktemp "$DM_STATE/.pr-body.XXXXXX")" || dm_die "mktemp failed composing the PR body for $id"
+      # `strip` drops a section an earlier compose appended, so re-running never
+      # stacks blocks; the operator's own text passes through untouched.
+      { if [ -n "$body_file" ]; then cat -- "$body_file"
+        elif [ -n "$body" ]; then printf '%s\n' "$body"; fi
+      } | "$BIN_DIR/dm-evidence.sh" strip > "$body_tmp" \
+        || { rm -f "$body_tmp"; dm_die "could not compose the PR body for $id (is --body-file readable?); nothing pushed"; }
+      printf '\n%s\n' "$evidence" >> "$body_tmp" \
+        || { rm -f "$body_tmp"; dm_die "failed writing the composed PR body for $id; nothing pushed"; }
+    fi
     dm_info "pushing $branch -> origin"
     # The first push (-u) can fail for benign reasons (upstream already set), so
     # retry a plain push. If THAT is rejected — typically a non-fast-forward
@@ -536,10 +565,12 @@ case "$cmd" in
     # branch is a signal to reconcile, never to overwrite origin.
     if ! git -C "$wt" push -u origin "$branch" >/dev/null 2>&1; then
       git -C "$wt" push origin "$branch" \
-        || dm_die "push rejected — branch '$branch' diverged on origin; was it rebased? no force performed. Reconcile with origin, then retry."
+        || { [ -z "$body_tmp" ] || rm -f "$body_tmp"
+             dm_die "push rejected — branch '$branch' diverged on origin; was it rebased? no force performed. Reconcile with origin, then retry."; }
     fi
     args=(pr create -R "$slug" --title "$title" --base "$base" --head "$branch")
-    if [ -n "$body_file" ]; then args+=(--body-file "$body_file")
+    if [ -n "$body_tmp" ]; then args+=(--body-file "$body_tmp")
+    elif [ -n "$body_file" ]; then args+=(--body-file "$body_file")
     elif [ -n "$body" ]; then args+=(--body "$body")
     else args+=(--body ""); fi
     [ "$draft" -eq 1 ] && args+=(--draft)
@@ -548,8 +579,10 @@ case "$cmd" in
     errf="$(mktemp "$DM_STATE/.pr-open.XXXXXX")" || dm_die "mktemp failed opening PR for $id"
     if out="$("$gh_cli" "${args[@]}" 2>"$errf")"; then
       rm -f "$errf"
+      [ -z "$body_tmp" ] || rm -f "$body_tmp"
     else
       err="$(cat "$errf" 2>/dev/null || true)"; rm -f "$errf"
+      [ -z "$body_tmp" ] || rm -f "$body_tmp"
       dm_die "pr create failed: ${err:-${out:-no output from $gh_cli}}"
     fi
     # `|| true` is load-bearing: a no-match grep exits 1, which under set -e

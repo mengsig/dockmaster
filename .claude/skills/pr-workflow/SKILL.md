@@ -145,6 +145,13 @@ Example: `bin/dm-branch-name.sh fix 412 "flaky login test"` → `fix/412/flaky-l
 Always through `bin/dm-pr.sh open <id> --title "<title>" --body-file <file>`.
 It pushes the branch, opens the PR against the repo default, and records the URL.
 
+**Gate evidence is appended for you.** Below your description it adds what the
+gates recorded (`bin/dm-evidence.sh block <id>`): which test command ran or that
+none is registered, and the verify verdict, its flows and the sha — or that a
+surface moved and nothing verified it. A gate that did not run adds nothing, so
+a docs-only PR stays clean. Do not hand-write any of it into the description,
+and do not paste screenshots: those stay in the operator's review surface.
+
 **Title**: imperative, specific, lowercase-first is fine. e.g. `fix flaky login test`.
 
 **Description** — short, plain, and human. Write it the way a working engineer

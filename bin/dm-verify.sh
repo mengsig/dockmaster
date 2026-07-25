@@ -14,6 +14,10 @@
 #                          2 = could not determine (never reported as a skip),
 #                          3 = surface touched but the repo has no app config
 #                          (UNAVAILABLE — report it, never a silent pass)
+#   evidence <id>          print this gate's evidence block for the PR body
+#                          (dm-evidence.sh collects it); read-only, and it
+#                          reports the SAME decision `gate` exits on. Nothing
+#                          when no surface moved — a docs-only PR stays clean.
 #   up <id>                start the app on a free per-task port, wait for it to
 #                          prove itself ready, and pin the verdict to this HEAD
 #   down <id>              stop the app and the browser; fails loudly if the app
@@ -676,6 +680,25 @@ matches_any() {
 # a path — the gate would silently under-fire on macOS only.
 normalize_globs() { printf '%s' "$1" | sed 's/\*\*/*/g'; }
 
+# gate_decision <id> <repo> -- the SINGLE owner of "should this gate run?". Prints
+# the changed paths that touch a user-facing surface; returns 0 required, 1 no
+# surface moved, 2 could not determine, 3 surface moved but the repo has no app
+# config. `gate` exits on it and `evidence` reports it, so a PR body can never
+# claim a decision the gate did not make.
+gate_decision() {
+  local id="$1" repo="$2" changed hits
+  changed="$(changed_files "$id")" || return 2
+  hits="$(surface_hits "$repo" "$changed")"
+  [ -n "$hits" ] || return 1
+  printf '%s\n' "$hits"
+  [ -n "$(app_field "$repo" app_start_cmd)" ] || return 3
+  return 0
+}
+
+# gate_hit_count <hits> -- how many paths gate_decision named. awk, not `wc -l`:
+# an empty list piped through printf still carries a newline and counts as 1.
+gate_hit_count() { printf '%s' "$1" | awk 'END { print NR + 0 }'; }
+
 # surface_hits <repo> <changed-paths> -- print each changed path that could change
 # what a user sees. With `verify_surfaces` set, only those globs count; without
 # it, everything except documentation counts. It takes the path list rather than
@@ -756,12 +779,45 @@ render_report() {
   printf '%s\n' "$md"
 }
 
+# verify_evidence <id> <surface-file-count> -- the block for a gate that WAS
+# required. Rows come from flows.tsv, the same file `report` renders its verdict
+# from; a recorded verdict whose flow record is gone, truncated or malformed
+# reports itself unavailable rather than restating a verdict nothing backs.
+verify_evidence() {
+  local id="$1" n="$2" verdict flows head total bad malformed
+  verdict="$(dm_meta_get "$id" verify)"
+  if [ -z "$verdict" ]; then
+    printf '**verify (e2e)** — NOT VERIFIED · %s changed file(s) touch a user-facing surface and no verification was recorded\n' "$n"
+    return 0
+  fi
+  flows="$(flows_file "$id")"
+  if [ ! -s "$flows" ] || [ -n "$(tail -c 1 "$flows")" ]; then
+    printf '**verify (e2e)** — evidence unavailable · a `%s` verdict is recorded but its flow record is missing or truncated\n' "$verdict"
+    return 0
+  fi
+  set -- $(flows_tally "$flows")
+  total="${1:-0}"; bad="${2:-0}"; malformed="${3:-0}"
+  if [ "$total" -eq 0 ] || [ "$malformed" -ne 0 ]; then
+    printf '**verify (e2e)** — evidence unavailable · the flow record behind a `%s` verdict has %s malformed row(s)\n' "$verdict" "$malformed"
+    return 0
+  fi
+  head="$(dm_meta_get "$id" verify_head)"
+  printf '**verify (e2e)** — %s · %s/%s flow(s) at `%s`\n\n' \
+    "$verdict" "$((total - bad))" "$total" "${head:-unrecorded}"
+  printf '| flow | result | note |\n|---|---|---|\n'
+  # A note may legally contain `|`, which would otherwise split the row.
+  awk -F'\t' 'NF == 6 {
+      gsub(/\|/, "\\|", $6)
+      printf "| %s | %s | %s |\n", $2, $3, $6
+    }' "$flows"
+}
+
 # --- commands ----------------------------------------------------------------
 
 cmd="${1:-}"; shift || true
 id="${1:-}"
 case "$cmd" in
-  gate|up|down|session|drive|shot|flow|report)
+  gate|evidence|up|down|session|drive|shot|flow|report)
     [ -n "$id" ] || { echo "usage: dm-verify.sh $cmd <id> ..." >&2; exit 2; }
     dm_require_id "$id"; shift
     ;;
@@ -771,24 +827,41 @@ case "$cmd" in
   gate)
     repo="$(dm_meta_get "$id" repo)"
     [ -n "$repo" ] || dm_die "task '$id' has no repo recorded"
-    # Exit 2 for "could not determine", never 1: 1 means "no surface moved", and
-    # reporting an unreadable worktree as nothing-to-verify is the silent skip
-    # this gate exists to prevent.
-    changed="$(changed_files "$id")" \
-      || { echo "error: could not determine what '$id' changed, so the verify gate cannot decide" >&2; exit 2; }
-    hits="$(surface_hits "$repo" "$changed")"
-    if [ -z "$hits" ]; then
-      echo "not-applicable: the diff touches no user-facing surface for $repo"
-      exit 1
-    fi
-    n="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
-    if [ -z "$(app_field "$repo" app_start_cmd)" ]; then
-      echo "UNAVAILABLE: $n changed file(s) touch a user-facing surface, but '$repo' has no app_start_cmd registered, so the app cannot be booted and NOTHING was verified. Report this as unavailable, never as a pass. Register one: dm-repo.sh set $repo app_start_cmd '<cmd honoring \$DM_VERIFY_PORT>'" >&2
-      printf '%s\n' "$hits" >&2
-      exit 3
-    fi
-    echo "required: $n changed file(s) touch a user-facing surface of $repo"
-    printf '%s\n' "$hits"
+    grc=0; hits="$(gate_decision "$id" "$repo")" || grc=$?
+    n="$(gate_hit_count "$hits")"
+    case "$grc" in
+      # Exit 2 for "could not determine", never 1: 1 means "no surface moved",
+      # and reporting an unreadable worktree as nothing-to-verify is the silent
+      # skip this gate exists to prevent.
+      2) echo "error: could not determine what '$id' changed, so the verify gate cannot decide" >&2; exit 2 ;;
+      1) echo "not-applicable: the diff touches no user-facing surface for $repo"; exit 1 ;;
+      3)
+        echo "UNAVAILABLE: $n changed file(s) touch a user-facing surface, but '$repo' has no app_start_cmd registered, so the app cannot be booted and NOTHING was verified. Report this as unavailable, never as a pass. Register one: dm-repo.sh set $repo app_start_cmd '<cmd honoring \$DM_VERIFY_PORT>'" >&2
+        printf '%s\n' "$hits" >&2
+        exit 3 ;;
+      0)
+        echo "required: $n changed file(s) touch a user-facing surface of $repo"
+        printf '%s\n' "$hits" ;;
+      *) dm_die "the verify gate returned an unrecognized decision ($grc) for '$id'" ;;
+    esac
+    ;;
+
+  evidence)
+    # Read-only: report what the gate DECIDED and what the run RECORDED, for the
+    # PR body (#175). Never boots anything and never writes; the decision comes
+    # from gate_decision, the same function `gate` exits on, so the PR cannot
+    # disagree with the gate.
+    repo="$(dm_meta_get "$id" repo)"
+    [ -n "$repo" ] || dm_die "task '$id' has no repo recorded"
+    grc=0; hits="$(gate_decision "$id" "$repo")" || grc=$?
+    n="$(gate_hit_count "$hits")"
+    case "$grc" in
+      1) : ;;   # no surface moved: the gate never ran, so it contributes nothing
+      2) printf '**verify (e2e)** — evidence unavailable · the gate could not determine what this task changed\n' ;;
+      3) printf '**verify (e2e)** — NOT VERIFIED · %s changed file(s) touch a user-facing surface, but `%s` has no app config, so the app was never booted\n' "$n" "$repo" ;;
+      0) verify_evidence "$id" "$n" ;;
+      *) printf '**verify (e2e)** — evidence unavailable · the gate returned an unrecognized decision (%s)\n' "$grc" ;;
+    esac
     ;;
 
   up)
@@ -1042,5 +1115,5 @@ case "$cmd" in
     ;;
 
   *)
-    echo "usage: dm-verify.sh {gate|up|down|session|drive|shot|flow|report} <id> ..." >&2; exit 2 ;;
+    echo "usage: dm-verify.sh {gate|evidence|up|down|session|drive|shot|flow|report} <id> ..." >&2; exit 2 ;;
 esac

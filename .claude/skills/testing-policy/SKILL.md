@@ -11,8 +11,9 @@ situations where it cannot simply return green, and what to do instead.
 ## No registered test command
 
 A repo with no `test_cmd` makes the gate a **declared soft skip**, never a
-fabricated pass — `dm-test` and `pr-workflow` already state this. A soft skip is
-not verification, so do not report the change as tested on the strength of it.
+fabricated pass — `dm-test` and `pr-workflow` already state this, and since #175
+`dm-pr.sh open` prints it on the PR itself, so the reviewer sees it too. A soft
+skip is not verification, so do not report the change as tested on it.
 Instead, load the `e2e-verification` skill and drive the change end-to-end, then report
 **what was actually exercised** (the flow you ran, what you observed). Honest
 "verified manually by X" beats a hollow "tests passed."

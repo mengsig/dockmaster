@@ -5285,6 +5285,142 @@ check "the task records it as stopped"     '[ "$(b dm-task.sh get vrf2 verify_ap
 
 fi
 
+echo "== gate evidence: a PR carries what its gates saw (#175) =="
+# The defect class this exists for is a check that APPEARS to run and does not,
+# so the negatives matter more than the happy path: no test command registered,
+# the verify gate UNAVAILABLE, a producer that errors, and a docs-only PR that
+# must stay clean.
+E="$ROOT/bin/dm-evidence.sh"
+b dm-repo.sh add evrepo "$TMP/origin.git" --mode pipeline >/dev/null 2>&1
+ev_task() {   # ev_task <id> <repo> <relpath> -> worktree with one committed file
+  local id="$1" repo="$2" rel="$3" wt
+  b dm-task.sh new "$id" --kind ship --repo "$repo" --mode pipeline >/dev/null
+  wt="$(b dm-worktree.sh create "$id" "$repo" | tail -n1)"
+  git -C "$wt" checkout -q -b "feat/x/$id"
+  mkdir -p "$wt/$(dirname "$rel")"; printf 'x\n' >> "$wt/$rel"
+  git -C "$wt" add -A >/dev/null; git -C "$wt" commit -qm "$id" >/dev/null
+  printf '%s\n' "$wt"
+}
+
+# 1. No test command, and a surface the repo cannot boot. Both must be VISIBLE.
+ev_task ev-bare evrepo src/thing.py >/dev/null
+b dm-test.sh ev-bare >/dev/null
+EV_BARE="$("$E" block ev-bare)"
+check "an unregistered test command is reported on the PR" \
+  'grep -q "no test command is registered" <<<"$EV_BARE"'
+check "the tests block says NOT RUN, never a pass"  'grep -q "tests\*\* — NOT RUN" <<<"$EV_BARE"'
+check "an UNAVAILABLE verify gate is reported"      'grep -q "verify (e2e)\*\* — NOT VERIFIED" <<<"$EV_BARE"'
+check "the unavailable line names the missing app config" 'grep -q "has no app config" <<<"$EV_BARE"'
+
+# 2. A docs-only task with no gate run at all contributes NOTHING — not even the
+# separator. This is the "docs-only PRs stay clean" property.
+ev_task ev-clean evrepo docs/notes.md >/dev/null
+check "no gate run means no section at all"    '[ -z "$("$E" block ev-clean)" ]'
+check "collecting an empty section still exits 0" '"$E" block ev-clean >/dev/null'
+# ... and once the tests gate HAS run, its result appears while verify, which
+# never ran, still contributes nothing.
+b dm-test.sh ev-clean >/dev/null
+EV_DOCS="$("$E" block ev-clean)"
+check "a docs-only diff keeps the verify gate silent" '! grep -q "verify (e2e)" <<<"$EV_DOCS"'
+check "the tests gate that did run is still reported" 'grep -q "tests\*\* — NOT RUN" <<<"$EV_DOCS"'
+
+# 3. A producer that errors, and one that is gone, degrade to a stated line —
+# never a silently dropped gate, and never a failed collection.
+EV_BROKEN="$TMP/ev-broken-bin"; mkdir -p "$EV_BROKEN"
+cp "$ROOT"/bin/dm-*.sh "$EV_BROKEN/"; chmod +x "$EV_BROKEN"/dm-*.sh
+printf '#!/usr/bin/env bash\nexit 9\n' > "$EV_BROKEN/dm-verify.sh"; chmod +x "$EV_BROKEN/dm-verify.sh"
+EV_ERR="$("$EV_BROKEN/dm-evidence.sh" block ev-bare)"
+check "a producer that errors is reported, not dropped" 'grep -q "verify\*\* — evidence unavailable" <<<"$EV_ERR"'
+check "a broken producer never fails the collection"    '"$EV_BROKEN/dm-evidence.sh" block ev-bare >/dev/null'
+check "the surviving producer still contributes"        'grep -q "tests\*\* —" <<<"$EV_ERR"'
+rm -f "$EV_BROKEN/dm-verify.sh"
+EV_GONE="$("$EV_BROKEN/dm-evidence.sh" block ev-bare)"
+check "a missing producer is reported, not dropped" 'grep -q "is missing or not executable" <<<"$EV_GONE"'
+
+# 4. The verify block renders the recorded run. A real green run needs a browser,
+# so the run's own artifacts (the verdict meta dm-verify.sh writes and its flow
+# record) are placed directly — this asserts the RENDERING, not the verdict.
+ev_task ev-run demo src/ui.js >/dev/null
+b dm-test.sh ev-run >/dev/null
+b dm-repo.sh set demo app_start_cmd 'true' >/dev/null
+b dm-repo.sh set demo app_stop_cmd 'true' >/dev/null
+b dm-repo.sh set demo verify_surfaces '' >/dev/null
+EV_FLOWS="$DM_HOME/data/ev-run/verify"; mkdir -p "$EV_FLOWS"
+printf '2026-01-01T00:00:00Z\tlogin\tpass\tsha1/1\tshots/login.png\tlanded | ok\n' > "$EV_FLOWS/flows.tsv"
+printf 'verify=pass\nverify_head=sha1/1\n' >> "$DM_HOME/state/tasks/ev-run.meta"
+EV_RUN="$("$E" block ev-run)"
+check "a recorded verdict is reported with its flows" 'grep -q "verify (e2e)\*\* — pass · 1/1 flow" <<<"$EV_RUN"'
+check "the verified code state is named"              'grep -q "sha1/1" <<<"$EV_RUN"'
+check "each flow lands in the table"                  'grep -q "^| login | pass |" <<<"$EV_RUN"'
+check "a pipe in a note cannot split the row"         'grep -q "landed \\\\| ok" <<<"$EV_RUN"'
+# A verdict whose evidence is truncated must not be restated as a verdict.
+printf 'x' >> "$EV_FLOWS/flows.tsv"
+EV_TRUNC="$("$E" block ev-run)"
+check "a truncated flow record reads unavailable, not pass" \
+  'grep -q "verify (e2e)\*\* — evidence unavailable" <<<"$EV_TRUNC" && ! grep -q "verify (e2e)\*\* — pass" <<<"$EV_TRUNC"'
+rm -rf "$EV_FLOWS"
+EV_NOEV="$("$E" block ev-run)"
+check "a verdict with no flow record reads unavailable" 'grep -q "evidence unavailable" <<<"$EV_NOEV"'
+
+# 5. strip is what makes re-composing idempotent.
+EV_BODY="$TMP/ev-body.md"
+printf 'add multiply\n\nRisk: low.\n' > "$EV_BODY"
+check "strip leaves a body with no section as written" \
+  'cmp -s "$EV_BODY" <("$E" strip < "$EV_BODY")'
+{ cat "$EV_BODY"; printf '\n'; "$E" block ev-bare; } > "$TMP/ev-body-with.md"
+check "strip removes an appended section and its separator" \
+  'cmp -s "$EV_BODY" <("$E" strip < "$TMP/ev-body-with.md")'
+
+# 6. dm-pr.sh open composes the real body: operator text first, evidence below,
+# and re-running over an already-composed body never stacks a second section.
+EV_STUB="$TMP/ev-pr-stub"; mkdir -p "$EV_STUB"
+cat > "$EV_STUB/gh" <<STUB
+#!/bin/sh
+next=0
+for a in "\$@"; do
+  [ "\$next" = 1 ] && { cp "\$a" "$EV_STUB/last-body"; next=0; }
+  [ "\$a" = "--body-file" ] && next=1
+done
+printf 'https://github.com/o/r/pull/175\n'
+STUB
+chmod +x "$EV_STUB/gh"
+PATH="$EV_STUB:$NOAXI_PATH" b dm-pr.sh open ev-bare --title T --body-file "$EV_BODY" >/dev/null 2>&1
+EV_SENT="$(cat "$EV_STUB/last-body" 2>/dev/null || true)"
+check "the operator's body stays first and intact" '[ "$(head -n3 "$EV_STUB/last-body")" = "$(cat "$EV_BODY")" ]'
+check "the evidence is appended below a separator" 'grep -q "### Gate evidence" <<<"$EV_SENT"'
+check "the composed body carries the tests gate"   'grep -q "no test command is registered" <<<"$EV_SENT"'
+check "no composed-body temp file is left behind"  '[ -z "$(find "$DM_HOME/state" -maxdepth 1 -name ".pr-body.*")" ]'
+cp "$EV_STUB/last-body" "$TMP/ev-recompose.md"
+ev_task ev-again evrepo src/again.py >/dev/null
+b dm-test.sh ev-again >/dev/null
+PATH="$EV_STUB:$NOAXI_PATH" b dm-pr.sh open ev-again --title T --body-file "$TMP/ev-recompose.md" >/dev/null 2>&1
+check "re-composing replaces the section, never stacks it" \
+  '[ "$(grep -c "dm:gate-evidence" "$EV_STUB/last-body")" = 1 ]'
+# Composing happens BEFORE the push, so an unreadable body fails with nothing
+# pushed and nothing left behind.
+ev_task ev-badbody evrepo src/bad.py >/dev/null
+b dm-test.sh ev-badbody >/dev/null
+check "an unreadable body file fails the open" \
+  '! PATH="$EV_STUB:$NOAXI_PATH" b dm-pr.sh open ev-badbody --title T --body-file "$TMP/no-such-body.md" >/dev/null 2>&1'
+check "a failed compose pushes nothing" \
+  '! git -C "$TMP/origin.git" rev-parse --verify --quiet refs/heads/feat/x/ev-badbody >/dev/null'
+check "a failed compose leaves no temp behind" \
+  '[ -z "$(find "$DM_HOME/state" -maxdepth 1 -name ".pr-body.*")" ]'
+
+# A task no gate has touched must reach gh with the caller's body untouched.
+ev_task ev-untouched evrepo docs/more.md >/dev/null
+rm -f "$EV_STUB/last-body"
+PATH="$EV_STUB:$NOAXI_PATH" b dm-pr.sh open ev-untouched --title T --body-file "$EV_BODY" >/dev/null 2>&1
+check "a PR with no gate evidence sends the caller's file unchanged" \
+  'cmp -s "$EV_BODY" "$EV_STUB/last-body"'
+
+# 7. The published fields are not hand-settable: evidence a reviewer trusts must
+# come from the gate that produced it.
+check "tests result cannot be hand-set"  '! b dm-task.sh set ev-bare tests pass >/dev/null 2>&1'
+check "tests command cannot be hand-set" '! b dm-task.sh set ev-bare tests_cmd "true" >/dev/null 2>&1'
+check "the tests gate records what it ran" \
+  '[ "$(b dm-task.sh get ev-clean tests)" = "skip" ] && [ "$(b dm-task.sh get ev-run tests_cmd)" = "test -f src/calc.py" ]'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
