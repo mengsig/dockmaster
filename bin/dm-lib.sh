@@ -408,12 +408,19 @@ dm_tracked_dirty() {
 # closed on them. On git failure prints a single-line `error: <detail>` and
 # returns 1, so the caller's refusal can name the cause instead of guessing.
 dm_untracked() {
-  local out rc=0 err
+  local out rc=0 errf err
+  # The temp lives OUTSIDE the inspected directory: a scratch file written into
+  # the worktree would itself show up as untracked work.
+  errf="$(mktemp "${TMPDIR:-/tmp}/dm-untracked.XXXXXX")" \
+    || { printf 'error: mktemp failed while inspecting untracked files in %s\n' "$1"; return 1; }
   # stderr stays OFF stdout on success: a git warning with exit 0 would
-  # otherwise read as an untracked filename and be cited as forgotten work.
-  out="$(git -C "$1" ls-files --others --exclude-standard 2>/dev/null)" || rc=$?
+  # otherwise read as an untracked filename and be cited as forgotten work. It
+  # is captured from THIS run, never re-read by a second one (#146): the tree
+  # can change between the two, and a second run that succeeds loses the cause.
+  out="$(git -C "$1" ls-files --others --exclude-standard 2>"$errf")" || rc=$?
+  err="$(cat "$errf" 2>/dev/null || true)"
+  rm -f "$errf"
   if [ "$rc" -ne 0 ]; then
-    err="$(git -C "$1" ls-files --others --exclude-standard 2>&1 >/dev/null)" || true
     printf 'error: git ls-files failed (exit %s) in %s: %s\n' "$rc" "$1" "$(dm_first_line "${err:-no detail from git}")"
     return 1
   fi
@@ -1048,22 +1055,64 @@ dm_open_pr_tasks() {
   done < <(dm_all_task_ids)
 }
 
-# --- dispatch right-sizing: advisory model-tier recommendation ----------------
-# Recommend the least model tier that still fits the work, as a pure function
-# (offline, no side effects) so dm-brief can surface it and smoke can test it.
-# ADVISORY, not a gate: the dockmaster decides the final resourcing, so this is
-# surfaced in the brief, never enforced. Risk signals dominate (size UP when
-# unsure); a scout or mechanical change sizes down. Matching is case-insensitive
-# and substring, so `auth` also fires on author/authority — a deliberate
-# over-size bias, the safe direction for an advisory hint. Prints: haiku|sonnet|opus.
+# --- dispatch right-sizing: advisory model + effort recommendations -----------
+# Two pure functions (offline, no side effects) over the same <kind> <text>
+# inputs, so dm-brief can surface them and smoke can test them. Both ADVISORY,
+# never gates: the dockmaster decides the final resourcing.
+#
+# Shared signal sets, so the two siblings cannot drift apart on the same input:
+#   RISK       dominates both and sizes UP. Matched as a case-insensitive
+#              SUBSTRING, so `auth` also fires on author/authority — a deliberate
+#              over-size bias, the safe direction for an advisory hint.
+#   MECHANICAL sizes DOWN, so a substring hit is the WRONG direction: `doc`
+#              inside dockmaster and `nit` inside unit would size real work down
+#              to the floor. Whole words only, with a small suffix set; a term
+#              this misses stays at the default tier, which is the safe miss.
+DM_RISK_SIGNAL_RE='authz|permission|auth|migration|alembic|concurren|lock|mutex|security|secret|crypto|merge.gate|memory governance'
+DM_MECHANICAL_SIGNAL_RE='(^|[^[:alpha:]])(test|doc|chore|nit|typo|format|comment|rename)(s|es|ed|ing)?([^[:alpha:]]|$)'
+
+# Least model tier that still fits the work: what the crewmate must be able to
+# DO. Prints: haiku|sonnet|opus.
 dm_recommended_model() {
   # dm_recommended_model <kind> <title-plus-brief-text>
   local kind="$1" text="$2"
-  if grep -qiE 'authz|permission|auth|migration|alembic|concurren|lock|mutex|security|secret|crypto|merge.gate|memory governance' <<<"$text"; then
+  if grep -qiE "$DM_RISK_SIGNAL_RE" <<<"$text"; then
     printf 'opus\n'; return 0
   fi
-  if [ "$kind" = "scout" ] || grep -qiE 'test|docs?|chore|nit|typo|format|comment|rename' <<<"$text"; then
+  if [ "$kind" = "scout" ] || grep -qiE "$DM_MECHANICAL_SIGNAL_RE" <<<"$text"; then
     printf 'haiku\n'; return 0
   fi
   printf 'sonnet\n'
+}
+
+# Reasoning effort the work is worth: how long the crewmate must THINK before
+# acting. A different axis from the model tier, so the two disagree by design —
+# a scout is cheap to run but must reason (haiku + high), a rename needs neither
+# (haiku + low), and an ordinary test edit needs a small model but real care
+# (haiku + medium). Same over-size bias; risk dominates. Prints:
+# low|medium|high|xhigh.
+#
+# NOT ENFORCEABLE AT SPAWN, unlike the model tier: the Agent tool takes a
+# per-spawn `model` and has no effort parameter, so this binds only when the
+# work is dispatched through a mechanism that accepts one. Advisory everywhere
+# else — dm-brief says so in as many words.
+dm_recommended_effort() {
+  # dm_recommended_effort <kind> <title-plus-brief-text>
+  local kind="$1" text="$2"
+  if grep -qiE "$DM_RISK_SIGNAL_RE" <<<"$text"; then
+    printf 'xhigh\n'; return 0
+  fi
+  # Understanding-first work: the answer is the deliverable, so deliberation is
+  # the whole job even when the edit is small (or there is no edit at all).
+  if [ "$kind" = "scout" ] \
+     || grep -qiE 'investigat|diagnos|debug|root.cause|reproduc|design|architect|refactor|audit|performance' <<<"$text"; then
+    printf 'high\n'; return 0
+  fi
+  # Only the truly mechanical floor: a rename or a typo needs no deliberation.
+  # `test` is deliberately NOT here — a small model can write a test, but a
+  # careless one writes a test that cannot fail.
+  if grep -qiE '(^|[^[:alpha:]])(nit|typo|format|comment|rename)(s|es|ed|ing)?([^[:alpha:]]|$)' <<<"$text"; then
+    printf 'low\n'; return 0
+  fi
+  printf 'medium\n'
 }

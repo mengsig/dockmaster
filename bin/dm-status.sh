@@ -124,7 +124,9 @@ if [ -n "$tasks" ]; then
     if [ "$short" = "working" ] && [ -z "$(dm_meta_get "$tid" model)" ]; then
       rec="$(dm_meta_get "$tid" model_recommended)"
       [ -n "$rec" ] || rec="$(dm_recommended_model "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
-      unsized+="  UNSIZED: task $tid is working with no model recorded (recommended: $rec)"$'\n'
+      erec="$(dm_meta_get "$tid" effort_recommended)"
+      [ -n "$erec" ] || erec="$(dm_recommended_effort "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
+      unsized+="  UNSIZED: task $tid is working with no model recorded (recommended: $rec, $erec effort)"$'\n'
     fi
     created="$(dm_meta_get "$tid" created)"
     epoch="$(iso_to_epoch "$created")"
