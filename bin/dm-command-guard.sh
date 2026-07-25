@@ -1035,9 +1035,12 @@ skip_wrapper_args() {
 # `time` is here AND in is_command_runner: unwrapping it is exact (its argv is
 # the rest of the segment), while re-entry still has to treat a quoted
 # `"time git push --force"` as a command.
+# `esac` MUST stay quoted: bash 3.2 reads a bare `esac` anywhere in a pattern
+# list as the reserved word and the whole file stops parsing (#164). bash >= 4
+# accepts it, so only a real 3.2 catches this.
 is_shell_keyword() {
   case "$1" in
-    if|then|elif|else|fi|while|until|for|do|done|case|esac|select|function|\
+    if|then|elif|else|fi|while|until|for|do|done|case|'esac'|select|function|\
     time|coproc|'{'|'}'|'!') return 0 ;;
   esac
   return 1
