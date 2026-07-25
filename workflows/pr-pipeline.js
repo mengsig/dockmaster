@@ -371,7 +371,9 @@ for (const g of gates) {
       `\`flow\`, and finish with \`${t.binDir}/dm-verify.sh report ${t.taskId}\`; report ITS exit code as reportExit. Never edit files.`,
       { label: 'verify', phase: 'Verify', effort: g.effort || 'high', schema: VERIFY_SCHEMA },
     )
-    // A pass is only credible on a no-surface gate (1) or a green report (0/0).
+    // Cross-check the boolean against the exit codes the agent reported. This
+    // narrows, it does not prove: a report that lies about `passed` can lie about
+    // the exit codes too. It catches the inconsistent claim, not the consistent one.
     const verifiable = (v.gateExit === 1 && v.reportExit === 0)
       || (v.gateExit === 0 && v.reportExit === 0)
     if (!v.passed || !verifiable) {

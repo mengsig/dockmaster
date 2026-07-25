@@ -13,12 +13,17 @@ mechanism; read its header for exact usage.
 The gate enforces its own invariants, so this skill is how to work with them,
 not a promise you are asked to keep:
 
-- `flow … pass` is **refused** without a live app, a live browser, an unmoved
-  worktree, and a real PNG of that flow. There is no way to record a green flow
-  you did not drive.
-- `report` re-checks every pass against the file on disk, refuses a truncated
-  or malformed record, and refuses once HEAD or the dirty state has moved since
-  boot — a green run cannot be carried across a later edit.
+- `flow … pass` is **refused** without an app still serving, a live browser, an
+  unmoved worktree, and a screenshot **this run's `shot` captured** (matched by
+  content digest against the boot token).
+- **The limit, plainly:** these checks catch accident, stale evidence and a dead
+  app — not a determined forgery. `flows.tsv` and the capture manifest are
+  ordinary files your own shell can write, and no same-user scheme changes that.
+  Report what you actually drove; the gate is a floor, not a guard against you.
+- `report` re-checks every pass against the file on disk AND this run's capture
+  manifest, re-probes the app, refuses a truncated or malformed record, and
+  refuses once the code changed since boot — by content, so an edit to an
+  already-dirty file moves the pin too.
 - `up` refuses unless `app_ready_cmd` proves the process on the port is the one
   this task started.
 
@@ -53,8 +58,9 @@ not reliably outlive it.
 that what answers on `$DM_VERIFY_PORT` is *this task's* instance — the container
 of this task's compose project, the process this start command spawned — and
 only then `cp "$DM_VERIFY_DIR/token" "$DM_VERIFY_DIR/ready-proof"`. `up` refuses
-to come up without that proof. A bare `curl "$DM_VERIFY_URL"` proves the port
-answers, not who is answering.
+to come up without that proof — and refuses a probe that produces it with
+nothing started, because such a probe would adopt any process that binds the
+port. A bare `curl "$DM_VERIFY_URL"` proves the port answers, not who answers.
 
 ## The run
 
@@ -75,8 +81,8 @@ up  →  session  →  (drive · shot)*  →  flow …  →  report        down 
    `fillform`, `click`, `wait`, …). `snapshot` first — element refs go stale
    after every action, so re-snapshot before each interaction.
 4. `dm-verify.sh shot <id> <flow-name>` at the asserted state. The screenshot
-   name must match the flow name; that binding is what `flow` and `report`
-   check.
+   name must match the flow name, and the capture is recorded against this boot;
+   copying an image in, or reusing one across flows, is refused.
 5. `dm-verify.sh flow <id> <name> pass|fail|flake "<what you observed>"`.
 6. `dm-verify.sh report <id>` — renders the report and **is** the verdict:
    exit 0 all passed, 1 something did not, 3 nothing was recorded.

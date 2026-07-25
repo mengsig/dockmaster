@@ -326,6 +326,11 @@ defaults are the supported configuration.
 | `DM_GH_RETRY_MAX` | `4` | Attempts `dm-pr.sh` makes against a retryable GitHub failure. |
 | `DM_GH_RETRY_BASE_SECS` | `2` | Backoff base for those retries. |
 | `DM_GH_CIRCUIT_BREAKER_MAX` | `5` | Consecutive GitHub failures after which `dm-pr.sh` stops calling out. |
+| `DM_VERIFY_READY_TIMEOUT` | `300` | Seconds `bin/dm-verify.sh up` waits for the app to prove itself ready before failing the boot. |
+| `DM_VERIFY_STOP_SETTLE` | `20` | Seconds `dm-verify.sh down` waits for the app's port to go quiet after `app_stop_cmd`. Still listening at the end records `leaked` and fails, rather than claiming a stop it did not achieve. |
+| `DM_VERIFY_LEASE_TIMEOUT` | `600` | Seconds a crewmate waits for the shared verification browser when it could not get one of its own, before failing visibly and naming the holder. |
+| `DM_VERIFY_BROWSER_BIN` | unset | Chrome/Chromium `dm-verify.sh session` launches for a task. Unset searches `PATH`, then the newest Playwright-managed Chromium. |
+| `DM_VERIFY_BROWSER_SHARED` | unset | `1` forces the degraded shared-browser path (exclusive lease instead of a per-task browser). Used by the tests; set it only to reproduce that path. |
 | `DM_RUNTIME_STARTUP_SAMPLE` | unset | `1` enables the opt-in CLI startup timing diagnostic in `tests/runtime-performance.sh`. |
 
 ## License

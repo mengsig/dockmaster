@@ -24,23 +24,35 @@
 #   shot <id> <name>       screenshot into data/<id>/verify/shots/<name>.png
 #   flow <id> <name> <pass|fail|flake> [<note>]
 #                          record one driven user flow's outcome. `pass` is
-#                          REFUSED without a live app, a live browser, an
-#                          unmoved HEAD, and a real screenshot of that flow.
+#                          REFUSED unless the app is still serving, the browser
+#                          is live, the code has not moved, and THIS run's `shot`
+#                          captured the screenshot named after the flow.
 #   report <id>            render data/<id>/verify/report.{md,html} and exit
 #                          0 = every flow passed, 1 = some flow did not,
-#                          2 = not a verdict at all (the code moved under it),
-#                          3 = nothing was recorded (never a pass)
+#                          2 = not a verdict at all (the code moved under it,
+#                          or the app stopped serving), 3 = nothing was
+#                          recorded (never a pass)
 #
-# Three things the gate enforces itself rather than asking an agent to honor:
-#   - A `pass` needs EVIDENCE. `flow` refuses one without a screenshot that is a
-#     real PNG, and `report` re-checks every pass row against the file on disk.
-#   - A verdict is bound to CODE. `up` pins the worktree's HEAD and dirty-state
-#     fingerprint; `flow` and `report` refuse once either has moved, so a green
-#     run cannot be carried over a later edit.
-#   - The app under test is the one WE started. The port must be silent before
-#     start, and `app_ready_cmd` must copy the per-boot token to
-#     $DM_VERIFY_DIR/ready-proof — proving the listener is this task's instance,
-#     not an operator's server that happened to appear on the port.
+# What the gate enforces itself rather than asking an agent to honor:
+#   - A `pass` needs EVIDENCE THIS RUN PRODUCED. `shot` records name + content
+#     digest + boot token; `flow` and `report` require a matching entry for the
+#     CURRENT boot, so a copied image, one image reused across flows, a symlink,
+#     or a whole archived run copied back over `shots/` is refused.
+#   - A verdict is bound to CODE BY CONTENT. `up` pins HEAD plus a checksum of
+#     `git diff HEAD` and untracked file contents; `flow` and `report` refuse
+#     once it moves. Porcelain status was not enough: it never carries content,
+#     so edits to an already-dirty file left the pin identical.
+#   - The app is SERVING NOW, not stamped up. `flow … pass` and `report` re-probe
+#     the port and re-run the ownership probe; a killed app fails them both.
+#   - The app is the one WE started. The port must be silent before start, and
+#     `app_ready_cmd` must copy the per-boot (unguessable) token to
+#     $DM_VERIFY_DIR/ready-proof. `up` first runs that probe with NOTHING
+#     started: a probe that passes then proves nothing and is refused.
+#
+# The limit, stated plainly: every check above defends against accident, stale
+# state and a dead app. None of it survives a determined same-user forgery — the
+# operator's own shell can write flows.tsv and the manifest directly. No
+# same-privilege scheme can close that, and this gate does not pretend to.
 #
 # Port probing uses bash's /dev/tcp redirection (present in every stock bash on
 # Linux and macOS); no netcat/ss/lsof dependency.
@@ -74,7 +86,9 @@ MIN_SHOT_BYTES=512
 # repo that HAS app config verifies any change outside this set — under-firing
 # is the one failure mode a verification gate cannot afford, so the default is
 # broad and `verify_surfaces` NARROWS it.
-DOC_ONLY_PATHS='*.md,*.txt,*.rst,docs/**,doc/**,LICENSE*,NOTICE*,CHANGELOG*,AGENTS.md,.github/**,.gitignore,.dm-knowledge/**'
+# `*.txt` is deliberately NOT here: requirements.txt and CMakeLists.txt are
+# build inputs, and a pin bump is exactly an app-breaking change.
+DOC_ONLY_PATHS='*.md,*.rst,docs/**,doc/**,LICENSE*,NOTICE*,CHANGELOG*,AGENTS.md,.github/**,.gitignore,.dm-knowledge/**'
 
 verify_dir() { printf '%s/%s/verify\n' "$DM_DATA" "$1"; }
 flows_file() { printf '%s/flows.tsv\n' "$(verify_dir "$1")"; }
@@ -116,15 +130,58 @@ allocate_port() {
 # either — crew work is uncommitted for most of its life — so the fingerprint
 # also covers the dirty state.
 
-# code_state <worktree> -- "<head>/<porcelain-checksum>", or empty when the
+# code_state <worktree> -- "<head>/<content-checksum>", or empty when the
 # worktree cannot be read.
+#
+# The checksum must cover file CONTENT, not the porcelain listing. `git status
+# --porcelain` emits status letters and paths and never content, so once a file
+# is already dirty every further edit produces the identical line and the
+# identical checksum — and crew work is dirty for most of its life, which is the
+# exact case this pin exists for. `git diff HEAD` carries the content of every
+# tracked change; untracked files are hashed by content too (their names alone
+# would repeat the same blindness one level out).
 code_state() {
-  local wt="$1" head dirty
+  local wt="$1" head content
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
   [ -n "$head" ] || return 1
-  dirty="$(git -C "$wt" status --porcelain=v1 --untracked-files=all 2>/dev/null | cksum | awk '{print $1}')" || return 1
-  printf '%s/%s\n' "$head" "$dirty"
+  content="$( { git -C "$wt" diff HEAD 2>/dev/null || return 1
+                git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
+                  | ( cd "$wt" && xargs -0 -n 50 cat 2>/dev/null || true )
+              } | cksum | awk '{print $1}' )" || return 1
+  [ -n "$content" ] || return 1
+  printf '%s/%s\n' "$head" "$content"
+}
+
+# require_app_serving <id> <what> -- refuse unless the app is serving RIGHT NOW.
+# `verify_app_state` is a stamp `up` wrote and nothing re-checks, so a crashed or
+# killed app left it reading `up` forever and a green verdict followed. Probe the
+# port, and re-run the repo's ownership probe so the answer is still OUR app.
+require_app_serving() {
+  local id="$1" what="$2" port repo cwd url ready token
+  [ "$(dm_meta_get "$id" verify_app_state)" = "up" ] \
+    || dm_die "refusing $what: the app for '$id' is not up, so no flow was driven"
+  port="$(dm_meta_get "$id" verify_port)"
+  [ -n "$port" ] || dm_die "refusing $what: no app port recorded for '$id'"
+  # Exit 2, like a moved code pin: a run whose app died is not a failing verdict,
+  # it is no verdict — and 1 would be indistinguishable from "a flow failed".
+  if ! port_busy "$port"; then
+    printf 'error: refusing %s: nothing is listening on port %s any more — the app for %s died during this run, so what it recorded cannot be trusted. Re-run: dm-verify.sh down %s && dm-verify.sh up %s\n' \
+      "$what" "$port" "'$id'" "$id" "$id" >&2
+    exit 2
+  fi
+  repo="$(dm_meta_get "$id" repo)"; ready="$(app_field "$repo" app_ready_cmd)"
+  [ -n "$ready" ] || return 0
+  cwd="$(app_cwd "$id")" || dm_die "refusing $what: cannot resolve a directory to re-probe the app for '$id'"
+  url="$(app_url_for "$repo" "$port")"
+  token="$(dm_meta_get "$id" verify_token)"
+  rm -f "$(verify_dir "$id")/ready-proof"
+  run_app_cmd "$cwd" "$port" "$url" "$id" "$ready" >/dev/null 2>&1 || true
+  if [ "$(cat "$(verify_dir "$id")/ready-proof" 2>/dev/null || true)" != "$token" ]; then
+    printf 'error: refusing %s: the app for %s no longer proves it is the instance this run booted on port %s\n' \
+      "$what" "'$id'" "$port" >&2
+    exit 2
+  fi
 }
 
 # require_unmoved_code <id> -- refuse once the worktree differs from what `up`
@@ -442,9 +499,49 @@ session_open_isolated() {
 shot_is_real() {
   local f="$1" magic
   [ -f "$f" ] || return 1
+  [ -L "$f" ] && return 1   # a symlink can point anywhere, including a prior run
   [ "$(wc -c < "$f" | tr -d ' ')" -ge "$MIN_SHOT_BYTES" ] || return 1
   magic="$(od -An -tx1 -N8 < "$f" 2>/dev/null | tr -d ' \n')"
   [ "$magic" = "89504e470d0a1a0a" ]
+}
+
+# --- evidence provenance -----------------------------------------------------
+# PNG shape is not provenance. Checking only magic+size accepted any image copied
+# in, one image reused for three flows, a symlink into a previous run's shots,
+# and `cp -a runs/<ts>/shots shots` restoring a whole archived run. So `shot`
+# records what it captured — name, content digest, boot token — and a pass is
+# only credible when the file on disk still matches an entry for the CURRENT
+# boot. Same-user tampering can still edit the manifest; this defends against
+# accident and stale evidence, which is what actually happens.
+
+shots_manifest() { printf '%s/shots.manifest\n' "$(verify_dir "$1")"; }
+
+# shot_digest <file> -- content digest, or empty. sha256sum on Linux, shasum on
+# macOS; cksum is the last resort so a missing tool cannot silently disable this.
+shot_digest() {
+  local f="$1"
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum < "$f" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 < "$f" | awk '{print $1}'
+  else cksum < "$f" | awk '{print $1"-"$2}'; fi
+}
+
+# shot_record <id> <name> <file> -- note that THIS boot captured this image.
+shot_record() {
+  printf '%s\t%s\t%s\n' "$2" "$(shot_digest "$3")" "$(dm_meta_get "$1" verify_token)" \
+    >> "$(shots_manifest "$1")"
+}
+
+# shot_from_this_run <id> <name> -- exit 0 when a usable PNG for <name> exists AND
+# this boot's `shot` is what produced the bytes now on disk.
+shot_from_this_run() {
+  local id="$1" name="$2" f digest token
+  f="$(shot_path "$id" "$name")"
+  shot_is_real "$f" || return 1
+  digest="$(shot_digest "$f")"; token="$(dm_meta_get "$id" verify_token)"
+  [ -n "$digest" ] && [ -n "$token" ] || return 1
+  awk -F'\t' -v n="$name" -v d="$digest" -v t="$token" \
+    '$1 == n && $2 == d && $3 == t { found = 1 } END { exit found ? 0 : 1 }' \
+    "$(shots_manifest "$id")" 2>/dev/null
 }
 
 # --- surface detection: does the diff touch a user-facing surface? -----------
@@ -465,9 +562,11 @@ changed_files() {
   dir="$(dm_repo_dir "$repo")" || return 1
   base="$(dm_pr_base_for "$id" "" "$dir")" || return 1
   [ -n "$base" ] || return 1
-  { if git -C "$wt" rev-parse --verify --quiet "$base" >/dev/null 2>&1; then
-      git -C "$wt" diff --name-only "$base"...HEAD 2>/dev/null || true
-    fi
+  # An unreachable base is NOT "no committed changes": dropping the range would
+  # report only the working tree, and a committed-but-unfetched surface would
+  # come back as not-applicable — the silent skip the exit-2 path exists for.
+  git -C "$wt" rev-parse --verify --quiet "$base" >/dev/null 2>&1 || return 1
+  { git -C "$wt" diff --name-only "$base"...HEAD 2>/dev/null || true
     git -C "$wt" diff --name-only HEAD 2>/dev/null || true
     git -C "$wt" ls-files --others --exclude-standard 2>/dev/null || true
   } | LC_ALL=C sort -u
@@ -634,12 +733,27 @@ case "$cmd" in
       mkdir -p "$prev"
       [ -s "$(flows_file "$id")" ] && mv -f "$(flows_file "$id")" "$prev/flows.tsv"
       [ -d "$vdir/shots" ] && mv -f "$vdir/shots" "$prev/shots"
+      [ -s "$(shots_manifest "$id")" ] && mv -f "$(shots_manifest "$id")" "$prev/shots.manifest"
     fi
-    rm -f "$(flows_file "$id")"
-    mkdir -p "$vdir/shots"
+    rm -f "$(flows_file "$id")" "$(shots_manifest "$id")"
+    rm -rf "$vdir/shots"; mkdir -p "$vdir/shots"
     rm -f "$vdir/ready-proof"
-    token="$(date -u +%s)-$$-$(printf '%s' "$id$port$pinned" | cksum | awk '{print $1}')"
+    # Unguessable, so the proof cannot be replayed or precomputed from the task
+    # id and port. Falls back to pid+time only where /dev/urandom is absent.
+    token="$(od -An -tx1 -N16 < /dev/urandom 2>/dev/null | tr -d ' \n')"
+    [ -n "$token" ] || token="$(date -u +%s)-$$-$(printf '%s' "$id$port$pinned" | cksum | awk '{print $1}')"
     printf '%s' "$token" > "$vdir/token"
+    # Is app_ready_cmd actually an OWNERSHIP probe? Run it once now, with the
+    # port provably silent and nothing started. A real probe cannot pass; one
+    # that ends in a bare `cp` of the token passes anything, and would adopt a
+    # foreign listener that binds during the readiness window. Detect that here
+    # rather than discover it as a green verdict over somebody else's server.
+    run_app_cmd "$wt" "$port" "$url" "$id" "$ready_cmd" >/dev/null 2>&1 || true
+    if [ "$(cat "$vdir/ready-proof" 2>/dev/null || true)" = "$token" ]; then
+      rm -f "$vdir/ready-proof"
+      dm_die "repo '$repo' has an app_ready_cmd that proves nothing: it wrote the ownership proof with NOTHING running on port $port. A probe that always passes would adopt any process that binds the port during the readiness window. It must verify the listener is this task's own instance (its container in this task's compose project, the pid its start command spawned) BEFORE copying \"\$DM_VERIFY_DIR/token\" to \"\$DM_VERIFY_DIR/ready-proof\"."
+    fi
+    rm -f "$vdir/ready-proof"
     dm_meta_set "$id" verify_port "$port"
     dm_meta_set "$id" verify_url "$url"
     dm_meta_set "$id" verify_token "$token"
@@ -747,7 +861,9 @@ case "$cmd" in
       rm -f "$tmp_shot"
       dm_die "chrome-devtools-axi reported a screenshot but produced no usable PNG; the browser session is not usable, so nothing is verified"
     fi
+    rm -f "$dest"   # never write through a symlink planted at the destination
     mv -f "$tmp_shot" "$dest" || { rm -f "$tmp_shot"; dm_die "could not store the screenshot at $dest"; }
+    shot_record "$id" "$name" "$dest"
     printf '%s\n' "$dest"
     ;;
 
@@ -759,18 +875,17 @@ case "$cmd" in
     dm_require_single_line "flow note" "$note"
     case "$note" in *"$(printf '\t')"*) dm_die "flow note must not contain a tab" ;; esac
     shot="-"
-    if shot_is_real "$(shot_path "$id" "$name")"; then shot="shots/$name.png"; fi
+    shot_from_this_run "$id" "$name" && shot="shots/$name.png"
     if [ "$result" = "pass" ]; then
       # A pass is a claim about a running app seen through a real browser. Each
       # of these is the mechanical form of that claim; prose in a skill is not.
       dm_need od
-      [ "$(dm_meta_get "$id" verify_app_state)" = "up" ] \
-        || dm_die "refusing 'pass' for '$name': the app for '$id' is not up, so no flow was driven"
+      require_app_serving "$id" "'pass' for '$name'"
       session_is_live "$id" \
         || dm_die "refusing 'pass' for '$name': '$id' has no live browser, so no flow was driven"
       require_unmoved_code "$id"
       [ "$shot" != "-" ] \
-        || dm_die "refusing 'pass' for '$name': no usable screenshot at $(shot_path "$id" "$name"). Capture the asserted state first: dm-verify.sh shot $id $name"
+        || dm_die "refusing 'pass' for '$name': no screenshot of '$name' was taken during THIS run. A PNG on disk is not evidence unless this run's \`shot\` produced it — capture the asserted state: dm-verify.sh shot $id $name"
     fi
     mkdir -p "$(verify_dir "$id")"
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$name" "$result" \
@@ -795,15 +910,23 @@ case "$cmd" in
       || dm_die "$malformed malformed row(s) in the flow record for '$id'; nothing here can be trusted as a verdict"
     [ "$total" -gt 0 ] \
       || dm_die "the flow record for '$id' holds no usable row; nothing was verified"
-    # Re-check every pass against the file on disk. `flow` checked it at record
-    # time; this catches a screenshot deleted, replaced, or never really written.
+    # Re-check every pass against the file on disk AND against this boot's
+    # capture manifest. `flow` checked both at record time; this catches evidence
+    # deleted, swapped, symlinked, or restored wholesale from an archived run.
     missing=""
     while IFS="$(printf '\t')" read -r _ts fname fresult _fhead fshot _fnote; do
       [ "$fresult" = "pass" ] || continue
-      shot_is_real "$vdir/$fshot" || missing="$missing $fname"
+      # The path is data read back from a file: keep it inside the run's own
+      # shots dir, or `../../../../x.png` would be embedded as an <img src>.
+      case "$fshot" in
+        "shots/$fname.png") ;;
+        *) missing="$missing $fname"; continue ;;
+      esac
+      shot_from_this_run "$id" "$fname" || missing="$missing $fname"
     done < "$flows"
     [ -z "$missing" ] \
-      || dm_die "flow(s) recorded as passing have no screenshot on disk:$missing — the evidence for this verdict does not exist"
+      || dm_die "flow(s) recorded as passing have no screenshot from this run:$missing — the evidence for this verdict does not exist, or is not what this run captured"
+    require_app_serving "$id" "this verdict"
     require_unmoved_code "$id"
     if [ "$bad" -eq 0 ]; then verdict="PASS"; else verdict="FAIL"; fi
     out="$(render_report "$id" "$verdict")"
