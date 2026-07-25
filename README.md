@@ -310,6 +310,23 @@ checks. Runtime smoke deletes its evidence on success or failure; add
 `--keep-evidence` only when sanitized version/status artifacts are needed for a
 report.
 
+## Environment
+
+Every toolbelt override, with its default. Nothing here is required — the
+defaults are the supported configuration.
+
+| variable | default | effect |
+|---|---|---|
+| `DM_HOME` | the clone containing `bin/` | Distro root. `state/`, `data/`, `repos/` and `config/` are all derived from it, so setting it relocates the whole runtime — a throwaway root for dogfooding, or a state directory outside the clone. Script paths follow `bin/` itself, not this. |
+| `DM_NO_FETCH` | unset | `1` makes every reconcile offline: no `git fetch`, no GitHub read. `dm-status.sh` sets it for its own read-only snapshot. |
+| `DM_STUCK_AGE_HOURS` | `4` | Age at which `dm-status.sh` flags a non-terminal task as possibly stuck. A non-positive or non-numeric value warns and falls back to the default. |
+| `DM_RECALL_MAX_LINES` | `40` | Per-store soft cap on `dm-memory.sh recall` output. Over the cap, recall prints a tail pointer naming how to see the rest. |
+| `DM_GUARD_DEPTH` | `0` | Current nesting depth of `dm-command-guard.sh`, incremented as it unwraps each shell wrapper; past 4 it refuses the command as excessively nested. Set by the guard itself — an inherited non-zero value only makes it refuse sooner. |
+| `DM_GH_RETRY_MAX` | `4` | Attempts `dm-pr.sh` makes against a retryable GitHub failure. |
+| `DM_GH_RETRY_BASE_SECS` | `2` | Backoff base for those retries. |
+| `DM_GH_CIRCUIT_BREAKER_MAX` | `5` | Consecutive GitHub failures after which `dm-pr.sh` stops calling out. |
+| `DM_RUNTIME_STARTUP_SAMPLE` | unset | `1` enables the opt-in CLI startup timing diagnostic in `tests/runtime-performance.sh`. |
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Changelog in [CHANGELOG.md](CHANGELOG.md).
