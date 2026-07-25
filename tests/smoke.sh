@@ -4711,6 +4711,9 @@ check "that step stays behind the system-bash-is-v3 assertion (#164)" \
 
 echo "== verify gate: registry fields =="
 V="$ROOT/bin/dm-verify.sh"
+# Bounded readiness for every boot in this section: the 300s default can outlive
+# a whole CI job, and a hang reports as a timeout instead of a failing check.
+vup() { DM_VERIFY_READY_TIMEOUT=25 "$V" up "$@"; }
 check "app fields are settable"        'b dm-repo.sh set demo app_url "http://localhost:\$DM_VERIFY_PORT" >/dev/null'
 check "app_url is stored verbatim"     '[ "$(b dm-repo.sh get demo app_url)" = "http://localhost:\$DM_VERIFY_PORT" ]'
 # Every app command is eval'd or matched as ONE line; a multi-line value would
@@ -4745,7 +4748,7 @@ check "an unresolvable worktree exits 2, not 1" '[ "$GATE_ERR_RC" = 2 ]'
 # shell's terminal and descriptors does not reliably outlive it (macOS kills this
 # fixture the moment `up` returns). Any real app_start_cmd that backgrounds a
 # server needs the same detachment.
-VAPP_START='nohup node -e "require(\"net\").createServer(function(c){c.end(\"ok\\n\")}).listen(process.env.DM_VERIFY_PORT,\"127.0.0.1\")" >"$DM_VERIFY_DIR/app.log" 2>&1 </dev/null & printf "%s" "$!" > "$DM_VERIFY_DIR/app.pid"; printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"'
+VAPP_START='rm -f "$DM_VERIFY_DIR/app.pid"; nohup node -e "require(\"net\").createServer(function(c){c.end(\"ok\\n\")}).listen(process.env.DM_VERIFY_PORT,\"127.0.0.1\")" >"$DM_VERIFY_DIR/app.log" 2>&1 </dev/null & printf "%s" "$!" > "$DM_VERIFY_DIR/app.pid"; printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"'
 # A genuine ownership probe: the listener must be the process THIS start command
 # spawned, and only then is the boot token echoed back.
 VAPP_READY='kill -0 "$(cat "$DM_VERIFY_DIR/app.pid")" 2>/dev/null && cp "$DM_VERIFY_DIR/token" "$DM_VERIFY_DIR/ready-proof"'
@@ -4804,11 +4807,11 @@ b dm-repo.sh set demo app_ready_cmd 'true' >/dev/null
 VNOPROOF="$(DM_VERIFY_READY_TIMEOUT=4 "$V" up vrf1 2>&1 || true)"
 check "a probe that proves nothing fails the boot" 'grep -q "never proved it is this task" <<<"$VNOPROOF"'
 b dm-repo.sh set demo app_ready_cmd '' >/dev/null
-check "no ownership probe at all is refused"       '! "$V" up vrf1 >/dev/null 2>&1'
+check "no ownership probe at all is refused"       '! vup vrf1 >/dev/null 2>&1'
 vapp_register
 
 echo "== verify gate: app lifecycle =="
-check "up boots the app"                 '"$V" up vrf1 >/dev/null 2>&1'
+check "up boots the app"                 'vup vrf1 >/dev/null 2>&1'
 VPORT="$(b dm-task.sh get vrf1 verify_port)"
 VDIR="$DM_HOME/data/vrf1/verify"
 check "the port is in the per-task range" '[ "$VPORT" -ge 8600 ] && [ "$VPORT" -le 8999 ]'
@@ -4819,14 +4822,14 @@ check "the app ran in the task worktree"  'grep -q "cwd=$VWT" "$VDIR/app.state"'
 check "the seed command ran"              '[ -f "$VDIR/app.seed" ]'
 check "app_url resolved the port token"   '[ "$(b dm-task.sh get vrf1 verify_url)" = "http://localhost:$VPORT" ]'
 check "the boot pinned the code under test" '[ -n "$(b dm-task.sh get vrf1 verify_head)" ]'
-check "a second up refuses while it is up" '! "$V" up vrf1 >/dev/null 2>&1'
+check "a second up refuses while it is up" '! vup vrf1 >/dev/null 2>&1'
 check "down stops the app"                '"$V" down vrf1 >/dev/null 2>&1'
 check "the app is really gone"            '! node -e "require(\"net\").connect($VPORT,\"127.0.0.1\").on(\"connect\",function(){process.exit(0)}).on(\"error\",function(){process.exit(1)})"'
 check "app state is recorded down"        '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "down" ]'
 check "down is idempotent"                '"$V" down vrf1 >/dev/null 2>&1'
 
 echo "== verify gate: down never reports success over a live app =="
-"$V" up vrf1 >/dev/null 2>&1
+vup vrf1 >/dev/null 2>&1
 # A stop command that does not stop anything. `down` used to record 'down' and
 # exit 0 anyway, leaving an app nothing could ever stop again.
 b dm-repo.sh set demo app_stop_cmd 'true' >/dev/null
@@ -4841,7 +4844,7 @@ echo "== verify gate: a failed boot always tears down =="
 # The start command half-starts (leaves a live listener) and then fails. Without
 # the cleanup trap that listener - a real app or container - would leak.
 b dm-repo.sh set demo app_start_cmd "$VAPP_START; false" >/dev/null
-check "a failing start fails the gate"    '! "$V" up vrf1 >/dev/null 2>&1'
+check "a failing start fails the gate"    '! vup vrf1 >/dev/null 2>&1'
 check "the half-started app was stopped"  '[ ! -f "$VDIR/app.pid" ]'
 check "state is recorded down after failure" '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "down" ]'
 b dm-repo.sh set demo app_start_cmd "$VAPP_START" >/dev/null
@@ -4857,7 +4860,7 @@ DERIVED="$(printf '%s' vrf1 | cksum | awk '{print 8600 + ($1 % 400)}')"
 node -e "require('net').createServer().listen($DERIVED,'127.0.0.1',function(){setTimeout(function(){process.exit(0)},25000)})" &
 SQUATTER=$!
 sleep 1
-"$V" up vrf1 >/dev/null 2>&1
+vup vrf1 >/dev/null 2>&1
 BUSY_PORT="$(b dm-task.sh get vrf1 verify_port)"
 check "the occupied derived port is not reused" '[ "$BUSY_PORT" != "$DERIVED" ]'
 check "the app still booted on a free port"     '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "up" ]'
@@ -4883,7 +4886,7 @@ exit 0
 AXI
 chmod +x "$VB/chrome-devtools-axi"
 vsh() { PATH="$VB:$PATH" DM_VERIFY_BROWSER_SHARED=1 DM_VERIFY_LEASE_TIMEOUT=1 "$V" "$@"; }
-"$V" up vrf1 >/dev/null 2>&1
+vup vrf1 >/dev/null 2>&1
 # THE FORGERY: one command used to mint a green gate with no app, no browser and
 # no screenshot. Each refusal below is one leg of that forgery closed.
 FORGE1="$("$V" flow vrf1 login pass "signed in fine" 2>&1 || true)"
@@ -4898,7 +4901,7 @@ check "shot refuses a file the driver never wrote" '! DM_SMOKE_SHOT=none vsh sho
 check "shot refuses a stub that is not a PNG"      '! DM_SMOKE_SHOT=stub vsh shot vrf1 login >/dev/null 2>&1'
 check "shot accepts a real PNG"                    'DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1'
 check "the screenshot landed under the task"       '[ -s "$VDIR/shots/login.png" ]'
-"$V" down vrf1 >/dev/null 2>&1; "$V" up vrf1 >/dev/null 2>&1; vsh session vrf1 >/dev/null 2>&1
+"$V" down vrf1 >/dev/null 2>&1; vup vrf1 >/dev/null 2>&1; vsh session vrf1 >/dev/null 2>&1
 DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1
 check "pass is accepted with app, browser and PNG" '"$V" flow vrf1 login pass "signed in" >/dev/null 2>&1'
 check "an all-pass run passes the gate"            '"$V" report vrf1 >/dev/null 2>&1'
@@ -4943,7 +4946,7 @@ check "a bad flow name is refused"             '! "$V" flow vrf1 "bad name" pass
 # previous run away instead of carrying its verdict forward.
 "$V" flow vrf1 retry flake "passed only on retry" >/dev/null
 check "a flake does not pass the gate"         '! "$V" report vrf1 >/dev/null 2>&1'
-"$V" down vrf1 >/dev/null 2>&1; "$V" up vrf1 >/dev/null 2>&1
+"$V" down vrf1 >/dev/null 2>&1; vup vrf1 >/dev/null 2>&1
 check "the previous run's flows are kept"      '[ -n "$(ls -A "$VDIR/runs" 2>/dev/null)" ]'
 VFRESH_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VFRESH_RC=$?
 check "a fresh run starts with no verdict"     '[ "$VFRESH_RC" = 3 ]'
@@ -4962,7 +4965,7 @@ check "the shared mode is recorded"            '[ "$(b dm-task.sh get vrf1 verif
 check "the lease names this task as holder"    '[ "$(cat "$DM_HOME/state/browser.lease/owner")" = "vrf1" ]'
 b dm-task.sh new vrf2 --kind ship --repo demo --title "second driver" >/dev/null
 b dm-worktree.sh create vrf2 demo >/dev/null
-"$V" up vrf2 >/dev/null 2>&1
+vup vrf2 >/dev/null 2>&1
 CONTEND="$(vsh session vrf2 2>&1 || true)"; CONTEND_RC=0
 vsh session vrf2 >/dev/null 2>&1 || CONTEND_RC=$?
 check "a second crewmate cannot take the browser" '[ "$CONTEND_RC" != 0 ]'
@@ -4983,7 +4986,7 @@ check "no lease is left behind"                   '[ ! -d "$DM_HOME/state/browse
 check "down purges the browser profile"           '[ ! -d "$VDIR/chrome-profile" ] && [ ! -d "$VDIR/axi-home" ]'
 
 echo "== verify gate: teardown stops the app even after the worktree is gone =="
-"$V" up vrf2 >/dev/null 2>&1
+vup vrf2 >/dev/null 2>&1
 VPORT2="$(b dm-task.sh get vrf2 verify_port)"
 b dm-worktree.sh remove vrf2 --force >/dev/null 2>&1
 check "worktree removal stopped the app"   '! node -e "require(\"net\").connect($VPORT2,\"127.0.0.1\").on(\"connect\",function(){process.exit(0)}).on(\"error\",function(){process.exit(1)})"'
