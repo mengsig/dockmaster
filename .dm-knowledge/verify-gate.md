@@ -33,6 +33,12 @@ Read before editing the verify gate or anything that drives a browser.
   a live browser, an unmoved worktree, and a real PNG named after the flow;
   `report` re-checks every pass row against the file on disk. Prose in a skill
   cannot hold this — the first version's own smoke section forged a green run.
+- **[pitfall]** The pin has now been wrong in BOTH directions, so hash both
+  derivatives and never swap one for the other. Porcelain status was blind to
+  content (an edit to an already-dirty file did not move it); content alone was
+  blind to structure (renaming an untracked file, or merging two into one with
+  the same bytes, did not move it either — and that is a route change). The
+  material is `git diff HEAD` + the untracked PATH list + the untracked CONTENTS.
 - **[invariant]** A verdict is bound to CODE. `up` pins `verify_head` =
   `<sha>/<cksum of porcelain>` — HEAD alone is not enough because crew work is
   uncommitted for most of its life — and `flow`/`report` refuse once it moves,
@@ -67,6 +73,11 @@ Read before editing the verify gate or anything that drives a browser.
   not `${v//\*\*/\*}`: bash 3.2 yields an ESCAPED star there, which matches a
   literal `*` and therefore no path at all — the gate would silently under-fire
   on macOS while passing every Linux test. Only CI's macOS smoke leg catches it.
+- **[invariant]** Re-checks read what was PINNED AT BOOT, never the live
+  registry. Two crewmates share one `state/repos.json`, so clearing
+  `app_ready_cmd` mid-run turned the liveness re-probe into `return 0` and a
+  foreign process on the port passed as the app. `up` records
+  `verify_ready_cmd`; `require_app_serving` uses that copy.
 - **[invariant]** `dm-verify.sh drive|shot` is the only sanctioned way to reach
   a browser. `session` deliberately prints a HANDLE, not an export block — an
   eval-able block would let a raw `chrome-devtools-axi` call land on the shared

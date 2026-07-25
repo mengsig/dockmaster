@@ -135,21 +135,33 @@ allocate_port() {
 # worktree cannot be read.
 #
 # The checksum must cover file CONTENT, not the porcelain listing. `git status
-# --porcelain` emits status letters and paths and never content, so once a file
-# is already dirty every further edit produces the identical line and the
-# identical checksum — and crew work is dirty for most of its life, which is the
-# exact case this pin exists for. `git diff HEAD` carries the content of every
-# tracked change; untracked files are hashed by content too (their names alone
-# would repeat the same blindness one level out).
+# --porcelain` emits status letters and paths and never CONTENT, so once a file
+# was dirty every further edit produced the identical line and checksum — and
+# crew work is dirty for most of its life, the exact case this pin exists for.
+#
+# Hash BOTH derivatives, never one instead of the other. Hashing content alone
+# was blind in the mirror direction: an untracked file RENAMED, or two untracked
+# files merged into one with the same bytes, left the checksum identical while
+# the app's routes moved. So the material is:
+#   - `git diff HEAD`  — tracked content AND tracked paths (renames included)
+#   - the untracked PATH list — structure
+#   - the untracked file CONTENTS — bytes
+# `git diff HEAD` also carries binary changes, via its `index <blob>..<blob>` line.
 code_state() {
   local wt="$1" head content
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
   [ -n "$head" ] || return 1
-  content="$( { git -C "$wt" diff HEAD 2>/dev/null || return 1
+  # Prove both reads work BEFORE hashing: a `return` inside the group below runs
+  # in a subshell, so a failed git would otherwise hash to a stable checksum of
+  # nothing — a pin that never moves, which is the failure this guards.
+  git -C "$wt" diff HEAD >/dev/null 2>&1 || return 1
+  git -C "$wt" ls-files --others --exclude-standard >/dev/null 2>&1 || return 1
+  content="$( { git -C "$wt" diff HEAD 2>/dev/null
+                git -C "$wt" ls-files --others --exclude-standard 2>/dev/null | LC_ALL=C sort
                 git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
                   | ( cd "$wt" && xargs -0 -n 50 cat 2>/dev/null || true )
-              } | cksum | awk '{print $1}' )" || return 1
+              } | cksum | awk '{print $1}' )"
   [ -n "$content" ] || return 1
   printf '%s/%s\n' "$head" "$content"
 }
@@ -171,8 +183,12 @@ require_app_serving() {
       "$what" "$port" "'$id'" "$id" "$id" >&2
     exit 2
   fi
-  repo="$(dm_meta_get "$id" repo)"; ready="$(app_field "$repo" app_ready_cmd)"
-  [ -n "$ready" ] || return 0
+  # The probe PINNED AT BOOT, not the current registry value. Two crewmates share
+  # one registry, so clearing app_ready_cmd mid-run used to turn this check into
+  # `return 0` — and a foreign process on the port then passed as the app.
+  repo="$(dm_meta_get "$id" repo)"; ready="$(dm_meta_get "$id" verify_ready_cmd)"
+  [ -n "$ready" ] \
+    || dm_die "refusing $what: no ownership probe was recorded when '$id' booted, so nothing can confirm what is on port $port is this run's app. Re-run: dm-verify.sh down $id && dm-verify.sh up $id"
   cwd="$(app_cwd "$id")" || dm_die "refusing $what: cannot resolve a directory to re-probe the app for '$id'"
   url="$(app_url_for "$repo" "$port")"
   token="$(dm_meta_get "$id" verify_token)"
@@ -669,9 +685,14 @@ render_report() {
     [ -n "$name" ] || continue
     cls="$([ "$result" = pass ] && printf pass || printf fail)"
     printf '| %s | %s | %s | %s |\n' "$name" "$result" "${note:-}" "$shot" >> "$md"
+    # Every field here is data read back from a file, so every one is escaped —
+    # `$shot` lands inside an attribute, where `x.png"><script>` would otherwise
+    # close it, and `$result` is rendered too.
     { printf '<h2 class="%s">%s — %s</h2><p>%s <small>%s · %s</small></p>' \
-        "$cls" "$(html_escape "$name")" "$result" "$(html_escape "${note:-}")" "$ts" "$(html_escape "$head")"
-      [ "$shot" != "-" ] && printf '<img src="%s" alt="%s">' "$shot" "$(html_escape "$name")"
+        "$cls" "$(html_escape "$name")" "$(html_escape "$result")" \
+        "$(html_escape "${note:-}")" "$(html_escape "$ts")" "$(html_escape "$head")"
+      [ "$shot" != "-" ] && printf '<img src="%s" alt="%s">' \
+        "$(html_escape "$shot")" "$(html_escape "$name")"
     } >> "$html"
   done < "$(flows_file "$id")"
   printf '%s\n' "$md"
@@ -765,6 +786,7 @@ case "$cmd" in
     dm_meta_set "$id" verify_port "$port"
     dm_meta_set "$id" verify_url "$url"
     dm_meta_set "$id" verify_token "$token"
+    dm_meta_set "$id" verify_ready_cmd "$ready_cmd"
     dm_meta_set "$id" verify_head "$pinned"
     dm_meta_set "$id" verify_cwd "$wt"
     dm_meta_set "$id" verify_app_state starting
@@ -923,17 +945,18 @@ case "$cmd" in
     # deleted, swapped, symlinked, or restored wholesale from an archived run.
     missing=""
     while IFS="$(printf '\t')" read -r _ts fname fresult _fhead fshot _fnote; do
-      [ "$fresult" = "pass" ] || continue
-      # The path is data read back from a file: keep it inside the run's own
-      # shots dir, or `../../../../x.png` would be embedded as an <img src>.
+      # The path check runs for EVERY row, above the pass filter: a `fail` row
+      # renders into report.html just the same, so `../../../../x.png` reaching
+      # an <img src> does not care what the verdict was.
       case "$fshot" in
-        "shots/$fname.png") ;;
+        -|"shots/$fname.png") ;;
         *) missing="$missing $fname"; continue ;;
       esac
+      [ "$fresult" = "pass" ] || continue
       shot_from_this_run "$id" "$fname" || missing="$missing $fname"
     done < "$flows"
     [ -z "$missing" ] \
-      || dm_die "flow(s) recorded as passing have no screenshot from this run:$missing — the evidence for this verdict does not exist, or is not what this run captured"
+      || dm_die "flow(s) name a screenshot that is not this run's own:$missing — the evidence for this verdict does not exist, or is not what this run captured"
     require_app_serving "$id" "this verdict"
     require_unmoved_code "$id"
     if [ "$bad" -eq 0 ]; then verdict="PASS"; else verdict="FAIL"; fi

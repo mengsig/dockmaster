@@ -4945,7 +4945,7 @@ cp -a "$TMP/prior-shots/." "$VDIR/shots/"; cp "$TMP/prior-flows.tsv" "$VDIR/flow
 VRESTORE_RC=0; VRESTORE="$("$V" report vrf1 2>&1)" || VRESTORE_RC=$?
 check "a restored prior run is not this run's verdict" '[ "$VRESTORE_RC" != 0 ]'
 check "the refusal says the evidence is not this run's" \
-  'grep -q "no screenshot from this run" <<<"$VRESTORE"'
+  'grep -q "not this run.s own" <<<"$VRESTORE"'
 rm -f "$VDIR/flows.tsv"; rm -rf "$VDIR/runs/faked"
 # A shots path in the record that escapes the run directory must never be
 # rendered into report.html as an <img src>.
@@ -4956,6 +4956,22 @@ cp "$TMP/esc.tsv" "$VDIR/flows.tsv"
 VESC_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VESC_RC=$?
 check "an escaping screenshot path is refused"  '[ "$VESC_RC" != 0 ]'
 check "no traversal path reaches report.html"   '! grep -q "\.\./\.\./" "$VDIR/report.html" 2>/dev/null'
+# A `fail` row renders into report.html exactly like a pass one, so the path
+# check cannot sit behind the pass filter, and every field must be escaped.
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+"$V" flow vrf1 badrow fail "broken" >/dev/null 2>&1 || true
+awk -F'\t' 'BEGIN{OFS="\t"} {$5="../../../../etc/passwd.png"; print}' "$VDIR/flows.tsv" > "$TMP/failesc.tsv"
+cp "$TMP/failesc.tsv" "$VDIR/flows.tsv"
+VFESC_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VFESC_RC=$?
+check "a FAIL row's escaping path is refused too" '[ "$VFESC_RC" != 0 ]'
+check "it never reached report.html"              '! grep -q "etc/passwd.png" "$VDIR/report.html" 2>/dev/null'
+# A field that tries to close the src attribute must be escaped, not rendered.
+printf '%s\tinject\tfail\t-\tshots/inject.png\t<script>alert(1)</script>\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$VDIR/flows.tsv"
+"$V" report vrf1 >/dev/null 2>&1 || true
+check "no script tag is ever emitted"             '! grep -q "<script>" "$VDIR/report.html" 2>/dev/null'
+rm -f "$VDIR/flows.tsv"
 
 echo "== verify gate: an ownership probe that proves nothing is refused (MED-4) =="
 # A probe registered as the bare trailing `cp` passes with nothing running, so it
@@ -5006,6 +5022,39 @@ check "the green verdict does not survive it"       'grep -q "worktree changed s
 VDIRTYF_RC=0; "$V" flow vrf1 newflow pass "after break" >/dev/null 2>&1 || VDIRTYF_RC=$?
 check "no new pass can be minted on it"             '[ "$VDIRTYF_RC" != 0 ]'
 git -C "$VWT" checkout -q -- src/calc.py 2>/dev/null || true
+# The mirror blind spot of the porcelain checksum: hashing untracked CONTENT and
+# not untracked PATHS. A route rename of new uncommitted work moved the app while
+# the bytes stayed identical, so the pin sat still and a green verdict survived.
+"$V" down vrf1 >/dev/null 2>&1 || true
+mkdir -p "$VWT/frontend"; printf 'about page\n' > "$VWT/frontend/about.js"
+vup vrf1 >/dev/null 2>&1 || true; vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 routed >/dev/null 2>&1 || true
+"$V" flow vrf1 routed pass "route verified" >/dev/null 2>&1 || true
+check "a green run on new untracked work"         '"$V" report vrf1 >/dev/null 2>&1'
+mv "$VWT/frontend/about.js" "$VWT/frontend/contact.js"
+VREN_RC=0; VREN="$("$V" report vrf1 2>&1)" || VREN_RC=$?
+check "renaming an untracked file moves the pin"  '[ "$VREN_RC" = 2 ]'
+check "the rename refusal names the edit"         'grep -q "worktree changed since the app was booted" <<<"$VREN"'
+mv "$VWT/frontend/contact.js" "$VWT/frontend/about.js"
+check "renaming it back restores the verdict"     '"$V" report vrf1 >/dev/null 2>&1'
+# Same family: two untracked files merged into one, identical bytes overall.
+printf 'a\n' > "$VWT/frontend/x1.js"; printf 'b\n' > "$VWT/frontend/x2.js"
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 split >/dev/null 2>&1 || true
+"$V" flow vrf1 split pass "both routes" >/dev/null 2>&1 || true
+check "a green run across two untracked files"    '"$V" report vrf1 >/dev/null 2>&1'
+rm -f "$VWT/frontend/x1.js" "$VWT/frontend/x2.js"; printf 'a\nb\n' > "$VWT/frontend/merged.js"
+VSPLIT_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VSPLIT_RC=$?
+check "merging them moves the pin too"            '[ "$VSPLIT_RC" = 2 ]'
+rm -f "$VWT/frontend/merged.js" "$VWT/frontend/about.js"
+# The pin must not be JUMPY either, or it refuses every honest run.
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 steady >/dev/null 2>&1 || true
+"$V" flow vrf1 steady pass "steady" >/dev/null 2>&1 || true
+touch "$VWT/src/calc.py"
+check "a no-op touch does not move the pin"       '"$V" report vrf1 >/dev/null 2>&1'
 
 echo "== verify gate: a dead app is never a green verdict (probe, not stamp) =="
 # verify_app_state is a stamp `up` wrote; nothing re-checked it, so an app killed
@@ -5026,6 +5075,36 @@ check "the refusal names the dead port"        'grep -q "nothing is listening on
 # these are SETUP, not assertions, and a bare failing command here aborts the
 # whole suite under `set -e` — printing a truncated count and no FAIL summary,
 # which reads like success.
+"$V" down vrf1 >/dev/null 2>&1 || true
+vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1 || true
+"$V" flow vrf1 login pass "signed in" >/dev/null 2>&1 || true
+
+echo "== verify gate: clearing the probe mid-run cannot re-open the fail-open =="
+# Two crewmates share one registry. Clearing app_ready_cmd used to turn the
+# liveness re-probe into `return 0`, so a foreign listener passed as the app.
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 pinned >/dev/null 2>&1 || true
+"$V" flow vrf1 pinned pass "driven" >/dev/null 2>&1 || true
+b dm-repo.sh set demo app_ready_cmd '' >/dev/null
+check "the boot-pinned probe still runs"        '"$V" report vrf1 >/dev/null 2>&1'
+VCLRPORT="$(b dm-task.sh get vrf1 verify_port)"
+kill -9 "$(cat "$VDIR/app.pid")" 2>/dev/null || true
+VCLRWAIT=0
+while [ "$VCLRWAIT" -lt 10 ] && node -e "require('net').connect($VCLRPORT,'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})" 2>/dev/null; do
+  VCLRWAIT=$((VCLRWAIT+1)); sleep 1
+done
+node -e "require('net').createServer().listen($VCLRPORT,'127.0.0.1',function(){setTimeout(function(){process.exit(0)},20000)})" &
+VFOREIGN=$!
+sleep 1
+VCLR_RC=0; VCLR="$("$V" report vrf1 2>&1)" || VCLR_RC=$?
+check "a foreign listener is not the app"       '[ "$VCLR_RC" = 2 ]'
+check "the refusal names the ownership proof"   'grep -q "no longer proves it is the instance" <<<"$VCLR"'
+kill "$VFOREIGN" 2>/dev/null || true
+vapp_register
+# Restore the canonical state the next section reads: a live app and a valid run.
 "$V" down vrf1 >/dev/null 2>&1 || true
 vup vrf1 >/dev/null 2>&1 || true
 vsh session vrf1 >/dev/null 2>&1 || true
