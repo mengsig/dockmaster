@@ -70,6 +70,13 @@ case "$cmd" in
     [ -z "$(git -C "$dir" status --porcelain)" ] || dm_die "clone working tree is dirty; refusing to land"
     head="$(git -C "$wt" rev-parse HEAD)"
     before="$(git -C "$dir" rev-parse --short "$def")"
+    # Already landed: `merge-base --is-ancestor` is trivially true when the two
+    # are equal, so a second run passed the FF gate, merged nothing, and still
+    # appended a `merged` event for a landing that did not happen (#126).
+    if [ "$(git -C "$dir" rev-parse "$def")" = "$head" ]; then
+      dm_info "already landed: $def is already at $id's head ($before); nothing to land"
+      exit 0
+    fi
     # FF only: default must be an ancestor of the task head.
     if ! git -C "$dir" merge-base --is-ancestor "$def" "$head"; then
       dm_die "REFUSED: '$def' is not an ancestor of '$branch' (diverged). Rebase the branch onto '$def' first: dm-merge.sh rebase $id"

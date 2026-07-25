@@ -121,6 +121,28 @@ case "$cmd" in
         [ -n "$registry_mode" ] || dm_die "repo '$task_repo' has no registered delivery mode (is it registered? dm-repo.sh list); refusing to set a mode that nothing vouches for"
         [ "$value" = "$registry_mode" ] || dm_die "REFUSED: repo '$task_repo' is registered for '$registry_mode' delivery, not '$value'. A task cannot opt itself out of its repo's delivery route. If the operator wants '$value' for this repo, record it where it belongs: dm-repo.sh set $task_repo mode $value"
         ;;
+      # Recording the runtime owner IS the dispatch record — task-lifecycle and
+      # fleet-change both spawn, then persist it here. So this is where the
+      # brief's "{TASK} is a safety contract" claim becomes one: a crewmate
+      # dispatched against an unfilled placeholder has no task at all, and every
+      # other section of the brief looks complete on a skim (#115).
+      agent_id)
+        dm_require_id "$id"
+        brief="$DM_DATA/$id/brief.md"
+        # A crewmate is already spawned by the time this runs (fleet-change
+        # terminates the returned id on a persistence failure), so the predicate
+        # must be exact: the placeholder arm matches the bare {TASK} LINE, not
+        # any mention of it. A MISSING brief refuses for the same reason the
+        # other two do — a recorded dispatch with no brief is the same crewmate
+        # with no task, reached by another route — so all three sites agree.
+        if reason="$(dm_brief_unready_reason "$brief")"; then
+          case "$reason" in
+            missing) dm_die "REFUSED: $id has no brief at $brief, so the crewmate you just spawned has no task record behind it. Generate it (dm-brief.sh $id), fill its {TASK} line, then record the owner." ;;
+            empty)   dm_die "REFUSED: $id's brief is empty ($brief) — a write died part-way, so the crewmate you just spawned has no task. Regenerate it (dm-brief.sh $id), fill its {TASK} line, then record the owner." ;;
+            *)       dm_die "REFUSED: $id's brief still has its bare {TASK} line unreplaced ($brief), so the crewmate you just spawned has no task. EDIT that file in place — do NOT regenerate, dm-brief.sh $id would overwrite what is already written. Confirm with 'dm-brief.sh check $id', then record the owner." ;;
+          esac
+        fi
+        ;;
     esac
     dm_meta_set "$id" "$key" "$value"
     ;;

@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "base_commit": "#143",
+  "base_commit": "#162",
   "shared_agents_bytes": 12533,
   "claude_settings_bytes": 1579,
-  "claude_skill_bytes": 85285,
+  "claude_skill_bytes": 86342,
   "claude_skill_description_bytes": 4603,
   "claude_files_sha256": {
     ".claude/settings.json": "2efe4d84bb21b43c94cb2782093f4b75432ea7de8e425f3edb8a1c721acade35",
@@ -12,7 +12,7 @@
     ".claude/skills/credential-handoff/SKILL.md": "03bd5a829ee39de335263931599e0e5829798c0575d0507c39f39b135dd23b08",
     ".claude/skills/decision-hold/SKILL.md": "2ecaeebd4ddeae7f139740d5a10ebeb70a9b594ae87b8d2d520a79b25d21efb6",
     ".claude/skills/diagnostic-reasoning/SKILL.md": "e079d4582c200e5c09a421d61b1a07b1d3203398789e04c9e73b4aa3749ae5a2",
-    ".claude/skills/fleet-change/SKILL.md": "629370a1ef4d9886ce68ab4d5e1e3d6b57ecdd300b9b9d4511a53763d69a042a",
+    ".claude/skills/fleet-change/SKILL.md": "2e86b17152fadfcb55c81bca6c626f9c5b918e6f6584bb6c97337008be7d3a3f",
     ".claude/skills/memory-routing/SKILL.md": "a27ddcbc312125f1b3d6d94c91346c7db8b7d4208f90990d067a798ebf04cc9c",
     ".claude/skills/merge-conflict/SKILL.md": "9fd025b13a754bb561176c86d3f825861896ea384f03cd2ee2d96496dee96b13",
     ".claude/skills/post-pr-review/SKILL.md": "6c7f6a16205561d0301610b86a56b5e9c71dfa3373bfed5257078f1ca7c603b4",
@@ -23,7 +23,7 @@
     ".claude/skills/secondmate/SKILL.md": "de070f494e3c27d54bcd4f8b6dccbf3a13dccf6e7a599bf793dfc5e8457d32d4",
     ".claude/skills/stuck-worker/SKILL.md": "a0713e0d518cbfb288ca456ebafd3e4f65344c9f79437823c10986e4b446c193",
     ".claude/skills/supervision/SKILL.md": "77288dd8aa1423ce769583be33f736af0361cb0b90509f3b3c681663960c3105",
-    ".claude/skills/task-lifecycle/SKILL.md": "293791c710dc7967accf9c83958337e81e24e7fa7d98949866f246a59c516d73",
+    ".claude/skills/task-lifecycle/SKILL.md": "22210807c4c6fb6e57026f26b572d2e04f10b0038f0ab7fcc1172da4a87d967e",
     ".claude/skills/testing-policy/SKILL.md": "3632ab3a7c0e39b4c6ad35acfa2178e753d73ec0f4df45542e5d29f86ceef475"
   },
   "limits": {

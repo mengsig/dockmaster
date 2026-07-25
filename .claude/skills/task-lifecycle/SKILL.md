@@ -58,28 +58,44 @@ bin/dm-brief.sh <id>              # scaffolds data/<id>/brief.md
 
 Open the brief, replace `{TASK}` with a concrete description, acceptance
 criteria, constraints, and context. Keep additions task-specific; do not restate
-the lifecycle. Then spawn the crewmate with the brief as its prompt:
+the lifecycle. Confirm it, then spawn the crewmate with the brief as its prompt:
 
 ```
+bin/dm-brief.sh check <id>        # refuses while {TASK} is still unfilled
 Agent(prompt=<contents of data/<id>/brief.md>, run in background,
-      subagent_type/model/effort per the resourcing policy below)
+      subagent_type + model per the resourcing policy below)
+bin/dm-task.sh set <id> agent_id <returned-agent-id>
 ```
+
+`set agent_id` re-runs that same guard, so an unfilled brief cannot reach a
+recorded dispatch; `dm-status` flags a live task on an unfilled brief as
+UNFILLED. Every other section of a brief looks complete on a skim, so nothing
+else would catch an empty task section.
 
 **Right-size the dispatch — you decide the resources.** The dockmaster runs on a
 capable model precisely so it can judge how much power each unit of work needs;
-do NOT just inherit your own tier. For every spawn, set `model` and `effort` to
-the *least* that will still get an excellent result:
+do NOT just inherit your own tier. For every spawn, set `model` to the *least*
+that will still get an excellent result, and judge the deliberation the work is
+worth alongside it:
 - trivial / mechanical (a doc or contract-text edit, a rename, a config value) →
-  a small fast model at low effort;
+  a small fast model, low deliberation;
 - ordinary implementation → a mid tier;
 - hard reasoning, adversarial review, or subtle safety / concurrency / security
-  work → the top tier at high effort.
+  work → the top tier, high deliberation.
 
-`dm-brief.sh` now computes this recommendation from the task kind + title,
-surfaces it in the brief header, and records `model_recommended` in task meta;
-`dm-status` flags any `working` task with no `model` recorded as UNSIZED. Heed
-it — pass that tier as the Agent `model` (size up when you know more). It is
-advisory, so you still decide.
+**Only `model` is a spawn parameter.** The Agent tool takes a per-spawn `model`
+and has NO effort parameter, so the model tier is the part you can actually
+enforce; the effort tier binds only where the work is dispatched through
+something that accepts one. The brief says this in as many words — do not
+contradict it by reporting an effort tier as applied.
+
+`dm-brief.sh` computes BOTH recommendations from the task kind + title, surfaces
+them in the brief header, and records `model_recommended` and
+`effort_recommended` in task meta; `dm-status` flags any `working` task with no
+`model` recorded as UNSIZED and names both tiers. They size different axes and
+disagree on purpose — a scout is a small model at high deliberation. Heed the
+model tier by passing it as the Agent `model` (size up when you know more).
+Both are advisory, so you still decide.
 
 Bias toward *sufficient* power: when unsure, size **up** — never trade
 correctness or quality for tokens. Optimize speed and cost only where they do not
@@ -91,9 +107,8 @@ implementing crewmate.
 For work that mutates files where a plain subagent would collide with siblings,
 prefer `isolation: "worktree"`; here the crew already has a dedicated worktree
 from `dm-worktree.sh`, so pass the worktree path in the brief and let the agent
-`cd` into it. Record the returned agent id: `bin/dm-task.sh set <id> agent_id <id>`.
-Confirm the crewmate is processing the brief, then resume supervision
-(load `supervision`).
+`cd` into it. Record the returned agent id as shown above. Confirm the crewmate
+is processing the brief, then resume supervision (load `supervision`).
 
 **Stacked sub-PRs (dispatching off a parent branch, not the default branch).**
 When a task is a piece of a larger in-flight change, dispatch it as a child of

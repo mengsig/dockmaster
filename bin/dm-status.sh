@@ -116,6 +116,7 @@ if [ -n "$tasks" ]; then
   stuck_secs=$((DM_STUCK_AGE_HOURS * 3600))
   agerows=""
   unsized=""
+  unfilled=""
   for ((ti = 0; ti < ${#task_ids[@]}; ti++)); do
     tid="${task_ids[ti]}"; short="${task_states[ti]}"
     case "$short" in done|'') continue ;; esac
@@ -124,7 +125,18 @@ if [ -n "$tasks" ]; then
     if [ "$short" = "working" ] && [ -z "$(dm_meta_get "$tid" model)" ]; then
       rec="$(dm_meta_get "$tid" model_recommended)"
       [ -n "$rec" ] || rec="$(dm_recommended_model "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
-      unsized+="  UNSIZED: task $tid is working with no model recorded (recommended: $rec)"$'\n'
+      erec="$(dm_meta_get "$tid" effort_recommended)"
+      [ -n "$erec" ] || erec="$(dm_recommended_effort "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
+      unsized+="  UNSIZED: task $tid is working with no model recorded (recommended: $rec, $erec effort)"$'\n'
+    fi
+    # A live task working against a brief that was never dispatch-ready (#115).
+    # dm-task.sh set agent_id refuses all three reasons at the dispatch record;
+    # this catches a dispatch that never recorded an owner. Soft hint, like
+    # UNSIZED — it names the reason so the recovery is not guesswork.
+    if [ "$short" = "working" ]; then
+      if brief_reason="$(dm_brief_unready_reason "$DM_DATA/$tid/brief.md")"; then
+        unfilled+="  UNFILLED: task $tid is working against a brief that is not dispatch-ready ($brief_reason): $DM_DATA/$tid/brief.md"$'\n'
+      fi
     fi
     created="$(dm_meta_get "$tid" created)"
     epoch="$(iso_to_epoch "$created")"
@@ -144,6 +156,7 @@ if [ -n "$tasks" ]; then
     printf '%s' "$agerows" | column -t -s$'\t' 2>/dev/null || printf '%s' "$agerows"
   fi
   [ -n "$unsized" ] && printf '%s' "$unsized"
+  [ -n "$unfilled" ] && printf '%s' "$unfilled"
 else
   echo "  (no tasks)"
 fi
