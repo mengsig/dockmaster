@@ -116,6 +116,7 @@ if [ -n "$tasks" ]; then
   stuck_secs=$((DM_STUCK_AGE_HOURS * 3600))
   agerows=""
   unsized=""
+  unfilled=""
   for ((ti = 0; ti < ${#task_ids[@]}; ti++)); do
     tid="${task_ids[ti]}"; short="${task_states[ti]}"
     case "$short" in done|'') continue ;; esac
@@ -127,6 +128,13 @@ if [ -n "$tasks" ]; then
       erec="$(dm_meta_get "$tid" effort_recommended)"
       [ -n "$erec" ] || erec="$(dm_recommended_effort "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
       unsized+="  UNSIZED: task $tid is working with no model recorded (recommended: $rec, $erec effort)"$'\n'
+    fi
+    # A live task dispatched against a brief whose {TASK} was never filled (#115).
+    # dm-task.sh set agent_id refuses that at the dispatch record; this catches a
+    # dispatch that never recorded an owner. Soft hint, like UNSIZED.
+    if [ "$short" = "working" ] && [ -f "$DM_DATA/$tid/brief.md" ] \
+       && grep -q '{TASK}' "$DM_DATA/$tid/brief.md"; then
+      unfilled+="  UNFILLED: task $tid is working against an unfilled brief ($DM_DATA/$tid/brief.md); its {TASK} placeholder was never replaced"$'\n'
     fi
     created="$(dm_meta_get "$tid" created)"
     epoch="$(iso_to_epoch "$created")"
@@ -146,6 +154,7 @@ if [ -n "$tasks" ]; then
     printf '%s' "$agerows" | column -t -s$'\t' 2>/dev/null || printf '%s' "$agerows"
   fi
   [ -n "$unsized" ] && printf '%s' "$unsized"
+  [ -n "$unfilled" ] && printf '%s' "$unfilled"
 else
   echo "  (no tasks)"
 fi

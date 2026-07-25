@@ -58,12 +58,19 @@ bin/dm-brief.sh <id>              # scaffolds data/<id>/brief.md
 
 Open the brief, replace `{TASK}` with a concrete description, acceptance
 criteria, constraints, and context. Keep additions task-specific; do not restate
-the lifecycle. Then spawn the crewmate with the brief as its prompt:
+the lifecycle. Confirm it, then spawn the crewmate with the brief as its prompt:
 
 ```
+bin/dm-brief.sh check <id>        # refuses while {TASK} is still unfilled
 Agent(prompt=<contents of data/<id>/brief.md>, run in background,
       subagent_type/model/effort per the resourcing policy below)
+bin/dm-task.sh set <id> agent_id <returned-agent-id>
 ```
+
+`set agent_id` re-runs that same guard, so an unfilled brief cannot reach a
+recorded dispatch; `dm-status` flags a live task on an unfilled brief as
+UNFILLED. Every other section of a brief looks complete on a skim, so nothing
+else would catch an empty task section.
 
 **Right-size the dispatch — you decide the resources.** The dockmaster runs on a
 capable model precisely so it can judge how much power each unit of work needs;
@@ -91,9 +98,8 @@ implementing crewmate.
 For work that mutates files where a plain subagent would collide with siblings,
 prefer `isolation: "worktree"`; here the crew already has a dedicated worktree
 from `dm-worktree.sh`, so pass the worktree path in the brief and let the agent
-`cd` into it. Record the returned agent id: `bin/dm-task.sh set <id> agent_id <id>`.
-Confirm the crewmate is processing the brief, then resume supervision
-(load `supervision`).
+`cd` into it. Record the returned agent id as shown above. Confirm the crewmate
+is processing the brief, then resume supervision (load `supervision`).
 
 **Stacked sub-PRs (dispatching off a parent branch, not the default branch).**
 When a task is a piece of a larger in-flight change, dispatch it as a child of

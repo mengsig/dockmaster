@@ -322,6 +322,7 @@ defaults are the supported configuration.
 | `DM_STUCK_AGE_HOURS` | `4` | Age at which `dm-status.sh` flags a non-terminal task as possibly stuck. A non-positive or non-numeric value warns and falls back to the default. |
 | `DM_RECALL_MAX_LINES` | `40` | Per-store soft cap on `dm-memory.sh recall` output. Over the cap, recall prints a tail pointer naming how to see the rest. |
 | `DM_GUARD_DEPTH` | `0` | Current nesting depth of `dm-command-guard.sh`, incremented as it unwraps each shell wrapper; past 4 it refuses the command as excessively nested. Set by the guard itself — an inherited non-zero value only makes it refuse sooner. |
+| `DM_GUARD_MAX_COMMAND` | `65536` | Largest command in bytes `dm-command-guard.sh` will classify; anything over it is refused deterministically rather than risking a parser timeout, which a hook treats as non-blocking. |
 | `DM_GH_RETRY_MAX` | `4` | Attempts `dm-pr.sh` makes against a retryable GitHub failure. |
 | `DM_GH_RETRY_BASE_SECS` | `2` | Backoff base for those retries. |
 | `DM_GH_CIRCUIT_BREAKER_MAX` | `5` | Consecutive GitHub failures after which `dm-pr.sh` stops calling out. |

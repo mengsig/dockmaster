@@ -4233,6 +4233,41 @@ b dm-worktree.sh create check demo >/dev/null
 check "a task literally named 'check' still generates" \
   'b dm-brief.sh check >/dev/null 2>&1 && [ -f "$DM_HOME/data/check/brief.md" ]'
 
+# The guard has to FIRE, not just exist. Recording the runtime owner is the
+# dispatch record (task-lifecycle and fleet-change both spawn, then persist it),
+# so that is where an unfilled brief is refused.
+b dm-task.sh new w6disp --kind ship --repo demo --title "add a widget" >/dev/null
+b dm-worktree.sh create w6disp demo >/dev/null
+b dm-brief.sh w6disp >/dev/null
+W6DISPREFUSE="$(b dm-task.sh set w6disp agent_id agent-123 2>&1 || true)"
+check "recording a dispatch against an unfilled brief is refused" \
+  '! b dm-task.sh set w6disp agent_id agent-123 >/dev/null 2>&1'
+check "the refusal names the placeholder and the check command" \
+  'grep -q "{TASK}" <<<"$W6DISPREFUSE" && grep -q "dm-brief.sh check w6disp" <<<"$W6DISPREFUSE"'
+check "the refused dispatch recorded no owner" '[ -z "$(b dm-task.sh get w6disp agent_id)" ]'
+# dm-status catches a dispatch that never recorded an owner at all.
+b dm-task.sh event w6disp working "started" >/dev/null
+W6DISPSTATUS="$(b dm-status.sh 2>&1 || true)"
+check "status flags a live task on an unfilled brief as UNFILLED" \
+  'grep -q "UNFILLED.*w6disp" <<<"$W6DISPSTATUS"'
+sed 's/{TASK}/Add a widget to src\/calc.py./' "$DM_HOME/data/w6disp/brief.md" > "$TMP/w6-disp-filled"
+mv "$TMP/w6-disp-filled" "$DM_HOME/data/w6disp/brief.md"
+check "the dispatch records once the brief is filled" \
+  'b dm-task.sh set w6disp agent_id agent-123 >/dev/null 2>&1 && [ "$(b dm-task.sh get w6disp agent_id)" = agent-123 ]'
+check "a filled brief clears the UNFILLED flag" \
+  '! grep -q "UNFILLED.*w6disp" <<<"$(b dm-status.sh 2>&1 || true)"'
+# A task that never had a brief scaffolded must not be blocked by a guard over a
+# file that does not exist.
+b dm-task.sh new w6nobrief --kind ship --repo demo >/dev/null
+check "a task with no brief still records a dispatch" \
+  'b dm-task.sh set w6nobrief agent_id agent-456 >/dev/null 2>&1'
+# The skills that dispatch must name the check, or the code guard is the only
+# thing standing between an empty brief and a spawned crewmate.
+check "task-lifecycle names the pre-dispatch check" \
+  'grep -q "dm-brief.sh check <id>" "$ROOT/.claude/skills/task-lifecycle/SKILL.md"'
+check "fleet-change names it for a child too" \
+  'grep -q "dm-brief.sh check <child-id>" "$ROOT/.claude/skills/fleet-change/SKILL.md"'
+
 echo "== DM_HOME override: a relocated state root still points at real scripts (#116) =="
 # DM_HOME relocates STATE. The scripts stay where they are, so every command the
 # brief hands a crewmate must follow bin/, not the state root.

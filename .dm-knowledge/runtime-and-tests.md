@@ -24,6 +24,11 @@ Read before adding a skill or touching anything the test suite measures.
   `echo` — and WHETHER bash aborts there is version-dependent (green on a dev
   box, red in CI). External-command exit checks inside `check`'s `if eval` are
   safe (the `if` suspends `set -e`); the trap is only the sourced-lib subshell.
+- **[pitfall]** `check` runs `eval "$2"` in the CURRENT shell, so a bare `exit`
+  inside a check body kills the whole suite instead of failing that one
+  assertion — and the run then prints a TRUNCATED pass count with no FAIL
+  summary, which reads like success. A loop that needs early exit must be
+  subshelled: `'( for x in …; do … || exit 1; done )'`.
 - **[pitfall]** Any smoke test comparing a resolver/worktree path against an
   expected value must run on a CANONICAL temp root — `smoke.sh` sets
   `TMP="$(cd "$(mktemp -d …)" && pwd -P)"`. `dm-lib` canonicalizes `DM_HOME`

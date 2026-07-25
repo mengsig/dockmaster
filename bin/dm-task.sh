@@ -121,6 +121,19 @@ case "$cmd" in
         [ -n "$registry_mode" ] || dm_die "repo '$task_repo' has no registered delivery mode (is it registered? dm-repo.sh list); refusing to set a mode that nothing vouches for"
         [ "$value" = "$registry_mode" ] || dm_die "REFUSED: repo '$task_repo' is registered for '$registry_mode' delivery, not '$value'. A task cannot opt itself out of its repo's delivery route. If the operator wants '$value' for this repo, record it where it belongs: dm-repo.sh set $task_repo mode $value"
         ;;
+      # Recording the runtime owner IS the dispatch record — task-lifecycle and
+      # fleet-change both spawn, then persist it here. So this is where the
+      # brief's "{TASK} is a safety contract" claim becomes one: a crewmate
+      # dispatched against an unfilled placeholder has no task at all, and every
+      # other section of the brief looks complete on a skim (#115). A task with
+      # NO brief file is unaffected — nothing was scaffolded to fill.
+      agent_id)
+        dm_require_id "$id"
+        brief="$DM_DATA/$id/brief.md"
+        if [ -f "$brief" ] && grep -q '{TASK}' "$brief"; then
+          dm_die "REFUSED: $id's brief still holds the unfilled {TASK} placeholder ($brief), so the crewmate you just spawned has no task. Fill it, confirm with 'dm-brief.sh check $id', then record the owner."
+        fi
+        ;;
     esac
     dm_meta_set "$id" "$key" "$value"
     ;;

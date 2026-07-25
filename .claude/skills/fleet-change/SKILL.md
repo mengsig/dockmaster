@@ -60,6 +60,7 @@ prepared. For each ready child, follow this exact ownership transition:
 bin/dm-task.sh new <child-id> --kind ship --repo <repo> --title "<title>"
 bin/dm-worktree.sh create <child-id> <repo>
 bin/dm-brief.sh <child-id>
+bin/dm-brief.sh check <child-id>          # refuses while {TASK} is still unfilled
 Agent(prompt=<brief>, run in background,
       subagent_type/model/effort per task-lifecycle)
 bin/dm-task.sh set <child-id> agent_id <returned-agent-id>
