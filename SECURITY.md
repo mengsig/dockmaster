@@ -22,11 +22,11 @@ but only after the unlanded-work and untracked-file refusals above have passed.)
 Be explicit about the boundary, because the guardrails are narrower than they
 look:
 
-- **The destructive-command guard is a guardrail, not a security boundary.**
-  `bin/dm-command-guard.sh` parses shell commands and refuses destructive Git
-  forms. It is armed as a `PreToolUse` hook on Bash for Claude sessions in this
-  project; the script is the authority and [Command guard](#command-guard) below
-  describes what it does and does not cover.
+- **The destructive-command guard is a guardrail, not a security boundary — and
+  it is not wired into any runtime today.** `bin/dm-command-guard.sh` parses
+  shell commands and refuses destructive Git forms; the script is the authority
+  and [Command guard](#command-guard) below describes it, including why it is
+  currently dormant.
 
   Be precise about what the guard is for. It raises the cost of an *accidental*
   destructive command and catches the forms an agent actually emits — which is
@@ -61,13 +61,12 @@ look:
 
 ## Command guard
 
-> **Armed, and narrow.** The project `.claude/settings.json` installs this as a
-> `PreToolUse` hook on the Bash tool, so it sees every shell command a Claude
-> session **in this project** runs. It sees nothing else: a tool that emits no
-> Bash event, a session in another project, and a shell you drive by hand are
-> all outside it. It resolves the script from `DM_HOME`, else by walking up from
-> the working directory; where no distro is above the cwd there is no guard to
-> run and the hook exits clean rather than blocking every command.
+> **Dormant today.** Nothing installs this guard as a PreToolUse hook, so it is
+> not currently protecting any session. Read this section as the contract it
+> will enforce once #89 wires it up. Arming was attempted and reverted: the
+> guard refused ordinary compound shell, and a `PreToolUse` hook **fails open**
+> (see [Why arming is not free](#why-arming-is-not-free)). The rest of this page
+> assumes nothing from it.
 
 `bin/dm-command-guard.sh` is a PreToolUse hook handler that parses a shell
 command and refuses Git forms that can lose work. It is an
@@ -96,11 +95,13 @@ so refusing the whole subcommand made the guard unadoptable — but `git restore
 stop. Permitted only when scoped to literal paths: `git restore <path>…` and
 `git checkout [<tree-ish>] -- <path>…`. No pathspec, `.`, a glob, `:` pathspec
 magic, an argument the guard cannot read, or a `checkout` without `--` (which
-moves HEAD rather than restoring a file) are all refused. Be clear about the
-edge: the test is lexical, so a named *directory* passes and discards its whole
-subtree. The guard does not stat the path, and `git restore src` is
-indistinguishable from `git restore src/app.py` to a parser. What it guarantees
-is that the caller named a scope, not that the scope is small.
+moves HEAD rather than restoring a file) are all refused. The pathspec test runs
+per **component**, not on the whole string: naming only `.` and `..` let
+`../..`, `./.`, `.//` and `src/../..` through, and any of those from one
+directory down discards the whole worktree. Absolute paths and brace expansion
+are refused with globs. Be clear about the edge that remains: the test is
+lexical, so a named *directory* passes and discards its whole subtree. What it
+guarantees is that the caller named a scope, not that the scope is small.
 
 Wrappers do not help: `timeout`, `nohup`, `nice`, `env`, `sudo` and friends are
 unwrapped, and an unrecognized executable holding a bare `git` token is refused
@@ -120,17 +121,77 @@ or the value of the option before it, is data the executable was handed — a
 `--body`, a `--title`, an `-m` message — so a quoted sentence there is prose and
 is not re-entered. Without that distinction the guard refused ordinary PR bodies
 ("watch the git log for changes", "xargs with git ls-files is faster"), and
-over-blocking is the failure mode that gets a guard switched off. **This is a
-narrowing:** an unmodelled local script that executes its own `--cmd "git push
---force"` value is no longer caught. A bare `git` token is still refused in
-every position (so `find . -exec git reset --hard` stands), a command runner
-keeps all of its arguments strict (so `flock -c "git push --force"` stands), and
-`sh -c` is classified before any of this applies.
+over-blocking is the failure mode that gets a guard switched off.
+
+Three rules keep that from becoming a hole, each with a test pinning it:
+
+- a string whose own first word is `git` is classified **wherever** it sits, so
+  `entr -s "git reset --hard"` and `rsync -e "git push --force"` are refused;
+- a bare shell or runner token **in the arguments** makes the rest of the scan
+  strict, so `find . -exec sh -c "git push --force" \;` and
+  `docker run img sh -c "git reset --hard"` are refused. That path is not
+  covered by the nested-shell rule, because there the shell is `find`'s
+  argument rather than the segment's executable;
+- a command runner keeps all of its arguments strict from the start
+  (`flock -c "git push --force"`), and a bare `git` token is refused in every
+  position (`find . -exec git reset --hard`).
+
+**The narrowing that remains**, stated plainly: an unmodelled executable that
+runs its own option value, where that value does *not* begin with `git` — say
+`./deploy.sh --cmd "timeout 5 git push --force"` — is not classified.
+
+The cost of the first rule, equally plainly: prose that *starts* with the word
+`git` is still classified, so `--body "git push --force loses work"` is refused
+while `--body "git log shows the bug"` passes. That is the same behavior the
+guard has always had, and it is the price of keeping `entr -s "git reset
+--hard"` refused. Lead such a sentence with any other word.
+
+Shell **keywords** are transparent: the lexer models no grammar, so without this
+`for r in a b; do git -C "$r" status; done` made `do` the executable and refused
+ordinary compound shell. `if`, `while`, `until`, `for`, `do`, `done`, `case`,
+`!`, `time` and friends are skipped so the real command behind them is the one
+classified — `if git push --force; then` still refuses.
+
+A **heredoc body** is stdin data, not commands, and is skipped: without that,
+`--body "$(cat <<'EOF' … EOF)"` re-lexed the prose and any line holding a bare
+`git` refused. `<<<` is a herestring, not a heredoc, and still reaches the rule
+that refuses a shell fed unresolved stdin — `bash <<EOF … EOF` is refused too.
 
 Content of a `$(…)` or backtick substitution is classified wherever it appears —
 as the executable, in an argument, quoted or unquoted. Argument position used to
 leak, so `echo $(git push --force)` ran the push. Content inside single quotes
-is not classified, because the shell does not execute it either.
+is not classified, because the shell does not execute it either. Paren counting
+is quote-aware (`$(grep "(" file)` is balanced to a real shell); a genuinely
+unbalanced substitution is left opaque rather than refused, because a real shell
+fails to parse it and runs nothing.
+
+## Why arming is not free
+
+Arming this guard is tracked in #89 and is **not** a matter of adding a hook.
+Two properties of the runtime decide how much a `PreToolUse` hook can ever be
+worth, and both were measured rather than assumed:
+
+- **A hook that times out fails OPEN.** Verified on Claude Code 2.1.219: a
+  `PreToolUse` command hook that sleeps past its `timeout` does **not** block —
+  the tool runs. A control hook that exits 2 immediately blocks, so the hook
+  was live and the timeout is what let the command through. The documentation
+  states this for `UserPromptSubmit` but not for `PreToolUse`; this is an
+  observed result, not a documented one.
+- **Any exit code other than 0 or 2 also fails open** — documented. A crashed
+  or missing guard script does not block anything.
+
+Together those mean a slow or broken guard silently disarms on exactly the
+inputs that take longest, which is why the parser is now linear in the command
+length and why an oversized command is **refused** rather than parsed: the
+guard decides deterministically instead of racing a timeout it loses silently.
+A command over 64KB is refused; the largest command under that limit parses in
+under 4s here. Whatever eventually arms this must set a timeout well clear of
+that — the platform default is 600s, and the reverted attempt had pinned it to
+10s, which would have created the race it was trying to prevent.
+
+`permissions.deny` rules in `settings.json` are evaluated by the permission
+engine rather than a subprocess, so they carry no timeout or exit-code race.
+Anything expressible as a deny rule belongs there, not here.
 
 Redirection of the Git process itself is refused in both spellings, since an
 option guarded in only one of its two forms is a bypass: `--exec-path`,
@@ -202,16 +263,21 @@ the easy paths, not as an argument that no path remains.
   literal paths — the drifted-lockfile restore, without which the guard could
   not be armed at all.
 - `GIT_TRACE=1` and the other stderr trace destinations.
+- ordinary compound shell: `if git diff --quiet; then …; fi`,
+  `for r in …; do git -C "$r" status; done`, `time git status`, `! git diff`.
+- a heredoc body, and a PR body assembled with `--body "$(cat <<'EOF' … EOF)"`.
 
 **Known limits.** The guard is a guardrail, not a sandbox, and should not be
 the only thing standing between an agent and a repository:
 
-- **It sees only commands that emit a Bash tool event, in this project.** It is
-  a `PreToolUse` hook on one tool, installed by this repo's own
-  `.claude/settings.json`. A specialized tool that edits files, calls an API, or
-  drives a browser produces no Bash event, so the guard never runs — nothing
-  reached that way is covered, however destructive. Neither is a session in a
-  different project, nor a shell you run yourself.
+- **It sees only commands that emit a Bash tool event.** It is a `PreToolUse`
+  hook on one tool. A specialized tool that edits files, calls an API, or drives
+  a browser produces no Bash event, so the guard never runs — nothing reached
+  that way is covered, however destructive.
+- **It fails open when it is slow or broken.** See
+  [Why arming is not free](#why-arming-is-not-free): a timed-out or crashed
+  hook does not block the command. A guard cannot be the last line of defence
+  when its failure mode is silence.
 - **It parses one command; it does not interpret a shell.** It has its own
   lexer, and a real shell will always resolve more than any parser models —
   variable expansion, command substitution, and dynamically assembled strings
@@ -224,12 +290,19 @@ the only thing standing between an agent and a repository:
   already installed in `.git/hooks`, are not inspected — only the attempt to set
   one on the command line is.
 - It does not restrict non-Git destruction (`rm -rf`, a build script, an
-  interpreter). Worktree isolation, the settings.json permission prompts, and
-  the operating contract carry that — the guard will not stop `rm -rf`.
-- **An option's value is treated as data.** That is what lets ordinary PR bodies
-  through, and it means an unmodelled executable that runs its own option value
-  (`./deploy.sh --cmd "git push --force"`) is not classified. Operand position,
-  bare `git` tokens, command runners and shells are all still strict.
+  interpreter). Worktree isolation, the settings.json permission rules, and the
+  operating contract carry that — the guard will not stop `rm -rf`.
+- **An option's value is treated as data** unless it begins with `git`, or a
+  shell/runner token appeared earlier in the argument list. So an unmodelled
+  executable running its own option value that starts with something else
+  (`./deploy.sh --cmd "timeout 5 git push --force"`) is not classified.
+- **A restore scoped to a named directory discards its subtree.** The pathspec
+  test is lexical: it refuses `.`, `..`, any `./` or `../` component, absolute
+  paths, globs and brace expansion, but `git restore src` names a scope without
+  bounding its size. The guard does not stat the path.
+- It is **not wired into a runtime today**, so it currently guards nothing. It
+  is reachable as `dm-command-guard.sh check <command>` and as a hook handler,
+  but no `settings.json` installs it. #89 owns the wiring.
 
 Guarded toolbelt paths and the operating contract remain the primary controls.
 

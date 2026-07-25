@@ -22,19 +22,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- **The destructive-command guard is armed** (#89). `.claude/settings.json`
-  installs `bin/dm-command-guard.sh` as a `PreToolUse` hook on Bash, so a Claude
-  session in this project is guarded for the first time; it had no caller since
-  the Codex runtime was removed. It resolves the script from `DM_HOME`, else by
-  walking up from the working directory — not git-toplevel, which in a managed
-  clone or worktree has no `bin/`. Two blockers landed with it: `git restore
-  <path>` and `git checkout [<tree-ish>] -- <path>` became permitted when scoped
-  to literal paths (the drifted-lockfile restore, refused outright before), and
-  option values are no longer re-entered as commands, so `gh pr create --body
-  "watch the git log for changes"` stops refusing (#143). The guard header and
-  `SECURITY.md` now state what it covers and, at the same length, what it does
-  not: Bash events in this project only, option values unclassified, a named
-  directory restore discards its subtree, and no non-Git destruction.
+- **The command guard stops refusing ordinary work, and stays dormant** (#143,
+  #89). `git restore <path>` and `git checkout [<tree-ish>] -- <path>` are now
+  permitted when scoped to literal paths — the drifted-lockfile restore, refused
+  outright before — and ordinary compound shell (`for r in …; do git -C "$r"
+  status; done`, `if git diff --quiet; then …; fi`, `time git status`) and
+  heredoc PR bodies are no longer refused. Arming it as a `PreToolUse` hook was
+  attempted here and **reverted**: a hook that times out **fails open** — the
+  tool runs — which was measured, not assumed, and the parser was quadratic
+  (32KB took 21s against a 10s timeout). The parser is now linear and refuses
+  anything over 64KB rather than racing a timeout it loses silently. #89 stays
+  open; `SECURITY.md` gains a "Why arming is not free" section stating the
+  fail-open result and what a future wiring has to account for.
 - **`AGENTS.md` is now the contract, not the manual** (#129). Cut roughly in half
   (28680 → 12736 bytes) by retiring two blocks that did not need to be re-read on
   every session and in every crewmate brief. The commandments mirror is gone — the
@@ -69,6 +68,16 @@ All notable changes to this project are documented here. The format follows
   the `trace2.*Target` config twin refused alongside). `*.path` is enumerated to
   the tool families that name an executable, so `submodule.<name>.path` — a tree
   path — no longer refuses.
+- **Command guard: four ways a real command reached past it.** A quoted command
+  in an *argument* of an unmodelled executable was never classified, so `find .
+  -exec sh -c "git push --force" \;` and `docker run img sh -c …` passed — the
+  nested-shell rule does not fire there, because the shell is find's argument
+  rather than the segment's executable. `git restore ../..`, `./.`, `.//`,
+  `src/../..` and absolute paths all reached the whole worktree, because only
+  `.` and `..` were named; the pathspec test now runs per path component.
+  Substitution paren counting is quote-aware, so `$(grep "(" file)` no longer
+  refuses, and a genuinely unbalanced substitution is left opaque instead of
+  refused — a real shell fails to parse it and runs nothing.
 - **The command guard is an allowlist, and its parsers agree with each other**
   (#121). A Git subcommand is now refused unless it is named permitted, so
   unknown and future subcommands fail closed — the old denylist had silently

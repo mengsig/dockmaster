@@ -4007,8 +4007,14 @@ check "guard permits ordinary PR prose that mentions git (#143)" \
      "gh pr create --body \"strace showed git stat calls\"" \
      "gh pr create --body \"flock around git index writes\"" \
      "gh pr create --body=\"watch the git log for changes\"" \
-     "gh pr create --title \"git push --force is now refused\"" \
      "git commit -m \"env=prod git deploy notes\""'
+# A body that STARTS with the word git is classified on its merits wherever it
+# sits -- that is what keeps `entr -s "git reset --hard"` refused, and it is
+# what the guard did before option values became data. So a permitted git
+# command in prose passes and a destructive one does not.
+check "a git-leading body is classified, not waved through (#143)" \
+  'all_allowed "gh pr create --body \"git log shows the bug\"" \
+     && all_blocked "gh pr create --title \"git push --force is now refused\""'
 # The same words in COMMAND position, not option-value position, still refuse.
 check "guard still refuses a real command behind the same words (#143)" \
   'all_blocked "parallel \"git push --force origin main\"" \
@@ -4062,38 +4068,94 @@ check "guard still refuses an unscoped restore or a checkout that moves HEAD (#8
      "git checkout ." "git checkout -- ." "git checkout feature" "git checkout -b feature" \
      "git checkout -f main" "git checkout main -b other -- file" "git checkout HEAD~5 --"'
 
-# The hook is ARMED, not merely present: run the exact command string
-# .claude/settings.json installs, in a throwaway distro, and check the verdict.
-GUARD_ARMED="$TMP/guard-armed"
-mkdir -p "$GUARD_ARMED/bin" "$GUARD_ARMED/nested/deep" "$TMP/no-distro"
-cp "$ROOT/bin/dm-command-guard.sh" "$GUARD_ARMED/bin/dm-command-guard.sh"
-chmod +x "$GUARD_ARMED/bin/dm-command-guard.sh"
-SETTINGS_HOOK="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$ROOT/.claude/settings.json")"
-# $1 = cwd the hook runs from, $2 = the PreToolUse payload. DM_HOME unset forces
-# the walk-up resolver; armed_home exercises the DM_HOME branch instead.
-armed_cwd()  { printf '%s' "$2" | ( cd "$1" && env -u DM_HOME bash -c "$SETTINGS_HOOK" ); }
-armed_home() { printf '%s' "$1" | ( cd "$TMP/no-distro" && DM_HOME="$GUARD_ARMED" bash -c "$SETTINGS_HOOK" ); }
-ARMED_RESET='{"tool_name":"Bash","tool_input":{"command":"git reset --hard"}}'
-ARMED_FORCE='{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}'
-ARMED_STATUS='{"tool_name":"Bash","tool_input":{"command":"git status"}}'
-ARMED_PROSE='{"tool_name":"Bash","tool_input":{"command":"gh pr create --body \"watch the git log for changes\""}}'
-ARMED_LOCKFILE='{"tool_name":"Bash","tool_input":{"command":"git checkout -- package-lock.json"}}'
-check "settings.json installs exactly one PreToolUse hook on Bash (#89)" \
-  'jq -e ".hooks.PreToolUse | length == 1" "$ROOT/.claude/settings.json" >/dev/null \
-     && [ "$(jq -r ".hooks.PreToolUse[0].matcher" "$ROOT/.claude/settings.json")" = Bash ]'
-check "the wired hook string reaches the guard via DM_HOME (#89)" \
-  '! armed_home "$ARMED_RESET" >/dev/null 2>&1 && armed_home "$ARMED_STATUS" >/dev/null 2>&1'
-check "the wired hook string reaches the guard by walking up from the cwd (#89)" \
-  '! armed_cwd "$GUARD_ARMED/nested/deep" "$ARMED_FORCE" >/dev/null 2>&1 \
-     && armed_cwd "$GUARD_ARMED/nested/deep" "$ARMED_STATUS" >/dev/null 2>&1'
-check "the armed hook refuses none of the work the operator actually does (#89)" \
-  'armed_home "$ARMED_PROSE" >/dev/null 2>&1 && armed_home "$ARMED_LOCKFILE" >/dev/null 2>&1'
-check "the wired hook blocks with exit 2, the code the runtime reads as a deny" \
-  'armed_home "$ARMED_RESET" >/dev/null 2>&1; [ "$?" -eq 2 ]'
-# No distro above the cwd means no guard to run; that must not brick every Bash
-# call, so the hook exits clean rather than failing an unguardable session.
-check "the wired hook is inert where no distro is above the cwd" \
-  'armed_cwd "$TMP/no-distro" "$ARMED_RESET" >/dev/null 2>&1'
+# --- #160 review: four HIGH regressions, each pinned in both directions -------
+# A quoted command reached through an ARGUMENT of an unmodelled executable: the
+# shell is find's argument, not the segment's executable, so check_nested_shell
+# never fires and the payload sat in option-value position.
+check "guard refuses a command smuggled through argument position (#160)" \
+  'all_blocked "find . -exec sh -c \"git push --force origin main\" \\;" \
+     "find . -execdir bash -c \"git reset --hard\" \\;" \
+     "find repos -name .git -execdir sh -c \"git reset --hard\" \\;" \
+     "docker run img sh -c \"git push --force\"" \
+     "entr -s \"git reset --hard\"" "rsync -e \"git push --force\""'
+# Payloads that do NOT begin with `git`, so only the shell-token rule catches
+# them -- without these the rule is masked by the git-leading one and a mutation
+# to it passes the suite.
+check "a shell token in argv classifies a payload whatever it starts with (#160)" \
+  'all_blocked "find . -exec sh -c \"cd /tmp && git clean -fdx\" \\;" \
+     "find . -exec sh -c \"timeout 5 git push --force\" \\;" \
+     "docker run img bash -c \"env git reset --hard\""'
+check "that rule does not refuse an innocent command handed to a shell (#160)" \
+  'all_allowed "find . -exec sh -c \"echo hello world\" \\;" \
+     "docker run img sh -c \"npm ci && npm test\"" \
+     "xargs -I{} echo \"the git log\"" "parallel \"some words about git here\""'
+check "the smuggle fix does not re-refuse ordinary PR prose (#160)" \
+  'all_allowed "gh pr create --body \"watch the git log for changes\"" \
+     "gh pr create --body \"xargs with git ls-files is faster\"" \
+     "gh pr create --body \"strace showed git stat calls\"" \
+     "find . -name \"*.py\" -print"'
+
+# Naming `.` and `..` was not enough. Each of these discards the whole worktree
+# from one directory down, and every one of them passed.
+check "guard refuses every unscoped pathspec spelling (#160)" \
+  'all_blocked "git restore ../.." "git restore ./." "git restore .//" \
+     "git restore /abs/path" "git restore {.,x}" "git restore src/../.." \
+     "git restore a/./.." "git checkout -- ../.." "git checkout -- ./."'
+check "the pathspec fix keeps a real file restore working (#160)" \
+  'all_allowed "git restore package-lock.json" "git restore src/app.py" \
+     "git restore a/b/c.txt" "git checkout -- src/app.py"'
+
+# The lexer models no shell grammar, so a keyword became the "executable" and
+# the following git a stray bare token. Ordinary compound shell was refused.
+check "guard permits ordinary compound shell (#160)" \
+  'all_allowed "if git diff --quiet; then echo clean; fi" \
+     "for r in a b; do git -C \"\$r\" status; done" \
+     "while ! git fetch origin; do sleep 1; done" \
+     "until git status; do sleep 1; done" \
+     "! git diff --quiet && echo dirty" "time git status" "type git" \
+     "{ git status; git log; }"'
+check "a keyword does not hide a destructive command (#160)" \
+  'all_blocked "if git push --force origin main; then echo ok; fi" \
+     "for r in a b; do git -C \"\$r\" reset --hard; done" \
+     "while git clean -fd; do :; done" "! git reset --hard" \
+     "time git push --force origin main" "{ git reset --hard; }"'
+
+# A heredoc body is stdin DATA. Re-lexed as commands, any line holding a bare
+# git refused -- which is how a PR body is normally assembled.
+HEREDOC_BODY="$(printf 'gh pr create --body "$(cat <<%sEOF%s\nFixes the thing.\ngit push --force is refused now.\nEOF\n)"' "'" "'")"
+HEREDOC_PLAIN="$(printf 'cat <<EOF\ngit reset --hard\nEOF\n')"
+HEREDOC_DASH="$(printf 'cat <<-EOF\n\tgit clean -fd\n\tEOF\n')"
+HEREDOC_SHELL="$(printf 'bash <<EOF\ngit reset --hard\nEOF\n')"
+check "guard permits a heredoc body and a heredoc PR body (#160)" \
+  'all_allowed "$HEREDOC_BODY" "$HEREDOC_PLAIN" "$HEREDOC_DASH"'
+# `<<<` is a herestring, not a heredoc, and a shell fed either is still refused.
+check "a heredoc fed to a SHELL is still refused (#160)" \
+  'all_blocked "$HEREDOC_SHELL" "bash <<< \"git clean -fd\""'
+check "guard counts substitution parens quote-aware (#160)" \
+  'all_allowed "echo \"\$(grep \\\"(\\\" file)\"" "gh pr create --body \"the fix works :) ship it\""'
+
+# A hook that times out FAILS OPEN (measured, see SECURITY.md), so the parser
+# must never be the slow thing. It was quadratic: 32KB took 21s.
+GUARD_BIG="$(awk 'BEGIN{ s="gh pr create --body \""; for(i=0;i<4000;i++) s = s "a b "; print s "\"" }')"
+GUARD_START="$(date +%s)"
+b dm-command-guard.sh check "$GUARD_BIG" >/dev/null 2>&1 || true
+GUARD_ELAPSED=$(( $(date +%s) - GUARD_START ))
+check "the lexer classifies a 16KB command in a few seconds, not tens (#160)" \
+  '[ "$GUARD_ELAPSED" -le 8 ]'
+# Over the cap the guard REFUSES rather than parsing on: a guard that runs long
+# is a guard that silently is not there.
+GUARD_OVER="$(awk 'BEGIN{ s="echo "; for(i=0;i<70000;i++) s = s "a"; print s }')"
+check "an oversized command is refused, not parsed until the timeout (#160)" \
+  '! b dm-command-guard.sh check "$GUARD_OVER" >/dev/null 2>&1'
+# Captured, not piped: `set -o pipefail` makes the pipeline carry the guard's
+# exit 2 rather than grep's verdict.
+GUARD_OVER_MSG="$(b dm-command-guard.sh check "$GUARD_OVER" 2>&1 || true)"
+check "the refusal names the size limit rather than a git verdict" \
+  'grep -q "byte limit" <<<"$GUARD_OVER_MSG"'
+# Arming is #89 and is NOT done here: the guard must stay dormant until the
+# fail-open behavior above is answered for.
+check "no settings.json installs the guard as a hook yet (#89 stays open)" \
+  '! jq -e ".hooks" "$ROOT/.claude/settings.json" >/dev/null 2>&1'
 
 echo
 echo "smoke: $pass passed, $fail failed"

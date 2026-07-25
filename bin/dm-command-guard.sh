@@ -3,13 +3,14 @@
 # Git forms that can lose work. Runs as `check <command>` or as a PreToolUse
 # hook reading the tool JSON on stdin.
 #
-# ARMED (#89). The project `.claude/settings.json` installs this as a PreToolUse
-# hook on Bash, resolving the script from DM_HOME else by walking up from $PWD —
-# NOT git-toplevel, which in a managed clone or worktree has no `bin/`. So it
-# sees every command a Claude session in THIS project runs through Bash, and
-# nothing else: a tool that emits no Bash event, a session in another project,
-# and a shell the operator drives by hand are all outside it. Scope, and what is
-# NOT covered, is stated in SECURITY.md; the honest summary is below.
+# STILL UNWIRED — do not read this file as an active control. Its only caller
+# was the Codex PreToolUse hook, removed with that runtime; no Claude
+# `settings.json` installs it. #89 owns the wiring and is deliberately NOT done
+# here: arming was tried and reverted because the guard refused ordinary
+# compound shell (`for r in a b; do git -C "$r" status; done`) and it fails open
+# by construction — a PreToolUse hook that exits non-zero-non-2, or is killed at
+# its timeout, is a NON-BLOCKING error and the tool runs anyway. Until then the
+# logic is exercised only by the tests.
 #
 # SHAPE: allowlist, not denylist (#121). A denylist has to enumerate every
 # destructive Git form and every wrapper that reaches one, and loses that race
@@ -71,11 +72,14 @@
 #
 # COMMAND POSITION vs ARGUMENT POSITION: an option, or the VALUE of the option
 # before it, is data the executable was handed, so a quoted sentence there is
-# prose and is not re-entered (#143). That is a NARROWING, stated plainly: an
-# unmodelled local script that runs its own `--cmd "git push --force"` value is
-# no longer caught. A bare `git` token is still refused in every position, a
-# command RUNNER keeps all of its arguments strict, and `sh -c` is classified by
-# check_nested_shell before any of this applies.
+# prose and is not re-entered (#143). Three things keep that from becoming a
+# hole, each with a test: a string whose own first word is `git` is classified
+# WHEREVER it sits; a bare shell or runner token in the arguments makes the rest
+# of the scan strict (`find . -exec sh -c "git push --force"`); and a command
+# RUNNER keeps all of its arguments strict from the start.
+# The NARROWING that remains, stated plainly: an unmodelled executable that runs
+# its own option value where that value does NOT start with `git` -- say
+# `./deploy.sh --cmd "timeout 5 git push --force"` -- is not classified.
 #
 # DELIBERATELY PERMITTED, each with a test that says so:
 #   - `git push --force-with-lease` / `--force-if-includes`: the toolbelt itself
@@ -93,35 +97,97 @@
 
 set -euo pipefail
 DM_GUARD_DEPTH="${DM_GUARD_DEPTH:-0}"
+DM_GUARD_MAX_COMMAND="${DM_GUARD_MAX_COMMAND:-65536}"
 
 deny() {
   printf 'BLOCKED: destructive Git command refused: %s\n' "$1" >&2
   exit 2
 }
 
+# bash rescans a string from its start for every `${var:offset:1}`, so a
+# per-character loop is QUADRATIC in the command length: 32KB took 21s against a
+# 10s PreToolUse timeout, and a guard that times out is a guard that is not
+# there. Read through a bounded sliding window instead -- the refill is the only
+# O(offset) operation and it happens once per LEX_WINDOW characters.
+LEX_WINDOW=512
+
+lex_char() {
+  local offset="$1"
+  if [ "$offset" -ge "$LEX_LENGTH" ] || [ "$offset" -lt 0 ]; then LEX_CHAR=""; return 0; fi
+  if [ "$offset" -lt "$LEX_BASE" ] || [ "$offset" -ge $((LEX_BASE + ${#LEX_CHUNK})) ]; then
+    LEX_BASE="$offset"; LEX_CHUNK="${LEX_INPUT:$offset:$LEX_WINDOW}"
+  fi
+  LEX_CHAR="${LEX_CHUNK:$((offset - LEX_BASE)):1}"
+}
+
+# A heredoc body is stdin DATA, not commands. Left in the token stream,
+# `--body "$(cat <<'EOF' ... EOF)"` re-lexed ordinary prose as commands and any
+# line holding a bare `git` refused. `<<<` is a HERESTRING, not a heredoc: it
+# must keep reaching check_shell_input, which refuses a shell fed unresolved
+# stdin. Only ONE pending delimiter is tracked; a second `<<` on the same line
+# overwrites it, so the rarer multi-heredoc form degrades to lexing the first
+# body as text rather than skipping both.
+note_heredoc_operator() {
+  local word="$1"
+  if [ "$HEREDOC_WANT_DELIMITER" -eq 1 ]; then
+    HEREDOC_DELIMITER="$word"; HEREDOC_WANT_DELIMITER=0; return 0
+  fi
+  case "$word" in
+    '<<<'*) return 0 ;;
+    '<<'|'<<-') HEREDOC_WANT_DELIMITER=1 ;;
+    '<<-'?*) HEREDOC_DELIMITER="${word#<<-}" ;;
+    '<<'?*) HEREDOC_DELIMITER="${word#<<}" ;;
+  esac
+}
+
+# `<<-` strips leading tabs from its delimiter line, so compare trimmed. Called
+# once per heredoc LINE, not per character.
+heredoc_line_ends_body() {
+  local line="$1"
+  while [ "${line# }" != "$line" ] || [ "${line#$'\t'}" != "$line" ]; do
+    line="${line# }"; line="${line#$'\t'}"
+  done
+  [ "$line" = "$HEREDOC_DELIMITER" ]
+}
+
 append_token() {
   TOKENS+=("$token")
   DYNAMIC+=("$dynamic")
+  note_heredoc_operator "$token"
   token=""; dynamic=0; started=0
 }
 
-# Consume the balanced `$( ... )` that starts at index $2, append the raw text
+# Consume the balanced `$( ... )` that starts at index $1, append the raw text
 # to the token being built, RECORD the inner command, and leave the index of the
 # closing paren in SUBSTITUTION_END. Sets a global rather than printing it: a
 # command substitution would run this in a subshell and lose both the token text
 # and the recorded command.
+# Paren counting is QUOTE-AWARE: `$(grep "(" file)` is balanced to a real shell,
+# and counting the quoted paren ran the scan off the end and refused it.
 consume_command_substitution() {
-  local input="$1" i="$2" depth=1 inner="" char
+  local i="$1" depth=1 inner="" char quote=""
   token+='$('; dynamic=1; started=1
   i=$((i + 2))
-  while [ "$i" -lt "${#input}" ] && [ "$depth" -gt 0 ]; do
-    char="${input:$i:1}"
-    case "$char" in '(') depth=$((depth + 1)) ;; ')') depth=$((depth - 1)) ;; esac
+  while [ "$i" -lt "$LEX_LENGTH" ] && [ "$depth" -gt 0 ]; do
+    lex_char "$i"; char="$LEX_CHAR"
+    if [ -n "$quote" ]; then
+      if [ "$char" = "$quote" ]; then quote=""; fi
+    else
+      case "$char" in
+        "'"|'"') quote="$char" ;;
+        '(') depth=$((depth + 1)) ;;
+        ')') depth=$((depth - 1)) ;;
+      esac
+    fi
     token+="$char"
     [ "$depth" -eq 0 ] || inner+="$char"
     i=$((i + 1))
   done
-  [ "$depth" -eq 0 ] || deny "unterminated command substitution"
+  # Genuinely unbalanced: a real shell FAILS TO PARSE this and runs nothing, so
+  # refusing it is over-blocking a command that cannot execute. Leave it as one
+  # opaque DYNAMIC token -- still refused in executable position, never read as
+  # prose -- rather than denying.
+  if [ "$depth" -gt 0 ]; then SUBSTITUTION_END=$((LEX_LENGTH - 1)); return 0; fi
   SUBSTITUTIONS+=("$inner")
   SUBSTITUTION_END=$((i - 1))
 }
@@ -130,31 +196,45 @@ consume_command_substitution() {
 # verbatim: the content is re-classified by a fresh lexer, which applies its own
 # escape rules to it.
 consume_backtick_substitution() {
-  local input="$1" i="$2" inner="" char closed=0
+  local i="$1" inner="" char closed=0
   token+='`'; dynamic=1; started=1
   i=$((i + 1))
-  while [ "$i" -lt "${#input}" ]; do
-    char="${input:$i:1}"
+  while [ "$i" -lt "$LEX_LENGTH" ]; do
+    lex_char "$i"; char="$LEX_CHAR"
     token+="$char"
     if [ "$char" = '`' ]; then closed=1; i=$((i + 1)); break; fi
     inner+="$char"
     i=$((i + 1))
   done
-  [ "$closed" -eq 1 ] || deny "unterminated command substitution"
+  if [ "$closed" -eq 0 ]; then SUBSTITUTION_END=$((LEX_LENGTH - 1)); return 0; fi
   SUBSTITUTIONS+=("$inner")
   SUBSTITUTION_END=$((i - 1))
 }
 
 lex_shell_command() {
-  local input="$1" i=0 char next state="plain" escaped=0
+  local i=0 char next state="plain" escaped=0 heredoc_line=""
+  LEX_INPUT="$1"; LEX_LENGTH="${#LEX_INPUT}"; LEX_CHUNK=""; LEX_BASE=0
+  HEREDOC_DELIMITER=""; HEREDOC_WANT_DELIMITER=0
   TOKENS=(); DYNAMIC=(); SUBSTITUTIONS=(); token=""; dynamic=0; started=0
-  while [ "$i" -lt "${#input}" ]; do
-    char="${input:$i:1}"; next="${input:$((i + 1)):1}"
+  while [ "$i" -lt "$LEX_LENGTH" ]; do
+    lex_char "$i"; char="$LEX_CHAR"
+    lex_char $((i + 1)); next="$LEX_CHAR"
     if [ "$escaped" -eq 1 ]; then
       [ "$char" = $'\n' ] || { token+="$char"; started=1; }
       escaped=0; i=$((i + 1)); continue
     fi
     case "$state" in
+      heredoc)
+        # Body text is skipped entirely; only the delimiter line ends it.
+        if [ "$char" != $'\n' ]; then
+          heredoc_line+="$char"
+        else
+          if heredoc_line_ends_body "$heredoc_line"; then
+            state="plain"; HEREDOC_DELIMITER=""
+          fi
+          heredoc_line=""
+        fi
+        ;;
       single)
         if [ "$char" = "'" ]; then state="plain"; else token+="$char"; fi
         started=1
@@ -165,12 +245,12 @@ lex_shell_command() {
           \\) escaped=1 ;;
           '$')
             if [ "$next" = "(" ]; then
-              consume_command_substitution "$input" "$i"; i="$SUBSTITUTION_END"
+              consume_command_substitution "$i"; i="$SUBSTITUTION_END"
             else
               token+="$char"; dynamic=1
             fi
             ;;
-          '`') consume_backtick_substitution "$input" "$i"; i="$SUBSTITUTION_END" ;;
+          '`') consume_backtick_substitution "$i"; i="$SUBSTITUTION_END" ;;
           *) token+="$char" ;;
         esac
         started=1
@@ -182,19 +262,20 @@ lex_shell_command() {
           \\) escaped=1; started=1 ;;
           '$')
             if [ "$next" = "(" ]; then
-              consume_command_substitution "$input" "$i"; i="$SUBSTITUTION_END"
+              consume_command_substitution "$i"; i="$SUBSTITUTION_END"
             else
               token+="$char"; dynamic=1; started=1
             fi
             ;;
-          '`') consume_backtick_substitution "$input" "$i"; i="$SUBSTITUTION_END" ;;
+          '`') consume_backtick_substitution "$i"; i="$SUBSTITUTION_END" ;;
           '#')
             # A comment ends at end of LINE, not end of input. `break` here
             # discarded every later newline-separated command, unguarded (#121).
             if [ "$started" -ne 0 ]; then
               token+="$char"
             else
-              while [ "$i" -lt "${#input}" ] && [ "${input:$i:1}" != $'\n' ]; do
+              while [ "$i" -lt "$LEX_LENGTH" ]; do
+                lex_char "$i"; [ "$LEX_CHAR" != $'\n' ] || break
                 i=$((i + 1))
               done
               TOKENS+=(";"); DYNAMIC+=(0)
@@ -206,6 +287,7 @@ lex_shell_command() {
           $'\n')
             [ "$started" -eq 0 ] || append_token
             TOKENS+=(";"); DYNAMIC+=(0)
+            if [ -n "$HEREDOC_DELIMITER" ]; then state="heredoc"; heredoc_line=""; fi
             ;;
           '&')
             # `&` inside a redirection (2>&1, >&2, &>log) belongs to the
@@ -238,7 +320,13 @@ lex_shell_command() {
     i=$((i + 1))
   done
   [ "$escaped" -eq 0 ] || deny "unterminated shell escape"
-  [ "$state" = "plain" ] || deny "unterminated shell quote"
+  # An unterminated HEREDOC is a shell syntax error, so nothing runs and there
+  # is nothing to refuse -- unlike an unterminated quote, which can still be a
+  # command the guard mis-segmented.
+  case "$state" in
+    plain|heredoc) ;;
+    *) deny "unterminated shell quote" ;;
+  esac
   [ "$started" -eq 0 ] || append_token
 }
 
@@ -661,11 +749,16 @@ check_git_config() {
 # A pathspec naming ONE literal path, so a restore scoped to it cannot widen
 # into a whole-tree discard. `.`, `/` and a glob reach every tracked file, and
 # `:` opens Git's pathspec magic (`:/` IS the whole repository).
+# Naming `..` was not enough: `../..`, `./.`, `.//`, `src/../..` and any
+# absolute path all reach the whole tree, and a crewmate one `cd` deep into its
+# own worktree wiped it (#160 review). Test every path COMPONENT instead of the
+# whole string, and refuse brace expansion alongside globs.
 is_scoped_pathspec() {
   case "$1" in
-    ""|.|..|/|./|../|:*) return 1 ;;
-    *"*"*|*"?"*|*"["*) return 1 ;;
+    ""|/*|:*) return 1 ;;
+    *"*"*|*"?"*|*"["*|*"{"*) return 1 ;;
   esac
+  case "/$1/" in *"/./"*|*"/../"*) return 1 ;; esac
   return 0
 }
 
@@ -934,11 +1027,28 @@ skip_wrapper_args() {
   printf '%s\n' "$i"
 }
 
+# Shell KEYWORDS are grammar, not executables. The lexer models no grammar, so
+# `for r in a b; do git -C "$r" status; done` made `do` the segment's executable
+# and the following `git` a stray bare token -- ordinary compound shell refused
+# (#160 review). Transparent here, so the real command behind the keyword is the
+# one classified: `if git push --force; then` still refuses.
+# `time` is here AND in is_command_runner: unwrapping it is exact (its argv is
+# the rest of the segment), while re-entry still has to treat a quoted
+# `"time git push --force"` as a command.
+is_shell_keyword() {
+  case "$1" in
+    if|then|elif|else|fi|while|until|for|do|done|case|esac|select|function|\
+    time|coproc|'{'|'}'|'!') return 0 ;;
+  esac
+  return 1
+}
+
 segment_command_index() {
   local i="$1" end="$2" wrapper token
   while [ "$i" -lt "$end" ]; do
     token="${TOKENS[$i]}"
     case "$token" in *=*) i=$((i + 1)); continue ;; esac
+    if is_shell_keyword "$token"; then i=$((i + 1)); continue; fi
     wrapper="${token##*/}"
     if ! is_command_wrapper "$wrapper"; then printf '%s\n' "$i"; return 0; fi
     i="$(skip_wrapper_args "$wrapper" $((i + 1)) "$end")"
@@ -951,7 +1061,7 @@ segment_command_index() {
 # (-exec), perl and python all CAN execute and are excluded.
 argument_inert() {
   case "$1" in
-    echo|printf|cat|grep|egrep|fgrep|rg|head|tail|wc|ls|man|which|jq) return 0 ;;
+    echo|printf|cat|grep|egrep|fgrep|rg|head|tail|wc|ls|man|which|type|jq) return 0 ;;
   esac
   return 1
 }
@@ -1010,7 +1120,8 @@ token_is_option_data() {
 # (`flock -c`), and its real argv is unknowable anyway, which is why it is not
 # unwrapped in the first place.
 check_stray_git_tokens() {
-  local start="$1" end="$2" executable="$3" i token flat first data_args=1
+  local start="$1" end="$2" executable="$3" i token flat first
+  local data_args=1 hands_to_shell=0
   argument_inert "$executable" && return 0
   if is_command_runner "$executable" || is_shell_executable "$executable"; then
     data_args=0
@@ -1021,16 +1132,41 @@ check_stray_git_tokens() {
     flat="${token//$'\t'/ }"; flat="${flat//$'\n'/ }"
     while [ "${flat# }" != "$flat" ]; do flat="${flat# }"; done
     first="${flat%% *}"
+    # Past a shell/runner token in the ARGUMENTS, every quoted string is a
+    # command being handed to it -- prose is not what follows `sh -c`. So
+    # re-enter regardless of the first word, which is the only thing that
+    # catches `find . -exec sh -c "cd /tmp && git clean -fdx" \;`.
+    if [ "$hands_to_shell" -eq 1 ]; then
+      case "$flat" in
+        *" "*) DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token"; i=$((i + 1)); continue ;;
+      esac
+    fi
     if token_begins_a_command "$first"; then
       case "$flat" in
         *" "*)
-          if [ "$data_args" -eq 0 ] || ! token_is_option_data "$i" "$start"; then
+          # A string whose own first word is `git` is classified wherever it
+          # sits: that is how `entr -s "git reset --hard"` and `rsync -e "git
+          # push --force"` stay refused, and it matches what the guard did
+          # before option values became data.
+          if [ "$data_args" -eq 0 ] || [ "${first##*/}" = git ] \
+             || ! token_is_option_data "$i" "$start"; then
             DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token"
           fi
           ;;
         *) case "${first##*/}" in
              git) deny "'$executable' may execute the git command in its arguments" ;;
-           esac ;;
+           esac
+           # A bare shell or runner token in the ARGUMENTS means this executable
+           # hands a command to one -- `find . -exec sh -c "git push --force"`,
+           # `docker run img sh -c ...`. check_nested_shell never fires there,
+           # because the shell is find's argument rather than the segment's
+           # executable, so everything after it must be classified (#160 review).
+           # Only the ARGV spelling sets this: a runner that is the segment's own
+           # executable keeps the first-word gate, so `xargs -I{} echo "the git
+           # log"` stays prose.
+           if is_shell_executable "${first##*/}" || is_command_runner "${first##*/}"; then
+             data_args=0; hands_to_shell=1
+           fi ;;
       esac
     fi
     i=$((i + 1))
@@ -1060,6 +1196,13 @@ check_substitutions() {
 check_shell_command() {
   local command="$1" i=0 end command_index token executable
   [ "$DM_GUARD_DEPTH" -le 4 ] || deny "excessively nested shell command"
+  # A command the parser cannot finish in time is the one failure this must not
+  # have: a PreToolUse hook that exits non-zero-non-2, or is killed at its
+  # timeout, is a NON-BLOCKING error and the tool runs anyway. So bound the
+  # input here and refuse deterministically, rather than letting the largest
+  # commands be the ones that walk through.
+  [ "${#command}" -le "$DM_GUARD_MAX_COMMAND" ] \
+    || deny "shell command is ${#command} bytes, over the ${DM_GUARD_MAX_COMMAND}-byte limit the guard can classify"
   lex_shell_command "$command"
   check_substitutions
   while [ "$i" -lt "${#TOKENS[@]}" ]; do
