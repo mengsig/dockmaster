@@ -127,17 +127,101 @@ lex_char() {
 # stdin. Only ONE pending delimiter is tracked; a second `<<` on the same line
 # overwrites it, so the rarer multi-heredoc form degrades to lexing the first
 # body as text rather than skipping both.
+#
+# OPERATOR POSITION IS THE WHOLE GATE. This runs on every token AFTER quote
+# stripping, so `echo "<<EOF"` and a real `<<EOF` arrive identical -- and
+# believing the lookalike put the lexer into heredoc state and skipped the REST
+# OF THE INPUT, so `echo "<<EOF"` + newline + `git push --force` PASSED (#163).
+# A redirection operator is by definition unquoted, so the leading `<<` must
+# come from plain, unquoted, unescaped text: TOKEN_LITERAL counts exactly those
+# leading characters and a lookalike scores 0.
 note_heredoc_operator() {
-  local word="$1"
+  local word="$1" literal="$2"
   if [ "$HEREDOC_WANT_DELIMITER" -eq 1 ]; then
-    HEREDOC_DELIMITER="$word"; HEREDOC_WANT_DELIMITER=0; return 0
+    HEREDOC_WANT_DELIMITER=0
+    set_heredoc_delimiter "$word" "$literal"
+    return 0
   fi
+  case "$word" in '<<<'*) return 0 ;; esac
+  # `<<-` needs three literal characters, `<<` two: a quoted `-` is part of the
+  # delimiter, not the tab-stripping operator.
   case "$word" in
-    '<<<'*) return 0 ;;
-    '<<'|'<<-') HEREDOC_WANT_DELIMITER=1 ;;
-    '<<-'?*) HEREDOC_DELIMITER="${word#<<-}" ;;
-    '<<'?*) HEREDOC_DELIMITER="${word#<<}" ;;
+    '<<-')   if [ "$literal" -ge 3 ]; then HEREDOC_WANT_DELIMITER=1; fi ;;
+    '<<')    if [ "$literal" -ge 2 ]; then HEREDOC_WANT_DELIMITER=1; fi ;;
+    '<<-'?*) if [ "$literal" -ge 3 ]; then set_heredoc_delimiter "${word#<<-}" $((literal - 3)); fi ;;
+    '<<'?*)  if [ "$literal" -ge 2 ]; then set_heredoc_delimiter "${word#<<}" $((literal - 2)); fi ;;
   esac
+  return 0
+}
+
+# `<<'EOF'` is LITERAL, `<<EOF` is INTERPOLATED -- bash really runs a `$(...)`
+# in the body of the second one. The lexer treated both the same and skipped
+# the body wholesale, so `cat <<EOF` + `$(git push --force)` + `EOF` PASSED
+# (#163). The delimiter counts as quoted when any of its characters did not
+# come from plain literal text, which is what bash itself keys expansion on.
+set_heredoc_delimiter() {
+  local delimiter="$1" literal="$2"
+  [ "$literal" -ge 0 ] || deny "internal: heredoc delimiter literal count went negative"
+  HEREDOC_DELIMITER="$delimiter"
+  # Every character literal => nothing was quoted => bash expands the body.
+  if [ "$literal" -ge "${#delimiter}" ]; then HEREDOC_QUOTED=0; else HEREDOC_QUOTED=1; fi
+  heredoc_substitution_reset
+}
+
+heredoc_substitution_reset() {
+  HEREDOC_SUB_KIND=""; HEREDOC_SUB_DEPTH=0
+  HEREDOC_SUB_INNER=""; HEREDOC_SUB_QUOTE=""
+}
+
+# Walk an INTERPOLATED heredoc body one character at a time, recording the
+# `$( ... )` and backtick spans that bash would actually execute. Character-wise
+# rather than jumping the index, so the delimiter line still ends the body
+# exactly as before -- and the literal prose around a substitution never enters
+# the token stream, which is the over-blocking the skip exists to prevent.
+# Paren counting is quote-aware for the same reason consume_command_substitution
+# is: `$(grep "(" f)` is balanced to a real shell.
+scan_heredoc_body() {
+  local char="$1" next="$2"
+  case "$HEREDOC_SUB_KIND" in
+    # A backslash in an interpolated body quotes the next character, so
+    # `\$(...)` is prose, not a substitution.
+    escape) HEREDOC_SUB_KIND="" ;;
+    "")
+      case "$char" in
+        \\) HEREDOC_SUB_KIND="escape" ;;
+        '$') if [ "$next" = "(" ]; then HEREDOC_SUB_KIND="paren"; HEREDOC_SUB_DEPTH=0; fi ;;
+        '`') HEREDOC_SUB_KIND="backtick" ;;
+      esac
+      ;;
+    paren)
+      if [ -n "$HEREDOC_SUB_QUOTE" ]; then
+        if [ "$char" = "$HEREDOC_SUB_QUOTE" ]; then HEREDOC_SUB_QUOTE=""; fi
+        HEREDOC_SUB_INNER+="$char"
+        return 0
+      fi
+      case "$char" in
+        "'"|'"') HEREDOC_SUB_QUOTE="$char" ;;
+        '(')
+          HEREDOC_SUB_DEPTH=$((HEREDOC_SUB_DEPTH + 1))
+          if [ "$HEREDOC_SUB_DEPTH" -eq 1 ]; then return 0; fi
+          ;;
+        ')')
+          HEREDOC_SUB_DEPTH=$((HEREDOC_SUB_DEPTH - 1))
+          if [ "$HEREDOC_SUB_DEPTH" -eq 0 ]; then
+            SUBSTITUTIONS+=("$HEREDOC_SUB_INNER"); heredoc_substitution_reset; return 0
+          fi
+          ;;
+      esac
+      HEREDOC_SUB_INNER+="$char"
+      ;;
+    backtick)
+      if [ "$char" = '`' ]; then
+        SUBSTITUTIONS+=("$HEREDOC_SUB_INNER"); heredoc_substitution_reset; return 0
+      fi
+      HEREDOC_SUB_INNER+="$char"
+      ;;
+  esac
+  return 0
 }
 
 # `<<-` strips leading tabs from its delimiter line, so compare trimmed. Called
@@ -150,11 +234,26 @@ heredoc_line_ends_body() {
   [ "$line" = "$HEREDOC_DELIMITER" ]
 }
 
+# How many LEADING characters of the token came from plain, unquoted, unescaped
+# text -- the one fact that separates a real `<<` redirection operator from a
+# quoted lookalike (#163). Only note_heredoc_operator reads it.
+# The plain-state lexer increments TOKEN_LITERAL unconditionally and the first
+# quote/escape/substitution SNAPSHOTS the count, rather than each character
+# testing a frozen flag: the test cost 40% of the lexer's runtime on a 32KB
+# command, and the guard's whole safety story rests on it staying fast.
+# TOKEN_LITERAL_FROZEN is -1 until the snapshot is taken.
+freeze_token_literal() {
+  [ "$TOKEN_LITERAL_FROZEN" -ge 0 ] || TOKEN_LITERAL_FROZEN="$TOKEN_LITERAL"
+}
+
 append_token() {
+  local literal="$TOKEN_LITERAL"
+  [ "$TOKEN_LITERAL_FROZEN" -lt 0 ] || literal="$TOKEN_LITERAL_FROZEN"
   TOKENS+=("$token")
   DYNAMIC+=("$dynamic")
-  note_heredoc_operator "$token"
+  note_heredoc_operator "$token" "$literal"
   token=""; dynamic=0; started=0
+  TOKEN_LITERAL=0; TOKEN_LITERAL_FROZEN=-1
 }
 
 # Consume the balanced `$( ... )` that starts at index $1, append the raw text
@@ -166,7 +265,7 @@ append_token() {
 # and counting the quoted paren ran the scan off the end and refused it.
 consume_command_substitution() {
   local i="$1" depth=1 inner="" char quote=""
-  token+='$('; dynamic=1; started=1
+  token+='$('; dynamic=1; started=1; freeze_token_literal
   i=$((i + 2))
   while [ "$i" -lt "$LEX_LENGTH" ] && [ "$depth" -gt 0 ]; do
     lex_char "$i"; char="$LEX_CHAR"
@@ -197,7 +296,7 @@ consume_command_substitution() {
 # escape rules to it.
 consume_backtick_substitution() {
   local i="$1" inner="" char closed=0
-  token+='`'; dynamic=1; started=1
+  token+='`'; dynamic=1; started=1; freeze_token_literal
   i=$((i + 1))
   while [ "$i" -lt "$LEX_LENGTH" ]; do
     lex_char "$i"; char="$LEX_CHAR"
@@ -214,8 +313,10 @@ consume_backtick_substitution() {
 lex_shell_command() {
   local i=0 char next state="plain" escaped=0 heredoc_line=""
   LEX_INPUT="$1"; LEX_LENGTH="${#LEX_INPUT}"; LEX_CHUNK=""; LEX_BASE=0
-  HEREDOC_DELIMITER=""; HEREDOC_WANT_DELIMITER=0
+  HEREDOC_DELIMITER=""; HEREDOC_WANT_DELIMITER=0; HEREDOC_QUOTED=0
+  heredoc_substitution_reset
   TOKENS=(); DYNAMIC=(); SUBSTITUTIONS=(); token=""; dynamic=0; started=0
+  TOKEN_LITERAL=0; TOKEN_LITERAL_FROZEN=-1
   while [ "$i" -lt "$LEX_LENGTH" ]; do
     lex_char "$i"; char="$LEX_CHAR"
     lex_char $((i + 1)); next="$LEX_CHAR"
@@ -225,12 +326,25 @@ lex_shell_command() {
     fi
     case "$state" in
       heredoc)
-        # Body text is skipped entirely; only the delimiter line ends it.
+        # Body text stays out of the token stream; only the delimiter line ends
+        # it. An UNQUOTED delimiter means bash expands the body, so the
+        # substitutions in it are recorded and classified even though the
+        # surrounding prose is not (#163).
+        # Filtered inline rather than calling per character: an ordinary body
+        # character outside a substitution needs no work at all, and paying a
+        # function call for each one cost 2.3x on a 32KB body -- against a hook
+        # timeout that FAILS OPEN, which is the one budget that cannot slip.
+        if [ "$HEREDOC_QUOTED" -eq 0 ]; then
+          case "$char" in
+            '$'|'`'|\\) scan_heredoc_body "$char" "$next" ;;
+            *) [ -z "$HEREDOC_SUB_KIND" ] || scan_heredoc_body "$char" "$next" ;;
+          esac
+        fi
         if [ "$char" != $'\n' ]; then
           heredoc_line+="$char"
         else
           if heredoc_line_ends_body "$heredoc_line"; then
-            state="plain"; HEREDOC_DELIMITER=""
+            state="plain"; HEREDOC_DELIMITER=""; heredoc_substitution_reset
           fi
           heredoc_line=""
         fi
@@ -257,14 +371,16 @@ lex_shell_command() {
         ;;
       plain)
         case "$char" in
-          "'") state="single"; started=1 ;;
-          '"') state="double"; started=1 ;;
-          \\) escaped=1; started=1 ;;
+          # A quote or an escape ends the token's LITERAL prefix: past here it
+          # can no longer be a redirection operator (#163).
+          "'") state="single"; started=1; freeze_token_literal ;;
+          '"') state="double"; started=1; freeze_token_literal ;;
+          \\) escaped=1; started=1; freeze_token_literal ;;
           '$')
             if [ "$next" = "(" ]; then
               consume_command_substitution "$i"; i="$SUBSTITUTION_END"
             else
-              token+="$char"; dynamic=1; started=1
+              token+="$char"; TOKEN_LITERAL=$((TOKEN_LITERAL + 1)); dynamic=1; started=1
             fi
             ;;
           '`') consume_backtick_substitution "$i"; i="$SUBSTITUTION_END" ;;
@@ -272,7 +388,7 @@ lex_shell_command() {
             # A comment ends at end of LINE, not end of input. `break` here
             # discarded every later newline-separated command, unguarded (#121).
             if [ "$started" -ne 0 ]; then
-              token+="$char"
+              token+="$char"; TOKEN_LITERAL=$((TOKEN_LITERAL + 1))
             else
               while [ "$i" -lt "$LEX_LENGTH" ]; do
                 lex_char "$i"; [ "$LEX_CHAR" != $'\n' ] || break
@@ -297,9 +413,9 @@ lex_shell_command() {
               [ "$started" -eq 0 ] || append_token
               TOKENS+=("&&"); DYNAMIC+=(0); i=$((i + 1))
             elif [ "$started" -eq 1 ] && { [ "${token%>}" != "$token" ] || [ "${token%<}" != "$token" ]; }; then
-              token+="$char"
+              token+="$char"; TOKEN_LITERAL=$((TOKEN_LITERAL + 1))
             elif [ "$started" -eq 0 ] && [ "$next" = ">" ]; then
-              token+="$char"; started=1
+              token+="$char"; TOKEN_LITERAL=$((TOKEN_LITERAL + 1)); started=1
             else
               [ "$started" -eq 0 ] || append_token
               TOKENS+=("&"); DYNAMIC+=(0)
@@ -313,16 +429,20 @@ lex_shell_command() {
               TOKENS+=("$char"); DYNAMIC+=(0)
             fi
             ;;
-          *) token+="$char"; started=1 ;;
+          *) token+="$char"; TOKEN_LITERAL=$((TOKEN_LITERAL + 1)); started=1 ;;
         esac
         ;;
     esac
     i=$((i + 1))
   done
   [ "$escaped" -eq 0 ] || deny "unterminated shell escape"
-  # An unterminated HEREDOC is a shell syntax error, so nothing runs and there
-  # is nothing to refuse -- unlike an unterminated quote, which can still be a
-  # command the guard mis-segmented.
+  # An unterminated HEREDOC is accepted because bash reads the body to END OF
+  # INPUT too (it warns and runs), so the guard skipped exactly the text bash
+  # treats as data -- the command holding the operator was already classified.
+  # That only holds now that a quoted lookalike can no longer open a heredoc
+  # (#163); it is NOT the "a syntax error runs nothing" this once claimed,
+  # which is false: `cat <<EOF` with no delimiter line still runs `cat`.
+  # An unterminated QUOTE stays a refusal -- it can be a mis-segmented command.
   case "$state" in
     plain|heredoc) ;;
     *) deny "unterminated shell quote" ;;
@@ -953,7 +1073,13 @@ check_shell_input() {
   fi
   i=$((command_index + 1))
   while [ "$i" -lt "$end" ]; do
-    case "${TOKENS[$i]}" in '<'*) deny "shell executes unresolved redirected stdin" ;; esac
+    # `0<file` is the fd-numbered spelling of `<file` and redirects the SAME
+    # stdin the shell then executes. Guarding only the bare form left the
+    # identical hole one spelling over, which is how #163's heredoc pair got
+    # here -- close the class, not the example.
+    case "${TOKENS[$i]}" in
+      '<'*|0'<'*) deny "shell executes unresolved redirected stdin" ;;
+    esac
     i=$((i + 1))
   done
 }
