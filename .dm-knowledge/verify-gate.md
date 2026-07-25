@@ -5,11 +5,42 @@ Read before editing the verify gate or anything that drives a browser.
 - **[invariant]** The app is booted on a PER-TASK port and the port must be
   SILENT before start. Never attach to whatever is listening: the operator runs
   their own instance of the same app, and "verifying" theirs is a fabricated
-  pass. `app_start_cmd` therefore has to honor `$DM_VERIFY_PORT`; a repo whose
-  start command ignores it cannot be verified safely.
-- **[invariant]** The verdict is mechanical. `report` reads only the flows
-  recorded by `flow`, and exits 3 when there are none — an unverified change can
-  never read as a pass. Nothing else may write `verify=pass` to task meta.
+  pass. `app_start_cmd` therefore has to honor `$DM_VERIFY_PORT`.
+- **[invariant]** Silence-then-start is a TOCTOU whose window is the whole
+  readiness timeout — a start command that binds nothing, plus anything that
+  binds the port seconds later, and the gate verified a foreign process. So
+  `app_ready_cmd` is MANDATORY and is an OWNERSHIP probe: it must establish the
+  listener is this task's instance, then copy `$DM_VERIFY_DIR/token` (fresh per
+  boot) to `ready-proof`. `up` refuses without that proof, so a repo that has not
+  done the work fails closed instead of passing.
+- **[invariant]** `down` must never record success over a live app. It resolves
+  its cwd to the worktree OR the clone (the stop command has to work after
+  teardown removed the worktree), and after stopping it re-probes the port: still
+  listening means `verify_app_state=leaked` and a loud failure, never `down`.
+  `dm-worktree.sh remove` calls it, so a SIGKILLed crewmate cannot leak an app.
+- **[invariant]** Under-firing is the one failure mode this gate cannot afford —
+  a gate that never fires is indistinguishable from one that always passes. With
+  no `verify_surfaces` registered, EVERYTHING except documentation counts;
+  `verify_surfaces` only NARROWS. A hand-written surface list missed
+  `src/pages/Home.tsx`, `app/views/home.erb` and `app.py` and skipped the very
+  change that broke the app.
+- **[convention]** `verify` ships in the RIGOROUS tier only. In `default` it
+  fails the pipeline before `pr` for every repo with no app config, and the only
+  escape is a blanket `noRuntimeSurface` override whose routine use turns the
+  gate into a no-op. Add it to `default` once the fleet is configured.
+- **[invariant]** A `pass` is EVIDENCE, not an assertion, and the gate enforces
+  it rather than asking a crewmate to: `flow … pass` refuses without a live app,
+  a live browser, an unmoved worktree, and a real PNG named after the flow;
+  `report` re-checks every pass row against the file on disk. Prose in a skill
+  cannot hold this — the first version's own smoke section forged a green run.
+- **[invariant]** A verdict is bound to CODE. `up` pins `verify_head` =
+  `<sha>/<cksum of porcelain>` — HEAD alone is not enough because crew work is
+  uncommitted for most of its life — and `flow`/`report` refuse once it moves,
+  so a green run cannot be carried across the edit that breaks the app.
+- **[pitfall]** One file, three parsers, three answers. `wc -l` counted 0 rows in
+  a `flows.tsv` whose last line lacked a newline while `awk` counted 1, so a
+  truncated record read as `PASS: 0/0`, exit 0. Tally in ONE awk pass, and refuse
+  a file that does not end in a newline.
 - **[pitfall]** `dm_unlock` runs `trap - EXIT INT TERM`, so ANY locked write
   (`dm_meta_set`, `dm_status_append`) silently disarms a cleanup trap set before
   it. `up` records its meta FIRST and arms the teardown trap after, or a failed

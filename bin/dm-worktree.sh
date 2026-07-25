@@ -489,6 +489,15 @@ $u"; fi
 $undisposable"
       fi
     fi
+    # Stop anything the verify gate left running BEFORE the directory goes: the
+    # stop command lives in the worktree, so after removal a leaked app/container
+    # (and its browser and browser lease) can no longer be stopped at all. Every
+    # refusal above has already passed, so this only runs on a real teardown, and
+    # it warns rather than blocks — a task must never pin on a stuck app.
+    if [ "$(dm_meta_get "$id" verify_app_state)" != "" ]; then
+      "$(dirname "$0")/dm-verify.sh" down "$id" >/dev/null \
+        || dm_warn "could not stop the verification app for $id; check for a leftover process or container before removing the worktree"
+    fi
     # Resolve the clone tolerantly: removal must not be held hostage by an
     # unregistered/renamed repo, or by a clone that escapes repos/ (#141), or the
     # worktree is uncleanable even with --force and its task pins at `working`

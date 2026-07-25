@@ -16,8 +16,7 @@ the `pr-workflow` skill for the selection criteria):
   or anything the operator is nervous about). Its `review` gate is
   **dimension-parallel** (one reviewer per lens), followed by an adversarial
   **`verify-findings`** gate, then fix → tests → the behavioral `verify` gate →
-  auto `security` → `pr`. (`default` carries `verify` too, after its final
-  `tests`.) (The CI-wait is not a config gate; it runs in the
+  auto `security` → `pr`. (The CI-wait is not a config gate; it runs in the
   operator-mediated merge tail after the PR opens — see `pr-workflow`.)
 
 ## The default executor: the dockmaster (agent-driven)
@@ -53,12 +52,16 @@ that injects the runner's workflow API; nothing auto-discovers it. It reads:
 - **`parallelCapacity`** in runner `args` — current injected reviewer capacity,
   integer 1..3. The runner batches five review lenses and every skeptic set to
   this bound; default 3 preserves the six-thread runtime's three reserved slots.
-- **`optional`** on the `verify` gate (default/rigorous) — the runner
-  self-computes this by running `bin/dm-verify.sh gate <id>`, which decides from
-  the diff: exit 0 = a user-facing surface moved (boot the app and drive it),
-  1 = none moved (explicit skip), 3 = a surface moved but the repo has no
-  `app_start_cmd` (reported **unavailable**, never a pass). A caller-declared
-  `noRuntimeSurface` is an override that skips the gate without asking.
+- **`optional`** on the `verify` gate (rigorous) — the decision comes from
+  `bin/dm-verify.sh gate <id>`, which reads the diff: exit 0 = a user-facing
+  surface moved (boot the app and drive it), 1 = none moved (explicit skip),
+  2 = could not decide, 3 = a surface moved but the repo has no `app_start_cmd`
+  (reported **unavailable**, never a pass). The runner cannot exec, so it
+  requires the agent to report those exit codes and refuses a `passed: true`
+  that they do not support. A caller-declared `noRuntimeSurface` is an override
+  that skips the gate without asking. `verify` ships in the rigorous tier ONLY
+  until every managed repo has app config — in `default` it would abort the
+  pipeline for each repo that has none.
 - **`max_rounds`** on a `fix` gate — the fix→re-review loop cap.
 - **`optional`** on the `security` gate (default/fast) — the runner self-computes
   this by running `bin/dm-pr.sh security-scan` itself (same as rigorous
