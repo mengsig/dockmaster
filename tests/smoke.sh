@@ -65,14 +65,16 @@ check "invalid durable id and role are rejected separately" '! b dm-thread-name.
 check "guard blocks git -C reset flag permutation" '! b dm-command-guard.sh check "git -C /tmp reset HEAD --hard" >/dev/null 2>&1'
 check "guard blocks absolute git clean flag permutation" '! b dm-command-guard.sh check "/usr/bin/git --no-pager -C /tmp clean -d -f" >/dev/null 2>&1'
 check "guard blocks non-hard reset and dry-run clean bypasses" '! b dm-command-guard.sh check "/usr/bin/git -C /tmp reset --merge HEAD" >/dev/null 2>&1 && ! b dm-command-guard.sh check "/usr/bin/git -C /tmp clean -n" >/dev/null 2>&1'
-check "guard blocks restore and destructive switch" '! b dm-command-guard.sh check "git restore file" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch --discard-changes main" >/dev/null 2>&1'
+# `git restore <path>` became permitted with #89's scoped carve-out; the
+# whole-tree form it was standing in for is what must stay refused.
+check "guard blocks restore and destructive switch" '! b dm-command-guard.sh check "git restore ." >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch --discard-changes main" >/dev/null 2>&1'
 check "guard blocks checkout and combined switch flags" '! b dm-command-guard.sh check "git checkout feature" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch -fq main" >/dev/null 2>&1'
 check "guard blocks quoted spaced-path destructive Git" '! b dm-command-guard.sh check "git -C \"/tmp/path with spaces\" reset --hard" >/dev/null 2>&1'
 check "guard blocks nested, indirect, and alias destructive Git" '! b dm-command-guard.sh check "bash -c \"git clean -fd\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env bash -c \"git reset --hard\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "\$GIT restore file" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git -c alias.nuke=\"!git reset --hard\" nuke" >/dev/null 2>&1'
 check "guard blocks dynamic Git executable and subcommands" '! b dm-command-guard.sh check "op=reset; git \"\$op\" --hard" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git \"\$(printf reset)\" --hard" >/dev/null 2>&1 && ! b dm-command-guard.sh check "\$(printf git) reset --hard" >/dev/null 2>&1'
 ESCAPED_RESET=$'git re\\\nset --hard'
 check "guard blocks escaped-newline destructive Git" '! b dm-command-guard.sh check "$ESCAPED_RESET" >/dev/null 2>&1'
-check "guard blocks shell-fed and alternate-shell destructive content" '! b dm-command-guard.sh check "printf \"git reset --hard\" | bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env dash -c \"git restore file\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "bash <<< \"git clean -fd\"" >/dev/null 2>&1'
+check "guard blocks shell-fed and alternate-shell destructive content" '! b dm-command-guard.sh check "printf \"git reset --hard\" | bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env dash -c \"git restore .\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "bash <<< \"git clean -fd\"" >/dev/null 2>&1'
 check "guard propagates piped stdin through shell wrappers" '! b dm-command-guard.sh check "printf \"git reset --hard\" | env bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "printf \"git reset --hard\" | command bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env command bash -s" >/dev/null 2>&1'
 check "guard rejects unresolved command positions" '! b dm-command-guard.sh check "\$SHELL -c \"git reset --hard\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git \"\$OP\" --hard" >/dev/null 2>&1'
 check "guard blocks invoked environment Git aliases" '! b dm-command-guard.sh check "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0=\"!git reset --hard\" git nuke" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0=\"\$ALIAS\" git nuke" >/dev/null 2>&1'
@@ -302,7 +304,7 @@ GUARD_CLONE="$GUARD_DISTRO/repos/veriflow/src"
 guard_from() { ( cd "$1" && printf '%s' "$2" | env -u DM_HOME "$GUARD_HOOK" hook ); }
 guard_dmhome() { ( cd "$TMP" && printf '%s' "$1" | DM_HOME="$GUARD_DISTRO" "$GUARD_HOOK" hook ); }
 GUARD_RESET='{"tool_input":{"command":"git reset --hard"}}'
-GUARD_CHECKOUT='{"tool_input":{"command":"git checkout -- package-lock.json"}}'
+GUARD_CHECKOUT='{"tool_input":{"command":"git checkout -- ."}}'
 GUARD_CLEAN='{"tool_input":{"command":"git clean -fdx"}}'
 GUARD_STATUS='{"tool_input":{"command":"git status"}}'
 check "hook blocks destructive git from a managed worktree (no DM_HOME)" '! guard_from "$GUARD_WT" "$GUARD_RESET" >/dev/null 2>&1'
@@ -3986,6 +3988,186 @@ check "the refused close recorded no terminal state" \
   '! grep -q " discarded: " "$DM_HOME/state/tasks/ri-ghost.status"'
 check "the discard-authority path is what reaches discarded" \
   'b dm-worktree.sh remove ri-ghost --force >/dev/null 2>&1 && grep -q " discarded: " "$DM_HOME/state/tasks/ri-ghost.status"'
+
+# --- command guard: precision fixes, closed holes, and the armed hook --------
+# Every fixed false positive is pinned in BOTH directions: the benign form is
+# ALLOWED and the destructive form it resembles is still REFUSED. A change that
+# only stops blocking things is a regression, not a fix.
+echo "== command guard precision and wiring (#143/#144/#139/#138/#89) =="
+
+# #143. Each body's first word reads like a wrapper, a runner, or an assignment,
+# which is what used to fire re-entry and refuse the sentence.
+check "guard permits ordinary PR prose that mentions git (#143)" \
+  'all_allowed "gh pr create --body \"watch the git log for changes\"" \
+     "gh pr create --body \"exec path handling in git changed\"" \
+     "gh pr create --body \"parallel git fetch across repos\"" \
+     "gh pr create --body \"time spent on git rebase was wasted\"" \
+     "gh pr create --body \"script that wraps git push\"" \
+     "gh pr create --body \"xargs with git ls-files is faster\"" \
+     "gh pr create --body \"strace showed git stat calls\"" \
+     "gh pr create --body \"flock around git index writes\"" \
+     "gh pr create --body=\"watch the git log for changes\"" \
+     "git commit -m \"env=prod git deploy notes\""'
+# A body that STARTS with the word git is classified on its merits wherever it
+# sits -- that is what keeps `entr -s "git reset --hard"` refused, and it is
+# what the guard did before option values became data. So a permitted git
+# command in prose passes and a destructive one does not.
+check "a git-leading body is classified, not waved through (#143)" \
+  'all_allowed "gh pr create --body \"git log shows the bug\"" \
+     && all_blocked "gh pr create --title \"git push --force is now refused\""'
+# The same words in COMMAND position, not option-value position, still refuse.
+check "guard still refuses a real command behind the same words (#143)" \
+  'all_blocked "parallel \"git push --force origin main\"" \
+     "parallel \" git push --force\"" \
+     "parallel \"timeout 5 git push --force\"" \
+     "flock -c \"git push --force\"" \
+     "./wrapper.sh \"git push --force\"" \
+     "xargs git push --force" \
+     "find . -exec git reset --hard {} +" \
+     "gh pr create --body x; git push --force origin main"'
+
+# #144. A blanket *.path refused submodule.<name>.path, which is a tree path.
+check "guard permits benign submodule.<name>.path (#144)" \
+  'all_allowed "git config submodule.lib.path" "git -c submodule.lib.path=vendor/lib status"'
+check "guard still refuses every .path that names an executable (#144)" \
+  'all_blocked "git config difftool.x.path /bin/sh" "git config mergetool.x.path /bin/sh" \
+     "git config browser.x.path /bin/sh" "git config man.x.path /bin/sh" \
+     "git -c include.path=/tmp/evil status"'
+
+# #139. GIT_TRACE=<path> was an unguarded file append through an allowed command.
+check "guard permits the GIT_TRACE stderr debugging idiom (#139)" \
+  'all_allowed "GIT_TRACE=1 git status" "GIT_TRACE_PACKET=true git fetch origin" "GIT_TRACE2=2 git log"'
+check "guard refuses a GIT_TRACE destination that is a file (#139)" \
+  'all_blocked "GIT_TRACE=/tmp/pwn git status" "GIT_TRACE2_EVENT=/tmp/pwn git status" \
+     "GIT_TRACE_PERFORMANCE=/tmp/pwn git log" "GIT_TRACE=\$DEST git status" \
+     "git -c trace2.eventTarget=/tmp/pwn status" "git config trace2.perfTarget /tmp/pwn"'
+
+# #138. Substitution content was classified as the executable and in process
+# substitution, but NOT in argument position, where it still ran.
+check "guard classifies substitution content in argument position (#138)" \
+  'all_blocked "echo \$(git push --force origin main)" \
+     "git log --oneline \$(git reset --hard HEAD~5)" \
+     "X=\$(git push --mirror origin)" \
+     "echo \`git push --force origin main\`" \
+     "echo \"\$(git push --force origin main)\"" \
+     "echo \"\`git reset --hard\`\""'
+check "guard leaves inert and harmless substitutions alone (#138)" \
+  "all_allowed 'git commit -m \"\$(cat msg.txt)\"' 'echo \"\$(git log --oneline)\"' \
+     'echo '\''\$(git push --force)'\'''"
+
+# #89. Restoring a drifted tracked file is ordinary crew work; discarding the
+# whole worktree with the same subcommand is the thing the guard exists to stop.
+check "guard permits a path-scoped file restore (#89)" \
+  'all_allowed "git restore package-lock.json" "git restore src/a.py src/b.py" \
+     "git restore -- package-lock.json" "git restore --staged --worktree package-lock.json" \
+     "git restore -s HEAD~1 package-lock.json" \
+     "git checkout -- package-lock.json" "git checkout HEAD -- package-lock.json"'
+check "guard still refuses an unscoped restore or a checkout that moves HEAD (#89)" \
+  'all_blocked "git restore ." "git restore" "git restore :/" "git restore \"*.json\"" \
+     "git restore --pathspec-from-file=list" "git restore \$FILE" \
+     "git checkout ." "git checkout -- ." "git checkout feature" "git checkout -b feature" \
+     "git checkout -f main" "git checkout main -b other -- file" "git checkout HEAD~5 --"'
+
+# --- #160 review: four HIGH regressions, each pinned in both directions -------
+# A quoted command reached through an ARGUMENT of an unmodelled executable: the
+# shell is find's argument, not the segment's executable, so check_nested_shell
+# never fires and the payload sat in option-value position.
+check "guard refuses a command smuggled through argument position (#160)" \
+  'all_blocked "find . -exec sh -c \"git push --force origin main\" \\;" \
+     "find . -execdir bash -c \"git reset --hard\" \\;" \
+     "find repos -name .git -execdir sh -c \"git reset --hard\" \\;" \
+     "docker run img sh -c \"git push --force\"" \
+     "entr -s \"git reset --hard\"" "rsync -e \"git push --force\""'
+# Payloads that do NOT begin with `git`, so only the shell-token rule catches
+# them -- without these the rule is masked by the git-leading one and a mutation
+# to it passes the suite.
+check "a shell token in argv classifies a payload whatever it starts with (#160)" \
+  'all_blocked "find . -exec sh -c \"cd /tmp && git clean -fdx\" \\;" \
+     "find . -exec sh -c \"timeout 5 git push --force\" \\;" \
+     "docker run img bash -c \"env git reset --hard\""'
+check "that rule does not refuse an innocent command handed to a shell (#160)" \
+  'all_allowed "find . -exec sh -c \"echo hello world\" \\;" \
+     "docker run img sh -c \"npm ci && npm test\"" \
+     "xargs -I{} echo \"the git log\"" "parallel \"some words about git here\""'
+check "the smuggle fix does not re-refuse ordinary PR prose (#160)" \
+  'all_allowed "gh pr create --body \"watch the git log for changes\"" \
+     "gh pr create --body \"xargs with git ls-files is faster\"" \
+     "gh pr create --body \"strace showed git stat calls\"" \
+     "find . -name \"*.py\" -print"'
+
+# Naming `.` and `..` was not enough. Each of these discards the whole worktree
+# from one directory down, and every one of them passed.
+check "guard refuses every unscoped pathspec spelling (#160)" \
+  'all_blocked "git restore ../.." "git restore ./." "git restore .//" \
+     "git restore /abs/path" "git restore {.,x}" "git restore src/../.." \
+     "git restore a/./.." "git checkout -- ../.." "git checkout -- ./."'
+check "the pathspec fix keeps a real file restore working (#160)" \
+  'all_allowed "git restore package-lock.json" "git restore src/app.py" \
+     "git restore a/b/c.txt" "git checkout -- src/app.py"'
+
+# The lexer models no shell grammar, so a keyword became the "executable" and
+# the following git a stray bare token. Ordinary compound shell was refused.
+check "guard permits ordinary compound shell (#160)" \
+  'all_allowed "if git diff --quiet; then echo clean; fi" \
+     "for r in a b; do git -C \"\$r\" status; done" \
+     "while ! git fetch origin; do sleep 1; done" \
+     "until git status; do sleep 1; done" \
+     "! git diff --quiet && echo dirty" "time git status" "type git" \
+     "{ git status; git log; }"'
+check "a keyword does not hide a destructive command (#160)" \
+  'all_blocked "if git push --force origin main; then echo ok; fi" \
+     "for r in a b; do git -C \"\$r\" reset --hard; done" \
+     "while git clean -fd; do :; done" "! git reset --hard" \
+     "time git push --force origin main" "{ git reset --hard; }"'
+
+# A heredoc body is stdin DATA. Re-lexed as commands, any line holding a bare
+# git refused -- which is how a PR body is normally assembled.
+HEREDOC_BODY="$(printf 'gh pr create --body "$(cat <<%sEOF%s\nFixes the thing.\ngit push --force is refused now.\nEOF\n)"' "'" "'")"
+HEREDOC_PLAIN="$(printf 'cat <<EOF\ngit reset --hard\nEOF\n')"
+HEREDOC_DASH="$(printf 'cat <<-EOF\n\tgit clean -fd\n\tEOF\n')"
+HEREDOC_SHELL="$(printf 'bash <<EOF\ngit reset --hard\nEOF\n')"
+# `<<<` is a HERESTRING. Read as a heredoc operator its delimiter would be `<`,
+# which never appears, so every later line would be swallowed unclassified --
+# the skip must not become a way to hide the next command.
+HERESTRING_THEN_CMD="$(printf 'grep -q x <<< "$s"\ngit reset --hard\n')"
+check "guard permits a heredoc body and a heredoc PR body (#160)" \
+  'all_allowed "$HEREDOC_BODY" "$HEREDOC_PLAIN" "$HEREDOC_DASH"'
+check "a heredoc fed to a SHELL is still refused (#160)" \
+  'all_blocked "$HEREDOC_SHELL" "bash <<< \"git clean -fd\""'
+check "a herestring does not swallow the commands after it (#160)" \
+  'all_blocked "$HERESTRING_THEN_CMD"'
+# The body skip must stop at the delimiter, not run to end of input.
+HEREDOC_THEN_CMD="$(printf 'cat <<EOF\nharmless text\nEOF\ngit reset --hard\n')"
+check "the heredoc skip stops at its delimiter (#160)" \
+  'all_blocked "$HEREDOC_THEN_CMD"'
+check "guard counts substitution parens quote-aware (#160)" \
+  'all_allowed "echo \"\$(grep \\\"(\\\" file)\"" "gh pr create --body \"the fix works :) ship it\""'
+
+# A hook that times out FAILS OPEN (measured, see SECURITY.md), so the parser
+# must never be the slow thing. 32KB is the size that showed it: 23s with the
+# quadratic reader, 2s with the sliding window. The bound is deliberately an
+# order of magnitude above the linear time and well below the quadratic one, so
+# a loaded CI runner cannot flip it either way.
+GUARD_BIG="$(awk 'BEGIN{ s="gh pr create --body \""; for(i=0;i<8000;i++) s = s "a b "; print s "\"" }')"
+GUARD_START="$(date +%s)"
+b dm-command-guard.sh check "$GUARD_BIG" >/dev/null 2>&1 || true
+GUARD_ELAPSED=$(( $(date +%s) - GUARD_START ))
+check "the lexer stays linear on a 32KB command (#160)" \
+  '[ "$GUARD_ELAPSED" -le 15 ]'
+# Over the cap the guard REFUSES rather than parsing on: a guard that runs long
+# is a guard that silently is not there.
+GUARD_OVER="$(awk 'BEGIN{ s="echo "; for(i=0;i<70000;i++) s = s "a"; print s }')"
+check "an oversized command is refused, not parsed until the timeout (#160)" \
+  '! b dm-command-guard.sh check "$GUARD_OVER" >/dev/null 2>&1'
+# Captured, not piped: `set -o pipefail` makes the pipeline carry the guard's
+# exit 2 rather than grep's verdict.
+GUARD_OVER_MSG="$(b dm-command-guard.sh check "$GUARD_OVER" 2>&1 || true)"
+check "the refusal names the size limit rather than a git verdict" \
+  'grep -q "byte limit" <<<"$GUARD_OVER_MSG"'
+# Arming is #89 and is NOT done here: the guard must stay dormant until the
+# fail-open behavior above is answered for.
+check "no settings.json installs the guard as a hook yet (#89 stays open)" \
+  '! jq -e ".hooks" "$ROOT/.claude/settings.json" >/dev/null 2>&1'
 
 echo
 echo "smoke: $pass passed, $fail failed"

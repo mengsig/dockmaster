@@ -12,7 +12,8 @@ through the normal gate (change-review + merge authority).
 
 ## Choose the path by how it landed
 
-- **Merged PR** — prefer a **revert PR**: `gh-axi pr revert <n>`. This is the
+- **Merged PR** — prefer a **revert PR**: `gh pr revert <n>` (same positional
+  shape under `gh-axi`; needs a `gh` new enough to have it). This is the
   sanctioned path: it opens a clean PR that reverses the merge commit. To run it
   through the normal gate tooling, **adopt the revert PR into a fresh task** — the
   gates (`dm-pr check`, merge) read `meta.pr`, so record the revert PR's URL on a

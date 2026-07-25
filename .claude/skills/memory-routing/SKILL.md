@@ -1,6 +1,6 @@
 ---
 name: memory-routing
-description: Where durable knowledge goes — per-repo shared facts to the repo's AGENTS.md dm:knowledge section, per-repo private notes to repos/<repo>/.dm, operator/fleet facts to dockmaster global memory, task notes to the backlog, findings to the scout report. Load before persisting knowledge or when sweeping a session for durable facts.
+description: Where durable knowledge goes — per-repo shared facts to the repo's committed .dm-knowledge/ notes, per-repo private notes to repos/<repo>/.dm, operator/fleet facts to dockmaster global memory, task notes to the backlog, findings to the scout report. Load before persisting knowledge or when sweeping a session for durable facts.
 ---
 
 # memory-routing
@@ -86,8 +86,8 @@ Facts about the **operator** or the **fleet as a whole**, not tied to one repo.
   `bin/dm-memory.sh remember --global --kind <kind> "<fact>"`.
 - `memory/` — Claude Code native file memory (operator identity, standing
   feedback, cross-repo state), indexed by `MEMORY.md`.
-- This distro's own repo knowledge lives in **this repo's** `AGENTS.md`
-  `dm:knowledge` section (it is itself a managed repo).
+- This distro's own repo knowledge lives in **this repo's** committed
+  `.dm-knowledge/` notes (it uses its own per-repo SHARED store).
 
 Recall both global files with `bin/dm-memory.sh recall --global [query]`.
 
@@ -104,7 +104,7 @@ Recall both global files with `bin/dm-memory.sh recall --global [query]`.
 | one managed repo, contributor-relevant | that repo's committed `.dm-knowledge/` notes |
 | one managed repo, orchestration (crew may see) | `repos/<repo>/.dm/notes.md` |
 | one managed repo, crew must NOT see | `repos/<repo>/.dm/private.md` |
-| this distro's own code | this repo's `AGENTS.md` dm:knowledge section |
+| this distro's own code | this repo's committed `.dm-knowledge/` notes |
 | the operator (prefs, style) | `state/operator.md` + native `memory/` |
 | the fleet as a whole | `state/learnings.md` |
 | a single task | the backlog item |

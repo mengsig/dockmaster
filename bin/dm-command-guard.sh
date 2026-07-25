@@ -3,12 +3,14 @@
 # Git forms that can lose work. Runs as `check <command>` or as a PreToolUse
 # hook reading the tool JSON on stdin.
 #
-# UNWIRED TODAY — do not read this file as an active control. Its only caller was
-# the Codex `.codex/config.toml` PreToolUse hook, removed with that runtime; no
-# Claude `settings.json` installs it. #89 owns the Claude-side wiring, and it is
-# deliberately not armed yet: #143 (prose false positives — the guard refuses
-# e.g. `gh pr create --body "watch the git log"`) must land first, or arming it
-# blocks ordinary work. Until then the logic is exercised only by the tests.
+# STILL UNWIRED — do not read this file as an active control. Its only caller
+# was the Codex PreToolUse hook, removed with that runtime; no Claude
+# `settings.json` installs it. #89 owns the wiring and is deliberately NOT done
+# here: arming was tried and reverted because the guard refused ordinary
+# compound shell (`for r in a b; do git -C "$r" status; done`) and it fails open
+# by construction — a PreToolUse hook that exits non-zero-non-2, or is killed at
+# its timeout, is a NON-BLOCKING error and the tool runs anyway. Until then the
+# logic is exercised only by the tests.
 #
 # SHAPE: allowlist, not denylist (#121). A denylist has to enumerate every
 # destructive Git form and every wrapper that reaches one, and loses that race
@@ -68,6 +70,17 @@
 # collateral. Text tools that provably never execute their argv are exempt so
 # `grep git .` still works; sed/awk/find/perl are deliberately NOT exempt.
 #
+# COMMAND POSITION vs ARGUMENT POSITION: an option, or the VALUE of the option
+# before it, is data the executable was handed, so a quoted sentence there is
+# prose and is not re-entered (#143). Three things keep that from becoming a
+# hole, each with a test: a string whose own first word is `git` is classified
+# WHEREVER it sits; a bare shell or runner token in the arguments makes the rest
+# of the scan strict (`find . -exec sh -c "git push --force"`); and a command
+# RUNNER keeps all of its arguments strict from the start.
+# The NARROWING that remains, stated plainly: an unmodelled executable that runs
+# its own option value where that value does NOT start with `git` -- say
+# `./deploy.sh --cmd "timeout 5 git push --force"` -- is not classified.
+#
 # DELIBERATELY PERMITTED, each with a test that says so:
 #   - `git push --force-with-lease` / `--force-if-includes`: the toolbelt itself
 #     uses lease-pinned force (dm-pr.sh) and #89 records it as intentional.
@@ -75,34 +88,153 @@
 #   - `git rebase` / `merge` / `pull`: they refuse to run on a dirty tree.
 #   - `git <sub> --help`: renders documentation, executes nothing.
 #   - `git config` on a key Git does not execute, read or write.
+#   - `git restore <path>` and `git checkout [<tree-ish>] -- <path>`: restoring
+#     a drifted tracked file is ordinary work (#89). Scoped to literal paths
+#     only — no pathspec, `.`, a glob or `:` magic is a whole-tree discard.
 #
 # NOT A SANDBOX. A tool that emits no Bash hook event is never seen at all.
 # See SECURITY.md for the coverage statement and the known limits.
 
 set -euo pipefail
 DM_GUARD_DEPTH="${DM_GUARD_DEPTH:-0}"
+DM_GUARD_MAX_COMMAND="${DM_GUARD_MAX_COMMAND:-65536}"
 
 deny() {
   printf 'BLOCKED: destructive Git command refused: %s\n' "$1" >&2
   exit 2
 }
 
+# bash rescans a string from its start for every `${var:offset:1}`, so a
+# per-character loop is QUADRATIC in the command length: 32KB took 21s against a
+# 10s PreToolUse timeout, and a guard that times out is a guard that is not
+# there. Read through a bounded sliding window instead -- the refill is the only
+# O(offset) operation and it happens once per LEX_WINDOW characters.
+LEX_WINDOW=512
+
+lex_char() {
+  local offset="$1"
+  if [ "$offset" -ge "$LEX_LENGTH" ] || [ "$offset" -lt 0 ]; then LEX_CHAR=""; return 0; fi
+  if [ "$offset" -lt "$LEX_BASE" ] || [ "$offset" -ge $((LEX_BASE + ${#LEX_CHUNK})) ]; then
+    LEX_BASE="$offset"; LEX_CHUNK="${LEX_INPUT:$offset:$LEX_WINDOW}"
+  fi
+  LEX_CHAR="${LEX_CHUNK:$((offset - LEX_BASE)):1}"
+}
+
+# A heredoc body is stdin DATA, not commands. Left in the token stream,
+# `--body "$(cat <<'EOF' ... EOF)"` re-lexed ordinary prose as commands and any
+# line holding a bare `git` refused. `<<<` is a HERESTRING, not a heredoc: it
+# must keep reaching check_shell_input, which refuses a shell fed unresolved
+# stdin. Only ONE pending delimiter is tracked; a second `<<` on the same line
+# overwrites it, so the rarer multi-heredoc form degrades to lexing the first
+# body as text rather than skipping both.
+note_heredoc_operator() {
+  local word="$1"
+  if [ "$HEREDOC_WANT_DELIMITER" -eq 1 ]; then
+    HEREDOC_DELIMITER="$word"; HEREDOC_WANT_DELIMITER=0; return 0
+  fi
+  case "$word" in
+    '<<<'*) return 0 ;;
+    '<<'|'<<-') HEREDOC_WANT_DELIMITER=1 ;;
+    '<<-'?*) HEREDOC_DELIMITER="${word#<<-}" ;;
+    '<<'?*) HEREDOC_DELIMITER="${word#<<}" ;;
+  esac
+}
+
+# `<<-` strips leading tabs from its delimiter line, so compare trimmed. Called
+# once per heredoc LINE, not per character.
+heredoc_line_ends_body() {
+  local line="$1"
+  while [ "${line# }" != "$line" ] || [ "${line#$'\t'}" != "$line" ]; do
+    line="${line# }"; line="${line#$'\t'}"
+  done
+  [ "$line" = "$HEREDOC_DELIMITER" ]
+}
+
 append_token() {
   TOKENS+=("$token")
   DYNAMIC+=("$dynamic")
+  note_heredoc_operator "$token"
   token=""; dynamic=0; started=0
 }
 
+# Consume the balanced `$( ... )` that starts at index $1, append the raw text
+# to the token being built, RECORD the inner command, and leave the index of the
+# closing paren in SUBSTITUTION_END. Sets a global rather than printing it: a
+# command substitution would run this in a subshell and lose both the token text
+# and the recorded command.
+# Paren counting is QUOTE-AWARE: `$(grep "(" file)` is balanced to a real shell,
+# and counting the quoted paren ran the scan off the end and refused it.
+consume_command_substitution() {
+  local i="$1" depth=1 inner="" char quote=""
+  token+='$('; dynamic=1; started=1
+  i=$((i + 2))
+  while [ "$i" -lt "$LEX_LENGTH" ] && [ "$depth" -gt 0 ]; do
+    lex_char "$i"; char="$LEX_CHAR"
+    if [ -n "$quote" ]; then
+      if [ "$char" = "$quote" ]; then quote=""; fi
+    else
+      case "$char" in
+        "'"|'"') quote="$char" ;;
+        '(') depth=$((depth + 1)) ;;
+        ')') depth=$((depth - 1)) ;;
+      esac
+    fi
+    token+="$char"
+    [ "$depth" -eq 0 ] || inner+="$char"
+    i=$((i + 1))
+  done
+  # Genuinely unbalanced: a real shell FAILS TO PARSE this and runs nothing, so
+  # refusing it is over-blocking a command that cannot execute. Leave it as one
+  # opaque DYNAMIC token -- still refused in executable position, never read as
+  # prose -- rather than denying.
+  if [ "$depth" -gt 0 ]; then SUBSTITUTION_END=$((LEX_LENGTH - 1)); return 0; fi
+  SUBSTITUTIONS+=("$inner")
+  SUBSTITUTION_END=$((i - 1))
+}
+
+# Same for the backtick spelling. An escape inside backticks is passed through
+# verbatim: the content is re-classified by a fresh lexer, which applies its own
+# escape rules to it.
+consume_backtick_substitution() {
+  local i="$1" inner="" char closed=0
+  token+='`'; dynamic=1; started=1
+  i=$((i + 1))
+  while [ "$i" -lt "$LEX_LENGTH" ]; do
+    lex_char "$i"; char="$LEX_CHAR"
+    token+="$char"
+    if [ "$char" = '`' ]; then closed=1; i=$((i + 1)); break; fi
+    inner+="$char"
+    i=$((i + 1))
+  done
+  if [ "$closed" -eq 0 ]; then SUBSTITUTION_END=$((LEX_LENGTH - 1)); return 0; fi
+  SUBSTITUTIONS+=("$inner")
+  SUBSTITUTION_END=$((i - 1))
+}
+
 lex_shell_command() {
-  local input="$1" i=0 char next state="plain" escaped=0 depth
-  TOKENS=(); DYNAMIC=(); token=""; dynamic=0; started=0
-  while [ "$i" -lt "${#input}" ]; do
-    char="${input:$i:1}"; next="${input:$((i + 1)):1}"
+  local i=0 char next state="plain" escaped=0 heredoc_line=""
+  LEX_INPUT="$1"; LEX_LENGTH="${#LEX_INPUT}"; LEX_CHUNK=""; LEX_BASE=0
+  HEREDOC_DELIMITER=""; HEREDOC_WANT_DELIMITER=0
+  TOKENS=(); DYNAMIC=(); SUBSTITUTIONS=(); token=""; dynamic=0; started=0
+  while [ "$i" -lt "$LEX_LENGTH" ]; do
+    lex_char "$i"; char="$LEX_CHAR"
+    lex_char $((i + 1)); next="$LEX_CHAR"
     if [ "$escaped" -eq 1 ]; then
       [ "$char" = $'\n' ] || { token+="$char"; started=1; }
       escaped=0; i=$((i + 1)); continue
     fi
     case "$state" in
+      heredoc)
+        # Body text is skipped entirely; only the delimiter line ends it.
+        if [ "$char" != $'\n' ]; then
+          heredoc_line+="$char"
+        else
+          if heredoc_line_ends_body "$heredoc_line"; then
+            state="plain"; HEREDOC_DELIMITER=""
+          fi
+          heredoc_line=""
+        fi
+        ;;
       single)
         if [ "$char" = "'" ]; then state="plain"; else token+="$char"; fi
         started=1
@@ -111,7 +243,14 @@ lex_shell_command() {
         case "$char" in
           '"') state="plain" ;;
           \\) escaped=1 ;;
-          '$'|'`') token+="$char"; dynamic=1 ;;
+          '$')
+            if [ "$next" = "(" ]; then
+              consume_command_substitution "$i"; i="$SUBSTITUTION_END"
+            else
+              token+="$char"; dynamic=1
+            fi
+            ;;
+          '`') consume_backtick_substitution "$i"; i="$SUBSTITUTION_END" ;;
           *) token+="$char" ;;
         esac
         started=1
@@ -123,26 +262,20 @@ lex_shell_command() {
           \\) escaped=1; started=1 ;;
           '$')
             if [ "$next" = "(" ]; then
-              token+='$('; dynamic=1; started=1; depth=1; i=$((i + 2))
-              while [ "$i" -lt "${#input}" ] && [ "$depth" -gt 0 ]; do
-                char="${input:$i:1}"; token+="$char"
-                case "$char" in '(') depth=$((depth + 1)) ;; ')') depth=$((depth - 1)) ;; esac
-                i=$((i + 1))
-              done
-              [ "$depth" -eq 0 ] || deny "unterminated command substitution"
-              i=$((i - 1))
+              consume_command_substitution "$i"; i="$SUBSTITUTION_END"
             else
               token+="$char"; dynamic=1; started=1
             fi
             ;;
-          '`') token+="$char"; dynamic=1; started=1 ;;
+          '`') consume_backtick_substitution "$i"; i="$SUBSTITUTION_END" ;;
           '#')
             # A comment ends at end of LINE, not end of input. `break` here
             # discarded every later newline-separated command, unguarded (#121).
             if [ "$started" -ne 0 ]; then
               token+="$char"
             else
-              while [ "$i" -lt "${#input}" ] && [ "${input:$i:1}" != $'\n' ]; do
+              while [ "$i" -lt "$LEX_LENGTH" ]; do
+                lex_char "$i"; [ "$LEX_CHAR" != $'\n' ] || break
                 i=$((i + 1))
               done
               TOKENS+=(";"); DYNAMIC+=(0)
@@ -154,6 +287,7 @@ lex_shell_command() {
           $'\n')
             [ "$started" -eq 0 ] || append_token
             TOKENS+=(";"); DYNAMIC+=(0)
+            if [ -n "$HEREDOC_DELIMITER" ]; then state="heredoc"; heredoc_line=""; fi
             ;;
           '&')
             # `&` inside a redirection (2>&1, >&2, &>log) belongs to the
@@ -186,7 +320,13 @@ lex_shell_command() {
     i=$((i + 1))
   done
   [ "$escaped" -eq 0 ] || deny "unterminated shell escape"
-  [ "$state" = "plain" ] || deny "unterminated shell quote"
+  # An unterminated HEREDOC is a shell syntax error, so nothing runs and there
+  # is nothing to refuse -- unlike an unterminated quote, which can still be a
+  # command the guard mis-segmented.
+  case "$state" in
+    plain|heredoc) ;;
+    *) deny "unterminated shell quote" ;;
+  esac
   [ "$started" -eq 0 ] || append_token
 }
 
@@ -371,12 +511,23 @@ config_key_executes() {
     uploadpack.packobjectshook|init.templatedir|protocol.ext.allow|\
     pager.*|filter.*|submodule.*.update|\
     *.command|*.driver|*.textconv|*.askpass|*.cmd|*.program|*.helper) return 0 ;;
-    # The merge-tool family (difftool/mergetool/browser/man <tool>.path are all
-    # executables) plus include.path, which injects config. Blanket rather than
-    # enumerated so a future tool family is covered; the accepted cost is that
-    # benign `submodule.<name>.path` refuses too.
-    *.path) return 0 ;;
+    # The tool families whose `.path` names an EXECUTABLE, plus include.path,
+    # which injects config. Enumerated rather than a blanket `*.path`: that
+    # blanket also refused `submodule.<name>.path`, which is a tree path and
+    # executes nothing (#144). A new tool family must be added here.
+    difftool.*.path|mergetool.*.path|browser.*.path|man.*.path|guitool.*.path|\
+    include.path|includeif.*.path) return 0 ;;
   esac
+  return 1
+}
+
+# Config keys whose value is a FILE GIT APPENDS TO. Not execution, but an
+# unguarded write through an allowed command, so it is refused alongside its
+# environment twin GIT_TRACE* (#139).
+config_key_writes_file() {
+  local key
+  key="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$key" in trace2.*target) return 0 ;; esac
   return 1
 }
 
@@ -388,6 +539,7 @@ check_config_entry() {
   case "$entry" in *=*) ;; *) return 0 ;; esac
   key="${entry%%=*}"
   config_key_executes "$key" && deny "Git config key '$key' has a value Git executes"
+  config_key_writes_file "$key" && deny "Git config key '$key' names a file Git writes"
   case "$key" in alias.*) ;; *) return 0 ;; esac
   name="${key#alias.}"
   [ "$name" = "$subcommand" ] || return 0
@@ -429,6 +581,18 @@ check_environment_prefixes() {
       # against git 2.54; MANPAGER is the same family, unproven here.
       PAGER=*|EDITOR=*|VISUAL=*|SSH_ASKPASS=*|MANPAGER=*)
         deny "environment variable '${token%%=*}' is a Git fallback whose value Git executes"
+        ;;
+      # The whole GIT_TRACE* family takes a destination: `1`/`2`/`true` writes
+      # to stderr, but any other value names a file Git APPENDS trace output to
+      # (or a socket, `af_unix:...`). That is an unguarded filesystem write
+      # through an allowed command (#139), so only the stderr spellings pass --
+      # `GIT_TRACE=1 git status` is the debugging idiom worth keeping.
+      GIT_TRACE*=*)
+        [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git trace destination cannot be safety-classified"
+        case "${token#*=}" in
+          0|1|2|true|false) ;;
+          *) deny "Git environment variable '${token%%=*}' names a file Git writes trace output to" ;;
+        esac
         ;;
       GIT_CONFIG_COUNT=*)
         [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git config count cannot be safety-classified"
@@ -575,8 +739,92 @@ check_git_config() {
     if config_key_executes "$token"; then
       deny "git config touching a key whose value Git executes: $token"
     fi
+    if config_key_writes_file "$token"; then
+      deny "git config touching a key that names a file Git writes: $token"
+    fi
     i=$((i + 1))
   done
+}
+
+# A pathspec naming ONE literal path, so a restore scoped to it cannot widen
+# into a whole-tree discard. `.`, `/` and a glob reach every tracked file, and
+# `:` opens Git's pathspec magic (`:/` IS the whole repository).
+# Naming `..` was not enough: `../..`, `./.`, `.//`, `src/../..` and any
+# absolute path all reach the whole tree, and a crewmate one `cd` deep into its
+# own worktree wiped it (#160 review). Test every path COMPONENT instead of the
+# whole string, and refuse brace expansion alongside globs.
+is_scoped_pathspec() {
+  case "$1" in
+    ""|/*|:*) return 1 ;;
+    *"*"*|*"?"*|*"["*|*"{"*) return 1 ;;
+  esac
+  case "/$1/" in *"/./"*|*"/../"*) return 1 ;; esac
+  return 0
+}
+
+restore_option_class() {
+  case "$1" in
+    -s|--source) printf 'value\n' ;;
+    --source=*|--staged|-S|--worktree|-W|--ours|--theirs|--overlay|\
+    --no-overlay|--ignore-unmerged|--progress|--no-progress|-q|--quiet)
+      printf 'flag\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# Restoring a drifted tracked file (the regenerated-lockfile case) is a
+# legitimate crewmate operation, so the subcommand cannot be refused outright
+# (#89) -- but `git restore .` discards the entire working tree, which is the
+# prime-directive violation the guard exists to prevent. Permitted ONLY when
+# every operand is a scoped literal path, and refused with none: no pathspec
+# means the whole tree. An unmodelled option fails closed like everywhere else.
+check_git_restore() {
+  local start="$1" end="$2" i token class paths=0 operands_only=0
+  i=$((start + 1))
+  while [ "$i" -lt "$end" ]; do
+    token="${TOKENS[$i]}"
+    if [ "$operands_only" -eq 0 ]; then
+      if [ "$token" = "--" ]; then operands_only=1; i=$((i + 1)); continue; fi
+      case "$token" in
+        -?*)
+          class="$(restore_option_class "$token")"
+          case "$class" in
+            value) i=$((i + 2)) ;;
+            flag) i=$((i + 1)) ;;
+            *) deny "git restore has an option the guard cannot classify: $token" ;;
+          esac
+          continue
+          ;;
+      esac
+    fi
+    is_scoped_pathspec "$token" || deny "git restore pathspec is not one scoped path: $token"
+    paths=$((paths + 1)); i=$((i + 1))
+  done
+  [ "$paths" -gt 0 ] || deny "git restore without a pathspec discards the whole worktree"
+}
+
+# Only the file-restore spelling, `git checkout [<tree-ish>] -- <path>...`.
+# Every other form switches branches, detaches HEAD, creates (-b/-B) or forces,
+# and the required `--` is what stops this reopening `git checkout .`.
+check_git_checkout() {
+  local start="$1" end="$2" i separator=-1 paths=0 token
+  i=$((start + 1))
+  while [ "$i" -lt "$end" ]; do
+    if [ "${TOKENS[$i]}" = "--" ]; then separator="$i"; break; fi
+    i=$((i + 1))
+  done
+  [ "$separator" -ge 0 ] || deny "git checkout without '-- <path>' changes what the worktree points at"
+  [ $((separator - start)) -le 2 ] || deny "git checkout takes at most one tree-ish before '--'"
+  if [ $((separator - start)) -eq 2 ]; then
+    token="${TOKENS[$((start + 1))]}"
+    case "$token" in -*) deny "git checkout option before '--' is not the file-restore form: $token" ;; esac
+  fi
+  i=$((separator + 1))
+  while [ "$i" -lt "$end" ]; do
+    is_scoped_pathspec "${TOKENS[$i]}" || deny "git checkout pathspec is not one scoped path: ${TOKENS[$i]}"
+    paths=$((paths + 1)); i=$((i + 1))
+  done
+  [ "$paths" -gt 0 ] || deny "git checkout -- without a pathspec discards the whole worktree"
 }
 
 check_git_switch() {
@@ -595,7 +843,7 @@ check_git_switch() {
 # refused: that is the point of the inversion (#121).
 #
 # REFUSED WITH NO CLEAN SPLIT, recorded so it reads as a decision:
-#   reset, clean, restore, checkout      discard worktree/index state
+#   reset, clean                         discard worktree/index state
 #   gc, prune, prune-packed, repack      destroy the dangling-commit recovery net
 #   filter-branch, replay, fast-import   rewrite history
 #   update-ref, symbolic-ref, pack-refs, read-tree, update-index
@@ -639,6 +887,8 @@ check_git_subcommand() {
     worktree) check_git_worktree "$sub_index" "$end" ;;
     config) check_git_config "$sub_index" "$end" ;;
     switch) check_git_switch "$sub_index" "$end" ;;
+    restore) check_git_restore "$sub_index" "$end" ;;
+    checkout) check_git_checkout "$sub_index" "$end" ;;
     rm) check_git_rm "$sub_index" "$end" ;;
     rebase) check_git_rebase "$sub_index" "$end" ;;
     difftool) check_git_difftool "$sub_index" "$end" ;;
@@ -777,11 +1027,28 @@ skip_wrapper_args() {
   printf '%s\n' "$i"
 }
 
+# Shell KEYWORDS are grammar, not executables. The lexer models no grammar, so
+# `for r in a b; do git -C "$r" status; done` made `do` the segment's executable
+# and the following `git` a stray bare token -- ordinary compound shell refused
+# (#160 review). Transparent here, so the real command behind the keyword is the
+# one classified: `if git push --force; then` still refuses.
+# `time` is here AND in is_command_runner: unwrapping it is exact (its argv is
+# the rest of the segment), while re-entry still has to treat a quoted
+# `"time git push --force"` as a command.
+is_shell_keyword() {
+  case "$1" in
+    if|then|elif|else|fi|while|until|for|do|done|case|esac|select|function|\
+    time|coproc|'{'|'}'|'!') return 0 ;;
+  esac
+  return 1
+}
+
 segment_command_index() {
   local i="$1" end="$2" wrapper token
   while [ "$i" -lt "$end" ]; do
     token="${TOKENS[$i]}"
     case "$token" in *=*) i=$((i + 1)); continue ;; esac
+    if is_shell_keyword "$token"; then i=$((i + 1)); continue; fi
     wrapper="${token##*/}"
     if ! is_command_wrapper "$wrapper"; then printf '%s\n' "$i"; return 0; fi
     i="$(skip_wrapper_args "$wrapper" $((i + 1)) "$end")"
@@ -794,7 +1061,7 @@ segment_command_index() {
 # (-exec), perl and python all CAN execute and are excluded.
 argument_inert() {
   case "$1" in
-    echo|printf|cat|grep|egrep|fgrep|rg|head|tail|wc|ls|man|which|jq) return 0 ;;
+    echo|printf|cat|grep|egrep|fgrep|rg|head|tail|wc|ls|man|which|type|jq) return 0 ;;
   esac
   return 1
 }
@@ -820,28 +1087,86 @@ token_begins_a_command() {
   return 1
 }
 
+# COMMAND POSITION vs ARGUMENT POSITION. A token that is an option, or the VALUE
+# of the option before it, is DATA the executable was handed -- a `--body`, a
+# `--title`, an `-m` message -- not a command it runs. Re-entering such a value
+# classified ordinary prose as a command, so any sentence whose first word reads
+# like a wrapper or a runner refused once it also said "git" (#143):
+# `--body "watch the git log for changes"`. `--` is excluded: it ends the
+# options, so what follows it is an operand, not a value.
+token_is_option_data() {
+  local i="$1" start="$2" previous
+  case "${TOKENS[$i]}" in --) return 1 ;; -?*) return 0 ;; esac
+  [ "$i" -gt $((start + 1)) ] || return 1
+  previous="${TOKENS[$((i - 1))]}"
+  case "$previous" in
+    --) return 1 ;;
+    *=*) return 1 ;;
+    -?*) return 0 ;;
+  esac
+  return 1
+}
+
 # A MULTI-WORD string is classified by re-entering the guard rather than refused
 # outright: refusing every token whose first word is "git" blocked ordinary prose
 # (`--body "git config write path now routed"`), and over-blocking is what gets a
 # guard switched off. Re-entry hands the whole string to the normal segmentation
 # and wrapper handling, so a leading space, a tab, or a `sh -c`/`env`/`timeout`
 # prefix cannot walk past it. A BARE git token still refuses -- the wrapper's
-# real argv is the rest of the segment, which this token does not describe.
+# real argv is the rest of the segment, which this token does not describe, and
+# an option value is NOT exempted from that, so `find . -exec git reset --hard`
+# stays refused.
+# A command RUNNER keeps every argument strict: its options do run commands
+# (`flock -c`), and its real argv is unknowable anyway, which is why it is not
+# unwrapped in the first place.
 check_stray_git_tokens() {
   local start="$1" end="$2" executable="$3" i token flat first
+  local data_args=1 hands_to_shell=0
   argument_inert "$executable" && return 0
+  if is_command_runner "$executable" || is_shell_executable "$executable"; then
+    data_args=0
+  fi
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
     token="${TOKENS[$i]}"
     flat="${token//$'\t'/ }"; flat="${flat//$'\n'/ }"
     while [ "${flat# }" != "$flat" ]; do flat="${flat# }"; done
     first="${flat%% *}"
+    # Past a shell/runner token in the ARGUMENTS, every quoted string is a
+    # command being handed to it -- prose is not what follows `sh -c`. So
+    # re-enter regardless of the first word, which is the only thing that
+    # catches `find . -exec sh -c "cd /tmp && git clean -fdx" \;`.
+    if [ "$hands_to_shell" -eq 1 ]; then
+      case "$flat" in
+        *" "*) DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token"; i=$((i + 1)); continue ;;
+      esac
+    fi
     if token_begins_a_command "$first"; then
       case "$flat" in
-        *" "*) DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token" ;;
+        *" "*)
+          # A string whose own first word is `git` is classified wherever it
+          # sits: that is how `entr -s "git reset --hard"` and `rsync -e "git
+          # push --force"` stay refused, and it matches what the guard did
+          # before option values became data.
+          if [ "$data_args" -eq 0 ] || [ "${first##*/}" = git ] \
+             || ! token_is_option_data "$i" "$start"; then
+            DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token"
+          fi
+          ;;
         *) case "${first##*/}" in
              git) deny "'$executable' may execute the git command in its arguments" ;;
-           esac ;;
+           esac
+           # A bare shell or runner token in the ARGUMENTS means this executable
+           # hands a command to one -- `find . -exec sh -c "git push --force"`,
+           # `docker run img sh -c ...`. check_nested_shell never fires there,
+           # because the shell is find's argument rather than the segment's
+           # executable, so everything after it must be classified (#160 review).
+           # Only the ARGV spelling sets this: a runner that is the segment's own
+           # executable keeps the first-word gate, so `xargs -I{} echo "the git
+           # log"` stays prose.
+           if is_shell_executable "${first##*/}" || is_command_runner "${first##*/}"; then
+             data_args=0; hands_to_shell=1
+           fi ;;
       esac
     fi
     i=$((i + 1))
@@ -856,10 +1181,30 @@ check_indirect_segment() {
   fi
 }
 
+# Substitution content executes wherever it appears, so it is classified in its
+# own right BEFORE segmentation. The executable and process-substitution
+# positions were already refused; argument position was not, so
+# `echo $(git push --force)` ran the push (#138).
+check_substitutions() {
+  local i=0
+  while [ "$i" -lt "${#SUBSTITUTIONS[@]}" ]; do
+    DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "${SUBSTITUTIONS[$i]}"
+    i=$((i + 1))
+  done
+}
+
 check_shell_command() {
   local command="$1" i=0 end command_index token executable
   [ "$DM_GUARD_DEPTH" -le 4 ] || deny "excessively nested shell command"
+  # A command the parser cannot finish in time is the one failure this must not
+  # have: a PreToolUse hook that exits non-zero-non-2, or is killed at its
+  # timeout, is a NON-BLOCKING error and the tool runs anyway. So bound the
+  # input here and refuse deterministically, rather than letting the largest
+  # commands be the ones that walk through.
+  [ "${#command}" -le "$DM_GUARD_MAX_COMMAND" ] \
+    || deny "shell command is ${#command} bytes, over the ${DM_GUARD_MAX_COMMAND}-byte limit the guard can classify"
   lex_shell_command "$command"
+  check_substitutions
   while [ "$i" -lt "${#TOKENS[@]}" ]; do
     if is_segment_end "${TOKENS[$i]}"; then i=$((i + 1)); continue; fi
     end="$i"

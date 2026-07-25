@@ -55,7 +55,8 @@ check_guard_blocked() {
 
 check_guard_blocked 'git -C /tmp reset HEAD --hard'
 check_guard_blocked '/usr/bin/git --no-pager -C /tmp clean -d -f'
-check_guard_blocked '/usr/bin/git -C /tmp restore --source HEAD file.txt'
+# A path-scoped restore is permitted work (#89); the whole-tree form is not.
+check_guard_blocked '/usr/bin/git -C /tmp restore --source HEAD .'
 check_guard_blocked '/usr/bin/git -C /tmp switch --discard-changes main'
 check_guard_blocked 'git -C "/tmp/a path with spaces" reset --hard'
 check_guard_blocked 'bash -c "git clean -fd"'
