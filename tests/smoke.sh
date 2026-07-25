@@ -1503,15 +1503,42 @@ check "gate waits on a CI repo reporting none"          '[ "$(awgate none clean 
 check "gate passes none only on a confirmed CI-less repo" '[ "$(awgate none clean 0)" = pass ]'
 check "gate waits on pending and unknown"               '[ "$(awgate pending clean 1)" = wait ] && [ "$(awgate unknown clean 1)" = wait ]'
 
-echo "== dispatch right-sizing: dm_recommended_model is an UNBIASED anchor (#77, #166) =="
-# Deliberately a constant, not a heuristic. A regex over a task title is a weak
-# signal that steered real spend, so the orchestrator decides instead. These
-# checks fail if anyone reintroduces keyword sizing in EITHER direction.
-rec() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_model "$@" ); }
-check "the anchor model tier is sonnet"          '[ "$(rec)" = sonnet ]'
-check "risk words do not size the anchor up"     '[ "$(rec ship "harden auth token security migration mutex")" = sonnet ]'
-check "mechanical words do not size it down"     '[ "$(rec ship "fix docs typo")" = sonnet ]'
-check "the scout kind does not size it"          '[ "$(rec scout "look into the page layout")" = sonnet ]'
+echo "== dispatch right-sizing: the recommendation is COMPUTED from the dispatch (#177) =="
+# Signals that exist at dispatch — the structural role, the task kind, and a
+# real diff — never the task title. The asymmetry is the point: an under-powered
+# review lands bad code, an under-powered builder costs a retry.
+pair() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_dispatch "$@" ); }
+rec()  { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_model "$@" ); }
+check "no diff signal falls back to the anchor"   '[ "$(pair build ship)" = "sonnet medium" ]'
+check "a small mechanical build diff reaches the bottom tier" '[ "$(pair build ship 1 12)" = "haiku low" ]'
+check "an ordinary build diff stays at the anchor" '[ "$(pair build ship 3 120)" = "sonnet medium" ]'
+check "a multi-file build diff sizes up"          '[ "$(pair build ship 9 420)" = "opus high" ]'
+check "a review never sizes below high+opus"      '[ "$(pair review ship)" = "opus high" ] && [ "$(pair review ship 1 3)" = "opus high" ] && [ "$(pair review ship 3 120)" = "opus high" ]'
+check "a large review sizes to the top level"     '[ "$(pair review ship 9 420)" = "opus xhigh" ]'
+check "verify floors at the anchor and rises with the diff" \
+  '[ "$(pair verify ship 1 3)" = "sonnet medium" ] && [ "$(pair verify ship 9 420)" = "opus high" ]'
+check "a scout never sizes below the anchor"      '[ "$(pair build scout 1 12)" = "sonnet medium" ] && [ "$(pair build scout)" = "sonnet medium" ]'
+check "a measured zero-file diff is unknown, not small" '[ "$(pair build ship 0 0)" = "sonnet medium" ]'
+# Failure contract: a missing or garbage ROLE is a caller bug, refused loudly —
+# never silently anchored, which would hide a misrouted review pass forever.
+check "a missing role is refused"                 '! pair'
+check "a garbage role is refused"                 '! pair reveiw ship 1 12'
+check "a refused role prints no tier at all"      '[ -z "$(pair reveiw ship 1 12 2>/dev/null)" ]'
+ROLE_REFUSAL="$(pair nonsense 2>&1 || true)"   # captured, not piped (pipefail)
+check "the refusal names the valid roles"         'grep -q "build review verify" <<<"$ROLE_REFUSAL"'
+check "the model dial refuses the same bad role"  '! rec nonsense ship'
+# Guard the guard: every role the set accepts must have a row in the table, and
+# every row must yield a real model AND a real effort level.
+check "every accepted role yields a valid model and level" \
+  '( . "$ROOT/bin/dm-lib.sh"
+     for w7r in $DM_DISPATCH_ROLES; do
+       w7p="$(dm_recommended_dispatch "$w7r" ship 3 120)" || exit 1
+       case "${w7p%% *}" in haiku|sonnet|opus|fable) ;; *) exit 1 ;; esac
+       dm_effort_is_valid "${w7p##* }" || exit 1
+     done )'
+# Garbage or half-supplied counts are a MISSING signal, not a crash.
+check "unparsable diff counts fall back to the anchor" \
+  '[ "$(pair build ship abc xyz)" = "sonnet medium" ] && [ "$(pair build ship 1)" = "sonnet medium" ] && [ "$(pair build ship -3 -9)" = "sonnet medium" ]'
 
 echo "== dispatch right-sizing: dm-status flags an unsized dispatch (#77, #166) =="
 # A live `working` task missing EITHER dial is an unsized dispatch; the hint
@@ -4168,21 +4195,52 @@ check "the refusal names the size limit rather than a git verdict" \
 # fail-open behavior above is answered for.
 check "no settings.json installs the guard as a hook yet (#89 stays open)" \
   '! jq -e ".hooks" "$ROOT/.claude/settings.json" >/dev/null 2>&1'
-echo "== dispatch right-sizing: dm_recommended_effort is an UNBIASED anchor (#166) =="
-# medium, always. The keyword heuristics are gone on purpose: the orchestrator
-# holds the task context, and a title regex that steers spend is worse than no
-# signal. These checks fail if keyword sizing comes back in either direction.
+echo "== dispatch right-sizing: both dials come from ONE table (#166, #177) =="
 w6rec() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_model "$@" ); }
 w6eff() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_effort "$@" ); }
-check "the anchor effort is medium"             '[ "$(w6eff)" = medium ]'
-check "risk words do not size effort up"        '[ "$(w6eff ship "harden auth token security")" = medium ] && [ "$(w6eff ship "add Alembic migration")" = medium ]'
-check "investigation words do not size up"      '[ "$(w6eff ship "diagnose the flaky drain")" = medium ] && [ "$(w6eff ship "refactor the report renderer")" = medium ]'
-check "the scout kind does not size up"         '[ "$(w6eff scout "look into the page layout")" = medium ]'
-check "mechanical words do not size down"       '[ "$(w6eff ship "fix docs typo")" = medium ] && [ "$(w6eff ship "rename a variable")" = medium ]'
-check "the two dials are anchored independently" '[ "$(w6rec)" = sonnet ] && [ "$(w6eff)" = medium ]'
+check "the two dials split the same recommendation" \
+  '[ "$(w6rec build ship 1 12)" = haiku ] && [ "$(w6eff build ship 1 12)" = low ] \
+   && [ "$(w6rec review ship 9 420)" = opus ] && [ "$(w6eff review ship 9 420)" = xhigh ]'
+check "with no signal both dials give the anchor" '[ "$(w6rec build ship)" = sonnet ] && [ "$(w6eff build ship)" = medium ]'
+check "a bad role fails BOTH dials, and prints nothing"  '! w6rec bogus ship && ! w6eff bogus ship && [ -z "$(w6eff bogus ship 2>/dev/null)" ]'
+# The task TITLE is not a signal and must never become one again — a regex over
+# prose steered real spend and over-fired (`auth` matched author/authority).
+check "a title passed where a kind belongs cannot size anything" \
+  '[ "$(w6rec build "harden auth token security migration mutex")" = sonnet ] && [ "$(w6rec build "fix docs typo")" = sonnet ]'
 # The dead signal sets must stay dead — an orphaned regex is the seed of the
 # next quiet re-bias.
 check "the keyword signal sets are gone"        '! grep -qE "DM_RISK_SIGNAL_RE|DM_MECHANICAL_SIGNAL_RE" "$ROOT/bin/dm-lib.sh"'
+check "no recommender reads a task title"       '! grep -nE "dm_meta_get [^ ]+ title" "$ROOT/bin/dm-lib.sh"'
+
+echo "== dispatch right-sizing: diff size is MEASURED, and failure is visible (#177) =="
+b dm-task.sh new w7size --kind ship --repo demo --title "measure me" >/dev/null
+W7WT="$(b dm-worktree.sh create w7size demo w7/size)"
+dsize() { ( . "$ROOT/bin/dm-lib.sh"; dm_worktree_diff_size "$@" ); }
+tsize() { ( . "$ROOT/bin/dm-lib.sh"; dm_task_diff_size "$@" ); }
+check "an unbuilt branch measures zero files"      '[ "$(dsize "$W7WT" main)" = "0 0" ]'
+printf 'a\nb\nc\n' > "$W7WT/newfile.txt"
+git -C "$W7WT" add newfile.txt >/dev/null && git -C "$W7WT" commit -qm "add newfile" >/dev/null
+check "a real commit measures files and lines"     '[ "$(dsize "$W7WT" main)" = "1 3" ]'
+check "the task-level measurement resolves its own base" '[ "$(tsize w7size)" = "1 3" ]'
+# Every way the measurement can fail returns non-zero with NO output, so a
+# caller can never mistake "could not measure" for "measured nothing".
+check "an absent worktree is refused, not guessed"  '! dsize "$TMP/no-such-worktree" main'
+check "a directory that is not a git worktree is refused" '! dsize "$TMP" main'
+check "an unknown base ref is refused"              '! dsize "$W7WT" no-such-base-ref'
+check "a missing argument is refused"               '! dsize "$W7WT" "" && ! dsize "" main'
+check "a refused measurement prints nothing"        '[ -z "$(dsize "$TMP/no-such-worktree" main 2>/dev/null)" ]'
+check "a task with no worktree recorded is refused" 'b dm-task.sh new w7nowt --kind ship --repo demo >/dev/null; ! tsize w7nowt'
+check "an unmeasurable task falls back to the anchor, never to small" \
+  '[ "$(b dm-task.sh recommend build w7nowt | grep "^model=")" = "model=sonnet" ]'
+# KNOWN LIMIT, pinned so it stays a decision: the measurement is of the BRANCH,
+# so uncommitted work is outside it and a tiny commit over a large dirty tree
+# still reads small. Change this test only alongside the measurement itself.
+W7N=0; while [ "$W7N" -lt 40 ]; do
+  printf 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n' > "$W7WT/dirty$W7N.txt"; W7N=$((W7N + 1)); done
+check "uncommitted work is outside the measurement" '[ "$(dsize "$W7WT" main)" = "1 3" ]'
+check "a dirty tree cannot raise the recommendation either" \
+  '[ "$(b dm-task.sh recommend build w7size | grep "^model=")" = "model=haiku" ]'
+rm -f "$W7WT"/dirty*.txt
 
 echo "== dispatch right-sizing: the effort set is closed, and each level has an agent (#166) =="
 w6valid() { ( . "$ROOT/bin/dm-lib.sh"; dm_effort_is_valid "$@" ); }
@@ -4213,8 +4271,35 @@ check "there is exactly one crew definition per accepted level (guard the guard)
   '( . "$ROOT/bin/dm-lib.sh"
      w6n=0; for w6l in $DM_EFFORT_LEVELS; do w6n=$((w6n + 1)); done
      [ "$(ls "$ROOT"/.claude/agents/crew-*.md | wc -l)" -eq "$w6n" ] )'
-check "no agent definition pins a model (the dials stay independent)" \
-  '! grep -q "^model:" "$ROOT"/.claude/agents/crew-*.md'
+# Every level pins a DEFAULT model (#177), so an omitted `model` parameter lands
+# on a considered tier instead of inheriting the session's most expensive one.
+# The pin must not couple the dials: the spawn parameter still overrides it, and
+# each file has to say so, or the next reader reads a pin as a coupling.
+check "every crew-<level> pins its default model" \
+  '( . "$ROOT/bin/dm-lib.sh"
+     for w6l in $DM_EFFORT_LEVELS; do
+       grep -qx "model: .\+" "$ROOT/.claude/agents/crew-$w6l.md" || exit 1
+     done )'
+# `&&`-joined, not newline-separated: `check` evals its body, and a body of four
+# separate commands reports only the LAST one's status — the medium and high
+# rows were unguarded, and a deleted crew-*.md still passed.
+check "the pinned defaults are the baseline table" \
+  'grep -qx "model: haiku"  "$ROOT/.claude/agents/crew-low.md" &&
+   grep -qx "model: sonnet" "$ROOT/.claude/agents/crew-medium.md" &&
+   grep -qx "model: opus"   "$ROOT/.claude/agents/crew-high.md" &&
+   grep -qx "model: opus"   "$ROOT/.claude/agents/crew-xhigh.md"'
+check "the cheap level is reachable by omission alone" 'grep -qx "model: haiku" "$ROOT/.claude/agents/crew-low.md"'
+check "every definition states the parameter still overrides" \
+  '( for w6f in "$ROOT"/.claude/agents/crew-*.md; do
+       grep -q "parameter overrides" "$w6f" || exit 1
+     done )'
+# The paths are asserted first: grep exits 2 on a missing operand, and `!` reads
+# that as "claim absent", so renaming any one of them would have retired this
+# guard while it kept reporting a pass.
+W6CLAIMPATHS="$ROOT/bin $ROOT/.claude $ROOT/.dm-knowledge $ROOT/AGENTS.md $ROOT/docs $ROOT/README.md"
+check "no distro text still claims nothing pins a model" \
+  '( for w6p in $W6CLAIMPATHS; do [ -e "$w6p" ] || exit 1; done
+     ! grep -rqE "[Nn]o ([^ ]+ )?definition pins a model" $W6CLAIMPATHS )'
 # The drift guard runs BOTH ways. Forward (above): every level the gate accepts
 # has a file whose `name:` and `effort:` both match. Reverse (here): every file
 # DECLARES a name the gate accepts and matching its own basename — so a stray
@@ -4252,6 +4337,96 @@ check "both dials chosen admits the dispatch"          'b dm-task.sh set w6gate-
 # anchor, and overriding both is the intended workflow.
 check "the recorded choice may differ from both anchors" \
   '[ "$(b dm-task.sh get w6gate-1 model)" = haiku ] && [ "$(b dm-task.sh get w6gate-1 effort)" = xhigh ]'
+
+echo "== dispatch tier: per-pass sizing is one command (#177) =="
+# w7size carries a real 1-file/3-line diff, so the same branch must size a
+# BUILDER at the bottom tier and a REVIEWER at the top of the model axis.
+W7RECB="$(b dm-task.sh recommend build w7size)"
+W7RECR="$(b dm-task.sh recommend review w7size)"
+check "a small build pass is recommended the bottom tier" \
+  'grep -qx "model=haiku" <<<"$W7RECB" && grep -qx "effort=low" <<<"$W7RECB"'
+check "the recommendation names the subagent_type to spawn" 'grep -qx "subagent_type=crew-low" <<<"$W7RECB"'
+check "it shows the signals it used, with the real numbers" \
+  'grep -q "signals=role:build kind:ship diff:small (files=1 lines=3)" <<<"$W7RECB"'
+check "a review of the same diff never drops below high+opus" \
+  'grep -qx "model=opus" <<<"$W7RECR" && grep -qx "effort=high" <<<"$W7RECR"'
+check "recommend refuses an unknown role"      '! b dm-task.sh recommend audit w7size >/dev/null 2>&1'
+check "recommend refuses an unknown task"      '! b dm-task.sh recommend build w7-no-such-task >/dev/null 2>&1'
+check "recommend refuses with no role at all"  '! b dm-task.sh recommend >/dev/null 2>&1'
+W7BADROLE="$(b dm-task.sh recommend audit w7size 2>&1 || true)"   # captured, not piped
+check "the role refusal names the valid roles" 'grep -q "build review verify" <<<"$W7BADROLE"'
+check "recommend records nothing (it only advises)" \
+  '[ -z "$(b dm-task.sh get w7size model)" ] && [ -z "$(b dm-task.sh get w7size effort)" ]'
+
+echo "== dispatch tier: the distribution is inspectable without a script (#177) =="
+W7SIZING="$(b dm-task.sh sizing)"
+check "sizing counts the models actually dispatched" 'grep -qE "^model[[:space:]]+haiku[[:space:]]+[0-9]+" <<<"$W7SIZING"'
+check "sizing counts the efforts actually dispatched" 'grep -qE "^effort[[:space:]]+xhigh[[:space:]]+[0-9]+" <<<"$W7SIZING"'
+check "sizing counts the unsized dispatches"         'grep -qE "^unsized[[:space:]]+no model or no effort[[:space:]]+[0-9]+" <<<"$W7SIZING"'
+check "sizing totals every task record"              'grep -qE "^total[[:space:]]+task records[[:space:]]+[0-9]+" <<<"$W7SIZING"'
+# The unsized count must be REAL: w7size records neither dial, so it is in it.
+check "a task with neither dial is counted unsized" \
+  '[ "$(grep -E "^unsized" <<<"$W7SIZING" | awk "{print \$NF}")" -ge 1 ]'
+check "sizing on an empty home says so rather than printing nothing" \
+  '[ "$(DM_HOME="$TMP/sizing-empty" b dm-task.sh sizing)" = "(no tasks)" ]'
+
+echo "== dispatch tier: the record is cross-checked against what actually ran (#177) =="
+# `set agent_id` is a RECORD gate: it forces the choice to be written down and
+# cannot verify the spawn. The transcript is the independent second source, so a
+# record that LIES about what ran is catchable. Unreadable stays unproven.
+w7sized() {   # <id> <model> <effort> <agent-id> -- a fully recorded dispatch
+  b dm-task.sh new "$1" --kind ship --repo demo --title "sized dispatch" >/dev/null
+  b dm-worktree.sh create "$1" demo >/dev/null
+  b dm-brief.sh "$1" >/dev/null
+  sed 's/{TASK}/Do the thing./' "$DM_HOME/data/$1/brief.md" > "$TMP/w7brief" \
+    && mv "$TMP/w7brief" "$DM_HOME/data/$1/brief.md"
+  b dm-task.sh set "$1" model "$2" >/dev/null
+  b dm-task.sh set "$1" effort "$3" >/dev/null
+  b dm-task.sh set "$1" agent_id "$4" >/dev/null
+}
+W7TX="$TMP/transcripts"; mkdir -p "$W7TX"
+w7sized w7tx-ok    opus   high   agent-tx-ok
+w7sized w7tx-bad   sonnet medium agent-tx-bad
+w7sized w7tx-gone  haiku  low    agent-tx-gone
+w7sized w7tx-blank opus   high   agent-tx-blank
+# The record holds a tier alias; the runtime reports a full model id.
+printf '{"type":"assistant","message":{"model":"claude-opus-5"}}\n' > "$W7TX/agent-tx-ok.output"
+printf '{"type":"assistant","message":{"model":"claude-opus-5"}}\n' > "$W7TX/agent-tx-bad.output"
+printf '{"type":"user","message":{"role":"user"}}\n'                > "$W7TX/agent-tx-blank.output"
+# agent-tx-gone deliberately has NO transcript file.
+W7TXOUT="$(b dm-task.sh sizing --transcripts "$W7TX" 2>"$TMP/w7tx.err" || true)"
+check "an alias record matching a full model id counts as verified" \
+  'grep -qE "^verified[[:space:]]+ran as recorded[[:space:]]+1$" <<<"$W7TXOUT"'
+check "a contradicted record is a MISMATCH, not a pass" \
+  'grep -qE "^verified[[:space:]]+MISMATCH[[:space:]]+1$" <<<"$W7TXOUT"'
+# A missing file and a transcript with no model field must land in the SAME
+# unproven bucket — neither may be counted as verified.
+check "a missing or model-less transcript is unproven, never verified" \
+  '[ "$(grep -E "^verified[[:space:]]+no transcript found" <<<"$W7TXOUT" | awk "{print \$NF}")" -ge 2 ]'
+check "the mismatch names the task, the record and what ran" \
+  'grep -q "w7tx-bad" "$TMP/w7tx.err" && grep -q "recorded model=sonnet" "$TMP/w7tx.err" && grep -q "claude-opus-5" "$TMP/w7tx.err"'
+check "a mismatch exits non-zero rather than reporting a clean sweep" \
+  '! b dm-task.sh sizing --transcripts "$W7TX" >/dev/null 2>&1'
+check "the plain distribution still exits 0 with the same mismatch present" \
+  'b dm-task.sh sizing >/dev/null 2>&1'
+check "the cross-check rows appear only when transcripts are supplied" \
+  '! b dm-task.sh sizing | grep -q "^verified"'
+# Failure contract on the flag itself.
+check "a transcript directory that does not exist is refused" \
+  '! b dm-task.sh sizing --transcripts "$TMP/no-such-transcripts" >/dev/null 2>&1'
+check "--transcripts with no value is refused"  '! b dm-task.sh sizing --transcripts >/dev/null 2>&1'
+check "an unknown sizing flag is refused"       '! b dm-task.sh sizing --nonsense >/dev/null 2>&1'
+# The matcher itself: containment against a full id, and no cross-tier match.
+w7match() { ( . "$ROOT/bin/dm-lib.sh"; dm_dispatch_model_matches "$@" ); }
+check "each tier alias matches only its own model id" \
+  'w7match opus claude-opus-5 && w7match sonnet claude-sonnet-5 && w7match haiku claude-haiku-4-5-20251001 \
+   && ! w7match opus claude-sonnet-5 && ! w7match haiku claude-opus-5 && ! w7match sonnet claude-haiku-4-5-20251001'
+check "an empty side never matches"             '! w7match "" claude-opus-5 && ! w7match opus ""'
+w7tm() { ( . "$ROOT/bin/dm-lib.sh"; dm_transcript_model "$@" ); }
+check "an absent transcript file is refused, printing nothing" \
+  '! w7tm "$W7TX/no-such-agent.output" && [ -z "$(w7tm "$W7TX/no-such-agent.output" 2>/dev/null)" ]'
+check "a transcript with no model field is refused" '! w7tm "$W7TX/agent-tx-blank.output"'
+check "a real transcript line yields the model id"  '[ "$(w7tm "$W7TX/agent-tx-ok.output")" = claude-opus-5 ]'
 
 echo "== brief: both dials are surfaced as tunable anchors (#166) =="
 b dm-task.sh new w6eff-1 --kind ship --repo demo --title "add a multiply endpoint" >/dev/null

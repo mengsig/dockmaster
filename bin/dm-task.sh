@@ -25,6 +25,14 @@
 #   archive <id>          move a terminal (done/discarded) task's records +
 #                         artifacts to state/archive/ (fails closed otherwise)
 #   list
+#   recommend <role> <id> size a spawn for this task from real signals (role,
+#                         kind, measured diff) — a recommendation, not a record
+#   sizing [--transcripts <dir>]
+#                         the dispatch distribution over every task record:
+#                         counts by model, by effort, and how many are unsized.
+#                         With --transcripts, also cross-checks each record
+#                         against what its crewmate actually ran (exit 3 on a
+#                         mismatch)
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -387,6 +395,99 @@ case "$cmd" in
     printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"
     ;;
 
+  recommend)
+    # What THIS spawn is worth, computed from what exists at dispatch: the pass
+    # being run, the task kind, and the branch's real diff. Not a record — the
+    # orchestrator still chooses and records with `set model` / `set effort`.
+    role="${1:-}"; id="${2:-}"
+    [ -n "$role" ] && [ -n "$id" ] || dm_die "usage: dm-task.sh recommend <$(printf '%s' "$DM_DISPATCH_ROLES" | tr ' ' '|')> <id>"
+    dm_role_is_valid "$role" || dm_die "role must be one of: $DM_DISPATCH_ROLES (it is the PASS being dispatched, not the task's kind)"
+    dm_require_id "$id"
+    [ -f "$(dm_meta_path "$id")" ] || dm_die "no such task: $id"
+    kind="$(dm_meta_get "$id" kind)"
+    # An unmeasurable branch is a MISSING signal, not a zero one, and the
+    # recommendation falls back to the anchor. Measurement refuses SILENTLY by
+    # contract; stderr is dropped so a missing clone cannot spam an advisory.
+    size=""; size="$(dm_task_diff_size "$id" 2>/dev/null)" || size=""
+    # Unquoted on purpose: "<files> <lines>" splits into the two count args.
+    pair="$(dm_recommended_dispatch "$role" "$kind" $size)" \
+      || dm_die "could not size a '$role' dispatch for $id"
+    class="$(dm_diff_size_class $size)"
+    if [ "$class" = "unknown" ]; then
+      evidence="none measurable"
+    else
+      evidence="files=${size%% *} lines=${size##* }"
+    fi
+    printf 'model=%s\n' "${pair%% *}"
+    printf 'effort=%s\n' "${pair##* }"
+    printf 'subagent_type=crew-%s\n' "${pair##* }"
+    printf 'signals=role:%s kind:%s diff:%s (%s)\n' "$role" "${kind:-unknown}" "$class" "$evidence"
+    ;;
+
+  sizing)
+    # "Was our spend proportionate?" answered from the records themselves, so it
+    # never needs a bespoke grep (#177). Reads meta only: no network, no
+    # reconcile, no mutation. Covers every non-archived task.
+    #
+    # --transcripts <dir> additionally CROSS-CHECKS the record against what each
+    # crewmate actually ran, closing the gap `set agent_id` admits to: that gate
+    # records a choice, it cannot verify the spawn. The directory holds one
+    # `<agent_id>.output` per spawn (the runtime's own layout, so the caller
+    # passes the path — nothing here hardcodes it). A file that is missing or
+    # carries no model is UNPROVEN, never a pass; a contradiction is a MISMATCH
+    # and exits 3, because a record that lies about what ran is worse than none.
+    transcripts=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --transcripts) [ "$#" -ge 2 ] || dm_die "--transcripts requires a directory"; transcripts="$2"; shift 2 ;;
+        *) dm_die "unknown flag: $1 (usage: dm-task.sh sizing [--transcripts <dir>])" ;;
+      esac
+    done
+    [ -z "$transcripts" ] || [ -d "$transcripts" ] || dm_die "no such transcript directory: $transcripts"
+    models=""; efforts=""; total=0; unsized=0
+    matched=0; unproven=0; mismatched=0; mismatches=""
+    # Runs in THIS shell (the loop below reads a process substitution), so the
+    # counters it updates are the ones printed.
+    cross_check() {
+      local tid="$1" recorded="$2" agent ran
+      agent="$(dm_meta_get "$tid" agent_id)"
+      [ -n "$agent" ] || return 0
+      ran="$(dm_transcript_model "$transcripts/$agent.output")" || ran=""
+      if [ -z "$ran" ]; then unproven=$((unproven + 1)); return 0; fi
+      if dm_dispatch_model_matches "$recorded" "$ran"; then
+        matched=$((matched + 1)); return 0
+      fi
+      mismatched=$((mismatched + 1))
+      mismatches="$mismatches  MISMATCH: $tid recorded model=$recorded but its transcript ran $ran"$'\n'
+    }
+    while IFS= read -r tid; do
+      [ -n "$tid" ] || continue
+      total=$((total + 1))
+      m="$(dm_meta_get "$tid" model)"; e="$(dm_meta_get "$tid" effort)"
+      [ -n "$m" ] && models="$models$m"$'\n'
+      [ -n "$e" ] && efforts="$efforts$e"$'\n'
+      if [ -z "$m" ] || [ -z "$e" ]; then unsized=$((unsized + 1)); fi
+      if [ -n "$transcripts" ] && [ -n "$m" ]; then cross_check "$tid" "$m"; fi
+    done < <(dm_all_task_ids)
+    [ "$total" -gt 0 ] || { dm_info "(no tasks)"; exit 0; }
+    tally() {
+      local label="$1" values="$2"
+      [ -n "$values" ] || return 0
+      printf '%s' "$values" | sort | uniq -c | sort -k1,1nr -k2,2 \
+        | while read -r n v; do printf '%s\t%s\t%s\n' "$label" "$v" "$n"; done
+    }
+    out="$( tally model "$models"; tally effort "$efforts"
+            printf 'unsized\tno model or no effort\t%s\n' "$unsized"
+            printf 'total\ttask records\t%s\n' "$total"
+            if [ -n "$transcripts" ]; then
+              printf 'verified\tran as recorded\t%s\n' "$matched"
+              printf 'verified\tno transcript found\t%s\n' "$unproven"
+              printf 'verified\tMISMATCH\t%s\n' "$mismatched"
+            fi )"
+    printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"
+    [ -z "$mismatches" ] || { printf '%s' "$mismatches" >&2; exit 3; }
+    ;;
+
   *)
-    echo "usage: dm-task.sh {new|set|get|event|state|close|archive|list} ..." >&2; exit 2 ;;
+    echo "usage: dm-task.sh {new|set|get|event|state|close|archive|list|recommend|sizing} ..." >&2; exit 2 ;;
 esac
