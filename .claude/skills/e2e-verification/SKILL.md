@@ -45,6 +45,10 @@ app_seed_cmd|app_url|verify_surfaces`. Every command runs in the task's worktree
 and **must honor `$DM_VERIFY_PORT`** — the app boots on a per-task port so a
 verification is never run against the operator's own running instance.
 
+An `app_start_cmd` that backgrounds a server must **detach** it
+(`nohup … >log 2>&1 </dev/null &`); a job left attached to the calling shell does
+not reliably outlive it.
+
 `app_ready_cmd` is the **ownership probe** and is mandatory. It must establish
 that what answers on `$DM_VERIFY_PORT` is *this task's* instance — the container
 of this task's compose project, the process this start command spawned — and

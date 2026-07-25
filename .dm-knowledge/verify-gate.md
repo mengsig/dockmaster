@@ -59,6 +59,10 @@ Read before editing the verify gate or anything that drives a browser.
   to the real home so the remapped HOME does not re-bootstrap the MCP server per
   task. It is VERIFIED, not assumed: `start` must report the allocated port, and
   a mismatch falls back to an exclusive lease on the one shared browser.
+- **[pitfall]** An `app_start_cmd` that backgrounds a server must DETACH it
+  (`nohup … >log 2>&1 </dev/null &`). A job still attached to the calling shell's
+  terminal and descriptors does not reliably outlive it — macOS kills it the
+  moment `up` returns, Linux does not, so this shows up only on the 3.2 CI leg.
 - **[pitfall]** `verify_surfaces` globs are normalized (`**` -> `*`) with `sed`,
   not `${v//\*\*/\*}`: bash 3.2 yields an ESCAPED star there, which matches a
   literal `*` and therefore no path at all — the gate would silently under-fire
