@@ -6,7 +6,7 @@
     { "gate": "verify-findings", "voters": 3, "method": "refute-majority", "note": "adversarial: N skeptics per finding each prompted to REFUTE it; a finding survives only if it is NOT refuted by a majority" },
     { "gate": "fix", "max_rounds": 2, "note": "apply only the surviving findings on the same branch" },
     { "gate": "tests", "note": "must pass after fixes" },
-    { "gate": "verify", "optional": true, "note": "behavioral gate: drive the changed behavior end to end via the verify skill and report what was exercised; skippable only when the diff has no runtime surface (docs/config-only)" },
+    { "gate": "verify", "optional": true, "note": "behavioral gate: boot the app and drive the changed behavior end to end via bin/dm-verify.sh and the e2e-verification skill; screenshots are the evidence. Normally skipped only on the mechanical no-surface decision (dm-verify.sh gate exits 1); a caller that declares noRuntimeSurface skips it outright, without asking" },
     { "gate": "security", "method": "auto", "note": "auto-triggered: run bin/dm-pr.sh security-scan <id>; if it reports a security surface run security-review, otherwise skip explicitly (never a silent forget)" },
     { "gate": "pr", "method": "squash", "note": "open the PR with the branch convention and a short human description" }
   ]

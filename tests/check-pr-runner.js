@@ -12,7 +12,8 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 function defaultResponse(label) {
   if (label.startsWith('state:')) return { head: 'a'.repeat(40), porcelain: '' }
   if (label.startsWith('review:')) return { findings: [] }
-  if (label.startsWith('tests:') || label === 'verify') return { passed: true, summary: 'passed' }
+  if (label === 'verify') return { gateExit: 0, reportExit: 0, passed: true, summary: 'verified' }
+  if (label.startsWith('tests:')) return { passed: true, summary: 'passed' }
   if (label === 'security') return { surface: false, findings: [], summary: 'no surface' }
   if (label === 'pr') return { url: 'https://github.com/o/r/pull/12' }
   if (label === 'verify-findings') return { refuted: false, rationale: 'real' }
@@ -131,7 +132,7 @@ async function checkFailures() {
   const finding = { severity: 'high', file: 'auth.js', summary: 'auth bypass' }
   const cases = [
     [{ gates: [{ gate: 'tests' }] }, { 'tests:gate': { passed: false, summary: 'red' } }, 'tests'],
-    [{ gates: [{ gate: 'verify' }] }, { verify: { passed: false, summary: 'broken' } }, 'verify'],
+    [{ gates: [{ gate: 'verify' }] }, { verify: { gateExit: 0, reportExit: 1, passed: false, summary: 'broken' } }, 'verify'],
     [{ gates: [{ gate: 'security' }] }, { security: { surface: true, findings: [finding], summary: 'unsafe' } }, 'security'],
     [{ gates: [{ gate: 'pr' }] }, { pr: { url: 'not-a-pr' } }, 'pr'],
     [{ gates: [{ gate: 'unknown' }] }, {}, 'config'],
@@ -204,6 +205,21 @@ async function checkCompatibilityEdges() {
 
   const verifySkip = await run({ gates: [{ gate: 'verify', optional: true }], noRuntimeSurface: true }, {})
   assert.deepEqual(verifySkip.calls, [])
+  // A bare `passed: true` is not enough: the agent must report exit codes the
+  // runner can hold it against, or a forged boolean would pass the gate.
+  const forged = await run({ gates: [{ gate: 'verify' }] }, {
+    verify: { gateExit: 0, reportExit: 1, passed: true, summary: 'looked fine' },
+  })
+  assert.equal(forged.result.ok, false, 'a claimed pass over a red report must fail the gate')
+  assert.equal(forged.result.stage, 'verify')
+  const unavailable = await run({ gates: [{ gate: 'verify' }] }, {
+    verify: { gateExit: 3, reportExit: 3, passed: true, summary: 'no app config' },
+  })
+  assert.equal(unavailable.result.ok, false, 'an unavailable gate must never pass')
+  const noSurface = await run({ gates: [{ gate: 'verify' }] }, {
+    verify: { gateExit: 1, reportExit: 0, passed: true, summary: 'no runtime surface moved' },
+  })
+  assert.equal(noSurface.result.ok, true, 'a mechanical no-surface decision passes')
 
   const untrackedPR = await run({ gates: [{ gate: 'pr' }] }, {
     'state:before-pr': { head: 'b'.repeat(40), porcelain: '?? review-output.json' },

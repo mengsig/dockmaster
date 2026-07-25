@@ -66,9 +66,11 @@ same way):
 The rigorous gate order is
 `review (dimension-parallel) → verify-findings → fix → tests → verify → security
 → pr`. The behavioral `verify` gate drives the changed behavior
-end to end (via the `verify` skill) and reports what was actually exercised — not
-just that tests pass; it is skippable only when the diff has no runtime surface
-(docs/config-only). `security` is auto-triggered (`bin/dm-pr.sh security-scan`,
+end to end (via the `e2e-verification` skill) and reports what was actually exercised — not
+just that tests pass. `bin/dm-verify.sh gate <id>` decides from the diff: exit 0
+runs it, 1 is an explicit no-surface skip, 2 could not decide, 3 means a surface
+moved but the repo has no app config — reported **unavailable**, never a pass.
+It is rigorous-only until every managed repo has app config. `security` is auto-triggered (`bin/dm-pr.sh security-scan`,
 then `security-review` only on a hit, else an explicit skip), and `pr` opens the
 PR. Waiting for CI is **not** a pipeline gate — it runs in the operator-mediated
 merge tail after the PR opens (see "Merge authority" below). The never-merge-red

@@ -4709,6 +4709,582 @@ check "CI parses bin/*.sh with the macOS system bash 3.2 (#164)" \
 check "that step stays behind the system-bash-is-v3 assertion (#164)" \
   '[ "$(grep -n "no longer version 3" "$CI_YML" | cut -d: -f1)" -lt "$(grep -n "/bin/bash -n" "$CI_YML" | cut -d: -f1)" ]'
 
+echo "== verify gate: registry fields =="
+V="$ROOT/bin/dm-verify.sh"
+# Bounded readiness for every boot in this section: the 300s default can outlive
+# a whole CI job, and a hang reports as a timeout instead of a failing check.
+vup() { DM_VERIFY_READY_TIMEOUT=25 "$V" up "$@"; } || true
+check "app fields are settable"        'b dm-repo.sh set demo app_url "http://localhost:\$DM_VERIFY_PORT" >/dev/null'
+check "app_url is stored verbatim"     '[ "$(b dm-repo.sh get demo app_url)" = "http://localhost:\$DM_VERIFY_PORT" ]'
+# Every app command is eval'd or matched as ONE line; a multi-line value would
+# run only its first line, so it must be refused rather than silently truncated.
+MULTILINE="$(printf 'one\ntwo')"
+check "a multi-line app command is refused" '! b dm-repo.sh set demo app_start_cmd "$MULTILINE" >/dev/null 2>&1'
+b dm-repo.sh set demo app_ready_cmd "true" >/dev/null
+b dm-repo.sh set demo app_ready_cmd "" >/dev/null
+check "an empty value clears the field"     '[ -z "$(b dm-repo.sh get demo app_ready_cmd)" ]'
+check "an unknown field is still refused"   '! b dm-repo.sh set demo app_nonsense x >/dev/null 2>&1'
+
+echo "== verify gate: does the gate fire? =="
+b dm-task.sh new vrf1 --kind ship --repo demo --title "verify gate" >/dev/null
+VWT="$(b dm-worktree.sh create vrf1 demo)"
+mkdir -p "$VWT/frontend"; printf 'console.log(1)\n' > "$VWT/frontend/app.js"
+# A user-facing surface moved but the repo cannot be booted. That is UNAVAILABLE
+# (exit 3) and must never read as a pass or a quiet skip.
+GATE_UNAVAIL="$("$V" gate vrf1 2>&1 || true)"; GATE_UNAVAIL_RC=0
+"$V" gate vrf1 >/dev/null 2>&1 || GATE_UNAVAIL_RC=$?
+check "no app config exits 3, not 0"        '[ "$GATE_UNAVAIL_RC" = 3 ]'
+check "the unavailable refusal says so"     'grep -q "UNAVAILABLE" <<<"$GATE_UNAVAIL"'
+check "it names the missing app_start_cmd"  'grep -q "app_start_cmd" <<<"$GATE_UNAVAIL"'
+# "could not determine" must never be reported as "nothing to verify": a task
+# whose worktree is gone exits 2, distinct from the no-surface 1.
+b dm-task.sh new vrfx --kind ship --repo demo --title "no worktree" >/dev/null
+GATE_ERR_RC=0; "$V" gate vrfx >/dev/null 2>&1 || GATE_ERR_RC=$?
+check "an unresolvable worktree exits 2, not 1" '[ "$GATE_ERR_RC" = 2 ]'
+
+# A fake app that really LISTENS, so the port, readiness and ownership checks are
+# exercised end to end without a network or a container.
+# The connection error handler is load-bearing: port_busy probes by opening a TCP
+# connection and dropping it, which arrives as ECONNRESET and killed this server
+# outright on macOS. A real app tolerates a reset; a two-line fixture must too.
+# nohup + closed stdio: a backgrounded server that stays attached to the calling
+# shell's terminal and descriptors does not reliably outlive it (macOS kills this
+# fixture the moment `up` returns). Any real app_start_cmd that backgrounds a
+# server needs the same detachment.
+VAPP_START='rm -f "$DM_VERIFY_DIR/app.pid"; ( nohup node -e "require(\"net\").createServer(function(c){c.on(\"error\",function(){});c.end(\"ok\\n\")}).listen(process.env.DM_VERIFY_PORT,\"127.0.0.1\")" >"$DM_VERIFY_DIR/app.log" 2>&1 </dev/null & printf "%s" "$!" > "$DM_VERIFY_DIR/app.pid" ); printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"'
+# A genuine ownership probe: the listener must be the process THIS start command
+# spawned, and only then is the boot token echoed back.
+# The url assertion makes this probe DISCRIMINATING: if a re-probe ever read
+# app_url live instead of the value pinned at boot, a concurrent edit to the
+# shared registry would hand it a different DM_VERIFY_URL and this would fail.
+VAPP_READY='[ "$DM_VERIFY_URL" = "http://localhost:$DM_VERIFY_PORT" ] && kill -0 "$(cat "$DM_VERIFY_DIR/app.pid")" 2>/dev/null && cp "$DM_VERIFY_DIR/token" "$DM_VERIFY_DIR/ready-proof"'
+VAPP_STOP='if [ -f "$DM_VERIFY_DIR/app.pid" ]; then kill "$(cat "$DM_VERIFY_DIR/app.pid")" 2>/dev/null || true; fi; rm -f "$DM_VERIFY_DIR/app.pid" "$DM_VERIFY_DIR/app.state"'
+vapp_register() {
+  b dm-repo.sh set demo app_start_cmd "$VAPP_START" >/dev/null
+  b dm-repo.sh set demo app_ready_cmd "$VAPP_READY" >/dev/null
+  b dm-repo.sh set demo app_stop_cmd "$VAPP_STOP" >/dev/null
+  b dm-repo.sh set demo app_seed_cmd 'printf seeded > "$DM_VERIFY_DIR/app.seed"' >/dev/null
+}
+vapp_register || true
+check "a touched surface with app config is required" '"$V" gate vrf1 >/dev/null 2>&1'
+check "the required line names the changed file"      'GOUT="$("$V" gate vrf1 2>&1)"; grep -q "frontend/app.js" <<<"$GOUT"'
+# UNDER-FIRING is the failure mode this gate cannot afford, so with no registered
+# verify_surfaces every non-doc path counts - including the layouts a hand-written
+# glob list missed (a page component, a template, a top-level entrypoint).
+rm -f "$VWT/frontend/app.js"
+for vp in src/pages/Home.tsx app/views/home.erb app.py lib/widget.svelte; do
+  mkdir -p "$VWT/$(dirname "$vp")"; printf 'x\n' > "$VWT/$vp"
+  check "an unregistered repo still fires on $vp" '"$V" gate vrf1 >/dev/null 2>&1'
+  rm -f "$VWT/$vp"
+done
+mkdir -p "$VWT/docs"; printf 'x\n' > "$VWT/docs/notes.md"; printf 'x\n' > "$VWT/README.md"
+GATE_NA_RC=0; "$V" gate vrf1 >/dev/null 2>&1 || GATE_NA_RC=$?
+check "a docs-only diff exits 1 (no surface)"  '[ "$GATE_NA_RC" = 1 ]'
+# verify_surfaces NARROWS the default, it does not widen it.
+printf 'x\n' > "$VWT/app.py"
+b dm-repo.sh set demo verify_surfaces 'frontend/**' >/dev/null
+GATE_NARROW_RC=0; "$V" gate vrf1 >/dev/null 2>&1 || GATE_NARROW_RC=$?
+check "verify_surfaces narrows what fires"     '[ "$GATE_NARROW_RC" = 1 ]'
+b dm-repo.sh set demo verify_surfaces '' >/dev/null
+check "clearing it restores the broad default" '"$V" gate vrf1 >/dev/null 2>&1'
+rm -f "$VWT/app.py"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "  skip verify-gate lifecycle checks (node absent; the fixture app needs it)"
+else
+
+echo "== verify gate: the app under test must be the one we started =="
+# app_start_cmd that starts nothing + no listener: readiness must never pass.
+b dm-repo.sh set demo app_start_cmd 'true' >/dev/null
+check "a start that binds nothing fails the gate" '! DM_VERIFY_READY_TIMEOUT=2 "$V" up vrf1 >/dev/null 2>&1'
+# The TOCTOU that the port-silence check alone cannot close: something else binds
+# the port DURING the readiness window. Without the ownership proof the gate
+# adopted it; the proof is what makes the foreign listener unverifiable.
+VSQUAT_PORT="$(printf '%s' vrf1 | cksum | awk '{print 8600 + ($1 % 400)}')"
+node -e "setTimeout(function(){require('net').createServer().listen($VSQUAT_PORT,'127.0.0.1')},2000);setTimeout(function(){process.exit(0)},25000)" &
+VSQUAT=$!
+VADOPT_RC=0; DM_VERIFY_READY_TIMEOUT=12 "$V" up vrf1 >/dev/null 2>&1 || VADOPT_RC=$?
+check "a foreign listener is never adopted as the app" '[ "$VADOPT_RC" != 0 ]'
+check "no app state is recorded for it"                '[ "$(b dm-task.sh get vrf1 verify_app_state)" != "up" ]'
+kill "$VSQUAT" 2>/dev/null || true
+vapp_register || true
+# A repo whose probe never proves ownership cannot verify anything.
+b dm-repo.sh set demo app_ready_cmd 'true' >/dev/null
+VNOPROOF="$(DM_VERIFY_READY_TIMEOUT=4 "$V" up vrf1 2>&1 || true)"
+check "a probe that proves nothing fails the boot" 'grep -q "never proved it is this task" <<<"$VNOPROOF"'
+b dm-repo.sh set demo app_ready_cmd '' >/dev/null
+check "no ownership probe at all is refused"       '! vup vrf1 >/dev/null 2>&1'
+vapp_register || true
+
+echo "== verify gate: app lifecycle =="
+check "up boots the app"                 'vup vrf1 >/dev/null 2>&1'
+VPORT="$(b dm-task.sh get vrf1 verify_port)"
+VDIR="$DM_HOME/data/vrf1/verify"
+check "the port is in the per-task range" '[ "$VPORT" -ge 8600 ] && [ "$VPORT" -le 8999 ]'
+check "app state is recorded up"          '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "up" ]'
+[ -s "$VDIR/app.log" ] && printf '       fixture app.log: %s\n' "$(head -c 300 "$VDIR/app.log" | tr '\n' ' ')"
+check "the app really listens"            'node -e "require(\"net\").connect($VPORT,\"127.0.0.1\").on(\"connect\",function(){process.exit(0)}).on(\"error\",function(){process.exit(1)})"'
+check "DM_VERIFY_PORT reached the app"    'grep -q "port=$VPORT" "$VDIR/app.state"'
+check "the app ran in the task worktree"  'grep -q "cwd=$VWT" "$VDIR/app.state"'
+check "the seed command ran"              '[ -f "$VDIR/app.seed" ]'
+check "app_url resolved the port token"   '[ "$(b dm-task.sh get vrf1 verify_url)" = "http://localhost:$VPORT" ]'
+check "the boot pinned the code under test" '[ -n "$(b dm-task.sh get vrf1 verify_head)" ]'
+check "a second up refuses while it is up" '! vup vrf1 >/dev/null 2>&1'
+check "down stops the app"                '"$V" down vrf1 >/dev/null 2>&1'
+check "the app is really gone"            '! node -e "require(\"net\").connect($VPORT,\"127.0.0.1\").on(\"connect\",function(){process.exit(0)}).on(\"error\",function(){process.exit(1)})"'
+check "app state is recorded down"        '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "down" ]'
+check "down is idempotent"                '"$V" down vrf1 >/dev/null 2>&1'
+
+echo "== verify gate: down never reports success over a live app =="
+vup vrf1 >/dev/null 2>&1 || true
+# A stop command that does not stop anything. `down` used to record 'down' and
+# exit 0 anyway, leaving an app nothing could ever stop again.
+b dm-repo.sh set demo app_stop_cmd 'true' >/dev/null
+VLEAK_RC=0; VLEAK="$(DM_VERIFY_STOP_SETTLE=2 "$V" down vrf1 2>&1)" || VLEAK_RC=$?
+check "a stop that stops nothing fails"       '[ "$VLEAK_RC" != 0 ]'
+check "the refusal names the live port"       'grep -q "STILL listening on port $VPORT" <<<"$VLEAK"'
+check "the state records the leak, not down"  '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "leaked" ]'
+b dm-repo.sh set demo app_stop_cmd "$VAPP_STOP" >/dev/null
+check "a real stop then clears it"            '"$V" down vrf1 >/dev/null 2>&1 && [ "$(b dm-task.sh get vrf1 verify_app_state)" = "down" ]'
+
+echo "== verify gate: a failed boot always tears down =="
+# The start command half-starts (leaves a live listener) and then fails. Without
+# the cleanup trap that listener - a real app or container - would leak.
+b dm-repo.sh set demo app_start_cmd "$VAPP_START; false" >/dev/null
+check "a failing start fails the gate"    '! vup vrf1 >/dev/null 2>&1'
+check "the half-started app was stopped"  '[ ! -f "$VDIR/app.pid" ]'
+check "state is recorded down after failure" '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "down" ]'
+b dm-repo.sh set demo app_start_cmd "$VAPP_START" >/dev/null
+b dm-repo.sh set demo app_ready_cmd 'false' >/dev/null
+check "a never-ready app fails the gate"  '! DM_VERIFY_READY_TIMEOUT=2 "$V" up vrf1 >/dev/null 2>&1'
+check "the unready app was stopped"       '[ ! -f "$VDIR/app.pid" ]'
+vapp_register || true
+
+echo "== verify gate: the operator's own instance is never adopted =="
+# The derived port is occupied by something that is NOT this task's app. The gate
+# must move to a free one; attaching to whatever answers would be a fabricated pass.
+DERIVED="$(printf '%s' vrf1 | cksum | awk '{print 8600 + ($1 % 400)}')"
+node -e "require('net').createServer().listen($DERIVED,'127.0.0.1',function(){setTimeout(function(){process.exit(0)},25000)})" &
+SQUATTER=$!
+sleep 1
+vup vrf1 >/dev/null 2>&1 || true
+BUSY_PORT="$(b dm-task.sh get vrf1 verify_port)"
+check "the occupied derived port is not reused" '[ "$BUSY_PORT" != "$DERIVED" ]'
+check "the app still booted on a free port"     '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "up" ]'
+kill "$SQUATTER" 2>/dev/null || true
+"$V" down vrf1 >/dev/null 2>&1
+
+echo "== verify gate: a pass needs evidence, not an assertion =="
+# A stub browser: `shot` must reject what it produces unless it is a real PNG.
+VB="$TMP/verify-bin"; mkdir -p "$VB"
+cat > "$VB/chrome-devtools-axi" <<'AXI'
+#!/usr/bin/env bash
+# Stub driver. `screenshot <path>` writes whatever DM_SMOKE_SHOT says to write.
+if [ "${1:-}" = "start" ]; then printf 'status: ready\nport: %s\n' "${CHROME_DEVTOOLS_AXI_PORT:-9224}"; exit 0; fi
+if [ "${1:-}" = "screenshot" ]; then
+  case "${DM_SMOKE_SHOT:-png}" in
+    none) : ;;
+    stub) printf 'X' > "$2" ;;
+    *)    { printf '\211PNG\r\n\032\n'; dd if=/dev/zero bs=1024 count=1 2>/dev/null; } > "$2" ;;
+  esac
+  printf 'screenshot: %s\n' "$2"; exit 0
+fi
+exit 0
+AXI
+chmod +x "$VB/chrome-devtools-axi"
+vsh() { PATH="$VB:$PATH" DM_VERIFY_BROWSER_SHARED=1 DM_VERIFY_LEASE_TIMEOUT=1 "$V" "$@"; } || true
+vup vrf1 >/dev/null 2>&1 || true
+# THE FORGERY: one command used to mint a green gate with no app, no browser and
+# no screenshot. Each refusal below is one leg of that forgery closed.
+FORGE1="$("$V" flow vrf1 login pass "signed in fine" 2>&1 || true)"
+check "pass is refused without a browser"     'grep -q "no live browser" <<<"$FORGE1"'
+vsh session vrf1 >/dev/null 2>&1 || true
+FORGE2="$("$V" flow vrf1 login pass "signed in fine" 2>&1 || true)"
+check "pass is refused without a screenshot"  'grep -q "no screenshot of .login. was taken during THIS run" <<<"$FORGE2"'
+check "a fail may still be recorded with none" '"$V" flow vrf1 login fail "could not sign in" >/dev/null 2>&1'
+check "the forged run reports FAIL"           '! "$V" report vrf1 >/dev/null 2>&1'
+# shot itself refuses anything that is not a real PNG.
+check "shot refuses a file the driver never wrote" '! DM_SMOKE_SHOT=none vsh shot vrf1 login >/dev/null 2>&1'
+check "shot refuses a stub that is not a PNG"      '! DM_SMOKE_SHOT=stub vsh shot vrf1 login >/dev/null 2>&1'
+check "shot accepts a real PNG"                    'DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1'
+check "the screenshot landed under the task"       '[ -s "$VDIR/shots/login.png" ]'
+"$V" down vrf1 >/dev/null 2>&1; vup vrf1 >/dev/null 2>&1; vsh session vrf1 >/dev/null 2>&1
+DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1
+check "pass is accepted with app, browser and PNG" '"$V" flow vrf1 login pass "signed in" >/dev/null 2>&1'
+check "an all-pass run passes the gate"            '"$V" report vrf1 >/dev/null 2>&1'
+check "the pass is recorded in meta"               '[ "$(b dm-task.sh get vrf1 verify)" = "pass" ]'
+# The evidence must still exist at report time, not just at record time.
+mv "$VDIR/shots/login.png" "$VDIR/shots/login.png.bak"
+VGONE="$("$V" report vrf1 2>&1 || true)"
+check "report refuses a pass whose screenshot vanished" 'grep -q "evidence for this verdict does not exist" <<<"$VGONE"'
+mv "$VDIR/shots/login.png.bak" "$VDIR/shots/login.png"
+
+echo "== verify gate: evidence must come from THIS run, not just look like a PNG =="
+# shot_is_real checks PNG shape, which is not provenance. Each route below
+# produced a green verdict when shape was the only test.
+"$V" down vrf1 >/dev/null 2>&1; vup vrf1 >/dev/null 2>&1; vsh session vrf1 >/dev/null 2>&1
+DM_SMOKE_SHOT=png vsh shot vrf1 realflow >/dev/null 2>&1
+check "a genuinely captured shot still passes"  '"$V" flow vrf1 realflow pass "driven" >/dev/null 2>&1'
+# Route 1: copy any PNG in under a flow name nobody captured.
+cp "$VDIR/shots/realflow.png" "$VDIR/shots/copied.png"
+VCOPY="$("$V" flow vrf1 copied pass "never driven" 2>&1 || true)"
+check "a copied PNG is not evidence"            'grep -q "no screenshot of .copied. was taken during THIS run" <<<"$VCOPY"'
+# Route 2: one image satisfying a second flow.
+cp "$VDIR/shots/realflow.png" "$VDIR/shots/reused.png"
+VREUSE_RC=0; "$V" flow vrf1 reused pass "same image" >/dev/null 2>&1 || VREUSE_RC=$?
+check "one image cannot satisfy a second flow"  '[ "$VREUSE_RC" != 0 ]'
+# Route 3: a symlink into a previous run's shots.
+mkdir -p "$VDIR/runs/faked/shots"; cp "$VDIR/shots/realflow.png" "$VDIR/runs/faked/shots/linked.png"
+ln -s "$VDIR/runs/faked/shots/linked.png" "$VDIR/shots/linked.png"
+VLINK_RC=0; "$V" flow vrf1 linked pass "symlinked" >/dev/null 2>&1 || VLINK_RC=$?
+check "a symlinked screenshot is not evidence"  '[ "$VLINK_RC" != 0 ]'
+rm -f "$VDIR/shots/linked.png" "$VDIR/shots/copied.png" "$VDIR/shots/reused.png"
+# Route 4 - the one that reversed the archiving fix with two `cp`s: restore a
+# whole prior run's shots and flows over the current ones.
+"$V" report vrf1 >/dev/null 2>&1
+cp "$VDIR/flows.tsv" "$TMP/prior-flows.tsv"; cp -a "$VDIR/shots" "$TMP/prior-shots"
+"$V" down vrf1 >/dev/null 2>&1; vup vrf1 >/dev/null 2>&1
+cp -a "$TMP/prior-shots/." "$VDIR/shots/"; cp "$TMP/prior-flows.tsv" "$VDIR/flows.tsv"
+VRESTORE_RC=0; VRESTORE="$("$V" report vrf1 2>&1)" || VRESTORE_RC=$?
+check "a restored prior run is not this run's verdict" '[ "$VRESTORE_RC" != 0 ]'
+check "the refusal says the evidence is not this run's" \
+  'grep -q "not this run.s own" <<<"$VRESTORE"'
+rm -f "$VDIR/flows.tsv"; rm -rf "$VDIR/runs/faked"
+# A shots path in the record that escapes the run directory must never be
+# rendered into report.html as an <img src>.
+vsh session vrf1 >/dev/null 2>&1; DM_SMOKE_SHOT=png vsh shot vrf1 escflow >/dev/null 2>&1 || true
+"$V" flow vrf1 escflow pass "driven" >/dev/null 2>&1
+sed 's#shots/escflow.png#../../../../etc/passwd.png#' "$VDIR/flows.tsv" > "$TMP/esc.tsv"
+cp "$TMP/esc.tsv" "$VDIR/flows.tsv"
+VESC_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VESC_RC=$?
+check "an escaping screenshot path is refused"  '[ "$VESC_RC" != 0 ]'
+check "no traversal path reaches report.html"   '! grep -q "\.\./\.\./" "$VDIR/report.html" 2>/dev/null'
+# A `fail` row renders into report.html exactly like a pass one, so the path
+# check cannot sit behind the pass filter, and every field must be escaped.
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+"$V" flow vrf1 badrow fail "broken" >/dev/null 2>&1 || true
+awk -F'\t' 'BEGIN{OFS="\t"} {$5="../../../../etc/passwd.png"; print}' "$VDIR/flows.tsv" > "$TMP/failesc.tsv"
+cp "$TMP/failesc.tsv" "$VDIR/flows.tsv"
+VFESC_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VFESC_RC=$?
+check "a FAIL row's escaping path is refused too" '[ "$VFESC_RC" != 0 ]'
+check "it never reached report.html"              '! grep -q "etc/passwd.png" "$VDIR/report.html" 2>/dev/null'
+# A field that tries to close the src attribute must be escaped, not rendered.
+printf '%s\tinject\tfail\t-\tshots/inject.png\t<script>alert(1)</script>\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$VDIR/flows.tsv"
+"$V" report vrf1 >/dev/null 2>&1 || true
+check "no script tag is ever emitted"             '! grep -q "<script>" "$VDIR/report.html" 2>/dev/null'
+# The attribute context, which injecting into the NOTE never exercised: `$shot`
+# and `$name` land inside src="..."/alt="...", where a bare quote closes the
+# attribute. A matching name/shot pair passes the path filter, so the escaper is
+# the only thing standing between a crafted row and a live event handler.
+VINJ='x" onerror="alert(1)'
+printf '%s\t%s\tfail\t-\tshots/%s.png\tnote\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$VINJ" "$VINJ" > "$VDIR/flows.tsv"
+"$V" report vrf1 >/dev/null 2>&1 || true
+check "a crafted name/shot pair is refused"      'grep -q "malformed-flow-name" <<<"$("$V" report vrf1 2>&1 || true)"'
+check "no onerror handler reaches report.html"   '! grep -q "onerror=" "$VDIR/report.html" 2>/dev/null'
+# And the escaper itself must close attributes, not only text.
+check "html_escape escapes double quotes"        '[ -z "$(bash -c "$(sed -n "/^html_escape() {/,/^}/p" "$ROOT/bin/dm-verify.sh")"'"'"'; html_escape "a\"b"'"'"' | grep -F "\"")" ]'
+check "html_escape escapes single quotes"        '[ -z "$(bash -c "$(sed -n "/^html_escape() {/,/^}/p" "$ROOT/bin/dm-verify.sh")"'"'"'; html_escape "a'"'"'"'"'"'"'"'"'b"'"'"' | grep -F "'"'"'")" ]'
+rm -f "$VDIR/flows.tsv"
+rm -f "$VDIR/flows.tsv"
+
+echo "== verify gate: an ownership probe that proves nothing is refused (MED-4) =="
+# A probe registered as the bare trailing `cp` passes with nothing running, so it
+# would adopt any process that binds the port during the readiness window. `up`
+# runs the probe once BEFORE starting anything: a real one cannot pass then.
+"$V" down vrf1 >/dev/null 2>&1
+b dm-repo.sh set demo app_ready_cmd 'cp "$DM_VERIFY_DIR/token" "$DM_VERIFY_DIR/ready-proof"' >/dev/null
+VLAZY_RC=0; VLAZY="$(vup vrf1 2>&1)" || VLAZY_RC=$?
+check "a probe that always passes fails the boot" '[ "$VLAZY_RC" != 0 ]'
+check "the refusal says it proves nothing"        'grep -q "proves nothing" <<<"$VLAZY"'
+check "nothing was recorded up"                   '[ "$(b dm-task.sh get vrf1 verify_app_state)" != "up" ]'
+vapp_register || true
+# The honest-probe boot IS the canonical state the sections below assume (app up,
+# browser live, one flow driven this run), so it is not torn down and rebuilt.
+# Setup lines are `|| true`: a bare failing command here aborts the whole suite
+# under `set -e`, printing a truncated count and no FAIL summary — reads as success.
+check "the honest probe still boots"              'vup vrf1 >/dev/null 2>&1'
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1 || true
+"$V" flow vrf1 login pass "signed in" >/dev/null 2>&1 || true
+
+echo "== verify gate: the verdict is bound to the code it verified =="
+# A green run must not survive the edit that breaks the app.
+printf 'changed after the boot\n' > "$VWT/frontend/app.js"
+VMOVED="$("$V" report vrf1 2>&1 || true)"; VMOVED_RC=0
+"$V" report vrf1 >/dev/null 2>&1 || VMOVED_RC=$?
+check "report refuses once the worktree moved" 'grep -q "worktree changed since the app was booted" <<<"$VMOVED"'
+# Exit 2, not 1: a run whose code moved is not a failing verdict, it is none.
+check "the refusal exits 2, not a plain fail"  '[ "$VMOVED_RC" = 2 ]'
+check "it says the working tree was edited"    'grep -q "working tree was edited" <<<"$VMOVED"'
+VMOVEDF="$("$V" flow vrf1 login pass "still fine" 2>&1 || true)"
+check "flow refuses a pass on moved code"      'grep -q "worktree changed since the app was booted" <<<"$VMOVEDF"'
+rm -f "$VWT/frontend/app.js"
+check "reverting the edit restores the verdict" '"$V" report vrf1 >/dev/null 2>&1'
+# The case the porcelain checksum was BLIND to, and the one that actually
+# happens: the file is ALREADY dirty, so every further edit produces the same
+# status line and the same cksum. Only content moves the pin. The test above
+# creates a file (absent -> present), which adds a line and hides this.
+printf 'first edit\n' >> "$VWT/src/calc.py"
+"$V" down vrf1 >/dev/null 2>&1; vup vrf1 >/dev/null 2>&1; vsh session vrf1 >/dev/null 2>&1
+DM_SMOKE_SHOT=png vsh shot vrf1 dirtyflow >/dev/null 2>&1
+check "a pass on an already-dirty tree is fine"  '"$V" flow vrf1 dirtyflow pass "verified" >/dev/null 2>&1'
+check "and it reports green"                     '"$V" report vrf1 >/dev/null 2>&1'
+printf 'second edit, same already-dirty file\n' >> "$VWT/src/calc.py"
+VDIRTY_RC=0; VDIRTY="$("$V" report vrf1 2>&1)" || VDIRTY_RC=$?
+check "editing an already-dirty file moves the pin" '[ "$VDIRTY_RC" = 2 ]'
+check "the green verdict does not survive it"       'grep -q "worktree changed since the app was booted" <<<"$VDIRTY"'
+VDIRTYF_RC=0; "$V" flow vrf1 newflow pass "after break" >/dev/null 2>&1 || VDIRTYF_RC=$?
+check "no new pass can be minted on it"             '[ "$VDIRTYF_RC" != 0 ]'
+git -C "$VWT" checkout -q -- src/calc.py 2>/dev/null || true
+# The mirror blind spot of the porcelain checksum: hashing untracked CONTENT and
+# not untracked PATHS. A route rename of new uncommitted work moved the app while
+# the bytes stayed identical, so the pin sat still and a green verdict survived.
+"$V" down vrf1 >/dev/null 2>&1 || true
+mkdir -p "$VWT/frontend"; printf 'about page\n' > "$VWT/frontend/about.js"
+vup vrf1 >/dev/null 2>&1 || true; vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 routed >/dev/null 2>&1 || true
+"$V" flow vrf1 routed pass "route verified" >/dev/null 2>&1 || true
+check "a green run on new untracked work"         '"$V" report vrf1 >/dev/null 2>&1'
+mv "$VWT/frontend/about.js" "$VWT/frontend/contact.js"
+VREN_RC=0; VREN="$("$V" report vrf1 2>&1)" || VREN_RC=$?
+check "renaming an untracked file moves the pin"  '[ "$VREN_RC" = 2 ]'
+check "the rename refusal names the edit"         'grep -q "worktree changed since the app was booted" <<<"$VREN"'
+mv "$VWT/frontend/contact.js" "$VWT/frontend/about.js"
+check "renaming it back restores the verdict"     '"$V" report vrf1 >/dev/null 2>&1'
+# Same family: two untracked files merged into one, identical bytes overall.
+printf 'a\n' > "$VWT/frontend/x1.js"; printf 'b\n' > "$VWT/frontend/x2.js"
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 split >/dev/null 2>&1 || true
+"$V" flow vrf1 split pass "both routes" >/dev/null 2>&1 || true
+check "a green run across two untracked files"    '"$V" report vrf1 >/dev/null 2>&1'
+rm -f "$VWT/frontend/x1.js" "$VWT/frontend/x2.js"; printf 'a\nb\n' > "$VWT/frontend/merged.js"
+VSPLIT_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VSPLIT_RC=$?
+check "merging them moves the pin too"            '[ "$VSPLIT_RC" = 2 ]'
+rm -f "$VWT/frontend/merged.js" "$VWT/frontend/about.js"
+# The pin must not be JUMPY either, or it refuses every honest run.
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 steady >/dev/null 2>&1 || true
+"$V" flow vrf1 steady pass "steady" >/dev/null 2>&1 || true
+touch "$VWT/src/calc.py"
+check "a no-op touch does not move the pin"       '"$V" report vrf1 >/dev/null 2>&1'
+# The third blindness of the same pin: hashing the three streams FLAT. Moving a
+# line from one untracked file to another leaves the path list and the total
+# bytes identical, so only a per-file digest — path bound to its own content —
+# moves it. The routes moved; the checksum must too.
+"$V" down vrf1 >/dev/null 2>&1 || true
+printf 'routeA\nrouteB\n' > "$VWT/frontend/a.js"; printf 'routeC\n' > "$VWT/frontend/b.js"
+vup vrf1 >/dev/null 2>&1 || true; vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 moved >/dev/null 2>&1 || true
+"$V" flow vrf1 moved pass "routes verified" >/dev/null 2>&1 || true
+check "a green run across two untracked routes"  '"$V" report vrf1 >/dev/null 2>&1'
+printf 'routeA\n' > "$VWT/frontend/a.js"; printf 'routeB\nrouteC\n' > "$VWT/frontend/b.js"
+VMOVE_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VMOVE_RC=$?
+check "a byte-neutral move still moves the pin"  '[ "$VMOVE_RC" = 2 ]'
+rm -f "$VWT/frontend/a.js" "$VWT/frontend/b.js"
+# An untracked file whose NAME looks like an option is handed to the digest tool
+# as a bare argument: it was read as one, the tool printed usage and hashed
+# NOTHING, and the untracked half of the pin became a constant. Assert the pin
+# still moves with such a file present AND that the file itself is hashed.
+"$V" down vrf1 >/dev/null 2>&1 || true
+printf 'route\n' > "$VWT/frontend/opt.js"; : > "$VWT/--help"
+vup vrf1 >/dev/null 2>&1 || true; vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 optname >/dev/null 2>&1 || true
+"$V" flow vrf1 optname pass "driven" >/dev/null 2>&1 || true
+check "a green run with an option-named file"    '"$V" report vrf1 >/dev/null 2>&1'
+printf 'route CHANGED\n' > "$VWT/frontend/opt.js"
+VOPT_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VOPT_RC=$?
+check "an option-named file cannot blind the pin" '[ "$VOPT_RC" = 2 ]'
+printf 'route\n' > "$VWT/frontend/opt.js"
+check "restoring the edit restores the verdict"   '"$V" report vrf1 >/dev/null 2>&1'
+printf 'now has content\n' > "$VWT/--help"
+VOPT2_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VOPT2_RC=$?
+check "the option-named file is itself hashed"    '[ "$VOPT2_RC" = 2 ]'
+rm -f "$VWT/--help" "$VWT/frontend/opt.js"
+
+echo "== verify gate: a dead app is never a green verdict (probe, not stamp) =="
+# verify_app_state is a stamp `up` wrote; nothing re-checked it, so an app killed
+# mid-run left it reading `up` forever and both flow-pass and report went green.
+"$V" down vrf1 >/dev/null 2>&1; vup vrf1 >/dev/null 2>&1; vsh session vrf1 >/dev/null 2>&1
+DM_SMOKE_SHOT=png vsh shot vrf1 liveflow >/dev/null 2>&1
+check "a pass while the app serves is fine"    '"$V" flow vrf1 liveflow pass "seen live" >/dev/null 2>&1'
+kill -9 "$(cat "$VDIR/app.pid")" 2>/dev/null || true
+VDEADWAIT=0; while [ "$VDEADWAIT" -lt 10 ] && node -e "require('net').connect($(b dm-task.sh get vrf1 verify_port),'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})" 2>/dev/null; do VDEADWAIT=$((VDEADWAIT+1)); sleep 1; done
+DM_SMOKE_SHOT=png vsh shot vrf1 deadflow >/dev/null 2>&1 || true
+VDEADF="$("$V" flow vrf1 deadflow pass "app was killed" 2>&1 || true)"
+check "a pass is refused once the app is dead" 'grep -q "nothing is listening on port" <<<"$VDEADF"'
+VDEADR_RC=0; VDEADR="$("$V" report vrf1 2>&1)" || VDEADR_RC=$?
+check "report refuses over a dead app"         '[ "$VDEADR_RC" = 2 ]'
+check "the refusal names the dead port"        'grep -q "nothing is listening on port" <<<"$VDEADR"'
+# Leave the canonical state the sections below assume: app up, browser live, and
+# one flow (`login`) driven and recorded from THIS run. Every line is `|| true`:
+# these are SETUP, not assertions, and a bare failing command here aborts the
+# whole suite under `set -e` — printing a truncated count and no FAIL summary,
+# which reads like success.
+"$V" down vrf1 >/dev/null 2>&1 || true
+vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1 || true
+"$V" flow vrf1 login pass "signed in" >/dev/null 2>&1 || true
+
+echo "== verify gate: a concurrent registry edit cannot repoint a live run =="
+# Two crewmates share one state/repos.json. The liveness re-probe pins the app
+# url at boot; reading it live would hand the pinned probe a DM_VERIFY_URL for a
+# different instance, and a probe whose ownership test is local would pass there.
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 pinnedurl >/dev/null 2>&1 || true
+"$V" flow vrf1 pinnedurl pass "driven" >/dev/null 2>&1 || true
+b dm-repo.sh set demo app_url 'http://elsewhere.invalid:$DM_VERIFY_PORT' >/dev/null
+check "the run uses the url pinned at boot"     '"$V" report vrf1 >/dev/null 2>&1'
+b dm-repo.sh set demo app_url 'http://localhost:$DM_VERIFY_PORT' >/dev/null
+
+echo "== verify gate: its trust fields are not hand-settable (fix 3's own hole) =="
+# verify_ready_cmd is eval'd and validated only at boot, so a CLI write would
+# bypass the boot check entirely. The pins that say what a verdict MEANS are
+# protected with it.
+# Every field any precondition of a `pass` reads. session_is_live reads only
+# verify_browser_mode + verify_browser_pid, so leaving those settable made the
+# browser leg forgeable with two ordinary CLI calls - and setting verify_axi_home
+# + verify_browser_port re-points drive/shot at the operator's own default bridge,
+# which is #80 reopened with their browser supplying this run's evidence.
+for vkey in verify_ready_cmd verify_token verify_head verify_port verify_url verify_cwd \
+            verify_app_state verify_browser_mode verify_browser_pid verify_browser_port \
+            verify_cdp_port verify_axi_home verify_browser_profile verify; do
+  check "dm-task.sh refuses to set $vkey" "! b dm-task.sh set vrf1 $vkey x >/dev/null 2>&1"
+done
+check "the refusal explains why"                'grep -q "verify-gate trust field" <<<"$(b dm-task.sh set vrf1 verify_ready_cmd x 2>&1 || true)"'
+# Fields the gate does NOT trust stay writable - the browser lease is authoritative
+# in its own directory, which the #80 section proves.
+check "an untrusted verify field is still settable" 'b dm-task.sh set vrf1 verify_browser_lease released >/dev/null 2>&1'
+# `kill 0` signals the caller's WHOLE PROCESS GROUP and SUCCEEDS, so `|| true`
+# never fires and 2>/dev/null hides it - and browser_stop runs from `down`, which
+# every crewmate arms in an EXIT trap. `0` passes a bare numeric guard; so do
+# `00` and `000`. Bound to the real source: both functions must carry the
+# all-zero exclusion, and the guard itself must never route one to `kill`.
+check "browser_stop excludes all-zero pids"   'sed -n "/^browser_stop() {/,/^}/p" "$ROOT/bin/dm-verify.sh" | grep -q "\[!0\]"'
+check "session_is_live excludes them too"     'sed -n "/^session_is_live() {/,/^}/p" "$ROOT/bin/dm-verify.sh" | grep -q "\[!0\]"'
+cat > "$TMP/pidguard.sh" <<'PIDGUARD'
+# The same two-step guard both functions use, exercised without sending signals.
+verdict() {
+  case "$1" in ''|*[!0-9]*) printf 'skip'; return ;; esac
+  case "$1" in *[!0]*) printf 'kill' ;; *) printf 'skip' ;; esac
+}
+for p in EMPTY 0 00 000 abc 123 0123; do
+  [ "$p" = EMPTY ] && p=''
+  printf '%s=%s\n' "${p:-EMPTY}" "$(verdict "$p")"
+done
+PIDGUARD
+VZERO="$(bash "$TMP/pidguard.sh")"
+check "an empty pid never reaches kill"       'grep -qx "EMPTY=skip" <<<"$VZERO"'
+check "pid 0 never reaches kill"              'grep -qx "0=skip" <<<"$VZERO"'
+check "pid 00 never reaches kill"             'grep -qx "00=skip" <<<"$VZERO"'
+check "pid 000 never reaches kill"            'grep -qx "000=skip" <<<"$VZERO"'
+check "a non-numeric pid never reaches kill"  'grep -qx "abc=skip" <<<"$VZERO"'
+check "a real pid still does"                 'grep -qx "123=kill" <<<"$VZERO"'
+check "a zero-prefixed real pid still does"   'grep -qx "0123=kill" <<<"$VZERO"'
+
+echo "== verify gate: clearing the probe mid-run cannot re-open the fail-open =="
+# Two crewmates share one registry. Clearing app_ready_cmd used to turn the
+# liveness re-probe into `return 0`, so a foreign listener passed as the app.
+"$V" down vrf1 >/dev/null 2>&1 || true; vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 pinned >/dev/null 2>&1 || true
+"$V" flow vrf1 pinned pass "driven" >/dev/null 2>&1 || true
+b dm-repo.sh set demo app_ready_cmd '' >/dev/null
+check "the boot-pinned probe still runs"        '"$V" report vrf1 >/dev/null 2>&1'
+VCLRPORT="$(b dm-task.sh get vrf1 verify_port)"
+kill -9 "$(cat "$VDIR/app.pid")" 2>/dev/null || true
+VCLRWAIT=0
+while [ "$VCLRWAIT" -lt 10 ] && node -e "require('net').connect($VCLRPORT,'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})" 2>/dev/null; do
+  VCLRWAIT=$((VCLRWAIT+1)); sleep 1
+done
+node -e "require('net').createServer().listen($VCLRPORT,'127.0.0.1',function(){setTimeout(function(){process.exit(0)},20000)})" &
+VFOREIGN=$!
+sleep 1
+VCLR_RC=0; VCLR="$("$V" report vrf1 2>&1)" || VCLR_RC=$?
+check "a foreign listener is not the app"       '[ "$VCLR_RC" = 2 ]'
+check "the refusal names the ownership proof"   'grep -q "no longer proves it is the instance" <<<"$VCLR"'
+kill "$VFOREIGN" 2>/dev/null || true
+vapp_register
+# Restore the canonical state the next section reads: a live app and a valid run.
+"$V" down vrf1 >/dev/null 2>&1 || true
+vup vrf1 >/dev/null 2>&1 || true
+vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1 || true
+"$V" flow vrf1 login pass "signed in" >/dev/null 2>&1 || true
+
+echo "== verify gate: a truncated or malformed record is never a verdict =="
+VFLOWS="$VDIR/flows.tsv"
+cp "$VFLOWS" "$TMP/flows.good"
+printf 'x\ty\tpass\tz' >> "$VFLOWS"   # no trailing newline
+VTRUNC="$("$V" report vrf1 2>&1 || true)"
+check "an unterminated final row is refused"   'grep -q "truncated mid-write" <<<"$VTRUNC"'
+printf 'not-a-row\n' > "$VFLOWS"
+VMAL="$("$V" report vrf1 2>&1 || true)"
+check "a malformed row is refused"             'grep -q "malformed row" <<<"$VMAL"'
+: > "$VFLOWS"
+VEMPTY_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VEMPTY_RC=$?
+check "an empty record exits 3, never 0"       '[ "$VEMPTY_RC" = 3 ]'
+cp "$TMP/flows.good" "$VFLOWS"
+check "the good record still verdicts"         '"$V" report vrf1 >/dev/null 2>&1'
+check "a bad flow result is refused"           '! "$V" flow vrf1 login green >/dev/null 2>&1'
+check "a bad flow name is refused"             '! "$V" flow vrf1 "bad name" pass >/dev/null 2>&1'
+# A flake is not a pass (testing-policy's stance), and a new boot files the
+# previous run away instead of carrying its verdict forward.
+"$V" flow vrf1 retry flake "passed only on retry" >/dev/null
+check "a flake does not pass the gate"         '! "$V" report vrf1 >/dev/null 2>&1'
+"$V" down vrf1 >/dev/null 2>&1; vup vrf1 >/dev/null 2>&1
+check "the previous run's flows are kept"      '[ -n "$(ls -A "$VDIR/runs" 2>/dev/null)" ]'
+VFRESH_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VFRESH_RC=$?
+check "a fresh run starts with no verdict"     '[ "$VFRESH_RC" = 3 ]'
+# A boot must archive the SCREENSHOTS too. Leaving last run's PNGs in place let a
+# flow that was never driven this run satisfy the evidence check.
+check "the previous run's screenshots go with it" '[ -z "$(ls -A "$VDIR/shots" 2>/dev/null)" ]'
+vsh session vrf1 >/dev/null 2>&1 || true
+VSTALE="$("$V" flow vrf1 login pass "never driven this run" 2>&1 || true)"
+check "a stale screenshot cannot satisfy a pass"  'grep -q "no screenshot of .login. was taken during THIS run" <<<"$VSTALE"'
+
+echo "== verify gate: two crewmates never drive one browser (#80) =="
+# DM_VERIFY_BROWSER_SHARED forces the degraded path: no per-task browser, so the
+# one shared browser is held under an exclusive lease instead of being shared.
+check "session degrades to the shared browser" 'vsh session vrf1 >/dev/null 2>&1'
+check "the shared mode is recorded"            '[ "$(b dm-task.sh get vrf1 verify_browser_mode)" = "shared" ]'
+check "the lease names this task as holder"    '[ "$(cat "$DM_HOME/state/browser.lease/owner")" = "vrf1" ]'
+b dm-task.sh new vrf2 --kind ship --repo demo --title "second driver" >/dev/null
+b dm-worktree.sh create vrf2 demo >/dev/null
+vup vrf2 >/dev/null 2>&1 || true
+CONTEND="$(vsh session vrf2 2>&1 || true)"; CONTEND_RC=0
+vsh session vrf2 >/dev/null 2>&1 || CONTEND_RC=$?
+check "a second crewmate cannot take the browser" '[ "$CONTEND_RC" != 0 ]'
+check "the refusal names the holder"              'grep -q "vrf1" <<<"$CONTEND"'
+# The holder's liveness comes from the lease dir, not a meta stamp written after
+# the lock was dropped: hand-clearing the stamp must NOT hand the browser over.
+b dm-task.sh set vrf1 verify_browser_lease released >/dev/null
+STEAL_RC=0; vsh session vrf2 >/dev/null 2>&1 || STEAL_RC=$?
+check "a stale meta stamp cannot steal the lease" '[ "$STEAL_RC" != 0 ]'
+check "the lease still names the real holder"     '[ "$(cat "$DM_HOME/state/browser.lease/owner")" = "vrf1" ]'
+check "a non-holder has no live session"          '! PATH="$VB:$PATH" "$V" drive vrf2 snapshot >/dev/null 2>&1'
+check "down releases the lease"                   '"$V" down vrf1 >/dev/null 2>&1; [ ! -d "$DM_HOME/state/browser.lease" ]'
+check "the browser is then available"             'vsh session vrf2 >/dev/null 2>&1'
+"$V" down vrf2 >/dev/null 2>&1
+check "no lease is left behind"                   '[ ! -d "$DM_HOME/state/browser.lease" ]'
+# The profile holds cookies and saved logins for the app just signed into, and
+# data/ is copied wholesale into a state export.
+check "down purges the browser profile"           '[ ! -d "$VDIR/chrome-profile" ] && [ ! -d "$VDIR/axi-home" ]'
+
+echo "== verify gate: teardown stops the app even after the worktree is gone =="
+vup vrf2 >/dev/null 2>&1 || true
+VPORT2="$(b dm-task.sh get vrf2 verify_port)"
+b dm-worktree.sh remove vrf2 --force >/dev/null 2>&1
+check "worktree removal stopped the app"   '! node -e "require(\"net\").connect($VPORT2,\"127.0.0.1\").on(\"connect\",function(){process.exit(0)}).on(\"error\",function(){process.exit(1)})"'
+check "the task records it as stopped"     '[ "$(b dm-task.sh get vrf2 verify_app_state)" = "down" ]'
+
+fi
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

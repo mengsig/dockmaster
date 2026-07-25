@@ -55,7 +55,7 @@ function checkSkillNames(skills) {
 // an untriggered skill is never loaded, a triggerless bullet points nowhere.
 function checkTriggers(skills) {
   const triggers = new Set()
-  for (const match of read('AGENTS.md').matchAll(/^- \*\*([a-z][a-z-]+)\*\* —/gm)) {
+  for (const match of read('AGENTS.md').matchAll(/^- \*\*([a-z][a-z0-9-]+)\*\* —/gm)) {
     triggers.add(match[1])
   }
   sameList(triggers, skills, 'AGENTS.md trigger set')

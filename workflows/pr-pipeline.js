@@ -101,6 +101,20 @@ const TEST_SCHEMA = {
   properties: { passed: { type: 'boolean' }, summary: { type: 'string' } },
   required: ['passed', 'summary'],
 }
+
+// The verify gate's agent must report the EXIT CODES it saw, not just a verdict:
+// this runner cannot exec, so the exit codes are the only checkable facts it can
+// hold the boolean against (see the verify branch below).
+const VERIFY_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    gateExit: { type: 'integer' },
+    reportExit: { type: 'integer' },
+    passed: { type: 'boolean' },
+    summary: { type: 'string' },
+  },
+  required: ['gateExit', 'reportExit', 'passed', 'summary'],
+}
 const REVIEW_SCHEMA = {
   type: 'object', additionalProperties: false,
   properties: {
@@ -341,16 +355,31 @@ for (const g of gates) {
       return { ok: false, stage: 'fix', detail: `unresolved ${currentPass} findings after ${max} rounds`, findings: lastReview.findings }
     }
   } else if (g.gate === 'verify') {
-    // Rigorous behavioral gate: drive the changed behavior end to end, not just
-    // the test suite. Skippable only when the diff has no runtime surface.
-    if (g.optional && t.noRuntimeSurface) { log('verify: diff has no runtime surface (docs/config-only) — behavioral gate skipped'); continue }
+    // Behavioral gate: boot the app and drive the changed surface, not just the
+    // test suite. This runner drives agents and cannot exec, so it does not
+    // compute the decision itself — it requires the agent to report the exit
+    // codes of `dm-verify.sh gate` and `dm-verify.sh report` and then checks the
+    // boolean against them, rather than trusting a bare `passed: true`.
+    if (g.optional && t.noRuntimeSurface) { log('verify: caller declared no runtime surface (docs/config-only) — behavioral gate skipped'); continue }
     const v = await agent(
-      `Behavioral verification of task ${t.taskId}. In ${t.worktree}, drive the behavior changed by ${base}...HEAD end to end without ` +
-      `editing files. Use a real browser for an affected web flow; otherwise use the narrowest executable CLI or API path. Observe the ` +
-      `actual result, not just that tests pass. Set passed=false if behavior is wrong or any required runtime/browser capability is unavailable.`,
-      { label: 'verify', phase: 'Verify', effort: g.effort || 'high', schema: TEST_SCHEMA },
+      `Behavioral verification of task ${t.taskId}, following the e2e-verification skill. First run exactly:\n\n` +
+      `    ${t.binDir}/dm-verify.sh gate ${t.taskId}\n\n` +
+      `and report its exit code as gateExit. 1 = no user-facing surface moved: report reportExit=0, passed=true, and say so. ` +
+      `3 = a surface moved but the repo has no app config, so NOTHING could be verified: report reportExit=3, passed=false, unavailable. ` +
+      `2 = the gate could not decide: passed=false. 0 = run the gate — ${t.binDir}/dm-verify.sh up ${t.taskId} (arm a trap that always ` +
+      `runs \`down\`), then session, then drive the flows the diff ${base}...HEAD implies, shot each asserted state, record each with ` +
+      `\`flow\`, and finish with \`${t.binDir}/dm-verify.sh report ${t.taskId}\`; report ITS exit code as reportExit. Never edit files.`,
+      { label: 'verify', phase: 'Verify', effort: g.effort || 'high', schema: VERIFY_SCHEMA },
     )
-    if (!v.passed) return { ok: false, stage: 'verify', detail: v.summary }
+    // Cross-check the boolean against the exit codes the agent reported. This
+    // narrows, it does not prove: a report that lies about `passed` can lie about
+    // the exit codes too. It catches the inconsistent claim, not the consistent one.
+    const verifiable = (v.gateExit === 1 && v.reportExit === 0)
+      || (v.gateExit === 0 && v.reportExit === 0)
+    if (!v.passed || !verifiable) {
+      return { ok: false, stage: 'verify', detail: `${v.summary} (gate exit ${v.gateExit}, report exit ${v.reportExit})` }
+    }
+    if (v.gateExit === 1) log(`verify: no user-facing surface moved — ${v.summary}`)
   } else if (g.gate === 'security') {
     const security = await runSecurityGate(g)
     if (!security.passed) {

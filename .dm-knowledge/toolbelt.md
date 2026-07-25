@@ -10,7 +10,8 @@ these are the constraints that are not obvious from the code you are editing.
   `dm-worktree` isolation; `dm-task` meta + on-demand state reconcile;
   `dm-brief`; `dm-branch-name`; `dm-pr` open/check/merge; `dm-merge` FF local
   land + rebase; `dm-sync` FF clone refresh; `dm-backlog`; `dm-lavish` review
-  artifact; `dm-test` tests gate; `dm-memory` context system; `dm-thread-name`
+  artifact; `dm-test` tests gate; `dm-verify` verify gate (per-task app boot +
+  isolated browser); `dm-memory` context system; `dm-thread-name`
   role-specific runtime labels; `dm-secondmate` locked supervisor identities;
   `dm-command-guard` destructive-Git command parsing. Point work at the right
   script instead of reinventing lifecycle logic.
