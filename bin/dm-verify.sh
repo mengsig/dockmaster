@@ -162,10 +162,13 @@ app_url_for() {
 # command with the verification environment exported.
 run_app_cmd() {
   local cwd="$1" port="$2" url="$3" id="$4" cmd="$5"
-  ( cd "$cwd" \
-    && DM_VERIFY_PORT="$port" DM_VERIFY_URL="$url" DM_VERIFY_TASK="$id" \
-       DM_VERIFY_DIR="$(verify_dir "$id")" \
-       eval "$cmd" )
+  # EXPORT, not an assignment prefix: a prefix on `eval` (a special builtin) sets
+  # the variable in the shell without reliably marking it exported across bash
+  # versions, so a start command that spawns a program would hand it nothing.
+  ( cd "$cwd" || exit 1
+    export DM_VERIFY_PORT="$port" DM_VERIFY_URL="$url" DM_VERIFY_TASK="$id"
+    DM_VERIFY_DIR="$(verify_dir "$id")"; export DM_VERIFY_DIR
+    eval "$cmd" )
 }
 
 # app_cwd <id> -- where a lifecycle command runs. The worktree while it exists,

@@ -4748,7 +4748,7 @@ check "an unresolvable worktree exits 2, not 1" '[ "$GATE_ERR_RC" = 2 ]'
 # shell's terminal and descriptors does not reliably outlive it (macOS kills this
 # fixture the moment `up` returns). Any real app_start_cmd that backgrounds a
 # server needs the same detachment.
-VAPP_START='rm -f "$DM_VERIFY_DIR/app.pid"; nohup node -e "require(\"net\").createServer(function(c){c.end(\"ok\\n\")}).listen(process.env.DM_VERIFY_PORT,\"127.0.0.1\")" >"$DM_VERIFY_DIR/app.log" 2>&1 </dev/null & printf "%s" "$!" > "$DM_VERIFY_DIR/app.pid"; printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"'
+VAPP_START='rm -f "$DM_VERIFY_DIR/app.pid"; ( nohup node -e "require(\"net\").createServer(function(c){c.end(\"ok\\n\")}).listen(process.env.DM_VERIFY_PORT,\"127.0.0.1\")" >"$DM_VERIFY_DIR/app.log" 2>&1 </dev/null & printf "%s" "$!" > "$DM_VERIFY_DIR/app.pid" ); printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"'
 # A genuine ownership probe: the listener must be the process THIS start command
 # spawned, and only then is the boot token echoed back.
 VAPP_READY='kill -0 "$(cat "$DM_VERIFY_DIR/app.pid")" 2>/dev/null && cp "$DM_VERIFY_DIR/token" "$DM_VERIFY_DIR/ready-proof"'
@@ -4816,6 +4816,7 @@ VPORT="$(b dm-task.sh get vrf1 verify_port)"
 VDIR="$DM_HOME/data/vrf1/verify"
 check "the port is in the per-task range" '[ "$VPORT" -ge 8600 ] && [ "$VPORT" -le 8999 ]'
 check "app state is recorded up"          '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "up" ]'
+[ -s "$VDIR/app.log" ] && printf '       fixture app.log: %s\n' "$(head -c 300 "$VDIR/app.log" | tr '\n' ' ')"
 check "the app really listens"            'node -e "require(\"net\").connect($VPORT,\"127.0.0.1\").on(\"connect\",function(){process.exit(0)}).on(\"error\",function(){process.exit(1)})"'
 check "DM_VERIFY_PORT reached the app"    'grep -q "port=$VPORT" "$VDIR/app.state"'
 check "the app ran in the task worktree"  'grep -q "cwd=$VWT" "$VDIR/app.state"'
