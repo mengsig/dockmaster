@@ -95,6 +95,34 @@ git_remove_worktree() {
 # the work is preserved anyway; the sha below keeps distinct ids from colliding.
 ref_component() { printf '%s' "${1//[!A-Za-z0-9_-]/_}"; }
 
+# Discards were once parked FLAT at refs/dm-discarded/<id>. A ref living at that
+# path is a git D/F conflict: nothing can be created beneath it, so upgrading to
+# the nested refs/dm-discarded/<id>/<sha> layout left parking permanently broken
+# for that id (#145). Move the old head into the nested layout, once.
+# Returns 0 when the parent path is clear to park under, 1 when it is not.
+migrate_flat_discard_ref() {
+  local id="$1" dir="$2" flat old out
+  flat="refs/dm-discarded/$(ref_component "$id")"
+  old="$(git -C "$dir" rev-parse --verify --quiet "$flat" 2>/dev/null)" || return 0
+  [ -n "$old" ] || return 0
+  # Delete before create: the nested path cannot exist while the flat ref does.
+  # The old head is unreferenced only between these two calls, and a failed
+  # re-park restores the flat ref rather than leaving the commit unnamed.
+  if ! out="$(git -C "$dir" update-ref -d "$flat" "$old" 2>&1)"; then
+    dm_warn "cannot clear $id's legacy discard ref $flat ($(dm_first_line "${out:-no error detail from git}")); parking under it stays blocked"
+    return 1
+  fi
+  # STDERR only: the caller's stdout is its parked-sha return value.
+  if out="$(git -C "$dir" update-ref "$flat/$old" "$old" 2>&1)"; then
+    dm_warn "$id: legacy discard ref $flat moved to $flat/$old (the old flat layout blocked parking)"
+    return 0
+  fi
+  dm_warn "could not re-park $id's legacy discarded head $old under $flat ($(dm_first_line "${out:-no error detail from git}")); restoring the legacy ref"
+  git -C "$dir" update-ref "$flat" "$old" 2>/dev/null \
+    || dm_warn "could not restore $flat either; recover $old with: git -C $dir branch recovered-$id $old"
+  return 1
+}
+
 # Park <sha> on a ref in the CLONE (shared object store) so a discarded commit
 # stays reachable and survives gc. Keyed by sha, not id alone: ids are reusable
 # and refs/dm-discarded/* gets no reflog, so a per-id ref would clobber an
@@ -115,6 +143,9 @@ park_discarded_head() {
     dm_warn "cannot park $id's discarded head $head: '$ref' is not a valid ref name; the commit may be unreachable after gc"
     return 0
   fi
+  # A legacy FLAT ref at the parent path is a git directory/file conflict that
+  # blocks every nested create beneath it. Migrate it first, or this park fails.
+  migrate_flat_discard_ref "$id" "$dir" || true
   if ! out="$(git -C "$dir" update-ref "$ref" "$head" 2>&1)"; then
     dm_warn "could not park $id's discarded head $head on $ref ($(dm_first_line "${out:-no error detail from git}")); the commit may be unreachable after gc"
     return 0
@@ -213,7 +244,16 @@ tangle_check() {
   local repo="$1" dir def cur
   dir="$(dm_repo_dir "$repo")"
   def="$(dm_default_branch "$dir")"
-  cur="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
+  # On an unborn HEAD git prints "HEAD" to STDOUT and exits 128, so the old
+  # `|| echo HEAD` fallback captured BOTH and reported the branch as "HEAD\nHEAD"
+  # — a corrupt diagnostic in exactly the case that needs a clear one (#123).
+  # dm-sync.sh already guards the identical call this way.
+  cur="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  cur="$(dm_first_line "$cur")"
+  if [ -z "$cur" ]; then
+    echo "TANGLE: cannot read the current branch of '$repo' at $dir; the clone is unreadable as a git repository"
+    return 1
+  fi
   if [ "$cur" != "$def" ] && [ "$cur" != "HEAD" ]; then
     echo "TANGLE: primary clone of '$repo' is on '$cur', expected '$def'. Return it with: git -C $dir checkout $def"
     return 1
