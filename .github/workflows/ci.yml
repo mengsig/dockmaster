@@ -36,6 +36,10 @@ jobs:
     timeout-minutes: 5
     outputs:
       code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}
+      # Single owner of "should macos-full run": both the job's own `if:` and
+      # ci-gate read THIS, so the gate can require success rather than infer it
+      # from the job's own `skipped`.
+      macos_full: ${{ github.event_name != 'pull_request' || (steps.filter.outputs.code == 'true' && contains(github.event.pull_request.labels.*.name, 'ci:macos')) }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
@@ -80,17 +84,19 @@ jobs:
       # shell. The comment-stripping grep excludes lines that are pure comments
       # (e.g. a note explaining why a construct is avoided) so it doesn't flag
       # itself.
-      - name: Check for banned bash-4 constructs in bin/*.sh
+      # bin/dm is listed explicitly: it carries no .sh suffix, so the glob alone
+      # left the dispatcher unchecked by the one job that runs unconditionally.
+      - name: Check for banned bash-4 constructs in bin/
         run: |
-          if grep -REn 'mapfile|readarray|declare -A|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|&>>' bin/*.sh \
+          if grep -REn 'mapfile|readarray|declare -A|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|&>>' bin/*.sh bin/dm \
               | grep -vE ':[0-9]+:[[:space:]]*#'; then
-            echo "banned bash-4 construct found in bin/*.sh (see above)"
+            echo "banned bash-4 construct found in bin/ (see above)"
             exit 1
           fi
 
-      - name: Check bin/*.sh syntax
+      - name: Check bin/ syntax
         run: |
-          for f in bin/*.sh; do
+          for f in bin/*.sh bin/dm; do
             echo "checking $f"
             bash -n "$f"
           done
@@ -103,6 +109,11 @@ jobs:
 
       - name: Check compatible-host runner gates
         run: node tests/check-pr-runner.js
+
+      # This workflow gates itself, so a PR that weakens the gate would verify
+      # itself green. Pin the job graph's shape here, where it always runs.
+      - name: Check CI job graph has not drifted
+        run: node tests/check-ci-graph.js
 
       - name: Check skill/trigger coverage
         run: node tests/check-skill-triggers.js
@@ -118,6 +129,7 @@ jobs:
           bash -n tests/runtime-evidence-dir.sh tests/runtime-performance.sh tests/runtime-smoke.sh tests/runtime-waiter-child.sh
           node --check tests/check-skill-triggers.js
           node --check tests/check-pr-runner.js
+          node --check tests/check-ci-graph.js
           node --check tests/runtime-performance.js
 
   # The suite as a contributor runs it: bash 5, GNU userland.
@@ -230,10 +242,7 @@ jobs:
   # merging something macOS-sensitive.
   macos-full:
     needs: [changes, macos]
-    if: |
-      needs.changes.outputs.code == 'true' &&
-      (github.event_name != 'pull_request' ||
-       contains(github.event.pull_request.labels.*.name, 'ci:macos'))
+    if: needs.changes.outputs.macos_full == 'true'
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -258,6 +267,7 @@ jobs:
             | node --input-type=module --check
           node tests/check-gate-drift.js
           node tests/check-pr-runner.js
+          node tests/check-ci-graph.js
           node tests/check-skill-triggers.js
           node tests/runtime-performance.js >/dev/null
 
@@ -274,6 +284,11 @@ jobs:
       - name: Require every needed job to have succeeded or been safely skipped
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
+          # The two `changes` outputs that decide whether a heavy leg runs. The
+          # gate re-reads them so a leg's own `skipped` is never taken as
+          # evidence that it was not needed.
+          CODE: ${{ needs.changes.outputs.code }}
+          MACOS_FULL_EXPECTED: ${{ needs.changes.outputs.macos_full }}
           FAST_RESULT: ${{ needs.fast.result }}
           SMOKE_LINUX_RESULT: ${{ needs.smoke-linux.result }}
           SMOKE_BASH32_RESULT: ${{ needs.smoke-bash32.result }}
@@ -296,15 +311,45 @@ jobs:
               exit 1
             fi
           done
+          # The outputs the leg checks below hang on must be a decided boolean.
+          # An empty or unexpected value would silently demote every leg to
+          # "not required", which is the exact fail-open this gate exists to
+          # prevent -- so refuse it outright.
+          for pair in "code:$CODE" "macos_full:$MACOS_FULL_EXPECTED"; do
+            case "${pair#*:}" in
+              true|false) ;;
+              *)
+                echo "::error::changes output ${pair%%:*} is not true/false (got: '${pair#*:}')"
+                exit 1
+                ;;
+            esac
+          done
+          # Each heavy leg is checked against the `changes` output that decides
+          # whether it runs, not against its own conclusion alone. When that
+          # output says the leg was required, ONLY success passes -- so a job
+          # that skipped for any reason (a filter regression, a dropped `needs`,
+          # an upstream failure) is a gate failure rather than a free pass.
           fail=0
-          for pair in "smoke-linux:$SMOKE_LINUX_RESULT" "smoke-bash32:$SMOKE_BASH32_RESULT" \
-                      "macos:$MACOS_RESULT" "macos-full:$MACOS_FULL_RESULT"; do
-            job=${pair%%:*}
-            result=${pair#*:}
+          for triple in "smoke-linux:$SMOKE_LINUX_RESULT:$CODE" \
+                        "smoke-bash32:$SMOKE_BASH32_RESULT:$CODE" \
+                        "macos:$MACOS_RESULT:$CODE" \
+                        "macos-full:$MACOS_FULL_RESULT:$MACOS_FULL_EXPECTED"; do
+            job=${triple%%:*}
+            rest=${triple#*:}
+            result=${rest%%:*}
+            required=${rest##*:}
+            if [ "$required" = "true" ]; then
+              [ "$result" = "success" ] && continue
+              echo "::error::$job was required by the path filter but did not succeed (result: ${result:-<empty>})"
+              fail=1
+              continue
+            fi
+            # Not required. Anything other than a clean skip (or an unexpected
+            # pass) still fails: an empty result means the job vanished.
             case "$result" in
               success|skipped) ;;
               *)
-                echo "::error::$job failed or was cancelled (result: $result)"
+                echo "::error::$job failed or was cancelled (result: ${result:-<empty>})"
                 fail=1
                 ;;
             esac
