@@ -27,8 +27,12 @@
 #   list
 #   recommend <role> <id> size a spawn for this task from real signals (role,
 #                         kind, measured diff) — a recommendation, not a record
-#   sizing                the dispatch distribution over every task record:
-#                         counts by model, by effort, and how many are unsized
+#   sizing [--transcripts <dir>]
+#                         the dispatch distribution over every task record:
+#                         counts by model, by effort, and how many are unsized.
+#                         With --transcripts, also cross-checks each record
+#                         against what its crewmate actually ran (exit 3 on a
+#                         mismatch)
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -421,9 +425,40 @@ case "$cmd" in
 
   sizing)
     # "Was our spend proportionate?" answered from the records themselves, so it
-    # never needs a bespoke grep over transcripts (#177). Reads meta only: no
-    # network, no reconcile, no mutation. Covers every non-archived task.
+    # never needs a bespoke grep (#177). Reads meta only: no network, no
+    # reconcile, no mutation. Covers every non-archived task.
+    #
+    # --transcripts <dir> additionally CROSS-CHECKS the record against what each
+    # crewmate actually ran, closing the gap `set agent_id` admits to: that gate
+    # records a choice, it cannot verify the spawn. The directory holds one
+    # `<agent_id>.output` per spawn (the runtime's own layout, so the caller
+    # passes the path — nothing here hardcodes it). A file that is missing or
+    # carries no model is UNPROVEN, never a pass; a contradiction is a MISMATCH
+    # and exits 3, because a record that lies about what ran is worse than none.
+    transcripts=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --transcripts) [ "$#" -ge 2 ] || dm_die "--transcripts requires a directory"; transcripts="$2"; shift 2 ;;
+        *) dm_die "unknown flag: $1 (usage: dm-task.sh sizing [--transcripts <dir>])" ;;
+      esac
+    done
+    [ -z "$transcripts" ] || [ -d "$transcripts" ] || dm_die "no such transcript directory: $transcripts"
     models=""; efforts=""; total=0; unsized=0
+    matched=0; unproven=0; mismatched=0; mismatches=""
+    # Runs in THIS shell (the loop below reads a process substitution), so the
+    # counters it updates are the ones printed.
+    cross_check() {
+      local tid="$1" recorded="$2" agent ran
+      agent="$(dm_meta_get "$tid" agent_id)"
+      [ -n "$agent" ] || return 0
+      ran="$(dm_transcript_model "$transcripts/$agent.output")" || ran=""
+      if [ -z "$ran" ]; then unproven=$((unproven + 1)); return 0; fi
+      if dm_dispatch_model_matches "$recorded" "$ran"; then
+        matched=$((matched + 1)); return 0
+      fi
+      mismatched=$((mismatched + 1))
+      mismatches="$mismatches  MISMATCH: $tid recorded model=$recorded but its transcript ran $ran"$'\n'
+    }
     while IFS= read -r tid; do
       [ -n "$tid" ] || continue
       total=$((total + 1))
@@ -431,6 +466,7 @@ case "$cmd" in
       [ -n "$m" ] && models="$models$m"$'\n'
       [ -n "$e" ] && efforts="$efforts$e"$'\n'
       if [ -z "$m" ] || [ -z "$e" ]; then unsized=$((unsized + 1)); fi
+      if [ -n "$transcripts" ] && [ -n "$m" ]; then cross_check "$tid" "$m"; fi
     done < <(dm_all_task_ids)
     [ "$total" -gt 0 ] || { dm_info "(no tasks)"; exit 0; }
     tally() {
@@ -441,8 +477,14 @@ case "$cmd" in
     }
     out="$( tally model "$models"; tally effort "$efforts"
             printf 'unsized\tno model or no effort\t%s\n' "$unsized"
-            printf 'total\ttask records\t%s\n' "$total" )"
+            printf 'total\ttask records\t%s\n' "$total"
+            if [ -n "$transcripts" ]; then
+              printf 'verified\tran as recorded\t%s\n' "$matched"
+              printf 'verified\tno transcript found\t%s\n' "$unproven"
+              printf 'verified\tMISMATCH\t%s\n' "$mismatched"
+            fi )"
     printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"
+    [ -z "$mismatches" ] || { printf '%s' "$mismatches" >&2; exit 3; }
     ;;
 
   *)

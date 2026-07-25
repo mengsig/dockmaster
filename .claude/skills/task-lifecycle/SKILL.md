@@ -144,6 +144,13 @@ effort, and how many dispatches never chose. Read it when you want to know
 whether the spend was proportionate; a bottom tier that never appears is the
 defect it was added to expose (#177).
 
+`sizing --transcripts <dir>` goes further and checks each record against what
+the crewmate ACTUALLY ran, reading the model out of its transcript (one
+`<agent_id>.output` per spawn, in the runtime's own per-session `tasks/` dir).
+That is the only check that can catch a record which lies — `set agent_id`
+records a choice and cannot verify the spawn. A missing transcript is reported
+unproven, never a pass; a contradiction is a MISMATCH and exits non-zero.
+
 The same judgment applies to **every** sub-unit you spawn downstream — review
 passes, verification, fix rounds, merge-gate reasoning (see `pr-workflow`) — not
 just the implementing crewmate; `recommend <role> <id>` sizes those too. Never

@@ -1276,6 +1276,33 @@ dm_recommended_effort() {
   printf '%s\n' "${pair##* }"
 }
 
+# dm_transcript_model <file>  -> the model id a subagent ACTUALLY ran as, read
+# from the first `"model":"..."` in its transcript; non-zero when the file is
+# absent or carries none. Task meta and the transcript are independent sources,
+# and only the transcript proves what ran — the dispatch gate records a CHOICE,
+# it cannot verify the spawn. Unreadable must stay unproven, never a pass.
+dm_transcript_model() {
+  local file="${1:-}" value
+  [ -n "$file" ] && [ -f "$file" ] || return 2
+  # `"model":"` is 9 chars, plus the closing quote: awk exits at the first hit,
+  # so a large transcript is not fully scanned.
+  value="$(awk 'match($0, /"model":"[a-zA-Z0-9._-]+"/) {
+    print substr($0, RSTART + 9, RLENGTH - 10); exit }' "$file")" || return 2
+  [ -n "$value" ] || return 2
+  printf '%s\n' "$value"
+}
+
+# True when the transcript's model id is the tier the dispatch recorded. The
+# record holds a tier alias (`opus`) and the runtime reports a full id
+# (`claude-opus-5`), so containment — not equality — is the test. No alias is a
+# substring of another, so this cannot cross-match two tiers.
+dm_dispatch_model_matches() {
+  local recorded="${1:-}" actual="${2:-}"
+  [ -n "$recorded" ] && [ -n "$actual" ] || return 1
+  case "$actual" in *"$recorded"*) return 0 ;; esac
+  return 1
+}
+
 # True when <value> is EXACTLY one effort level. Whole-word equality, never a
 # substring test against the joined list: `case " $LEVELS " in *" $v "*)` also
 # accepted any adjacent run ("low medium", "high xhigh"), storing a level with no

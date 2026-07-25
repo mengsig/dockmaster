@@ -4353,6 +4353,64 @@ check "a task with neither dial is counted unsized" \
 check "sizing on an empty home says so rather than printing nothing" \
   '[ "$(DM_HOME="$TMP/sizing-empty" b dm-task.sh sizing)" = "(no tasks)" ]'
 
+echo "== dispatch tier: the record is cross-checked against what actually ran (#177) =="
+# `set agent_id` is a RECORD gate: it forces the choice to be written down and
+# cannot verify the spawn. The transcript is the independent second source, so a
+# record that LIES about what ran is catchable. Unreadable stays unproven.
+w7sized() {   # <id> <model> <effort> <agent-id> -- a fully recorded dispatch
+  b dm-task.sh new "$1" --kind ship --repo demo --title "sized dispatch" >/dev/null
+  b dm-worktree.sh create "$1" demo >/dev/null
+  b dm-brief.sh "$1" >/dev/null
+  sed 's/{TASK}/Do the thing./' "$DM_HOME/data/$1/brief.md" > "$TMP/w7brief" \
+    && mv "$TMP/w7brief" "$DM_HOME/data/$1/brief.md"
+  b dm-task.sh set "$1" model "$2" >/dev/null
+  b dm-task.sh set "$1" effort "$3" >/dev/null
+  b dm-task.sh set "$1" agent_id "$4" >/dev/null
+}
+W7TX="$TMP/transcripts"; mkdir -p "$W7TX"
+w7sized w7tx-ok    opus   high   agent-tx-ok
+w7sized w7tx-bad   sonnet medium agent-tx-bad
+w7sized w7tx-gone  haiku  low    agent-tx-gone
+w7sized w7tx-blank opus   high   agent-tx-blank
+# The record holds a tier alias; the runtime reports a full model id.
+printf '{"type":"assistant","message":{"model":"claude-opus-5"}}\n' > "$W7TX/agent-tx-ok.output"
+printf '{"type":"assistant","message":{"model":"claude-opus-5"}}\n' > "$W7TX/agent-tx-bad.output"
+printf '{"type":"user","message":{"role":"user"}}\n'                > "$W7TX/agent-tx-blank.output"
+# agent-tx-gone deliberately has NO transcript file.
+W7TXOUT="$(b dm-task.sh sizing --transcripts "$W7TX" 2>"$TMP/w7tx.err" || true)"
+check "an alias record matching a full model id counts as verified" \
+  'grep -qE "^verified[[:space:]]+ran as recorded[[:space:]]+1$" <<<"$W7TXOUT"'
+check "a contradicted record is a MISMATCH, not a pass" \
+  'grep -qE "^verified[[:space:]]+MISMATCH[[:space:]]+1$" <<<"$W7TXOUT"'
+# A missing file and a transcript with no model field must land in the SAME
+# unproven bucket — neither may be counted as verified.
+check "a missing or model-less transcript is unproven, never verified" \
+  '[ "$(grep -E "^verified[[:space:]]+no transcript found" <<<"$W7TXOUT" | awk "{print \$NF}")" -ge 2 ]'
+check "the mismatch names the task, the record and what ran" \
+  'grep -q "w7tx-bad" "$TMP/w7tx.err" && grep -q "recorded model=sonnet" "$TMP/w7tx.err" && grep -q "claude-opus-5" "$TMP/w7tx.err"'
+check "a mismatch exits non-zero rather than reporting a clean sweep" \
+  '! b dm-task.sh sizing --transcripts "$W7TX" >/dev/null 2>&1'
+check "the plain distribution still exits 0 with the same mismatch present" \
+  'b dm-task.sh sizing >/dev/null 2>&1'
+check "the cross-check rows appear only when transcripts are supplied" \
+  '! b dm-task.sh sizing | grep -q "^verified"'
+# Failure contract on the flag itself.
+check "a transcript directory that does not exist is refused" \
+  '! b dm-task.sh sizing --transcripts "$TMP/no-such-transcripts" >/dev/null 2>&1'
+check "--transcripts with no value is refused"  '! b dm-task.sh sizing --transcripts >/dev/null 2>&1'
+check "an unknown sizing flag is refused"       '! b dm-task.sh sizing --nonsense >/dev/null 2>&1'
+# The matcher itself: containment against a full id, and no cross-tier match.
+w7match() { ( . "$ROOT/bin/dm-lib.sh"; dm_dispatch_model_matches "$@" ); }
+check "each tier alias matches only its own model id" \
+  'w7match opus claude-opus-5 && w7match sonnet claude-sonnet-5 && w7match haiku claude-haiku-4-5-20251001 \
+   && ! w7match opus claude-sonnet-5 && ! w7match haiku claude-opus-5 && ! w7match sonnet claude-haiku-4-5-20251001'
+check "an empty side never matches"             '! w7match "" claude-opus-5 && ! w7match opus ""'
+w7tm() { ( . "$ROOT/bin/dm-lib.sh"; dm_transcript_model "$@" ); }
+check "an absent transcript file is refused, printing nothing" \
+  '! w7tm "$W7TX/no-such-agent.output" && [ -z "$(w7tm "$W7TX/no-such-agent.output" 2>/dev/null)" ]'
+check "a transcript with no model field is refused" '! w7tm "$W7TX/agent-tx-blank.output"'
+check "a real transcript line yields the model id"  '[ "$(w7tm "$W7TX/agent-tx-ok.output")" = claude-opus-5 ]'
+
 echo "== brief: both dials are surfaced as tunable anchors (#166) =="
 b dm-task.sh new w6eff-1 --kind ship --repo demo --title "add a multiply endpoint" >/dev/null
 b dm-worktree.sh create w6eff-1 demo >/dev/null

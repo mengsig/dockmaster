@@ -77,6 +77,17 @@ delivered. The contract a crewmate follows lives in the `task-lifecycle` and
   `dm-brief` runs the build-pass recommendation and records `model_recommended`
   / `effort_recommended`; `dm-status` flags a `working` task missing EITHER dial
   as UNSIZED.
+- **[convention]** The record gate can be AUDITED even though it cannot verify a
+  spawn: `dm-task.sh sizing --transcripts <dir>` compares each task's recorded
+  `model` against the model its crewmate actually ran, read by
+  `dm_transcript_model` from the first `"model":"..."` in the transcript. The
+  runtime writes one `<agent_id>.output` per spawn under its per-session
+  `tasks/` dir (a symlink to `subagents/agent-<id>.jsonl`); the DIRECTORY is a
+  caller argument so nothing in `bin/` hardcodes a runtime-internal path, and a
+  wrong directory degrades to "unproven" for every task rather than a false
+  pass. Matching is CONTAINMENT (`opus` vs `claude-opus-5`) because meta holds a
+  tier alias and the transcript a full id; no alias is a substring of another. A
+  contradiction exits 3.
 - **[gotcha]** `dm-task.sh set agent_id` REFUSES unless the task records both
   `model` and `effort`, and refuses an effort outside `DM_EFFORT_LEVELS`. It is
   a RECORD gate, not a SPAWN gate: the agent is already running by the time it
