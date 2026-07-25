@@ -881,6 +881,55 @@ dm_sync_reaction() {
   esac
 }
 
+# --- PR body: the appended gate-evidence section (#175) ----------------------
+# Single owner of the section's SHAPE, because two scripts depend on it:
+# dm-evidence.sh renders one, and dm-pr.sh both renders the "collector could not
+# be run" variant and strips a previous section before appending. Keeping the
+# markers here also means stripping never depends on dm-evidence.sh existing —
+# the very failure the fallback exists for.
+#
+# The region is delimited at BOTH ends. A single opening marker was ambiguous:
+# any body that merely QUOTED it (a PR description about this machinery is the
+# obvious case) got truncated from that line to the end, silently discarding the
+# operator's own text.
+DM_EVIDENCE_BEGIN='<!-- dm:gate-evidence -->'
+DM_EVIDENCE_END='<!-- /dm:gate-evidence -->'
+
+dm_evidence_wrap() {
+  # dm_evidence_wrap <content> -- the whole appended section, separator and
+  # markers included. Content is markdown already rendered by its producer.
+  [ "$#" -eq 1 ] || dm_die "dm_evidence_wrap requires <content>"
+  [ -n "$1" ] || dm_die "dm_evidence_wrap refuses an empty section: an evidence block with nothing in it is indistinguishable from no gate at all"
+  printf -- '---\n%s\n\n### Gate evidence\n\n%s\n\n%s\n' \
+    "$DM_EVIDENCE_BEGIN" "$1" "$DM_EVIDENCE_END"
+}
+
+dm_evidence_strip() {
+  # dm_evidence_strip -- body on stdin, body without a previously appended
+  # section on stdout. Removes ONLY a complete begin..end region that ends the
+  # body, plus the blank lines and `---` separator introducing it. Anything else
+  # — a quoted marker, an unterminated one, one inside a fenced block — is
+  # passed through byte for byte: appending a duplicate section is a visible
+  # annoyance, whereas eating the description is silent data loss.
+  # \r is ignored when matching so a body round-tripped through GitHub (which
+  # serves CRLF) still strips instead of stacking a second section.
+  awk -v b="$DM_EVIDENCE_BEGIN" -v e="$DM_EVIDENCE_END" '
+    function bare(s) { sub(/\r$/, "", s); return s }
+    { raw[++n] = $0; flat[n] = bare($0) }
+    END {
+      last = n
+      while (last > 0 && flat[last] == "") last--
+      start = 0
+      if (last > 0 && flat[last] == e)
+        for (i = last - 1; i >= 1; i--) if (flat[i] == b) { start = i; break }
+      if (start > 0) {
+        n = start - 1
+        while (n > 0 && (flat[n] == "" || flat[n] == "---")) n--
+      }
+      for (i = 1; i <= n; i++) print raw[i]
+    }'
+}
+
 # --- live PR-state refresh: the out-of-band-merge drift guard -----------------
 # The cached pr_state meta field goes stale when a PR is merged out of band
 # (the operator merges in the GitHub web UI — common), so state/landed decisions

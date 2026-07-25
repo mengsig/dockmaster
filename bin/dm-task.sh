@@ -86,6 +86,11 @@ case "$cmd" in
     case "$key" in
       pr|pr_state|merge_state|pr_check_snapshot|pr_head) dm_die "'$key' is a PR-tracking field maintained by dm-pr.sh (check/open/merge); it must not be set by hand" ;;
       base) dm_die "'base' is recorded by dm-worktree.sh create --base; it must not be set by hand" ;;
+      # The tests gate's result and the command that produced it. Both are
+      # published on the PR as evidence (#175), so a hand-set value would put a
+      # pass a reviewer trusts behind a suite that never ran. dm-test.sh writes
+      # them through dm_meta_set directly.
+      tests|tests_cmd) dm_die "'$key' is recorded by dm-test.sh when the tests gate runs; hand-setting it would publish a test result nothing ran" ;;
       worktree) dm_die "'worktree' is maintained by dm-worktree.sh create/remove; it must not be set by hand" ;;
       # The verify gate's TRUST inputs. `verify_ready_cmd` is eval'd, and
       # dm-verify.sh validates it at boot (it must prove ownership, and a probe
