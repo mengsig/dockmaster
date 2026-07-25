@@ -4548,6 +4548,46 @@ check "the old pattern is still a live regex (guard the guard)" \
 check "the lint does not flag the safe split or a refusing handler" \
   '[ -z "$(w6_swallowed_refusals "$W6PLANT/dm-lib.sh" "$W6PLANT/dm-safe.sh")" ]'
 
+echo "== bin/ must PARSE under bash 3.2: no bare esac in a pattern list (#164) =="
+# bash 3.2 reads a bare `esac` ANYWHERE in a case pattern list as the reserved
+# word and the file stops parsing; bash >= 4 accepts it. So a construct that is
+# fine on every dev machine, and on every CI leg that resolves `bash` through
+# PATH, makes the file unloadable on a stock macOS shell -- which is how #160
+# shipped a dm-command-guard.sh that did not parse at all. Measured: only `esac`
+# behaves this way; case/do/done/in/time/function are all fine unquoted.
+esac_in_pattern_list() {
+  grep -nE '(\|[[:space:]]*esac[[:space:]]*[|)])|((^|[[:space:]])esac[[:space:]]*\|)' "$@" || true
+}
+BARE_ESAC="$(esac_in_pattern_list "$ROOT"/bin/*.sh)"
+[ -z "$BARE_ESAC" ] || printf '%s\n' "$BARE_ESAC" >&2
+check "no bin/*.sh puts a bare esac in a case pattern list (#164)" '[ -z "$BARE_ESAC" ]'
+# Guard the guard, in both spellings the construct actually takes.
+ESAC_LINT="$TMP/esac-lint"; mkdir -p "$ESAC_LINT"
+cat > "$ESAC_LINT/bad.sh" <<'ESACBAD'
+#!/usr/bin/env bash
+one_line() { case "$1" in for|esac|while) return 0 ;; esac; return 1; }
+continued() { case "$1" in for|while|\
+esac|until) return 0 ;; esac; return 1; }
+ESACBAD
+cat > "$ESAC_LINT/good.sh" <<'ESACGOOD'
+#!/usr/bin/env bash
+quoted() { case "$1" in for|'esac'|while) return 0 ;; esac; return 1; }
+plain()  { case "$1" in for) return 0 ;; esac; return 1; }
+ESACGOOD
+check "the lint catches both spellings of the planted construct (#164)" \
+  '[ "$(grep -c . <<<"$(esac_in_pattern_list "$ESAC_LINT/bad.sh")")" = 2 ]'
+check "the lint clears a quoted esac and an ordinary terminator (#164)" \
+  '[ -z "$(esac_in_pattern_list "$ESAC_LINT/good.sh")" ]'
+# The lint is the portable half. CI's own `bash -n` over bin/*.sh runs PATH
+# bash, which on the macOS runner is Homebrew 5 -- so nothing ever parsed the
+# toolbelt with the 3.2 the invariant is about. Pin the explicit step, and pin
+# that it stays behind the assertion that the runner still ships 3.2.
+CI_YML="$ROOT/.github/workflows/ci.yml"
+check "CI parses bin/*.sh with the macOS system bash 3.2 (#164)" \
+  'grep -q "/bin/bash -n" "$CI_YML"'
+check "that step stays behind the system-bash-is-v3 assertion (#164)" \
+  '[ "$(grep -n "no longer version 3" "$CI_YML" | cut -d: -f1)" -lt "$(grep -n "/bin/bash -n" "$CI_YML" | cut -d: -f1)" ]'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

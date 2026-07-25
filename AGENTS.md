@@ -186,7 +186,8 @@ meant to bind: when it blocks you, cut or relocate rather than raise it.
 Three constraints apply to almost any edit here, so they stay in this file:
 - `bin/` must run on bash 3.2 (macOS default) — no `mapfile`, no `declare -A`,
   no `${var^^}`, no `&>>`. CI pins this: it greps `bin/*.sh` for those
-  constructs, and runs the whole smoke suite under macOS system bash 3.2.
+  constructs and PARSES them with macOS system bash 3.2. Only the smoke
+  harness runs under 3.2; the toolbelt it invokes does not (#164).
 - New behavior = a skill under `.claude/skills/` plus a trigger bullet above,
   never an inline contract; `tests/check-skill-triggers.js` enforces it.
 - Never hand-edit `state/tasks/*.meta`, `state/repos.json`, or the backlog —
