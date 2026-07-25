@@ -243,14 +243,17 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     # the display and the enforcement paths share one migration rule (a legacy
     # yolo-only entry still shows the derived authority), rather than duplicating
     # the yolo->authority mapping inline in jq.
-    { printf 'NAME\tAUTH\tMODE\tBRANCH\tREMOTE\n'
+    #
+    # `| column ... || cat` bound `||` to the whole pipeline: a missing column
+    # fell back to `cat` on the SCRIPT's stdin (consumed -> empty; a tty -> hangs).
+    out="$(printf 'NAME\tAUTH\tMODE\tBRANCH\tREMOTE\n'
       while IFS= read -r name; do
         [ -n "$name" ] || continue
         printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$(dm_merge_authority "$name")" \
           "$(dm_registry_get "$name" mode)" "$(dm_registry_get "$name" default_branch)" \
           "$(dm_registry_get "$name" remote)"
-      done < <(dm_registry_keys)
-    } | column -t -s$'\t' 2>/dev/null || cat
+      done < <(dm_registry_keys))"
+    printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"
     ;;
 
   get)
