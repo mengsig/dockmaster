@@ -4126,11 +4126,20 @@ HEREDOC_BODY="$(printf 'gh pr create --body "$(cat <<%sEOF%s\nFixes the thing.\n
 HEREDOC_PLAIN="$(printf 'cat <<EOF\ngit reset --hard\nEOF\n')"
 HEREDOC_DASH="$(printf 'cat <<-EOF\n\tgit clean -fd\n\tEOF\n')"
 HEREDOC_SHELL="$(printf 'bash <<EOF\ngit reset --hard\nEOF\n')"
+# `<<<` is a HERESTRING. Read as a heredoc operator its delimiter would be `<`,
+# which never appears, so every later line would be swallowed unclassified --
+# the skip must not become a way to hide the next command.
+HERESTRING_THEN_CMD="$(printf 'grep -q x <<< "$s"\ngit reset --hard\n')"
 check "guard permits a heredoc body and a heredoc PR body (#160)" \
   'all_allowed "$HEREDOC_BODY" "$HEREDOC_PLAIN" "$HEREDOC_DASH"'
-# `<<<` is a herestring, not a heredoc, and a shell fed either is still refused.
 check "a heredoc fed to a SHELL is still refused (#160)" \
   'all_blocked "$HEREDOC_SHELL" "bash <<< \"git clean -fd\""'
+check "a herestring does not swallow the commands after it (#160)" \
+  'all_blocked "$HERESTRING_THEN_CMD"'
+# The body skip must stop at the delimiter, not run to end of input.
+HEREDOC_THEN_CMD="$(printf 'cat <<EOF\nharmless text\nEOF\ngit reset --hard\n')"
+check "the heredoc skip stops at its delimiter (#160)" \
+  'all_blocked "$HEREDOC_THEN_CMD"'
 check "guard counts substitution parens quote-aware (#160)" \
   'all_allowed "echo \"\$(grep \\\"(\\\" file)\"" "gh pr create --body \"the fix works :) ship it\""'
 
