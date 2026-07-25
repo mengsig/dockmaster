@@ -4616,10 +4616,13 @@ HD_LOOKALIKE=$'echo "<<EOF"\ngit push --force'
 HD_LOOKALIKE_GREP=$'grep "<<EOF" README.md\ngit push --force'
 HD_LOOKALIKE_BARE=$'echo "<<" marker\ngit push --force'
 HD_LOOKALIKE_DASH=$'echo "<<-EOF"\ngit push --force'
+# Unlike HD_LOOKALIKE_DASH (delimiter attached), this bare form isolates the
+# `<<-` gate itself rather than an unrelated internal assertion (#167).
+HD_LOOKALIKE_DASH_BARE=$'echo "<<-" marker\ngit push --force'
 HD_LOOKALIKE_ESCAPED=$'echo \\<\\<EOF\ngit push --force'
 check "a quoted heredoc lookalike no longer swallows the next command (#163)" \
   'all_blocked "$HD_LOOKALIKE" "$HD_LOOKALIKE_GREP" "$HD_LOOKALIKE_BARE" \
-     "$HD_LOOKALIKE_DASH" "$HD_LOOKALIKE_ESCAPED"'
+     "$HD_LOOKALIKE_DASH" "$HD_LOOKALIKE_DASH_BARE" "$HD_LOOKALIKE_ESCAPED"'
 # The other half of the same bit, or the fix is just the old over-blocking: a
 # REAL operator must still skip its body, in every spelling.
 HD_REAL_PROSE=$'cat <<EOF\ngit push --force is what broke it\nEOF'
@@ -4660,6 +4663,11 @@ check "a heredoc fed to a shell is still refused either way (#163)" \
 # does, and only the bare form was guarded.
 check "the fd-numbered stdin redirect into a shell is refused (#163)" \
   'all_blocked "bash 0<payload.sh" "bash 0<&3" && all_allowed "echo 0<x" "git -C /tmp status"'
+# Multi-zero spellings (`00<file`, `000<file`) alias fd 0 too; only the
+# single-digit form was guarded (#167). A non-zero leading digit stays allowed.
+check "any-zeros fd-numbered stdin redirect is refused, non-fd0 digits are not (#167)" \
+  'all_blocked "bash 00<payload.sh" "bash 000<payload.sh" \
+     && all_allowed "bash 01<payload.sh" "bash 10<payload.sh"'
 
 echo "== bin/ must PARSE under bash 3.2: no bare esac in a pattern list (#164) =="
 # bash 3.2 reads a bare `esac` ANYWHERE in a case pattern list as the reserved

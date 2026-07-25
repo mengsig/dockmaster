@@ -1065,6 +1065,17 @@ is_shell_executable() {
   case "$1" in sh|bash|dash|zsh|ash|ksh|mksh) return 0 ;; *) return 1 ;; esac
 }
 
+# bash aliases ANY leading-zero run before `<` to fd 0 (`00<file` = `0<file`);
+# a non-zero leading digit names a different fd, not stdin.
+is_fd0_redirect() {
+  local word="$1"
+  while [ -n "$word" ] && [ "${word:0:1}" = "0" ]; do
+    word="${word:1}"
+  done
+  case "$word" in '<'*) return 0 ;; esac
+  return 1
+}
+
 check_shell_input() {
   local segment_start="$1" command_index="$2" end="$3" executable="$4" i
   is_shell_executable "$executable" || return 0
@@ -1073,13 +1084,8 @@ check_shell_input() {
   fi
   i=$((command_index + 1))
   while [ "$i" -lt "$end" ]; do
-    # `0<file` is the fd-numbered spelling of `<file` and redirects the SAME
-    # stdin the shell then executes. Guarding only the bare form left the
-    # identical hole one spelling over, which is how #163's heredoc pair got
-    # here -- close the class, not the example.
-    case "${TOKENS[$i]}" in
-      '<'*|0'<'*) deny "shell executes unresolved redirected stdin" ;;
-    esac
+    # Any-zeros fd-numbered spelling of `<file`; see is_fd0_redirect above.
+    is_fd0_redirect "${TOKENS[$i]}" && deny "shell executes unresolved redirected stdin"
     i=$((i + 1))
   done
 }
