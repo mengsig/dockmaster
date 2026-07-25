@@ -1,0 +1,270 @@
+{
+  "source": "fixture",
+  "generated_at": "2026-07-25T21:40:00Z",
+  "fleet": { "repos": 4, "in_flight": 28, "open_prs": 10, "needs_you": 7 },
+
+  "needs_you": [
+    {
+      "lamp": "port",
+      "state": "CI red",
+      "headline": "The idle-session fix is failing its checks",
+      "detail": "Two checks have been red for 3 hours. Nothing else is waiting on it.",
+      "repo": "veriflow",
+      "age": "3h",
+      "action": { "label": "Open the pull request", "href": "https://github.com/mengsig/veriflow/pull/311" }
+    },
+    {
+      "lamp": "brass",
+      "state": "Yours to merge",
+      "headline": "The conflict-render fix is ready and only you can merge it",
+      "detail": "Green and reviewed. gitflow is set so the dockmaster never merges.",
+      "repo": "gitflow",
+      "age": "2d",
+      "action": { "label": "Open the pull request", "href": "https://github.com/devGunnin/gitflow/pull/400" }
+    },
+    {
+      "lamp": "brass",
+      "state": "Needs your decision",
+      "headline": "How wide should project access be for managers?",
+      "detail": "Today they see every project in the workspace; the docs promise only the ones they belong to.",
+      "repo": "veriflow",
+      "age": "5d",
+      "action": { "label": "Answer it", "href": "#decisions" }
+    },
+    {
+      "lamp": "brass",
+      "state": "Needs your decision",
+      "headline": "Rename the deployment stack, or keep the old name?",
+      "detail": "Renaming orphans the live database and object-store volumes. No safe automatic answer.",
+      "repo": "veriflow",
+      "age": "6d",
+      "action": { "label": "Answer it", "href": "#decisions" }
+    },
+    {
+      "lamp": "brass",
+      "state": "Waiting on review",
+      "headline": "13 changes are waiting for you to look at them",
+      "detail": "The oldest has been waiting 4 days. Reviewing the queue unblocks eight pull requests.",
+      "repo": "veriflow",
+      "age": "4d",
+      "action": { "label": "Open the review archive", "href": "#reviews" }
+    },
+    {
+      "lamp": "port",
+      "state": "Stalled",
+      "headline": "The isFullBay removal has not moved in 6 days",
+      "detail": "No new commits since Friday and its checks are red. Worth restarting or dropping.",
+      "repo": "ccso",
+      "age": "6d",
+      "action": { "label": "Open the pull request", "href": "https://github.com/devGunnin/CCSO/pull/1197" }
+    },
+    {
+      "lamp": "brass",
+      "state": "Yours to merge",
+      "headline": "The gate-evidence change is ready and only you can merge it",
+      "detail": "Green, reviewed, and the dockmaster is never allowed to merge its own distro.",
+      "repo": "dockmaster",
+      "age": "5h",
+      "action": { "label": "Open the pull request", "href": "https://github.com/mengsig/dockmaster/pull/186" }
+    }
+  ],
+
+  "prs": [
+    { "repo": "veriflow", "title": "Fail closed when the throttle cannot be read", "number": 310, "url": "https://github.com/mengsig/veriflow/pull/310", "checks": "passing", "checks_detail": "14 of 14 green", "reviews": "Approved", "merge": "dockmaster", "age": "5h" },
+    { "repo": "veriflow", "title": "Expire idle sessions", "number": 311, "url": "https://github.com/mengsig/veriflow/pull/311", "checks": "failing", "checks_detail": "2 of 14 failing", "reviews": "Changes requested", "merge": "blocked", "blocker": "Backend tests fail on the new session clock", "age": "5h" },
+    { "repo": "veriflow", "title": "Cap unbounded list responses", "number": 312, "url": "https://github.com/mengsig/veriflow/pull/312", "checks": "pending", "checks_detail": "9 of 14 done", "reviews": "No review yet", "merge": "blocked", "blocker": "Checks still running", "age": "5h" },
+    { "repo": "veriflow", "title": "Filter security findings by project", "number": 315, "url": "https://github.com/mengsig/veriflow/pull/315", "checks": "passing", "checks_detail": "14 of 14 green", "reviews": "Approved", "merge": "dockmaster", "age": "3h" },
+    { "repo": "veriflow", "title": "Return 401 instead of 500 on an expired session", "number": 316, "url": "https://github.com/mengsig/veriflow/pull/316", "checks": "passing", "checks_detail": "14 of 14 green", "reviews": "No review yet", "merge": "dockmaster", "age": "4h" },
+    { "repo": "gitflow", "title": "Render conflicts without dropping hunks", "number": 400, "url": "https://github.com/devGunnin/gitflow/pull/400", "checks": "passing", "checks_detail": "6 of 6 green", "reviews": "Approved", "merge": "you", "age": "2d" },
+    { "repo": "ccso", "title": "Remove isFullBay", "number": 1197, "url": "https://github.com/devGunnin/CCSO/pull/1197", "checks": "failing", "checks_detail": "3 of 11 failing", "reviews": "No review yet", "merge": "you", "blocker": "Stalled 6 days with red checks", "age": "6d" },
+    { "repo": "dockmaster", "title": "PRs carry the evidence their gates produced", "number": 186, "url": "https://github.com/mengsig/dockmaster/pull/186", "checks": "passing", "checks_detail": "8 of 8 green", "reviews": "Approved", "merge": "you", "age": "5h" },
+    { "repo": "dockmaster", "title": "Size dispatches from real signals", "number": 187, "url": "https://github.com/mengsig/dockmaster/pull/187", "checks": "passing", "checks_detail": "8 of 8 green", "reviews": "Approved", "merge": "you", "age": "5h" },
+    { "repo": "dockmaster", "title": "Make state exports portable", "number": 135, "url": "https://github.com/mengsig/dockmaster/pull/135", "checks": "failing", "checks_detail": "1 of 8 failing", "reviews": "No review yet", "merge": "blocked", "blocker": "The macOS leg fails on a symlinked temp path", "age": "4d" }
+  ],
+
+  "work": [
+    { "title": "Expire idle sessions", "repo": "veriflow", "kind": "change", "state": "in_progress", "since": "5h" },
+    { "title": "Fail closed when the throttle cannot be read", "repo": "veriflow", "kind": "change", "state": "in_progress", "since": "5h" },
+    { "title": "Cap unbounded list responses", "repo": "veriflow", "kind": "change", "state": "in_progress", "since": "5h" },
+    { "title": "Filter security findings by project", "repo": "veriflow", "kind": "change", "state": "in_progress", "since": "3h" },
+    { "title": "Return 401 instead of 500 on an expired session", "repo": "veriflow", "kind": "change", "state": "in_progress", "since": "4h" },
+    { "title": "The dockmaster console", "repo": "dockmaster", "kind": "change", "state": "in_progress", "since": "1h" },
+    { "title": "Fix diff-base resolution in the sizing and verify gates", "repo": "dockmaster", "kind": "change", "state": "queued", "since": "1h", "blocker": "Waiting for the evidence change to land" },
+    { "title": "MCGA configuration", "repo": "ccso", "kind": "change", "state": "in_progress", "since": "1h" },
+    { "title": "Lashing optimizer solver mismatch", "repo": "ccso", "kind": "change", "state": "in_progress", "since": "1h" },
+    { "title": "Consolidate the dependency-update pull requests", "repo": "ccso", "kind": "change", "state": "in_progress", "since": "1h" },
+    { "title": "Remove isFullBay", "repo": "ccso", "kind": "change", "state": "in_progress", "since": "6d", "blocker": "No commits since Friday; checks red" },
+    { "title": "Map render performance", "repo": "tactica-infrastructure", "kind": "investigation", "state": "in_progress", "since": "52m" },
+    { "title": "Drain the flaky test list", "repo": "gitflow", "kind": "change", "state": "in_progress", "since": "5d", "blocker": "No commits since Sunday" },
+    { "title": "Render conflicts without dropping hunks", "repo": "gitflow", "kind": "change", "state": "ready_for_review", "since": "2d", "review": "#reviews" },
+    { "title": "User-settable timezone", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "3d", "review": "#reviews" },
+    { "title": "Recover stuck runs", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "3d", "review": "#reviews" },
+    { "title": "Boot signal comes from the component it proves", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "2d", "review": "#reviews" },
+    { "title": "Notification recipients", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "2d", "review": "#reviews" },
+    { "title": "Remove the N+1 in the sync path", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "2d", "review": "#reviews" },
+    { "title": "Security audit follow-ups", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "2d", "review": "#reviews" },
+    { "title": "License compliance", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "2d", "review": "#reviews" },
+    { "title": "Memory consolidation keeps its numbers", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "3d", "review": "#reviews" },
+    { "title": "Error boundary around the report view", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "3d", "review": "#reviews" },
+    { "title": "One error class for provider failures", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "3d", "review": "#reviews" },
+    { "title": "Deflake the toast assertions", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "3d", "review": "#reviews" },
+    { "title": "Teaching UI", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "2d", "review": "#reviews" },
+    { "title": "Motion foundation rollout", "repo": "veriflow", "kind": "change", "state": "ready_for_review", "since": "2d", "review": "#reviews" },
+    { "title": "Registry integrity", "repo": "dockmaster", "kind": "change", "state": "ready_for_review", "since": "4d", "review": "#reviews" },
+    { "title": "Enrollment integrity", "repo": "dockmaster", "kind": "change", "state": "queued", "since": "4d", "blocker": "Waiting for registry integrity to land" },
+    { "title": "State root layout", "repo": "dockmaster", "kind": "change", "state": "queued", "since": "4d", "blocker": "Waiting for the repo resolver to land" },
+    { "title": "Model budget for report narratives", "repo": "veriflow", "kind": "change", "state": "queued", "since": "2d", "blocker": "Waiting for the provider error class" },
+    { "title": "Authorization coverage", "repo": "veriflow", "kind": "change", "state": "queued", "since": "2d", "blocker": "Waiting on the project-access decision" },
+    { "title": "Live QA sweep of agents and memory", "repo": "veriflow", "kind": "investigation", "state": "done", "since": "1d" },
+    { "title": "Triage sweep", "repo": "tactica-infrastructure", "kind": "investigation", "state": "done", "since": "7h" },
+    { "title": "Second end-to-end attempt", "repo": "veriflow", "kind": "change", "state": "dropped", "since": "11h" }
+  ],
+
+  "repos": [
+    {
+      "name": "veriflow", "authority": "yolo", "mode": "pipeline", "branch": "main",
+      "remote": "git@github.com:mengsig/veriflow.git",
+      "test_cmd": "cd backend && PYTHONPATH=$(pwd) pytest -q",
+      "sync": "current", "copies": 5, "disk": "2.0G",
+      "notes": [
+        "Run pytest from the local copy's backend/ with PYTHONPATH set - a shared virtualenv otherwise imports the clone's code and greens falsely.",
+        "Migration ids must be 32 characters or fewer, and SQLite will not catch a violation."
+      ]
+    },
+    {
+      "name": "ccso", "authority": "never", "mode": "pipeline", "branch": "main",
+      "remote": "git@github.com:devgunnin/ccso.git",
+      "test_cmd": "make test",
+      "sync": "behind", "copies": 8, "disk": "2.1G",
+      "notes": ["You merge every change here; the dockmaster never will."]
+    },
+    {
+      "name": "gitflow", "authority": "never", "mode": "pipeline", "branch": "main",
+      "remote": "git@github.com:devGunnin/gitflow.git",
+      "test_cmd": "go test ./...",
+      "sync": "current", "copies": 8, "disk": "18M",
+      "notes": ["You merge every change here; the dockmaster never will."]
+    },
+    {
+      "name": "tactica-infrastructure", "authority": "yolo", "mode": "pipeline", "branch": "main",
+      "remote": "git@github.com-mengsig:mengsig/tactica-infrastructure.git",
+      "test_cmd": "make test",
+      "sync": "current", "copies": 1, "disk": "7.3M",
+      "notes": [
+        "This clone is also the live deployment: a container command run from its directory takes production down. Always name the project and file explicitly.",
+        "Concurrent branches pick the same migration id, because the id is a function of main. Check them against each other before either opens a pull request."
+      ]
+    }
+  ],
+
+  "backlog": {
+    "in_flight": [
+      { "title": "Weight gauge and chart disagree", "repo": "ccso" },
+      { "title": "Lashing editor zoom misbehaves", "repo": "ccso" },
+      { "title": "Save-lashing dialog wording", "repo": "ccso" },
+      { "title": "Streamline the Makefile", "repo": "ccso" },
+      { "title": "Remove isFullBay", "repo": "ccso" },
+      { "title": "MCGA configuration", "repo": "ccso" },
+      { "title": "Lashing optimizer solver mismatch", "repo": "ccso" },
+      { "title": "Consolidate the dependency-update pull requests", "repo": "ccso" },
+      { "title": "Chart units", "repo": "veriflow" },
+      { "title": "Live QA sweep of agents and memory", "repo": "veriflow" },
+      { "title": "Agent and memory audit", "repo": "veriflow" },
+      { "title": "Agent web browsing", "repo": "veriflow" },
+      { "title": "Semantic memory design", "repo": "veriflow" },
+      { "title": "Ship-readiness audit", "repo": "veriflow" },
+      { "title": "Dependency updates: workflow actions", "repo": "veriflow" },
+      { "title": "Dependency updates: frontend", "repo": "veriflow" },
+      { "title": "Dependency updates: backend", "repo": "veriflow" },
+      { "title": "Fix diff-base resolution in the sizing and verify gates", "repo": "dockmaster" },
+      { "title": "The dockmaster console", "repo": "dockmaster" },
+      { "title": "Map render performance", "repo": "tactica-infrastructure" }
+    ],
+    "queued": [
+      { "title": "Semantic memory retrieval", "repo": "veriflow" },
+      { "title": "Secret-manager integration", "repo": "veriflow" },
+      { "title": "Notify when learnings await approval", "repo": "veriflow", "blocked_by": "The knowledge UI" },
+      { "title": "Bind chat and runs to a project scope", "repo": "veriflow", "blocked_by": "Agent creation" },
+      { "title": "User-settable timezone", "repo": "veriflow", "blocked_by": "Scheduling" },
+      { "title": "Deck wears the customer brand", "repo": "veriflow", "blocked_by": "Brand import" },
+      { "title": "Deck visual follow-ups", "repo": "veriflow", "blocked_by": "Deck visuals" },
+      { "title": "Enrollment integrity", "repo": "dockmaster", "blocked_by": "Registry integrity" },
+      { "title": "State root layout", "repo": "dockmaster", "blocked_by": "The repo resolver" },
+      { "title": "Pin the frontend base images", "repo": "tactica-infrastructure" },
+      { "title": "Asset search serializes 5000 geometries on the event loop", "repo": "tactica-infrastructure", "blocked_by": "Search deep-linking" },
+      { "title": "Coverage refresh fires a redundant second request", "repo": "tactica-infrastructure", "blocked_by": "Search deep-linking" },
+      { "title": "Product-wide interface refinement", "repo": "tactica-infrastructure", "blocked_by": "Search deep-linking" },
+      { "title": "World-scale clusters aggregate every row", "repo": "tactica-infrastructure" },
+      { "title": "One-command offline regional bundle", "repo": "tactica-infrastructure" },
+      { "title": "Attach the map view to the report", "repo": "tactica-infrastructure", "blocked_by": "Report polygons" }
+    ],
+    "done": [
+      { "title": "Gate evidence in pull-request bodies", "repo": "dockmaster" },
+      { "title": "Dispatch sizing from real signals", "repo": "dockmaster" },
+      { "title": "End-to-end verification gate", "repo": "dockmaster" },
+      { "title": "Report generation", "repo": "veriflow" },
+      { "title": "Dependency update automation", "repo": "veriflow" },
+      { "title": "Server-side request forgery mitigation", "repo": "veriflow" },
+      { "title": "Self-hosted CI runner", "repo": "veriflow" },
+      { "title": "Commit pickers", "repo": "gitflow" }
+    ]
+  },
+
+  "decisions": {
+    "open": [
+      {
+        "question": "How wide should project access be for managers?",
+        "detail": "The code gives product and management roles every project in the workspace. The documentation promises only the projects they belong to. Tighten the code, or bless the wider access in the docs.",
+        "options": ["Tighten access to membership", "Amend the docs"],
+        "repo": "veriflow",
+        "age": "5d"
+      },
+      {
+        "question": "Rename the deployment stack, or keep the old name?",
+        "detail": "The container stack is still named after the old product. Renaming it orphans the live database and object-store volumes, so it cannot be done automatically.",
+        "options": ["Rename and migrate the volumes", "Keep the old name"],
+        "repo": "veriflow",
+        "age": "6d"
+      }
+    ],
+    "resolved": [
+      { "question": "Single sign-on: which protocol?", "answer": "In-house OpenID Connect alongside password login. No SAML, no vendor.", "repo": "veriflow", "at": "2026-07-25" },
+      { "question": "Should reports read user-scoped memory?", "answer": "No. Reports read project-scoped memory only.", "repo": "veriflow", "at": "2026-07-24" },
+      { "question": "How should deletion of a repository be guarded?", "answer": "A narrow deny rule for recursive deletes against the managed clones and the distro root.", "repo": "dockmaster", "at": "2026-07-25" }
+    ]
+  },
+
+  "reviews": [
+    { "title": "Render conflicts without dropping hunks", "repo": "gitflow", "state": "awaiting", "at": "2 days ago", "href": "#" },
+    { "title": "User-settable timezone", "repo": "veriflow", "state": "awaiting", "at": "3 days ago", "href": "#" },
+    { "title": "Recover stuck runs", "repo": "veriflow", "state": "awaiting", "at": "3 days ago", "href": "#" },
+    { "title": "Memory consolidation keeps its numbers", "repo": "veriflow", "state": "awaiting", "at": "3 days ago", "href": "#" },
+    { "title": "Error boundary around the report view", "repo": "veriflow", "state": "awaiting", "at": "3 days ago", "href": "#" },
+    { "title": "Registry integrity", "repo": "dockmaster", "state": "awaiting", "at": "4 days ago", "href": "#" },
+    { "title": "Gate evidence in pull-request bodies", "repo": "dockmaster", "state": "reviewed", "at": "5 hours ago", "href": "#" },
+    { "title": "Dispatch sizing from real signals", "repo": "dockmaster", "state": "reviewed", "at": "5 hours ago", "href": "#" },
+    { "title": "Motion foundation rollout", "repo": "veriflow", "state": "reviewed", "at": "2 days ago", "href": "#" },
+    { "title": "Self-hosted CI runner", "repo": "veriflow", "state": "reviewed", "at": "2 days ago", "href": "#" }
+  ],
+
+  "health": {
+    "verdict": "Ready",
+    "checks": [
+      { "name": "Git", "status": "ok", "note": "2.51.0" },
+      { "name": "GitHub sign-in", "status": "ok", "note": "signed in as devGunnin" },
+      { "name": "Node", "status": "ok", "note": "22.22.2" },
+      { "name": "jq", "status": "ok", "note": "1.8.1" },
+      { "name": "Review surface", "status": "ok", "note": "lavish available" },
+      { "name": "Browser driver", "status": "warn", "note": "chrome-devtools not on the path; browser checks are unavailable" }
+    ],
+    "cleanup": [
+      { "label": "Stale local copies", "count": 38, "note": "Recorded but gone from disk. Safe to clear." },
+      { "label": "Local copies with no work attached", "count": 2, "note": "On disk with nothing pointing at them." },
+      { "label": "Leftover artifacts", "count": 8, "note": "Review pages for work that has finished." }
+    ],
+    "sizing": [
+      { "label": "Work with no size recorded", "count": 8, "note": "Runs anyway; sizes are a cost control, not a gate." },
+      { "label": "Work started without a full instruction", "count": 6, "note": "Started from a placeholder. Worth re-checking." }
+    ]
+  }
+}

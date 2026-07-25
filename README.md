@@ -332,6 +332,7 @@ defaults are the supported configuration.
 | `DM_VERIFY_BROWSER_BIN` | unset | Chrome/Chromium `dm-verify.sh session` launches for a task. Unset searches `PATH`, then the newest Playwright-managed Chromium. |
 | `DM_VERIFY_BROWSER_SHARED` | unset | `1` forces the degraded shared-browser path (exclusive lease instead of a per-task browser). Used by the tests; set it only to reproduce that path. |
 | `DM_RUNTIME_STARTUP_SAMPLE` | unset | `1` enables the opt-in CLI startup timing diagnostic in `tests/runtime-performance.sh`. |
+| `DM_UI_PORT` | `4877` | Loopback port `bin/dm-ui.sh` serves the console on. Chosen clear of lavish (4387), chrome-devtools (9224) and the verify gate's app/bridge/CDP ranges; change it only if something else already holds 4877. |
 
 ## License
 

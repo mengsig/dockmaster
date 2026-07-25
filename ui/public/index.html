@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>dockmaster</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/console.css">
+</head>
+<body>
+<a class="skip" href="#view">Skip to content</a>
+
+<header class="topbar">
+  <div class="wordmark"><span class="wordmark-cleat" aria-hidden="true"></span>dockmaster</div>
+  <p class="pulse" id="pulse"></p>
+  <div class="topbar-actions">
+    <button type="button" class="btn" id="chat-toggle" aria-expanded="false" aria-controls="chat">Chat</button>
+    <button type="button" class="btn" id="theme-toggle">Light</button>
+  </div>
+</header>
+
+<div class="deck">
+  <nav class="rail" id="rail" aria-label="Console sections"></nav>
+
+  <main class="view" id="view" tabindex="-1"></main>
+
+  <aside class="chat" id="chat" aria-label="Conversation with the dockmaster">
+    <header class="chat-head">
+      <span class="eyebrow">Conversation</span>
+      <button type="button" class="btn btn-quiet" id="chat-close" aria-label="Close the conversation">Close</button>
+    </header>
+    <div class="chat-log" id="chat-log" role="log" aria-live="polite"></div>
+    <p class="chat-pending" id="chat-pending" hidden>
+      <span class="lamp lamp-brass lamp-pulse" aria-hidden="true"></span>
+      <span id="chat-pending-text"></span>
+    </p>
+    <form class="chat-form" id="chat-form">
+      <label class="sr-only" for="chat-input">Message the dockmaster</label>
+      <textarea id="chat-input" rows="3" placeholder="Ask for work, or answer a question…"></textarea>
+      <button type="submit" class="btn btn-send">Send</button>
+    </form>
+  </aside>
+</div>
+
+<div class="scrim" id="scrim" hidden></div>
+<script src="/console.js"></script>
+</body>
+</html>
