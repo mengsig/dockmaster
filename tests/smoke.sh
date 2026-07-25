@@ -4744,11 +4744,14 @@ check "an unresolvable worktree exits 2, not 1" '[ "$GATE_ERR_RC" = 2 ]'
 
 # A fake app that really LISTENS, so the port, readiness and ownership checks are
 # exercised end to end without a network or a container.
+# The connection error handler is load-bearing: port_busy probes by opening a TCP
+# connection and dropping it, which arrives as ECONNRESET and killed this server
+# outright on macOS. A real app tolerates a reset; a two-line fixture must too.
 # nohup + closed stdio: a backgrounded server that stays attached to the calling
 # shell's terminal and descriptors does not reliably outlive it (macOS kills this
 # fixture the moment `up` returns). Any real app_start_cmd that backgrounds a
 # server needs the same detachment.
-VAPP_START='rm -f "$DM_VERIFY_DIR/app.pid"; ( nohup node -e "require(\"net\").createServer(function(c){c.end(\"ok\\n\")}).listen(process.env.DM_VERIFY_PORT,\"127.0.0.1\")" >"$DM_VERIFY_DIR/app.log" 2>&1 </dev/null & printf "%s" "$!" > "$DM_VERIFY_DIR/app.pid" ); printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"'
+VAPP_START='rm -f "$DM_VERIFY_DIR/app.pid"; ( nohup node -e "require(\"net\").createServer(function(c){c.on(\"error\",function(){});c.end(\"ok\\n\")}).listen(process.env.DM_VERIFY_PORT,\"127.0.0.1\")" >"$DM_VERIFY_DIR/app.log" 2>&1 </dev/null & printf "%s" "$!" > "$DM_VERIFY_DIR/app.pid" ); printf "port=%s cwd=%s\n" "$DM_VERIFY_PORT" "$PWD" > "$DM_VERIFY_DIR/app.state"'
 # A genuine ownership probe: the listener must be the process THIS start command
 # spawned, and only then is the boot token echoed back.
 VAPP_READY='kill -0 "$(cat "$DM_VERIFY_DIR/app.pid")" 2>/dev/null && cp "$DM_VERIFY_DIR/token" "$DM_VERIFY_DIR/ready-proof"'
