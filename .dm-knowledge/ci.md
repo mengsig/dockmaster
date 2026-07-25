@@ -17,16 +17,32 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   which `macos-full` is 6m47s. Every PR-blocking cap therefore has 2x+ headroom:
   10 min against a 3m05s longest, 12 against `smoke-bash32`'s 4m54s, and the
   20-min `macos-full` cap blocks nobody.
-- **[decision]** Jobs are `changes` → {`fast`, `smoke-linux`, `smoke-bash32`,
-  `macos`, `node14-compat`} → `ci-gate`. `fast` and `node14-compat` have no
-  `if:` and no `needs:` on purpose — they run on every event, so a docs-only PR
-  still gets a real gate and `ci-gate` is never vacuous.
-- **[convention]** `ci-gate` is the single required status for branch
-  protection. It runs `if: always()` and fails closed: only `success` and
-  `skipped` pass, so a cancelled leg (a `timeout-minutes` kill reads as
-  cancelled, not failed) can never be mistaken for one that had nothing to do.
-  `changes` must succeed outright — if it fails we do not know what should have
-  run, so no downstream skip can be trusted.
+- **[decision]** Eight jobs. `changes` gates `smoke-linux`, `smoke-bash32` and
+  `macos`; `macos-full` additionally needs `macos`. `fast` and `node14-compat`
+  depend on NOTHING — no `needs:`, no `if:` — on purpose, so they run on every
+  event and a docs-only PR still gets a real gate. `ci-gate` needs all seven.
+- **[pitfall]** `ci-gate` is DESIGNED to be the single required status for
+  branch protection, but branch protection is not configured on `main`:
+  `GET /repos/mengsig/dockmaster/branches/main` returns `"protected": false` and
+  `/rulesets` is empty, so nothing is required from GitHub's side. Today the
+  operative merge gate is `bin/dm-pr.sh:381-406`, which reads all check runs
+  itself and treats `skipped` as passing. Nothing is unsafe as a result, but do
+  not read `ci-gate` as enforced until protection is actually turned on.
+- **[convention]** `ci-gate` runs `if: always()` and fails closed. It does not
+  take a leg's own `skipped` as evidence the leg was not needed: it re-reads the
+  `changes` outputs (`code`, `macos_full`) that decided whether each heavy leg
+  runs, and when the output says the leg was required, only `success` passes.
+  A leg that is not required must be `success` or `skipped` — failed, cancelled
+  (a `timeout-minutes` kill reads as cancelled, not failed), errored, or an
+  empty result all fail. `changes` must succeed outright: if it fails we do not
+  know what should have run, so no downstream skip can be trusted.
+- **[convention]** `tests/check-ci-graph.js` pins the job graph's SHAPE, because
+  the workflow gates itself and a PR that weakens the gate would verify itself
+  green. It fails if `ci-gate.needs` stops covering every job, if
+  `predicate-quantifier` leaves `every`, if the exclusion list grows, if a heavy
+  leg's `if:` guard stops matching the output `ci-gate` requires, if `fast` or
+  `node14-compat` gains an `if:`/`needs:`, or if any job loses
+  `timeout-minutes`. Each of those nine was planted and confirmed caught.
 - **[convention]** The path filter is an EXCLUSION list (`'**'` minus a short
   list) under `predicate-quantifier: 'every'`, not an inclusion list. A path
   nobody has classified is therefore code by default, and so is every future
@@ -44,12 +60,19 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   identical result to the ubuntu bash-5 leg: 1180 passed, 0 failed.
 - **[pitfall]** That container MUST install a GNU userland AND every tool the
   hosted runners already carry. The one variable under test is the bash
-  version; a thinner install produced 12 false failures. Nine came from a
-  missing `column` alone — `bin/` renders tables with `… | column -t … || cat`,
-  and when `column` is absent the `|| cat` reads the script's stdin, not the
-  consumed pipe, so the command prints NOTHING instead of the unaligned
-  fallback. Two more came from a missing `gh`. Add to the `apk add` line
+  version; a thinner install produced 12 false failures — nine from a missing
+  `column`, two from a missing `gh`, and one from a test copy that had no
+  `.git` (that last one was the harness, not the container). The `column` nine
+  are the interesting ones: `bin/` renders tables with `… | column -t … || cat`,
+  and when `column` is absent the `|| cat` reads the script's STDIN, not the
+  consumed pipe — so the command prints nothing instead of the unaligned
+  fallback, and on a terminal it blocks outright. Add to the `apk add` line
   whenever a test starts depending on a new tool.
+- **[pitfall]** Unproven at the time of writing: the `push: main` and `schedule`
+  paths had never executed — every run was `pull_request`. `code` cannot come
+  back `false` there (the filter step is skipped and the output is hardcoded
+  `true`), but that is reasoning, not evidence. The first push-to-main run must
+  show `smoke-linux`, `smoke-bash32`, `macos` and `macos-full` all RUNNING.
 - **[pitfall]** `smoke-bash32` is now the critical path and it pulls `bash:3.2`
   from Docker Hub unauthenticated. An anonymous-pull rate limit would fail the
   job — loudly, not silently. If that starts happening, mirror the image to
@@ -69,10 +92,14 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   Both strings must stay UNIQUE — the check compares `grep -n … | cut -d: -f1`
   as an integer, so a second occurrence of either makes it fail with a shell
   error rather than a clear message.
+- **[pitfall]** A run superseded by `cancel-in-progress` shows `ci-gate` as
+  FAILED, not cancelled — the cancel lands as an empty result, which the gate
+  correctly refuses. Harmless: the check-runs API defaults to `filter=latest`,
+  so only the newest run is what any consumer sees. Do not chase it as a red.
 - **[finding]** Sharding the suite was investigated and rejected. It is one
   linear script over one `$DM_HOME`: sections build task/repo state that later
-  sections assert on (the `dm-state` round-trip at ~L3237 reads `arch-wip`,
-  created at ~L400), and many `check` bodies MUTATE state rather than just
+  sections assert on (the `dm-state` round-trip at L3237 reads `arch-wip`,
+  created at L964), and many `check` bodies MUTATE state rather than just
   reading it, so no-op'ing out-of-range checks changes what later sections see.
   Splitting needs a real refactor into hermetic files, not a line-range split.
   If that is ever done, the shard runner must assert the shard counts SUM to the
