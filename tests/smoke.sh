@@ -4232,6 +4232,15 @@ check "a refused measurement prints nothing"        '[ -z "$(dsize "$TMP/no-such
 check "a task with no worktree recorded is refused" 'b dm-task.sh new w7nowt --kind ship --repo demo >/dev/null; ! tsize w7nowt'
 check "an unmeasurable task falls back to the anchor, never to small" \
   '[ "$(b dm-task.sh recommend build w7nowt | grep "^model=")" = "model=sonnet" ]'
+# KNOWN LIMIT, pinned so it stays a decision: the measurement is of the BRANCH,
+# so uncommitted work is outside it and a tiny commit over a large dirty tree
+# still reads small. Change this test only alongside the measurement itself.
+W7N=0; while [ "$W7N" -lt 40 ]; do
+  printf 'a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n' > "$W7WT/dirty$W7N.txt"; W7N=$((W7N + 1)); done
+check "uncommitted work is outside the measurement" '[ "$(dsize "$W7WT" main)" = "1 3" ]'
+check "a dirty tree cannot raise the recommendation either" \
+  '[ "$(b dm-task.sh recommend build w7size | grep "^model=")" = "model=haiku" ]'
+rm -f "$W7WT"/dirty*.txt
 
 echo "== dispatch right-sizing: the effort set is closed, and each level has an agent (#166) =="
 w6valid() { ( . "$ROOT/bin/dm-lib.sh"; dm_effort_is_valid "$@" ); }
@@ -4271,18 +4280,26 @@ check "every crew-<level> pins its default model" \
      for w6l in $DM_EFFORT_LEVELS; do
        grep -qx "model: .\+" "$ROOT/.claude/agents/crew-$w6l.md" || exit 1
      done )'
+# `&&`-joined, not newline-separated: `check` evals its body, and a body of four
+# separate commands reports only the LAST one's status — the medium and high
+# rows were unguarded, and a deleted crew-*.md still passed.
 check "the pinned defaults are the baseline table" \
-  'grep -qx "model: haiku"  "$ROOT/.claude/agents/crew-low.md"
-   grep -qx "model: sonnet" "$ROOT/.claude/agents/crew-medium.md"
-   grep -qx "model: opus"   "$ROOT/.claude/agents/crew-high.md"
+  'grep -qx "model: haiku"  "$ROOT/.claude/agents/crew-low.md" &&
+   grep -qx "model: sonnet" "$ROOT/.claude/agents/crew-medium.md" &&
+   grep -qx "model: opus"   "$ROOT/.claude/agents/crew-high.md" &&
    grep -qx "model: opus"   "$ROOT/.claude/agents/crew-xhigh.md"'
 check "the cheap level is reachable by omission alone" 'grep -qx "model: haiku" "$ROOT/.claude/agents/crew-low.md"'
 check "every definition states the parameter still overrides" \
   '( for w6f in "$ROOT"/.claude/agents/crew-*.md; do
        grep -q "parameter overrides" "$w6f" || exit 1
      done )'
+# The paths are asserted first: grep exits 2 on a missing operand, and `!` reads
+# that as "claim absent", so renaming any one of them would have retired this
+# guard while it kept reporting a pass.
+W6CLAIMPATHS="$ROOT/bin $ROOT/.claude $ROOT/.dm-knowledge $ROOT/AGENTS.md $ROOT/docs $ROOT/README.md"
 check "no distro text still claims nothing pins a model" \
-  '! grep -rqE "[Nn]o ([^ ]+ )?definition pins a model" "$ROOT/bin" "$ROOT/.claude" "$ROOT/.dm-knowledge" "$ROOT/AGENTS.md" "$ROOT/docs" "$ROOT/README.md"'
+  '( for w6p in $W6CLAIMPATHS; do [ -e "$w6p" ] || exit 1; done
+     ! grep -rqE "[Nn]o ([^ ]+ )?definition pins a model" $W6CLAIMPATHS )'
 # The drift guard runs BOTH ways. Forward (above): every level the gate accepts
 # has a file whose `name:` and `effort:` both match. Reverse (here): every file
 # DECLARES a name the gate accepts and matching its own basename — so a stray

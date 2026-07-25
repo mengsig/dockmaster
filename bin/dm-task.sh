@@ -405,8 +405,9 @@ case "$cmd" in
     dm_require_id "$id"
     [ -f "$(dm_meta_path "$id")" ] || dm_die "no such task: $id"
     kind="$(dm_meta_get "$id" kind)"
-    # An unmeasurable branch is a MISSING signal, not a zero one: the refusal is
-    # already on stderr, and the recommendation falls back to the anchor.
+    # An unmeasurable branch is a MISSING signal, not a zero one, and the
+    # recommendation falls back to the anchor. Measurement refuses SILENTLY by
+    # contract; stderr is dropped so a missing clone cannot spam an advisory.
     size=""; size="$(dm_task_diff_size "$id" 2>/dev/null)" || size=""
     # Unquoted on purpose: "<files> <lines>" splits into the two count args.
     pair="$(dm_recommended_dispatch "$role" "$kind" $size)" \

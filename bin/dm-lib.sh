@@ -1173,6 +1173,8 @@ dm_is_count() {
 # Hard numbers off a real branch, never an estimate. Returns non-zero printing
 # NOTHING when there is no directory, no git, or no such base — the caller then
 # has no size signal, which is a different thing from a measured zero.
+# It measures the BRANCH (base...HEAD), so uncommitted work is outside it: a
+# tiny commit over a large dirty tree reads small. Known limit, pinned by test.
 dm_worktree_diff_size() {
   local wt="${1:-}" base="${2:-}" ref numstat
   [ -n "$wt" ] && [ -n "$base" ] || return 2
