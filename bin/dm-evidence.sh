@@ -31,9 +31,8 @@ set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
-# The line that introduces an appended section. It renders as nothing on GitHub
-# and is the only anchor `strip` needs, so a body can be recomposed idempotently.
-EVIDENCE_MARKER='<!-- dm:gate-evidence -->'
+# The section's shape (markers, separator, heading) belongs to dm-lib.sh:
+# dm-pr.sh renders one too, for the case where THIS script cannot be run.
 
 # producer_block <label> <script> <id> -- print one producer's block, or the
 # stated unavailable line when it cannot be asked. Never fails: the caller is
@@ -63,21 +62,12 @@ case "$cmd" in
       producer_block verify "$BIN_DIR/dm-verify.sh" "$id"
     )"
     [ -n "$blocks" ] || exit 0
-    printf -- '---\n%s\n\n### Gate evidence\n\n%s\n' "$EVIDENCE_MARKER" "$blocks"
+    dm_evidence_wrap "$blocks"
     ;;
 
   strip)
     [ "$#" -eq 0 ] || dm_die "usage: dm-evidence.sh strip  (body on stdin)"
-    # Buffer so the separator and blank lines that PRECEDE a removed section go
-    # with it. Only trim when a marker was actually found: with no section to
-    # remove the operator's body comes back as written (bar a final newline).
-    awk -v marker="$EVIDENCE_MARKER" '
-      $0 == marker { found = 1; exit }
-      { lines[++n] = $0 }
-      END {
-        if (found) { while (n > 0 && (lines[n] == "" || lines[n] == "---")) n-- }
-        for (i = 1; i <= n; i++) print lines[i]
-      }'
+    dm_evidence_strip
     ;;
 
   *)

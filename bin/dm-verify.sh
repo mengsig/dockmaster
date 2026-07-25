@@ -719,6 +719,11 @@ surface_hits() {
   done <<EOF
 $2
 EOF
+  # The loop's status is its LAST iteration's: with `verify_surfaces` set, a
+  # final non-matching path left it 1, which under set -e aborted `gate` with
+  # exit 1 — read by every caller as "no user-facing surface", the silent skip
+  # this gate exists to prevent. Only stdout carries the answer, so say so.
+  return 0
 }
 
 # --- report ------------------------------------------------------------------
@@ -805,11 +810,22 @@ verify_evidence() {
   printf '**verify (e2e)** — %s · %s/%s flow(s) at `%s`\n\n' \
     "$verdict" "$((total - bad))" "$total" "${head:-unrecorded}"
   printf '| flow | result | note |\n|---|---|---|\n'
-  # A note may legally contain `|`, which would otherwise split the row.
-  awk -F'\t' 'NF == 6 {
-      gsub(/\|/, "\\|", $6)
-      printf "| %s | %s | %s |\n", $2, $3, $6
-    }' "$flows"
+  # The note is CREW-WRITTEN free text going onto a GitHub-rendered page, so its
+  # two structural weapons are neutralised as entities: `|` (splits the row) and
+  # `<` (opens raw HTML). `&` goes first, and `\` with them — escaping `|` as
+  # `\|` was the trap, since a note already containing `\|` became `\\|`, a
+  # literal backslash followed by a LIVE delimiter. Inline markdown still
+  # renders, inside the cell, where it cannot pose as another gate's verdict.
+  # `name` and `result` need nothing: `flow` validates them to [A-Za-z0-9._-]
+  # and pass|fail|flake, and refuses a multi-line or tabbed note, so no field
+  # here can forge a row or reach a line of its own.
+  awk -F'\t' '
+    function cell(s) {
+      gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s)
+      gsub(/\\/, "\\&#92;", s); gsub(/\|/, "\\&#124;", s)
+      return s
+    }
+    NF == 6 { printf "| %s | %s | %s |\n", $2, $3, cell($6) }' "$flows"
 }
 
 # --- commands ----------------------------------------------------------------

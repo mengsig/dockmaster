@@ -4788,6 +4788,18 @@ check "verify_surfaces narrows what fires"     '[ "$GATE_NARROW_RC" = 1 ]'
 b dm-repo.sh set demo verify_surfaces '' >/dev/null
 check "clearing it restores the broad default" '"$V" gate vrf1 >/dev/null 2>&1'
 rm -f "$VWT/app.py"
+# A surface moved AND a non-surface path sorts after it. surface_hits' status is
+# its last iteration's, so a trailing non-match left it 1 and set -e aborted the
+# gate at exit 1 — the "no user-facing surface" code, returned with a surface
+# already found. Only stdout answers this question; the status must not.
+mkdir -p "$VWT/frontend"; printf 'x\n' > "$VWT/frontend/app.js"; printf 'x\n' > "$VWT/zzz.txt"
+b dm-repo.sh set demo verify_surfaces 'frontend/**' >/dev/null
+GATE_MIXED="$("$V" gate vrf1 2>&1 || true)"; GATE_MIXED_RC=0
+"$V" gate vrf1 >/dev/null 2>&1 || GATE_MIXED_RC=$?
+check "a surface trailed by a non-surface still fires" '[ "$GATE_MIXED_RC" = 0 ]'
+check "and the required line names the surface"        'grep -q "frontend/app.js" <<<"$GATE_MIXED"'
+b dm-repo.sh set demo verify_surfaces '' >/dev/null
+rm -f "$VWT/frontend/app.js" "$VWT/zzz.txt"
 
 if ! command -v node >/dev/null 2>&1; then
   echo "  skip verify-gate lifecycle checks (node absent; the fixture app needs it)"
@@ -5352,7 +5364,17 @@ EV_RUN="$("$E" block ev-run)"
 check "a recorded verdict is reported with its flows" 'grep -q "verify (e2e)\*\* — pass · 1/1 flow" <<<"$EV_RUN"'
 check "the verified code state is named"              'grep -q "sha1/1" <<<"$EV_RUN"'
 check "each flow lands in the table"                  'grep -q "^| login | pass |" <<<"$EV_RUN"'
-check "a pipe in a note cannot split the row"         'grep -q "landed \\\\| ok" <<<"$EV_RUN"'
+# The note is crew-written text on a rendered page. Every row must have exactly
+# the 3 cells the header declares, whatever the note contains: `\|` was the
+# escape that ate itself, `<` opens raw HTML.
+check "a pipe in a note cannot split the row" 'grep -q "^| login | pass | landed &#124; ok |$" <<<"$EV_RUN"'
+printf '2026-01-01T00:00:01Z\tlogout\tfail\tsha1/1\t-\tsaw a\\| pipe <img src=x> & more\n' >> "$EV_FLOWS/flows.tsv"
+EV_HOSTILE="$("$E" block ev-run)"
+check "an already-escaped pipe cannot split the row either" \
+  'grep -q "^| logout | fail | saw a&#92;&#124; pipe &lt;img src=x&gt; &amp; more |$" <<<"$EV_HOSTILE"'
+check "every rendered row has exactly three cells" \
+  '[ -z "$(grep "^| " <<<"$EV_HOSTILE" | awk -F"|" "NF != 5")" ]'
+printf '2026-01-01T00:00:00Z\tlogin\tpass\tsha1/1\tshots/login.png\tlanded | ok\n' > "$EV_FLOWS/flows.tsv"
 # A verdict whose evidence is truncated must not be restated as a verdict.
 printf 'x' >> "$EV_FLOWS/flows.tsv"
 EV_TRUNC="$("$E" block ev-run)"
@@ -5370,6 +5392,31 @@ check "strip leaves a body with no section as written" \
 { cat "$EV_BODY"; printf '\n'; "$E" block ev-bare; } > "$TMP/ev-body-with.md"
 check "strip removes an appended section and its separator" \
   'cmp -s "$EV_BODY" <("$E" strip < "$TMP/ev-body-with.md")'
+# A body round-tripped through GitHub comes back CRLF. Matching must ignore it,
+# or the section is not recognized and a re-open stacks a second one.
+sed 's/$/\r/' "$TMP/ev-body-with.md" > "$TMP/ev-body-crlf.md"
+check "a CRLF body's section is still recognized" \
+  '[ "$("$E" strip < "$TMP/ev-body-crlf.md" | wc -l)" = "$(wc -l < "$EV_BODY")" ]'
+
+# strip must never TRUNCATE. Its anchor is a marker, and a marker is just text:
+# a PR description about this very machinery quotes it. Removing from the first
+# occurrence silently ate the rest of the operator's description, so only a
+# COMPLETE begin..end region ending the body is removed.
+EV_MARK="$(printf '%s' '<!-- dm:gate-evidence -->')"
+printf 'anchored by a comment:\n\n%s\n\nand everything below it is regenerated.\n\nRisk: low.\n' \
+  "$EV_MARK" > "$TMP/ev-quoted.md"
+check "a body that quotes the marker keeps every byte" \
+  'cmp -s "$TMP/ev-quoted.md" <("$E" strip < "$TMP/ev-quoted.md")'
+printf '%s\nthe whole description\n\nRisk: low.\n' "$EV_MARK" > "$TMP/ev-leading.md"
+check "a marker on the first line does not empty the body" \
+  'cmp -s "$TMP/ev-leading.md" <("$E" strip < "$TMP/ev-leading.md")'
+printf 'the anchor:\n\n```\n%s\n```\n\nRisk: low.\n' "$EV_MARK" > "$TMP/ev-fenced.md"
+check "a marker inside a fenced block is not an anchor" \
+  'cmp -s "$TMP/ev-fenced.md" <("$E" strip < "$TMP/ev-fenced.md")'
+# ... and a quoted marker ABOVE a real section still leaves the quote alone.
+{ cat "$TMP/ev-quoted.md"; printf '\n'; "$E" block ev-bare; } > "$TMP/ev-quoted-with.md"
+check "a real section is removed without touching a quoted marker" \
+  'cmp -s "$TMP/ev-quoted.md" <("$E" strip < "$TMP/ev-quoted-with.md")'
 
 # 6. dm-pr.sh open composes the real body: operator text first, evidence below,
 # and re-running over an already-composed body never stacks a second section.
@@ -5395,7 +5442,9 @@ ev_task ev-again evrepo src/again.py >/dev/null
 b dm-test.sh ev-again >/dev/null
 PATH="$EV_STUB:$NOAXI_PATH" b dm-pr.sh open ev-again --title T --body-file "$TMP/ev-recompose.md" >/dev/null 2>&1
 check "re-composing replaces the section, never stacks it" \
-  '[ "$(grep -c "dm:gate-evidence" "$EV_STUB/last-body")" = 1 ]'
+  '[ "$(grep -c "^<!-- dm:gate-evidence -->$" "$EV_STUB/last-body")" = 1 ]'
+check "the replaced section is properly closed" \
+  '[ "$(grep -c "^<!-- /dm:gate-evidence -->$" "$EV_STUB/last-body")" = 1 ]'
 # Composing happens BEFORE the push, so an unreadable body fails with nothing
 # pushed and nothing left behind.
 ev_task ev-badbody evrepo src/bad.py >/dev/null
@@ -5414,7 +5463,42 @@ PATH="$EV_STUB:$NOAXI_PATH" b dm-pr.sh open ev-untouched --title T --body-file "
 check "a PR with no gate evidence sends the caller's file unchanged" \
   'cmp -s "$EV_BODY" "$EV_STUB/last-body"'
 
-# 7. The published fields are not hand-settable: evidence a reviewer trusts must
+# 7. The COLLECTOR itself failing must be visible ON THE PR. A warning on stderr
+# lands in a log nobody opens, and a PR carrying nothing is indistinguishable
+# from a PR whose gates all legitimately stayed out — precisely the false green
+# this section exists to prevent.
+EV_BIN2="$TMP/ev-bin2"; mkdir -p "$EV_BIN2"
+cp "$ROOT"/bin/dm-*.sh "$EV_BIN2/"; chmod +x "$EV_BIN2"/dm-*.sh
+ev_open() {   # ev_open <task> -> body the stub gh received
+  rm -f "$EV_STUB/last-body"
+  PATH="$EV_STUB:$NOAXI_PATH" "$EV_BIN2/dm-pr.sh" open "$1" --title T --body-file "$EV_BODY" >/dev/null 2>&1
+  cat "$EV_STUB/last-body" 2>/dev/null || true
+}
+ev_task ev-nocoll evrepo src/nocoll.py >/dev/null; b dm-test.sh ev-nocoll >/dev/null
+mv "$EV_BIN2/dm-evidence.sh" "$TMP/ev-collector.bak"
+EV_NOCOLL="$(ev_open ev-nocoll)"
+check "a missing collector is stated on the PR, not swallowed" \
+  'grep -q "gate evidence\*\* — UNAVAILABLE" <<<"$EV_NOCOLL"'
+check "the unavailable section still carries the operator's body" \
+  '[ "$(head -n3 <<<"$EV_NOCOLL")" = "$(cat "$EV_BODY")" ]'
+mv "$TMP/ev-collector.bak" "$EV_BIN2/dm-evidence.sh"
+ev_task ev-noexec evrepo src/noexec.py >/dev/null; b dm-test.sh ev-noexec >/dev/null
+chmod -x "$EV_BIN2/dm-evidence.sh"
+check "a non-executable collector is stated too" \
+  'grep -q "gate evidence\*\* — UNAVAILABLE" <<<"$(ev_open ev-noexec)"'
+chmod +x "$EV_BIN2/dm-evidence.sh"
+# The composed body holds PR text, so no failure may strand it in state/. A
+# refused mktemp is the path that reached `gh` with the body already written.
+ev_task ev-leak evrepo src/leak.py >/dev/null; b dm-test.sh ev-leak >/dev/null
+printf '#!/bin/sh\ncase "$*" in *.pr-open.*) exit 1 ;; esac\nexec %s "$@"\n' \
+  "$(command -v mktemp)" > "$EV_STUB/mktemp"; chmod +x "$EV_STUB/mktemp"
+check "a later failure still fails the open" \
+  '! PATH="$EV_STUB:$NOAXI_PATH" b dm-pr.sh open ev-leak --title T --body-file "$EV_BODY" >/dev/null 2>&1'
+check "no PR text is stranded in state/ by a later failure" \
+  '[ -z "$(find "$DM_HOME/state" -maxdepth 1 -name ".pr-body.*")" ]'
+rm -f "$EV_STUB/mktemp"
+
+# 8. The published fields are not hand-settable: evidence a reviewer trusts must
 # come from the gate that produced it.
 check "tests result cannot be hand-set"  '! b dm-task.sh set ev-bare tests pass >/dev/null 2>&1'
 check "tests command cannot be hand-set" '! b dm-task.sh set ev-bare tests_cmd "true" >/dev/null 2>&1'

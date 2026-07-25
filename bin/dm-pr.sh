@@ -65,6 +65,29 @@ dm_registry_require_valid
 # reachable from any cwd (mirrors dm-lib's BASH_SOURCE-based resolution).
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
+# gate_evidence_section <id> -- the section to append below the caller's body:
+# whatever dm-evidence.sh collected, or a stated UNAVAILABLE section when the
+# collector itself cannot be run. Empty ONLY when the collector ran and no gate
+# contributed anything, which is the one case that legitimately means "no gate
+# applied" (#175). A warning on stderr is not a substitute: it reaches a log the
+# reviewer never opens, and a PR carrying nothing reads exactly like a PR whose
+# gates all stayed out — the false green this whole section exists to prevent.
+gate_evidence_section() {
+  local id="$1" collector="$BIN_DIR/dm-evidence.sh" out rc=0 why=""
+  if [ ! -x "$collector" ]; then
+    why="\`dm-evidence.sh\` is missing or not executable"
+  else
+    out="$("$collector" block "$id" 2>/dev/null)" || rc=$?
+    [ "$rc" -eq 0 ] || why="\`dm-evidence.sh block\` exited $rc"
+  fi
+  if [ -n "$why" ]; then
+    dm_warn "gate evidence could not be collected for $id ($why); the PR will say so"
+    dm_evidence_wrap "**gate evidence** — UNAVAILABLE · $why, so what this task's gates saw is NOT reported here. Treat every gate as unreported until it is."
+    return 0
+  fi
+  printf '%s' "$out"
+}
+
 # await-checks polling defaults (named once): wait up to ~10 minutes, re-checking
 # every ~15s. GitHub Actions runs are minutes long, so a short interval mostly
 # sleeps; both are overridable per call.
@@ -537,25 +560,30 @@ case "$cmd" in
     # created via `dm-worktree.sh create --base`), else the default branch.
     base="$(dm_pr_base_for "$id" "$base" "$dir")"
     # Gate evidence (#175). Composed BEFORE the push so a body problem fails with
-    # nothing pushed. Read-only and never fatal on its own: a PR still opens when
-    # the collector cannot be reached, and a gate that recorded nothing yields an
-    # empty block, leaving the body exactly as the caller passed it.
-    evidence=""; body_tmp=""
-    ev_rc=0; evidence="$("$BIN_DIR/dm-evidence.sh" block "$id" 2>/dev/null)" || ev_rc=$?
-    if [ "$ev_rc" -ne 0 ]; then
-      dm_warn "gate evidence could not be collected for $id (dm-evidence.sh exited $ev_rc); opening the PR without it"
-      evidence=""
-    fi
+    # nothing pushed. Read-only and never fatal on its own: an unreachable
+    # collector still opens the PR, saying so on it. Only a collector that RAN
+    # and found nothing yields an empty block, leaving the body as passed.
+    body_tmp=""
+    evidence="$(gate_evidence_section "$id")"
     if [ -n "$evidence" ]; then
       body_tmp="$(mktemp "$DM_STATE/.pr-body.XXXXXX")" || dm_die "mktemp failed composing the PR body for $id"
-      # `strip` drops a section an earlier compose appended, so re-running never
-      # stacks blocks; the operator's own text passes through untouched.
+      # The composed body holds the PR text, so it is cleaned up on EVERY exit
+      # from here on — a `dm_die` further down, or a kill mid-`gh`. Cleared
+      # again before the first dm_meta_set: dm_lock installs its own EXIT/INT/
+      # TERM traps and would drop this one.
+      trap 'rm -f "$body_tmp"' EXIT
+      trap 'rm -f "$body_tmp"; exit 130' INT
+      trap 'rm -f "$body_tmp"; exit 143' TERM
+      # Stripping first drops a section an earlier compose appended, so
+      # re-running never stacks blocks; the caller's own text passes through
+      # untouched. dm_evidence_strip is a lib function, not a call back into
+      # dm-evidence.sh: the collector may be exactly what is unavailable.
       { if [ -n "$body_file" ]; then cat -- "$body_file"
         elif [ -n "$body" ]; then printf '%s\n' "$body"; fi
-      } | "$BIN_DIR/dm-evidence.sh" strip > "$body_tmp" \
-        || { rm -f "$body_tmp"; dm_die "could not compose the PR body for $id (is --body-file readable?); nothing pushed"; }
+      } | dm_evidence_strip > "$body_tmp" \
+        || dm_die "could not compose the PR body for $id (is --body-file readable?); nothing pushed"
       printf '\n%s\n' "$evidence" >> "$body_tmp" \
-        || { rm -f "$body_tmp"; dm_die "failed writing the composed PR body for $id; nothing pushed"; }
+        || dm_die "failed writing the composed PR body for $id; nothing pushed"
     fi
     dm_info "pushing $branch -> origin"
     # The first push (-u) can fail for benign reasons (upstream already set), so
@@ -565,8 +593,7 @@ case "$cmd" in
     # branch is a signal to reconcile, never to overwrite origin.
     if ! git -C "$wt" push -u origin "$branch" >/dev/null 2>&1; then
       git -C "$wt" push origin "$branch" \
-        || { [ -z "$body_tmp" ] || rm -f "$body_tmp"
-             dm_die "push rejected — branch '$branch' diverged on origin; was it rebased? no force performed. Reconcile with origin, then retry."; }
+        || dm_die "push rejected — branch '$branch' diverged on origin; was it rebased? no force performed. Reconcile with origin, then retry."
     fi
     args=(pr create -R "$slug" --title "$title" --base "$base" --head "$branch")
     if [ -n "$body_tmp" ]; then args+=(--body-file "$body_tmp")
@@ -579,12 +606,13 @@ case "$cmd" in
     errf="$(mktemp "$DM_STATE/.pr-open.XXXXXX")" || dm_die "mktemp failed opening PR for $id"
     if out="$("$gh_cli" "${args[@]}" 2>"$errf")"; then
       rm -f "$errf"
-      [ -z "$body_tmp" ] || rm -f "$body_tmp"
     else
       err="$(cat "$errf" 2>/dev/null || true)"; rm -f "$errf"
-      [ -z "$body_tmp" ] || rm -f "$body_tmp"
       dm_die "pr create failed: ${err:-${out:-no output from $gh_cli}}"
     fi
+    # The body has been handed to GitHub; drop it and the traps guarding it
+    # before dm_meta_set, whose lock installs traps of its own.
+    if [ -n "$body_tmp" ]; then trap - EXIT INT TERM; rm -f "$body_tmp"; body_tmp=""; fi
     # `|| true` is load-bearing: a no-match grep exits 1, which under set -e
     # aborted the whole command HERE — silently, before the guard below could
     # say anything. -m1 replaces the `| head -n1` pipe (no SIGPIPE to trip
