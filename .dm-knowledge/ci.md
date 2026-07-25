@@ -7,6 +7,16 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   0-1 s *combined*; `bash tests/smoke.sh` took 4m24s on ubuntu and 9m07s on
   macOS. Any question of the form "why is CI slow" is a question about that one
   script. Caching buys nothing: the workflow installs no dependencies.
+- **[measured]** What the split bought, run 30152362149 on the PR that made
+  this change (green, all legs): `changes` 6s, `fast` 10s, `node14-compat` 9s,
+  `macos` 33s, `smoke-linux` 3m05s, `smoke-bash32` 4m54s, `ci-gate` 4s — 5m12s
+  wall clock against 8m27s / 9m33s / 20m45s for the three runs before it. A
+  docs-only PR (run 30152386547) finished in **23 seconds** with all four heavy
+  legs skipped and `ci-gate` green. `smoke-bash32` is now the critical path.
+  With the `ci:macos` label (run 30152527444) the whole thing is 7m41s, of
+  which `macos-full` is 6m47s. Every PR-blocking cap therefore has 2x+ headroom:
+  10 min against a 3m05s longest, 12 against `smoke-bash32`'s 4m54s, and the
+  20-min `macos-full` cap blocks nobody.
 - **[decision]** Jobs are `changes` → {`fast`, `smoke-linux`, `smoke-bash32`,
   `macos`, `node14-compat`} → `ci-gate`. `fast` and `node14-compat` have no
   `if:` and no `needs:` on purpose — they run on every event, so a docs-only PR
@@ -40,6 +50,12 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   consumed pipe, so the command prints NOTHING instead of the unaligned
   fallback. Two more came from a missing `gh`. Add to the `apk add` line
   whenever a test starts depending on a new tool.
+- **[pitfall]** `smoke-bash32` is now the critical path and it pulls `bash:3.2`
+  from Docker Hub unauthenticated. An anonymous-pull rate limit would fail the
+  job — loudly, not silently. If that starts happening, mirror the image to
+  GHCR rather than dropping the leg. The tag (not a digest) is deliberate: the
+  image is rebuilt on a current Alpine, and the job asserts `version 3.2`
+  itself, so a bad rebuild fails instead of rotting silently.
 - **[decision]** macOS keeps the coverage nothing else can give (BSD userland,
   the `/var -> /private/var` symlinked tmpdir, macOS lock/process semantics) but
   is off the PR critical path: it was 100% of wall clock, 9m07s of runtime plus
