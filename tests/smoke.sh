@@ -4144,13 +4144,16 @@ check "guard counts substitution parens quote-aware (#160)" \
   'all_allowed "echo \"\$(grep \\\"(\\\" file)\"" "gh pr create --body \"the fix works :) ship it\""'
 
 # A hook that times out FAILS OPEN (measured, see SECURITY.md), so the parser
-# must never be the slow thing. It was quadratic: 32KB took 21s.
-GUARD_BIG="$(awk 'BEGIN{ s="gh pr create --body \""; for(i=0;i<4000;i++) s = s "a b "; print s "\"" }')"
+# must never be the slow thing. 32KB is the size that showed it: 23s with the
+# quadratic reader, 2s with the sliding window. The bound is deliberately an
+# order of magnitude above the linear time and well below the quadratic one, so
+# a loaded CI runner cannot flip it either way.
+GUARD_BIG="$(awk 'BEGIN{ s="gh pr create --body \""; for(i=0;i<8000;i++) s = s "a b "; print s "\"" }')"
 GUARD_START="$(date +%s)"
 b dm-command-guard.sh check "$GUARD_BIG" >/dev/null 2>&1 || true
 GUARD_ELAPSED=$(( $(date +%s) - GUARD_START ))
-check "the lexer classifies a 16KB command in a few seconds, not tens (#160)" \
-  '[ "$GUARD_ELAPSED" -le 8 ]'
+check "the lexer stays linear on a 32KB command (#160)" \
+  '[ "$GUARD_ELAPSED" -le 15 ]'
 # Over the cap the guard REFUSES rather than parsing on: a guard that runs long
 # is a guard that silently is not there.
 GUARD_OVER="$(awk 'BEGIN{ s="echo "; for(i=0;i<70000;i++) s = s "a"; print s }')"
