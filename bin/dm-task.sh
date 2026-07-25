@@ -125,8 +125,7 @@ case "$cmd" in
       # fleet-change both spawn, then persist it here. So this is where the
       # brief's "{TASK} is a safety contract" claim becomes one: a crewmate
       # dispatched against an unfilled placeholder has no task at all, and every
-      # other section of the brief looks complete on a skim (#115). A task with
-      # NO brief file is unaffected — nothing was scaffolded to fill.
+      # other section of the brief looks complete on a skim (#115).
       agent_id)
         dm_require_id "$id"
         brief="$DM_DATA/$id/brief.md"
