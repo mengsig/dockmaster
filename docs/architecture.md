@@ -357,3 +357,5 @@ block for managed repos that have not migrated, so nothing is stranded.
 `state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
 tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `workflows/`, `config/`
 defaults, docs) is the shared distro and ships through this repo's own PR path.
+
+<!-- filter proof: docs-only change, throwaway -->
