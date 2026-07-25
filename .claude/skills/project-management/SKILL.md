@@ -46,10 +46,10 @@ bin/dm-repo.sh create <name> [<remote>] [--mode M] [--test-cmd "<cmd>"] \
   [--branch <default>] [--public|--private] [--https] [--description D] [--no-memory]
 ```
 
-- **No remote given** → creates the GitHub repo via `gh-axi` (default
-  `--private`; pass `--public` to publish), then wires it up. Requires GitHub
-  auth. The git remote defaults to SSH (`git@github.com:…`); pass `--https` for
-  an HTTPS origin.
+- **No remote given** → creates the GitHub repo via the GitHub CLI (`gh-axi`
+  when installed, else plain `gh`; default `--private`, pass `--public` to
+  publish), then wires it up. Requires GitHub auth. The git remote defaults to
+  SSH (`git@github.com:…`); pass `--https` for an HTTPS origin.
 - **Remote given** → the operator already made the repo. It must be **empty**;
   `create` refuses a remote that already has branches and points you at `add`.
 
