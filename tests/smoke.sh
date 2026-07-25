@@ -4256,11 +4256,17 @@ check "the dispatch records once the brief is filled" \
   'b dm-task.sh set w6disp agent_id agent-123 >/dev/null 2>&1 && [ "$(b dm-task.sh get w6disp agent_id)" = agent-123 ]'
 check "a filled brief clears the UNFILLED flag" \
   '! grep -q "UNFILLED.*w6disp" <<<"$(b dm-status.sh 2>&1 || true)"'
-# A task that never had a brief scaffolded must not be blocked by a guard over a
-# file that does not exist.
+# All three sites agree on all three reasons. A MISSING brief refuses too: a
+# recorded dispatch with no brief is the same "crewmate with no task" #115
+# exists to prevent, reached by another route.
 b dm-task.sh new w6nobrief --kind ship --repo demo >/dev/null
-check "a task with no brief still records a dispatch" \
-  'b dm-task.sh set w6nobrief agent_id agent-456 >/dev/null 2>&1'
+W6NOBRIEF="$(b dm-task.sh set w6nobrief agent_id agent-456 2>&1 || true)"
+check "a task with no brief is refused a dispatch record" \
+  '! b dm-task.sh set w6nobrief agent_id agent-456 >/dev/null 2>&1'
+check "that refusal says GENERATE, not edit in place" \
+  'grep -q "dm-brief.sh w6nobrief" <<<"$W6NOBRIEF" && ! grep -q "do NOT regenerate" <<<"$W6NOBRIEF"'
+check "dm-brief.sh check agrees a missing brief is not ready" \
+  '! b dm-brief.sh check w6nobrief >/dev/null 2>&1'
 # The skills that dispatch must name the check, or the code guard is the only
 # thing standing between an empty brief and a spawned crewmate.
 check "task-lifecycle names the pre-dispatch check" \
@@ -4311,11 +4317,23 @@ check "an empty brief fails the check rather than passing it" \
   '! b dm-brief.sh check w6empty >/dev/null 2>&1'
 check "an empty brief blocks the dispatch record" \
   '! b dm-task.sh set w6empty agent_id agent-000 >/dev/null 2>&1'
-# The refusal must not send the reader to regeneration, which overwrites a
-# partial fill.
-W6REGEN="$(b dm-task.sh set w6empty agent_id agent-000 2>&1 || true)"
-check "the refusal says edit in place, not regenerate" \
-  'grep -q "Edit that file in place" <<<"$W6REGEN" && grep -q "would overwrite it" <<<"$W6REGEN"'
+# Recovery advice is per-arm, because it INVERTS between them. An empty brief has
+# nothing to preserve and regeneration is the only fix; a partly-filled one would
+# be destroyed by it (dm-brief.sh <id> rewrites unconditionally).
+W6EMPTYMSG="$(b dm-task.sh set w6empty agent_id agent-000 2>&1 || true)"
+check "the empty-brief refusal says REGENERATE" \
+  'grep -q "Regenerate it (dm-brief.sh w6empty)" <<<"$W6EMPTYMSG"'
+check "and does not tell you to edit a file with no lines" \
+  '! grep -q "EDIT that file in place" <<<"$W6EMPTYMSG" && ! grep -q "do NOT regenerate" <<<"$W6EMPTYMSG"'
+W6EMPTYCHK="$(b dm-brief.sh check w6empty 2>&1 || true)"
+check "dm-brief.sh check gives the same empty-arm advice" \
+  'grep -q "Regenerate it: dm-brief.sh w6empty" <<<"$W6EMPTYCHK" && ! grep -q "still has its bare" <<<"$W6EMPTYCHK"'
+# The unreplaced-placeholder arm is where "do not regenerate" belongs; w6disp
+# still holds its scaffold placeholder.
+check "the placeholder refusal says edit in place, not regenerate" \
+  'grep -q "EDIT that file in place" <<<"$W6DISPREFUSE" && grep -q "would overwrite what is already written" <<<"$W6DISPREFUSE"'
+check "and does not tell you to regenerate over a partial fill" \
+  '! grep -q "Regenerate it" <<<"$W6DISPREFUSE"'
 
 echo "== risk sizing: 'lock' is word-anchored so 'blocked' does not buy the top tier =="
 # `blocked` is this distro's own status word; substring-matching `lock` bought
@@ -4328,6 +4346,13 @@ check "a real lock/mutex/deadlock still does" \
   '[ "$(w6rec ship "fix mutex lock race")" = opus ] && [ "$(w6rec ship "deadlock in the scheduler")" = opus ] && [ "$(w6eff ship "lock contention on the registry")" = xhigh ]'
 check "so do its inflections" \
   '[ "$(w6rec ship "locking order audit")" = opus ] && [ "$(w6rec ship "unlock the advisory lock")" = opus ]'
+# Anchoring `lock` cannot match a compound (the preceding char is a letter), so
+# the real hazards are listed back explicitly. This is the DOWN-sizing direction
+# in the one regex that must bias UP, and nothing else covers it.
+check "flock stays top tier — the POSIX advisory-lock call" \
+  '[ "$(w6rec ship "flock the registry before writing")" = opus ] && [ "$(w6eff ship "flock the registry before writing")" = xhigh ]'
+check "so do spinlock, livelock and rwlock" \
+  '[ "$(w6rec ship "spinlock in the ring buffer")" = opus ] && [ "$(w6rec ship "livelock under contention")" = opus ] && [ "$(w6eff ship "rwlock upgrade path")" = xhigh ]'
 
 echo "== dispatch docs: the skill must not contradict the brief about what binds =="
 W6TLSKILL="$ROOT/.claude/skills/task-lifecycle/SKILL.md"

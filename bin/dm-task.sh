@@ -132,10 +132,16 @@ case "$cmd" in
         brief="$DM_DATA/$id/brief.md"
         # A crewmate is already spawned by the time this runs (fleet-change
         # terminates the returned id on a persistence failure), so the predicate
-        # must be exact: dm_brief_unfilled matches the bare placeholder LINE, not
-        # any mention of it. EDIT is the recovery — regenerating overwrites.
-        if dm_brief_unfilled "$brief"; then
-          dm_die "REFUSED: $id's brief is not dispatch-ready ($brief) — it is empty, or its bare {TASK} line was never replaced, so the crewmate you just spawned has no task. Edit that file in place (do NOT regenerate: dm-brief.sh $id would overwrite it), confirm with 'dm-brief.sh check $id', then record the owner."
+        # must be exact: the placeholder arm matches the bare {TASK} LINE, not
+        # any mention of it. A MISSING brief refuses for the same reason the
+        # other two do — a recorded dispatch with no brief is the same crewmate
+        # with no task, reached by another route — so all three sites agree.
+        if reason="$(dm_brief_unready_reason "$brief")"; then
+          case "$reason" in
+            missing) dm_die "REFUSED: $id has no brief at $brief, so the crewmate you just spawned has no task record behind it. Generate it (dm-brief.sh $id), fill its {TASK} line, then record the owner." ;;
+            empty)   dm_die "REFUSED: $id's brief is empty ($brief) — a write died part-way, so the crewmate you just spawned has no task. Regenerate it (dm-brief.sh $id), fill its {TASK} line, then record the owner." ;;
+            *)       dm_die "REFUSED: $id's brief still has its bare {TASK} line unreplaced ($brief), so the crewmate you just spawned has no task. EDIT that file in place — do NOT regenerate, dm-brief.sh $id would overwrite what is already written. Confirm with 'dm-brief.sh check $id', then record the owner." ;;
+          esac
         fi
         ;;
     esac

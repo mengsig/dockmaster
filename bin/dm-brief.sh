@@ -32,11 +32,15 @@ if [ "${1:-}" = "check" ] && [ -n "${2:-}" ]; then
   id="$2"
   dm_require_id "$id"
   brief="$DM_DATA/$id/brief.md"
-  [ -f "$brief" ] || dm_die "no brief for $id at $brief; generate it with: dm-brief.sh $id"
-  # EDIT the file in place. Never "regenerate to fix it": dm-brief.sh <id>
-  # rewrites the brief from the scaffold and would destroy a partial fill.
-  ! dm_brief_unfilled "$brief" \
-    || dm_die "brief for $id is not dispatch-ready ($brief): it is empty, or its bare {TASK} line was never replaced. Edit that file in place — replace the {TASK} line with the concrete task, acceptance criteria and constraints."
+  # Per-arm recovery: regeneration is the fix for a missing/empty brief and the
+  # DESTROYER of a partly-filled one (dm-brief.sh <id> rewrites unconditionally).
+  if reason="$(dm_brief_unready_reason "$brief")"; then
+    case "$reason" in
+      missing) dm_die "no brief for $id at $brief; generate it with: dm-brief.sh $id, then replace its {TASK} line" ;;
+      empty)   dm_die "brief for $id is empty ($brief) — a write died part-way. Regenerate it: dm-brief.sh $id, then replace its {TASK} line" ;;
+      *)       dm_die "brief for $id still has its bare {TASK} line unreplaced ($brief). EDIT that file in place — replace the {TASK} line with the concrete task, acceptance criteria and constraints. Do NOT regenerate: dm-brief.sh $id would overwrite what is already written." ;;
+    esac
+  fi
   dm_info "$brief"
   exit 0
 fi

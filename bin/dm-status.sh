@@ -129,11 +129,14 @@ if [ -n "$tasks" ]; then
       [ -n "$erec" ] || erec="$(dm_recommended_effort "$(dm_meta_get "$tid" kind)" "$(dm_meta_get "$tid" title)")"
       unsized+="  UNSIZED: task $tid is working with no model recorded (recommended: $rec, $erec effort)"$'\n'
     fi
-    # A live task dispatched against a brief whose {TASK} was never filled (#115).
-    # dm-task.sh set agent_id refuses that at the dispatch record; this catches a
-    # dispatch that never recorded an owner. Soft hint, like UNSIZED.
-    if [ "$short" = "working" ] && dm_brief_unfilled "$DM_DATA/$tid/brief.md"; then
-      unfilled+="  UNFILLED: task $tid is working against a brief that is not dispatch-ready ($DM_DATA/$tid/brief.md); it is empty, or its bare {TASK} line was never replaced"$'\n'
+    # A live task working against a brief that was never dispatch-ready (#115).
+    # dm-task.sh set agent_id refuses all three reasons at the dispatch record;
+    # this catches a dispatch that never recorded an owner. Soft hint, like
+    # UNSIZED — it names the reason so the recovery is not guesswork.
+    if [ "$short" = "working" ]; then
+      if brief_reason="$(dm_brief_unready_reason "$DM_DATA/$tid/brief.md")"; then
+        unfilled+="  UNFILLED: task $tid is working against a brief that is not dispatch-ready ($brief_reason): $DM_DATA/$tid/brief.md"$'\n'
+      fi
     fi
     created="$(dm_meta_get "$tid" created)"
     epoch="$(iso_to_epoch "$created")"

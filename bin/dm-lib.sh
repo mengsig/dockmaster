@@ -1055,21 +1055,31 @@ dm_open_pr_tasks() {
   done < <(dm_all_task_ids)
 }
 
-# --- brief readiness: one owner for "was {TASK} actually filled?" -------------
-# Exit 0 = the brief is NOT dispatch-ready. Two ways that happens:
-#   - the file exists but is empty (the brief is written truncate-then-write, so
-#     a death mid-write leaves exactly this);
-#   - it still carries the scaffold's bare {TASK} placeholder LINE.
-# LINE-anchored, never a whole-file match: a correctly filled brief whose task
-# text merely MENTIONS {TASK} is filled — issue #115's own text does — and
-# refusing it would strand an already-spawned crewmate on a false alarm. A
-# missing file is not "unfilled": nothing was scaffolded to fill.
-# Single owner because three call sites drifting on this predicate is the bug.
-dm_brief_unfilled() {
+# --- brief readiness: one owner for "can this brief be dispatched?" -----------
+# Prints WHY a brief must not be dispatched and returns 0; prints nothing and
+# returns 1 when it is ready. Three reasons, because they need three different
+# recoveries and a single boolean made every caller give the wrong advice:
+#   missing     -> generate it (dm-brief.sh <id>), then fill it
+#   empty       -> regenerate; there is nothing to preserve
+#   placeholder -> EDIT IN PLACE; regenerating would destroy a partial fill
+# All three end the same way — a crewmate with no task — so all three callers
+# refuse on all three. Single owner: three sites drifting on this predicate is
+# what produced the false refusal this replaced.
+#
+# `placeholder` is LINE-anchored, never a whole-file match: a correctly filled
+# brief whose task text merely MENTIONS {TASK} is filled — issue #115's own text
+# does — and refusing it would strand an already-spawned crewmate. \r is in
+# [[:space:]], so a CRLF scaffold still matches.
+# `empty` catches an EXACTLY zero-byte file, which is what a death during the
+# truncate-then-write leaves. A partial write that got as far as one byte is not
+# caught here; it is caught by the placeholder arm whenever the bare {TASK} line
+# survived, and not at all when it did not.
+dm_brief_unready_reason() {
   local brief="$1"
-  [ -f "$brief" ] || return 1
-  [ -s "$brief" ] || return 0
-  grep -qx '[[:space:]]*{TASK}[[:space:]]*' "$brief"
+  [ -f "$brief" ] || { printf 'missing\n'; return 0; }
+  [ -s "$brief" ] || { printf 'empty\n'; return 0; }
+  grep -qx '[[:space:]]*{TASK}[[:space:]]*' "$brief" || return 1
+  printf 'placeholder\n'
 }
 
 # --- dispatch right-sizing: advisory model + effort recommendations -----------
@@ -1084,12 +1094,16 @@ dm_brief_unfilled() {
 #              exception: `lock` is word-anchored, because it otherwise fires on
 #              block/blocking/unblock, and `blocked` is this distro's own status
 #              word — every routine "unblock X" task would buy the top tier.
-#              `deadlock` is kept explicitly; `lockfile` is deliberately not.
+#              Anchoring drops compounds too, so the real hazards are listed
+#              back explicitly: deadlock, flock (the POSIX advisory-lock call
+#              this distro's own mutex notes), spinlock, livelock, rwlock.
+#              `lockfile` is deliberately NOT among them — "add a lockfile" is
+#              dependency work, and a lockfile RACE says concurren/mutex anyway.
 #   MECHANICAL sizes DOWN, so a substring hit is the WRONG direction: `doc`
 #              inside dockmaster and `nit` inside unit would size real work down
 #              to the floor. Whole words only, with a small suffix set; a term
 #              this misses stays at the default tier, which is the safe miss.
-DM_RISK_SIGNAL_RE='authz|permission|auth|migration|alembic|concurren|(^|[^[:alpha:]])(un)?lock(s|ing|ed)?([^[:alpha:]]|$)|deadlock|mutex|security|secret|crypto|merge.gate|memory governance'
+DM_RISK_SIGNAL_RE='authz|permission|auth|migration|alembic|concurren|(^|[^[:alpha:]])(un)?lock(s|ing|ed)?([^[:alpha:]]|$)|deadlock|flock|spinlock|livelock|rwlock|mutex|security|secret|crypto|merge.gate|memory governance'
 DM_MECHANICAL_SIGNAL_RE='(^|[^[:alpha:]])(test|doc|chore|nit|typo|format|comment|rename)(s|es|ed|ing)?([^[:alpha:]]|$)'
 
 # Least model tier that still fits the work: what the crewmate must be able to
