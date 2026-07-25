@@ -5085,6 +5085,25 @@ printf 'routeA\n' > "$VWT/frontend/a.js"; printf 'routeB\nrouteC\n' > "$VWT/fron
 VMOVE_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VMOVE_RC=$?
 check "a byte-neutral move still moves the pin"  '[ "$VMOVE_RC" = 2 ]'
 rm -f "$VWT/frontend/a.js" "$VWT/frontend/b.js"
+# An untracked file whose NAME looks like an option is handed to the digest tool
+# as a bare argument: it was read as one, the tool printed usage and hashed
+# NOTHING, and the untracked half of the pin became a constant. Assert the pin
+# still moves with such a file present AND that the file itself is hashed.
+"$V" down vrf1 >/dev/null 2>&1 || true
+printf 'route\n' > "$VWT/frontend/opt.js"; : > "$VWT/--help"
+vup vrf1 >/dev/null 2>&1 || true; vsh session vrf1 >/dev/null 2>&1 || true
+DM_SMOKE_SHOT=png vsh shot vrf1 optname >/dev/null 2>&1 || true
+"$V" flow vrf1 optname pass "driven" >/dev/null 2>&1 || true
+check "a green run with an option-named file"    '"$V" report vrf1 >/dev/null 2>&1'
+printf 'route CHANGED\n' > "$VWT/frontend/opt.js"
+VOPT_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VOPT_RC=$?
+check "an option-named file cannot blind the pin" '[ "$VOPT_RC" = 2 ]'
+printf 'route\n' > "$VWT/frontend/opt.js"
+check "restoring the edit restores the verdict"   '"$V" report vrf1 >/dev/null 2>&1'
+printf 'now has content\n' > "$VWT/--help"
+VOPT2_RC=0; "$V" report vrf1 >/dev/null 2>&1 || VOPT2_RC=$?
+check "the option-named file is itself hashed"    '[ "$VOPT2_RC" = 2 ]'
+rm -f "$VWT/--help" "$VWT/frontend/opt.js"
 
 echo "== verify gate: a dead app is never a green verdict (probe, not stamp) =="
 # verify_app_state is a stamp `up` wrote; nothing re-checked it, so an app killed
@@ -5127,13 +5146,46 @@ echo "== verify gate: its trust fields are not hand-settable (fix 3's own hole) 
 # verify_ready_cmd is eval'd and validated only at boot, so a CLI write would
 # bypass the boot check entirely. The pins that say what a verdict MEANS are
 # protected with it.
-for vkey in verify_ready_cmd verify_token verify_head verify_port verify_url verify_cwd; do
+# Every field any precondition of a `pass` reads. session_is_live reads only
+# verify_browser_mode + verify_browser_pid, so leaving those settable made the
+# browser leg forgeable with two ordinary CLI calls - and setting verify_axi_home
+# + verify_browser_port re-points drive/shot at the operator's own default bridge,
+# which is #80 reopened with their browser supplying this run's evidence.
+for vkey in verify_ready_cmd verify_token verify_head verify_port verify_url verify_cwd \
+            verify_app_state verify_browser_mode verify_browser_pid verify_browser_port \
+            verify_cdp_port verify_axi_home verify_browser_profile verify; do
   check "dm-task.sh refuses to set $vkey" "! b dm-task.sh set vrf1 $vkey x >/dev/null 2>&1"
 done
 check "the refusal explains why"                'grep -q "verify-gate trust field" <<<"$(b dm-task.sh set vrf1 verify_ready_cmd x 2>&1 || true)"'
 # Fields the gate does NOT trust stay writable - the browser lease is authoritative
 # in its own directory, which the #80 section proves.
 check "an untrusted verify field is still settable" 'b dm-task.sh set vrf1 verify_browser_lease released >/dev/null 2>&1'
+# `kill 0` signals the caller's WHOLE PROCESS GROUP and SUCCEEDS, so `|| true`
+# never fires and 2>/dev/null hides it - and browser_stop runs from `down`, which
+# every crewmate arms in an EXIT trap. `0` passes a bare numeric guard; so do
+# `00` and `000`. Bound to the real source: both functions must carry the
+# all-zero exclusion, and the guard itself must never route one to `kill`.
+check "browser_stop excludes all-zero pids"   'sed -n "/^browser_stop() {/,/^}/p" "$ROOT/bin/dm-verify.sh" | grep -q "\[!0\]"'
+check "session_is_live excludes them too"     'sed -n "/^session_is_live() {/,/^}/p" "$ROOT/bin/dm-verify.sh" | grep -q "\[!0\]"'
+cat > "$TMP/pidguard.sh" <<'PIDGUARD'
+# The same two-step guard both functions use, exercised without sending signals.
+verdict() {
+  case "$1" in ''|*[!0-9]*) printf 'skip'; return ;; esac
+  case "$1" in *[!0]*) printf 'kill' ;; *) printf 'skip' ;; esac
+}
+for p in EMPTY 0 00 000 abc 123 0123; do
+  [ "$p" = EMPTY ] && p=''
+  printf '%s=%s\n' "${p:-EMPTY}" "$(verdict "$p")"
+done
+PIDGUARD
+VZERO="$(bash "$TMP/pidguard.sh")"
+check "an empty pid never reaches kill"       'grep -qx "EMPTY=skip" <<<"$VZERO"'
+check "pid 0 never reaches kill"              'grep -qx "0=skip" <<<"$VZERO"'
+check "pid 00 never reaches kill"             'grep -qx "00=skip" <<<"$VZERO"'
+check "pid 000 never reaches kill"            'grep -qx "000=skip" <<<"$VZERO"'
+check "a non-numeric pid never reaches kill"  'grep -qx "abc=skip" <<<"$VZERO"'
+check "a real pid still does"                 'grep -qx "123=kill" <<<"$VZERO"'
+check "a zero-prefixed real pid still does"   'grep -qx "0123=kill" <<<"$VZERO"'
 
 echo "== verify gate: clearing the probe mid-run cannot re-open the fail-open =="
 # Two crewmates share one registry. Clearing app_ready_cmd used to turn the

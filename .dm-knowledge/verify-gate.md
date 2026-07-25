@@ -74,10 +74,22 @@ Read before editing the verify gate or anything that drives a browser.
   literal `*` and therefore no path at all — the gate would silently under-fire
   on macOS while passing every Linux test. Only CI's macOS smoke leg catches it.
 - **[scope]** The pin covers what `changed_files` covers: tracked changes plus
-  untracked-but-not-ignored files. A gitignored file (build output, a local
-  `.env`) can change under a green run without moving it. That is deliberate and
-  consistent with the gate's firing rule, not an oversight — but it means the pin
-  answers "did the SOURCE move", not "did anything on disk move".
+  untracked-but-not-ignored files. Both use `--exclude-standard`, so a gitignored
+  path is outside BOTH — a change confined to `dist/` or `build/` moves neither
+  the gate's firing decision nor the pin, and a green verdict survives it. That
+  is deliberate (the gate asks "did the SOURCE move"), but it matters for a repo
+  that SERVES gitignored build output: rebuild between `up` and `report` and the
+  app can change under a run the pin still calls unchanged. Verify from source.
+- **[pitfall]** Any filename reaching a tool as a bare argument needs `--`. An
+  untracked file called `--help` was read as an OPTION by the digest tool, which
+  printed usage, hashed nothing and exited 0 — the untracked half of the pin
+  collapsed to a constant and stopped moving on new uncommitted source at all.
+  `2>/dev/null || true` hid it completely. Never silence a digest step.
+- **[pitfall]** `kill 0` signals the CALLER'S WHOLE PROCESS GROUP, and `0`
+  passes any `*[!0-9]*` numeric guard (so do `00`, `000`). `browser_stop` runs
+  from `down`, which every crewmate arms in an EXIT trap, so a `0` pid there
+  SIGTERMs the crewmate's own shell — and `kill 0` SUCCEEDS, so `|| true` never
+  fires. `kill -0 0` likewise makes a liveness check unconditionally true.
 - **[invariant]** Re-checks read what was PINNED AT BOOT — the probe, the url,
   the port, the token, the code state — never the live registry. Two crewmates share one `state/repos.json`, so clearing
   `app_ready_cmd` mid-run turned the liveness re-probe into `return 0` and a

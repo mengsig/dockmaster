@@ -165,13 +165,18 @@ untracked_digests() {
   # and a digest tool with no arguments reads stdin and hangs.
   paths="$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null)" || return 1
   [ -n "$paths" ] || return 0
+  # `--` is load-bearing: paths arrive as bare arguments, so an untracked file
+  # named `--help` or `-c` is read as an OPTION. sha256sum then prints usage,
+  # hashes NOTHING and exits 0 — the untracked digest set collapses to a
+  # constant and the pin stops moving on new uncommitted source entirely.
+  # No `|| true` either: a digest tool that fails must fail the pin, not empty it.
   git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
-    | ( cd "$wt" && xargs -0 -n 50 "${DIGEST_CMD[@]}" 2>/dev/null || true ) \
+    | ( cd "$wt" && xargs -0 -n 50 "${DIGEST_CMD[@]}" -- ) \
     | LC_ALL=C sort
 }
 
 code_state() {
-  local wt="$1" head content
+  local wt="$1" head content udigests
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
   [ -n "$head" ] || return 1
@@ -180,9 +185,12 @@ code_state() {
   # nothing — a pin that never moves, which is the failure this guards.
   git -C "$wt" diff HEAD >/dev/null 2>&1 || return 1
   git -C "$wt" ls-files --others --exclude-standard >/dev/null 2>&1 || return 1
+  udigests="$(untracked_digests "$wt")" || return 1
+  # cksum's byte count is kept, not discarded: this is the security-critical pin
+  # and CRC-32 is linear, so length is a cheap independent term.
   content="$( { git -C "$wt" diff HEAD 2>/dev/null
-                untracked_digests "$wt"
-              } | cksum | awk '{print $1}' )"
+                printf '%s\n' "$udigests"
+              } | cksum | awk '{print $1"-"$2}' )"
   [ -n "$content" ] || return 1
   printf '%s/%s\n' "$head" "$content"
 }
@@ -395,7 +403,12 @@ browser_stop() {
     fi
   fi
   pid="$(dm_meta_get "$id" verify_browser_pid)"
+  # `0` must be excluded explicitly: it passes a numeric test, and `kill 0`
+  # SIGTERMs every process in the caller's group — the crewmate's own shell and
+  # the app included. It also succeeds, so `|| true` never fires and 2>/dev/null
+  # hides it. This runs from `down`, which every crewmate arms in a trap.
   case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$pid" in *[!0]*) ;; *) return 0 ;; esac   # 0, 00, 000 … all mean the group
   kill "$pid" 2>/dev/null || true
 }
 
@@ -481,7 +494,10 @@ session_is_live() {
     *) return 1 ;;
   esac
   pid="$(dm_meta_get "$id" verify_browser_pid)"
+  # Same exclusion, opposite default: `kill -0 0` tests the caller's own process
+  # group and always succeeds, which would report a live browser unconditionally.
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$pid" in *[!0]*) ;; *) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null
 }
 

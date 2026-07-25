@@ -94,8 +94,10 @@ case "$cmd" in
       # app was reached on, the boot token evidence is matched against, and the
       # code state the run verified. Hand-setting any of them re-points a verdict
       # at something else. dm-verify.sh writes them through dm_meta_set directly.
-      verify_ready_cmd|verify_token|verify_head|verify_port|verify_url|verify_cwd)
-        dm_die "'$key' is a verify-gate trust field recorded by dm-verify.sh up; setting it by hand would re-point a verdict at code, an app, or evidence the run never checked" ;;
+      verify_ready_cmd|verify_token|verify_head|verify_port|verify_url|verify_cwd\
+      |verify_app_state|verify_browser_mode|verify_browser_pid|verify_browser_port\
+      |verify_cdp_port|verify_axi_home|verify_browser_profile|verify)
+        dm_die "'$key' is a verify-gate trust field recorded by dm-verify.sh; setting it by hand would re-point a verdict at code, an app, a browser, or evidence the run never checked" ;;
       # A task's repo decides which clone its work lands in and whose merge
       # authority gates it. Re-pointing a live record at another repo would carry
       # both decisions over to a repo that never consented to them, so the repo is
