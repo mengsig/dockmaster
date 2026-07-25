@@ -38,11 +38,25 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   know what should have run, so no downstream skip can be trusted.
 - **[convention]** `tests/check-ci-graph.js` pins the job graph's SHAPE, because
   the workflow gates itself and a PR that weakens the gate would verify itself
-  green. It fails if `ci-gate.needs` stops covering every job, if
-  `predicate-quantifier` leaves `every`, if the exclusion list grows, if a heavy
-  leg's `if:` guard stops matching the output `ci-gate` requires, if `fast` or
-  `node14-compat` gains an `if:`/`needs:`, or if any job loses
-  `timeout-minutes`. Each of those nine was planted and confirmed caught.
+  green. It pins: `ci-gate.needs` covering every job; each job bound to exactly
+  one `needs.<job>.result` env line that the gate script actually READS (all
+  three wires, so a new job cannot be added half-wired); no duplicate env key
+  shadowing a real expression; `predicate-quantifier: 'every'`; the exclusion
+  list verbatim; both `changes` output expressions verbatim; each heavy leg's
+  `if:` guard verbatim; the load-bearing lines of the gate script; `fast` and
+  `node14-compat` having no `if:`/`needs:`; `timeout-minutes` present and
+  <= 30; and its own invocation step. 24 planted drifts caught, 6 legitimate
+  edits stayed green.
+- **[pitfall]** That checker is a LINE parser, not a YAML parser — no
+  dependencies, and it must run on Node 14. It normalizes whole-line comments
+  (so hiding the original in a comment beside a hardcoded pass does not fool a
+  pin), block- and flow-style `needs:`, and quoted job keys. It does NOT model
+  YAML anchors/aliases, flow-style job mappings, folded (`>`) scalars beyond
+  refusing one on `filters:`, multi-document files, or a trailing same-line
+  comment. A pin defeated by any of those would pass. Treat it as a drift
+  tripwire, not a proof: it raises the cost of an accidental regression, it
+  does not stop a determined one. The real guarantee is the gate script itself,
+  which was swept over 2500 result combinations against an independent oracle.
 - **[convention]** The path filter is an EXCLUSION list (`'**'` minus a short
   list) under `predicate-quantifier: 'every'`, not an inclusion list. A path
   nobody has classified is therefore code by default, and so is every future
@@ -92,6 +106,12 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   Both strings must stay UNIQUE — the check compares `grep -n … | cut -d: -f1`
   as an integer, so a second occurrence of either makes it fail with a shell
   error rather than a clear message.
+- **[decision]** On a PARTIAL re-run, a job that failed in attempt 1 can splice
+  stale empty outputs into attempt 2 (actions/runner#2598). If `changes` itself
+  failed and is re-run alone, `ci-gate` fails with `changes output code is not
+  true/false (got: '')`. That is deliberate: it is loud, diagnosable, and fixed
+  by "Re-run all jobs". Before the outputs were validated the same scenario was
+  a silent fail-OPEN. Do not "fix" it back into tolerating an empty output.
 - **[pitfall]** A run superseded by `cancel-in-progress` shows `ci-gate` as
   FAILED, not cancelled — the cancel lands as an empty result, which the gate
   correctly refuses. Harmless: the check-runs API defaults to `filter=latest`,
