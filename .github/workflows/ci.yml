@@ -4,22 +4,71 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  # The full macOS suite is the one leg too slow to block a PR (measured: 9m07s
+  # against 4m24s for the same suite on ubuntu, plus queue waits up to 11m).
+  # It runs here every night against main instead, so BSD userland and the
+  # macOS process/tmpdir semantics stay covered on a fixed cadence.
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
+  # dorny/paths-filter's pull_request mode calls the Pulls API listFiles.
+  pull-requests: read
+
+concurrency:
+  # Supersede a PR's in-flight run when new commits land on it. Never cancel a
+  # main / scheduled run: those are the record that a landed commit is green.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  checks:
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  # Which legs a PR needs. The filter is an EXCLUSION list, not an inclusion
+  # one: `code` is true for any changed file that is not in the small set of
+  # paths nothing under test reads. A path nobody has classified is therefore
+  # code by default, and so is every future path. Outside pull_request the
+  # output is hardcoded true, so main, nightly and dispatch always run
+  # everything.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          # Every pattern must match for a file to count, which is what makes
+          # the `!` lines subtract from `**` instead of being OR'd into it.
+          predicate-quantifier: 'every'
+          filters: |
+            code:
+              - '**'
+              - '!docs/**'
+              - '!.dm-knowledge/**'
+              - '!assets/**'
+              - '!CHANGELOG.md'
+              - '!CONTRIBUTING.md'
+              - '!SECURITY.md'
+              - '!LICENSE'
+            # README.md, AGENTS.md and CLAUDE.md are deliberately NOT excluded:
+            # the smoke suite asserts on their contents (the plain-gh parity
+            # sentence, the documented DM_* override list, the AGENTS.md byte
+            # cap), so a "docs-only" edit to them can genuinely fail a test.
 
-      # Node 20 runs the full suite on both platforms.
+  # Every check that costs no measurable time, in one always-on job. Split out
+  # so a syntax error, a drifted gate list or a broken skill trigger fails in
+  # well under a minute instead of behind a four-minute suite. Runs on every
+  # event including a docs-only PR, so the aggregate gate is never vacuous.
+  fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -27,12 +76,10 @@ jobs:
       - name: Check jq is present
         run: jq --version
 
-      # Enforce the bash-3.2 portability invariant (see dm:knowledge) before
-      # anything else runs: a bash-4-only construct in bin/*.sh would only
-      # blow up at runtime on a macOS 3.2 shell, so catch it here for both
-      # runner images. The comment-stripping grep excludes lines that are
-      # pure comments (e.g. a note explaining why a construct is avoided)
-      # so it doesn't flag itself.
+      # A bash-4-only construct in bin/*.sh only blows up at runtime on a 3.2
+      # shell. The comment-stripping grep excludes lines that are pure comments
+      # (e.g. a note explaining why a construct is avoided) so it doesn't flag
+      # itself.
       - name: Check for banned bash-4 constructs in bin/*.sh
         run: |
           if grep -REn 'mapfile|readarray|declare -A|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|&>>' bin/*.sh \
@@ -41,11 +88,112 @@ jobs:
             exit 1
           fi
 
-      # Guard against the macOS runner image quietly switching its default
-      # /bin/bash to a non-3.2 version, which would make the "system bash"
-      # smoke run below stop actually testing the 3.2 portability invariant.
+      - name: Check bin/*.sh syntax
+        run: |
+          for f in bin/*.sh; do
+            echo "checking $f"
+            bash -n "$f"
+          done
+
+      - name: Check workflows/pr-pipeline.js syntax
+        run: node --check workflows/pr-pipeline.js
+
+      - name: Check pr-pipeline gate lists match config
+        run: node tests/check-gate-drift.js
+
+      - name: Check compatible-host runner gates
+        run: node tests/check-pr-runner.js
+
+      - name: Check skill/trigger coverage
+        run: node tests/check-skill-triggers.js
+
+      - name: Check runtime context-performance guardrails
+        run: bash tests/runtime-performance.sh
+
+      - name: Check deterministic waiter child (mailbox wake remains manual)
+        run: test "$(bash tests/runtime-waiter-child.sh 0)" = "WAITER_COMPLETION_OK"
+
+      - name: Check runtime test syntax
+        run: |
+          bash -n tests/runtime-evidence-dir.sh tests/runtime-performance.sh tests/runtime-smoke.sh tests/runtime-waiter-child.sh
+          node --check tests/check-skill-triggers.js
+          node --check tests/check-pr-runner.js
+          node --check tests/runtime-performance.js
+
+  # The suite as a contributor runs it: bash 5, GNU userland.
+  smoke-linux:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run smoke tests
+        run: bash tests/smoke.sh
+
+  # The bash-3.2 portability invariant, on a Linux runner instead of a macOS
+  # one. This is STRICTLY MORE 3.2 coverage than the macOS leg ever had: there,
+  # only the harness ran under /bin/bash 3.2 while every bin/dm-*.sh resolved
+  # `#!/usr/bin/env bash` through PATH to Homebrew bash 5 (#164). In the
+  # container 3.2 is the only bash on PATH, so the toolbelt itself runs on it.
+  # GNU userland is installed on purpose: the one variable under test is the
+  # bash version, not busybox-vs-GNU tool behavior.
+  smoke-bash32:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # 12 rather than the 10 the other PR-blocking jobs get: this one also pays
+    # an image pull and an apk install on top of the suite (measured ~5m40s).
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse and run the suite under real bash 3.2
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w bash:3.2 sh -c '
+            set -e
+            # A GNU userland plus every tool the hosted runners already carry.
+            # Leaving busybox in place, or dropping one of these, produces false
+            # failures that have nothing to do with the bash version:
+            # no column -> nine empty tables, no gh -> two wrong PR messages.
+            apk add --no-cache git jq nodejs github-cli coreutils grep sed gawk \
+              findutils diffutils tar procps util-linux util-linux-misc >/dev/null
+            git config --global --add safe.directory "*"
+            bash --version | head -1
+            case "$(bash --version | head -1)" in
+              *"version 3.2"*) ;;
+              *) echo "the bash:3.2 image no longer ships bash 3.2"; exit 1 ;;
+            esac
+            for f in bin/*.sh bin/dm; do echo "checking $f"; bash -n "$f"; done
+            bash tests/smoke.sh
+          '
+
+  # macOS is the only place BSD userland and the macOS process / symlinked-tmpdir
+  # semantics are real. On a PR it runs the cheap half: the 3.2 parse (the check
+  # that caught #164) plus the hermetic scripts that exercise path
+  # canonicalization and lock ownership. The full suite is macos-full below.
+  macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check jq is present
+        run: jq --version
+
+      # Guard against the runner image quietly switching its default /bin/bash
+      # to a non-3.2 version, which would make every macOS step -- here and in
+      # macos-full, which needs this job -- stop testing the 3.2 portability
+      # invariant. Ordered FIRST so a runner image that stops shipping 3.2
+      # fails loudly rather than silently passing.
       - name: Assert macOS system bash is v3
-        if: matrix.os == 'macos-latest'
         run: |
           # Only the first line is the actual version banner; --version's
           # later lines (the GPL license notice) say "GNU GPL version 3"
@@ -58,62 +206,43 @@ jobs:
             *) echo "macOS system /bin/bash is no longer version 3; the bash-3.2 leg is no longer testing what it claims"; exit 1 ;;
           esac
 
-      # The "Check bin/*.sh syntax" step below runs `bash` from PATH, which on
-      # the macOS runner is Homebrew bash 5 -- so the toolbelt was never parsed
-      # by the 3.2 the invariant is about, and a 3.2-only parse error shipped
-      # green on all three legs (#164). Parse with the system 3.2 explicitly.
-      # Ordered after the v3 assertion above so a runner image that stops
-      # shipping 3.2 fails loudly there rather than silently passing here.
       - name: Check bin/*.sh syntax (system bash 3.2)
-        if: matrix.os == 'macos-latest'
         run: |
-          for f in bin/*.sh; do
+          for f in bin/*.sh bin/dm; do
             echo "checking $f"
             /bin/bash -n "$f"
           done
 
-      # macOS runners default /bin/bash to the system bash (3.2), which is the
-      # exact shell the toolbelt's bash-3.2 portability invariant targets.
-      # Invoke it explicitly so a PATH-shadowing bash (e.g. a Homebrew bash 5)
-      # can never mask a 3.2 regression.
-      # NOTE: this pins the HARNESS only. Every bin/dm-*.sh it shells out to
-      # carries `#!/usr/bin/env bash` and resolves through PATH to bash 5, so
-      # the toolbelt's RUNTIME 3.2 behavior is still untested here; the step
-      # above covers it at parse level.
-      - name: Run smoke tests (system bash)
+      # The BSD-userland canaries. Both build their own fixtures, and
+      # scout-cleanup.sh keeps a deliberately SYMLINKED root -- the macOS
+      # /var -> /private/var shape behind the canonicalization and
+      # lock-ownership fixes this leg exists to catch.
+      - name: Run the hermetic BSD-sensitive scripts (system bash)
+        run: |
+          /bin/bash tests/scout-cleanup.sh
+          DM_RUNTIME_SMOKE_TEST_ONLY=1 DM_RUNTIME_SMOKE_FIXTURE_SECRET=ci /bin/bash tests/runtime-smoke.sh >/dev/null
+          test "$(/bin/bash tests/runtime-waiter-child.sh 0)" = "WAITER_COMPLETION_OK"
+
+  # The full suite on BSD userland. `needs: macos` so the system-bash-is-v3
+  # assertion above still guards it. Skipped on an ordinary PR because it is
+  # the one leg that cannot fit a 10-minute cap (measured 9m07s, plus queue
+  # waits up to 11m); add the `ci:macos` label to a PR to demand it before
+  # merging something macOS-sensitive.
+  macos-full:
+    needs: [changes, macos]
+    if: |
+      needs.changes.outputs.code == 'true' &&
+      (github.event_name != 'pull_request' ||
+       contains(github.event.pull_request.labels.*.name, 'ci:macos'))
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run the full smoke suite (system bash)
         run: /bin/bash tests/smoke.sh
-
-      - name: Check workflows/pr-pipeline.js syntax
-        run: node --check workflows/pr-pipeline.js
-
-      - name: Check pr-pipeline gate lists match config
-        run: node tests/check-gate-drift.js
-
-      - name: Check compatible-host runner gates
-        run: node tests/check-pr-runner.js
-
-      - name: Check deterministic waiter child (mailbox wake remains manual)
-        run: test "$(bash tests/runtime-waiter-child.sh 0)" = "WAITER_COMPLETION_OK"
-
-      - name: Check skill/trigger coverage
-        run: node tests/check-skill-triggers.js
-
-      - name: Check runtime context-performance guardrails
-        run: /bin/bash tests/runtime-performance.sh
-
-      - name: Check bin/*.sh syntax
-        run: |
-          for f in bin/*.sh; do
-            echo "checking $f"
-            bash -n "$f"
-          done
-
-      - name: Check runtime test syntax
-        run: |
-          bash -n tests/runtime-evidence-dir.sh tests/runtime-performance.sh tests/runtime-smoke.sh tests/runtime-waiter-child.sh
-          node --check tests/check-skill-triggers.js
-          node --check tests/check-pr-runner.js
-          node --check tests/runtime-performance.js
 
   node14-compat:
     runs-on: ubuntu-latest
@@ -131,3 +260,53 @@ jobs:
           node tests/check-pr-runner.js
           node tests/check-skill-triggers.js
           node tests/runtime-performance.js >/dev/null
+
+  # The single required status for branch protection. `if: always()` so it runs
+  # even when a leg was path-filtered out, and it FAILS CLOSED: only `success`
+  # and `skipped` pass, so a cancelled leg (a timeout reads as cancelled) or a
+  # failed one can never be mistaken for one that had nothing to do.
+  ci-gate:
+    needs: [changes, fast, smoke-linux, smoke-bash32, macos, macos-full, node14-compat]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every needed job to have succeeded or been safely skipped
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          FAST_RESULT: ${{ needs.fast.result }}
+          SMOKE_LINUX_RESULT: ${{ needs.smoke-linux.result }}
+          SMOKE_BASH32_RESULT: ${{ needs.smoke-bash32.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          MACOS_FULL_RESULT: ${{ needs.macos-full.result }}
+          NODE14_RESULT: ${{ needs.node14-compat.result }}
+        run: |
+          set -euo pipefail
+          # `changes` must succeed outright: if it failed we do not know what
+          # should have run, so a downstream skip cannot be read as "not needed".
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "::error::changes did not succeed (result: $CHANGES_RESULT)"
+            exit 1
+          fi
+          # `fast` and `node14-compat` have no `if:` and no `needs`, so they run
+          # on every event: a skip there is a bug, not a filter decision.
+          for pair in "fast:$FAST_RESULT" "node14-compat:$NODE14_RESULT"; do
+            if [ "${pair#*:}" != "success" ]; then
+              echo "::error::${pair%%:*} must run on every event (result: ${pair#*:})"
+              exit 1
+            fi
+          done
+          fail=0
+          for pair in "smoke-linux:$SMOKE_LINUX_RESULT" "smoke-bash32:$SMOKE_BASH32_RESULT" \
+                      "macos:$MACOS_RESULT" "macos-full:$MACOS_FULL_RESULT"; do
+            job=${pair%%:*}
+            result=${pair#*:}
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "::error::$job failed or was cancelled (result: $result)"
+                fail=1
+                ;;
+            esac
+          done
+          exit "$fail"
