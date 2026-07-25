@@ -63,7 +63,9 @@ the lifecycle. Confirm it, then spawn the crewmate with the brief as its prompt:
 ```
 bin/dm-brief.sh check <id>        # refuses while {TASK} is still unfilled
 Agent(prompt=<contents of data/<id>/brief.md>, run in background,
-      subagent_type + model per the resourcing policy below)
+      model=<tier>, subagent_type=crew-<level>)   # both dials, see below
+bin/dm-task.sh set <id> model <tier>
+bin/dm-task.sh set <id> effort <level>    # set agent_id refuses without both
 bin/dm-task.sh set <id> agent_id <returned-agent-id>
 ```
 
@@ -106,6 +108,12 @@ dm-task.sh set <id> model <tier>
 dm-task.sh set <id> effort <level>     # must match the crew-<level> you spawned
 dm-task.sh set <id> agent_id <id>
 ```
+
+This is a **record gate, not a spawn gate.** The crewmate is already running by
+the time `set agent_id` executes, and nothing compares the recorded effort
+against the `subagent_type` you actually passed — same shape as the `{TASK}`
+brief guard. It guarantees the choice was made and written down; it does NOT
+verify what was spawned. Record what you really passed, or the meta lies.
 
 `dm-status` flags a live task missing either dial as UNSIZED. The same judgment
 applies to **every** sub-unit you spawn downstream — review passes, verification,

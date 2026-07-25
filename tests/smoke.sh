@@ -4196,8 +4196,20 @@ check "every accepted level has a crew-<level> agent definition" \
   '( . "$ROOT/bin/dm-lib.sh"; for w6l in $DM_EFFORT_LEVELS; do
        [ -f "$ROOT/.claude/agents/crew-$w6l.md" ] || exit 1
        grep -qx "effort: $w6l" "$ROOT/.claude/agents/crew-$w6l.md" || exit 1; done )'
+check "the crew definitions exist at all (guard the guard)" \
+  '[ "$(ls "$ROOT"/.claude/agents/crew-*.md | wc -l)" -eq 4 ]'
 check "no agent definition pins a model (the dials stay independent)" \
-  '! grep -l "^model:" "$ROOT"/.claude/agents/crew-*.md'
+  '! grep -q "^model:" "$ROOT"/.claude/agents/crew-*.md'
+# The drift guard runs BOTH ways. Forward (above): every level the gate accepts
+# has a file. Reverse (here): every file names a level the gate accepts, so a
+# stray crew-<junk>.md — a definition nothing can dispatch through — is caught,
+# not just crew-max.
+check "every crew-*.md names a level the gate accepts" \
+  '( . "$ROOT/bin/dm-lib.sh"
+     for w6f in "$ROOT"/.claude/agents/crew-*.md; do
+       w6b="${w6f##*/}"; w6b="${w6b%.md}"
+       dm_effort_is_valid "${w6b#crew-}" || exit 1
+     done )'
 check "no crew agent exists for the excluded max tier" '[ ! -f "$ROOT/.claude/agents/crew-max.md" ]'
 
 echo "== dispatch gate: set agent_id refuses until BOTH dials are chosen (#166) =="
@@ -4237,8 +4249,15 @@ check "brief still records model_recommended"      '[ "$(b dm-task.sh get w6eff-
 # "not enforceable" disclaimer must not survive anywhere in the distro.
 check "brief no longer claims effort is unenforceable" \
   '! grep -qi "NOT ENFORCEABLE AT SPAWN\|no effort parameter" "$W6BR"'
+# The scan MUST cover .dm-knowledge: AGENTS.md names those notes as the
+# authority a future editor opens before touching this code, and the first
+# version of this guard missed the one stale claim that survived there.
 check "no distro text claims effort is unenforceable" \
-  '! grep -rqi "NOT ENFORCEABLE AT SPAWN\|has no effort parameter\|effort is not a spawn parameter" "$ROOT/bin" "$ROOT/.claude/skills" "$ROOT/AGENTS.md"'
+  '! grep -rqi "NOT ENFORCEABLE AT SPAWN\|has no effort parameter\|effort is not a spawn parameter" "$ROOT/bin" "$ROOT/.claude/skills" "$ROOT/.dm-knowledge" "$ROOT/AGENTS.md"'
+check "no distro text still calls right-sizing advisory-only" \
+  '! grep -rqi "right-sizing is ADVISORY\|never blocks dispatch" "$ROOT/bin" "$ROOT/.claude/skills" "$ROOT/.dm-knowledge" "$ROOT/AGENTS.md"'
+check "the lifecycle note documents the gate and both dials" \
+  'grep -q "crew-<level>" "$ROOT/.dm-knowledge/lifecycle.md" && grep -q "RECORD gate, not a SPAWN gate" "$ROOT/.dm-knowledge/lifecycle.md"'
 check "the task section carries the recorded title" 'grep -q "Recorded title: add a multiply endpoint" "$W6BR"'
 b dm-task.sh event w6eff-1 working "started" >/dev/null
 W6STATUS="$(b dm-status.sh 2>&1 || true)"   # capture once (grep -q + pipefail)

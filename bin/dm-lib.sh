@@ -1109,8 +1109,10 @@ dm_recommended_effort() {
   printf 'medium\n'
 }
 
-# True when <value> is an effort level a dispatch may record. Empty is refused
-# first: the substring test below would otherwise match the separator space.
+# True when <value> is an effort level a dispatch may record. The empty guard is
+# defence, not correction — an empty value already misses the case (the pattern
+# needs a double space, and the list has none). It keeps that safety a property
+# of this function rather than of how the list happens to be spelled.
 dm_effort_is_valid() {
   local value="${1:-}"
   [ -n "$value" ] || return 1

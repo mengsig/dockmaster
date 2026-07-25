@@ -154,6 +154,9 @@ case "$cmd" in
         # Both sizing dials must be a deliberate CHOICE before a dispatch counts.
         # Not the RECOMMENDED value — overriding the anchor is the point — but
         # neither may be left unset, or one axis silently defaults forever.
+        # A RECORD gate, not a spawn gate: the agent is already running, and
+        # nothing checks the recorded effort against the subagent_type actually
+        # passed. It forces the choice to be written down, it does not verify it.
         [ -n "$(dm_meta_get "$id" model)" ] || dm_die "REFUSED: $id has no model recorded, so its dispatch was never sized. Choose a model tier for THIS task and record it (dm-task.sh set $id model <tier>), then record the owner."
         dispatch_effort="$(dm_meta_get "$id" effort)"
         [ -n "$dispatch_effort" ] || dm_die "REFUSED: $id has no reasoning effort recorded, so its dispatch was never sized. Choose a level for THIS task ($DM_EFFORT_LEVELS), record it (dm-task.sh set $id effort <level>), and spawn with the matching subagent_type crew-<level>."

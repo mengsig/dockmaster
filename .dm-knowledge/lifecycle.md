@@ -47,11 +47,33 @@ delivered. The contract a crewmate follows lives in the `task-lifecycle` and
   committed-unlanded worktree), never from the last status line;
   `state/tasks/<id>.status` is an append-only event log. Add new signals to
   `dm-task.sh state`, not to callers.
-- **[convention]** Dispatch right-sizing is ADVISORY, not a gate:
-  `dm_recommended_model <kind> <text>` (dm-lib, pure) picks haiku|sonnet|opus;
-  `dm-brief` surfaces it in the header and records `model_recommended` in meta;
-  `dm-status` flags a `working` task with no `model` as UNSIZED. The dockmaster
-  passes it as the Agent `model`. Additive — never blocks dispatch.
+- **[convention]** Dispatch right-sizing is TWO INDEPENDENT DIALS, and choosing
+  both is a GATE (#166). Model is the Agent `model` parameter; reasoning effort
+  is the Agent `subagent_type`, selecting a `crew-<level>` definition under
+  `.claude/agents/` whose frontmatter carries `effort:`. No definition pins a
+  model, so every model x effort pair stays reachable. `dm_recommended_model`
+  and `dm_recommended_effort` (dm-lib, pure, no args) are UNBIASED ANCHORS —
+  constants `sonnet` and `medium`. They were keyword heuristics over the task
+  title until #166; a title regex that steers real spend is a weak signal
+  wearing the costume of a judgment, and it over-fired (`auth` matched
+  author/authority). Do not reintroduce keyword sizing in either direction.
+  `dm-brief` surfaces both and records `model_recommended` /
+  `effort_recommended`; `dm-status` flags a `working` task missing EITHER as
+  UNSIZED. `DM_EFFORT_LEVELS` is the closed set the gate accepts — `max` exists
+  in the runtime and is deliberately excluded as a cost ceiling.
+- **[gotcha]** `dm-task.sh set agent_id` REFUSES unless the task records both
+  `model` and `effort`, and refuses an effort outside `DM_EFFORT_LEVELS`. It is
+  a RECORD gate, not a SPAWN gate: the agent is already running by the time it
+  executes, and nothing verifies the recorded effort matches the `subagent_type`
+  actually passed. Same shape as the `{TASK}` brief guard — it forces the choice
+  to be made and written down, it does not verify what was spawned. Read
+  "enforced" as "cannot go unrecorded", never as "verified".
+- **[gotcha]** `haiku` has no reasoning-effort support: it ignores the
+  `crew-<level>` definition and runs at its own default. Verified empirically,
+  not documented by the runtime. Pick haiku for cheapness, never for restraint.
+- **[gotcha]** Agent definitions load at SESSION START, not on write. A newly
+  added `.claude/agents/*.md` is invisible to the running session ("agent type
+  not found"); it takes a restart.
 - **[decision]** Requested-change delivery flow: crewmate implements in a
   worktree and renders a lavish artifact (review-ready) → operator approves via
   lavish (mediated by the dockmaster) → ask PR-or-local → on PR: coldstart

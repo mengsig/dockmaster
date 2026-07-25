@@ -62,7 +62,7 @@ bin/dm-worktree.sh create <child-id> <repo>
 bin/dm-brief.sh <child-id>
 bin/dm-brief.sh check <child-id>          # refuses while {TASK} is still unfilled
 Agent(prompt=<brief>, run in background,
-      model=<tier>, subagent_type=crew-<level>   # both dials, per task-lifecycle
+      model=<tier>, subagent_type=crew-<level>)  # both dials, per task-lifecycle
 bin/dm-task.sh set <child-id> model <tier>
 bin/dm-task.sh set <child-id> effort <level>     # set agent_id refuses without both
 bin/dm-task.sh set <child-id> agent_id <returned-agent-id>
