@@ -22,6 +22,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The destructive-command guard is armed** (#89). `.claude/settings.json`
+  installs `bin/dm-command-guard.sh` as a `PreToolUse` hook on Bash, so a Claude
+  session in this project is guarded for the first time; it had no caller since
+  the Codex runtime was removed. It resolves the script from `DM_HOME`, else by
+  walking up from the working directory — not git-toplevel, which in a managed
+  clone or worktree has no `bin/`. Two blockers landed with it: `git restore
+  <path>` and `git checkout [<tree-ish>] -- <path>` became permitted when scoped
+  to literal paths (the drifted-lockfile restore, refused outright before), and
+  option values are no longer re-entered as commands, so `gh pr create --body
+  "watch the git log for changes"` stops refusing (#143). The guard header and
+  `SECURITY.md` now state what it covers and, at the same length, what it does
+  not: Bash events in this project only, option values unclassified, a named
+  directory restore discards its subtree, and no non-Git destruction.
 - **`AGENTS.md` is now the contract, not the manual** (#129). Cut roughly in half
   (28680 → 12736 bytes) by retiring two blocks that did not need to be re-read on
   every session and in every crewmate brief. The commandments mirror is gone — the
@@ -43,6 +56,19 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Command guard: prose false positives, and two unclassified positions**
+  (#143, #144, #139, #138). Re-entry now distinguishes command position from
+  argument position — an option, or the value of the option before it, is data,
+  so a quoted sentence there is prose and is not classified as a command. Bodies
+  whose first word reads like a wrapper or a runner ("watch the git log for
+  changes", "xargs with git ls-files is faster") stop refusing, while bare `git`
+  tokens, operand position, command runners and `sh -c` stay strict. Substitution
+  content is now classified in argument position too, so `echo $(git push
+  --force)` no longer runs the push. `GIT_TRACE*` with a file destination is
+  refused as an unguarded filesystem write (`=1`/`=2`/`=true` still pass, with
+  the `trace2.*Target` config twin refused alongside). `*.path` is enumerated to
+  the tool families that name an executable, so `submodule.<name>.path` — a tree
+  path — no longer refuses.
 - **The command guard is an allowlist, and its parsers agree with each other**
   (#121). A Git subcommand is now refused unless it is named permitted, so
   unknown and future subcommands fail closed — the old denylist had silently

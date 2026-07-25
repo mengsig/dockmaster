@@ -74,10 +74,10 @@ command and refuses Git forms that can lose work. It is an
 **allowlist**: a Git subcommand is refused unless it is named permitted, so an
 unrecognized or future subcommand fails closed.
 
-Refused outright: `reset`, `clean`, `gc`, `prune`,
-`repack`, `filter-branch`, `update-ref`, `symbolic-ref`, `pack-refs`,
-`read-tree`, `update-index`, `replace`, `rerere`, `maintenance`, `fast-import`,
-`credential`, `daemon`, `send-email`, and `for-each-repo`. Each is refused
+Refused outright: `reset`, `clean`, `gc`, `prune`, `repack`, `filter-branch`,
+`update-ref`, `symbolic-ref`, `pack-refs`, `read-tree`, `update-index`,
+`replace`, `rerere`, `maintenance`, `fast-import`, `credential`, `daemon`,
+`send-email`, and `for-each-repo`. Each is refused
 because it has no clean split between a safe and a destructive form — that is a
 decision, not an oversight, and widening it is a one-line change.
 
