@@ -4968,15 +4968,11 @@ check "a probe that always passes fails the boot" '[ "$VLAZY_RC" != 0 ]'
 check "the refusal says it proves nothing"        'grep -q "proves nothing" <<<"$VLAZY"'
 check "nothing was recorded up"                   '[ "$(b dm-task.sh get vrf1 verify_app_state)" != "up" ]'
 vapp_register || true
+# The honest-probe boot IS the canonical state the sections below assume (app up,
+# browser live, one flow driven this run), so it is not torn down and rebuilt.
+# Setup lines are `|| true`: a bare failing command here aborts the whole suite
+# under `set -e`, printing a truncated count and no FAIL summary — reads as success.
 check "the honest probe still boots"              'vup vrf1 >/dev/null 2>&1'
-"$V" down vrf1 >/dev/null 2>&1
-# Leave the canonical state the sections below assume: app up, browser live, and
-# one flow (`login`) driven and recorded from THIS run. Every line is `|| true`:
-# these are SETUP, not assertions, and a bare failing command here aborts the
-# whole suite under `set -e` — printing a truncated count and no FAIL summary,
-# which reads like success.
-"$V" down vrf1 >/dev/null 2>&1 || true
-vup vrf1 >/dev/null 2>&1 || true
 vsh session vrf1 >/dev/null 2>&1 || true
 DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1 || true
 "$V" flow vrf1 login pass "signed in" >/dev/null 2>&1 || true

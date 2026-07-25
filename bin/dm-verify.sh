@@ -77,6 +77,7 @@ CDP_PORT_BASE=9600
 CDP_PORT_SPAN=200
 READY_TIMEOUT="${DM_VERIFY_READY_TIMEOUT:-300}"
 READY_INTERVAL=3
+READY_FIRST_WAIT=0.2
 STOP_SETTLE_SECS="${DM_VERIFY_STOP_SETTLE:-20}"
 LEASE_TIMEOUT="${DM_VERIFY_LEASE_TIMEOUT:-600}"
 LEASE_DIR="$DM_STATE/browser.lease"
@@ -245,10 +246,14 @@ app_cwd() {
 # on our port and the per-boot token echoed into ready-proof by the repo's own
 # probe; a probe that only fetches the url proves liveness, not ownership.
 wait_ready() {
-  local cwd="$1" port="$2" url="$3" id="$4" ready_cmd="$5" deadline proof token
+  local cwd="$1" port="$2" url="$3" id="$4" ready_cmd="$5" deadline proof token wait_s
   token="$(dm_meta_get "$id" verify_token)"
   proof="$(verify_dir "$id")/ready-proof"
   deadline=$(( $(date +%s) + READY_TIMEOUT ))
+  # Back off from a short first wait rather than sleeping a flat interval: an app
+  # that is already up should cost milliseconds, not seconds. A flat 3s was
+  # several minutes of pure sleeping across a test suite's worth of boots.
+  wait_s="$READY_FIRST_WAIT"
   while :; do
     if port_busy "$port" && run_app_cmd "$cwd" "$port" "$url" "$id" "$ready_cmd" >/dev/null 2>&1; then
       [ "$(cat "$proof" 2>/dev/null || true)" = "$token" ] && return 0
@@ -256,7 +261,10 @@ wait_ready() {
       return 2
     fi
     [ "$(date +%s)" -lt "$deadline" ] || return 1
-    sleep "$READY_INTERVAL"
+    sleep "$wait_s"
+    case "$wait_s" in
+      0.2) wait_s=0.5 ;; 0.5) wait_s=1 ;; 1) wait_s=2 ;; *) wait_s="$READY_INTERVAL" ;;
+    esac
   done
 }
 
