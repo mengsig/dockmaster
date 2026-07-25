@@ -25,6 +25,10 @@
 #   archive <id>          move a terminal (done/discarded) task's records +
 #                         artifacts to state/archive/ (fails closed otherwise)
 #   list
+#   recommend <role> <id> size a spawn for this task from real signals (role,
+#                         kind, measured diff) — a recommendation, not a record
+#   sizing                the dispatch distribution over every task record:
+#                         counts by model, by effort, and how many are unsized
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -387,6 +391,60 @@ case "$cmd" in
     printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"
     ;;
 
+  recommend)
+    # What THIS spawn is worth, computed from what exists at dispatch: the pass
+    # being run, the task kind, and the branch's real diff. Not a record — the
+    # orchestrator still chooses and records with `set model` / `set effort`.
+    role="${1:-}"; id="${2:-}"
+    [ -n "$role" ] && [ -n "$id" ] || dm_die "usage: dm-task.sh recommend <$(printf '%s' "$DM_DISPATCH_ROLES" | tr ' ' '|')> <id>"
+    dm_role_is_valid "$role" || dm_die "role must be one of: $DM_DISPATCH_ROLES (it is the PASS being dispatched, not the task's kind)"
+    dm_require_id "$id"
+    [ -f "$(dm_meta_path "$id")" ] || dm_die "no such task: $id"
+    kind="$(dm_meta_get "$id" kind)"
+    # An unmeasurable branch is a MISSING signal, not a zero one: the refusal is
+    # already on stderr, and the recommendation falls back to the anchor.
+    size=""; size="$(dm_task_diff_size "$id" 2>/dev/null)" || size=""
+    # Unquoted on purpose: "<files> <lines>" splits into the two count args.
+    pair="$(dm_recommended_dispatch "$role" "$kind" $size)" \
+      || dm_die "could not size a '$role' dispatch for $id"
+    class="$(dm_diff_size_class $size)"
+    if [ "$class" = "unknown" ]; then
+      evidence="none measurable"
+    else
+      evidence="files=${size%% *} lines=${size##* }"
+    fi
+    printf 'model=%s\n' "${pair%% *}"
+    printf 'effort=%s\n' "${pair##* }"
+    printf 'subagent_type=crew-%s\n' "${pair##* }"
+    printf 'signals=role:%s kind:%s diff:%s (%s)\n' "$role" "${kind:-unknown}" "$class" "$evidence"
+    ;;
+
+  sizing)
+    # "Was our spend proportionate?" answered from the records themselves, so it
+    # never needs a bespoke grep over transcripts (#177). Reads meta only: no
+    # network, no reconcile, no mutation. Covers every non-archived task.
+    models=""; efforts=""; total=0; unsized=0
+    while IFS= read -r tid; do
+      [ -n "$tid" ] || continue
+      total=$((total + 1))
+      m="$(dm_meta_get "$tid" model)"; e="$(dm_meta_get "$tid" effort)"
+      [ -n "$m" ] && models="$models$m"$'\n'
+      [ -n "$e" ] && efforts="$efforts$e"$'\n'
+      if [ -z "$m" ] || [ -z "$e" ]; then unsized=$((unsized + 1)); fi
+    done < <(dm_all_task_ids)
+    [ "$total" -gt 0 ] || { dm_info "(no tasks)"; exit 0; }
+    tally() {
+      local label="$1" values="$2"
+      [ -n "$values" ] || return 0
+      printf '%s' "$values" | sort | uniq -c | sort -k1,1nr -k2,2 \
+        | while read -r n v; do printf '%s\t%s\t%s\n' "$label" "$v" "$n"; done
+    }
+    out="$( tally model "$models"; tally effort "$efforts"
+            printf 'unsized\tno model or no effort\t%s\n' "$unsized"
+            printf 'total\ttask records\t%s\n' "$total" )"
+    printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"
+    ;;
+
   *)
-    echo "usage: dm-task.sh {new|set|get|event|state|close|archive|list} ..." >&2; exit 2 ;;
+    echo "usage: dm-task.sh {new|set|get|event|state|close|archive|list|recommend|sizing} ..." >&2; exit 2 ;;
 esac

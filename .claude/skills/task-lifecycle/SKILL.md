@@ -84,11 +84,14 @@ of work needs. Do NOT inherit your own tier. Every spawn sets both:
   `crew-high` | `crew-xhigh`. How long it must THINK first. (No `max` tier: a
   deliberate cost ceiling.)
 
-The dials are **independent** — no `crew-*` definition pins a model, so every
-combination is reachable. Sonnet at low effort and haiku at high effort are both
-ordinary, deliberate choices. Small, well-specified work against clear
-instructions does not need a high level even on a strong model; work that needs
-debugging or adversarial reading probably does, whatever the model.
+Each `crew-<level>` pins a **default model** — `crew-low` haiku, `crew-medium`
+sonnet, `crew-high` / `crew-xhigh` opus — so an omitted `model` parameter lands
+on a considered tier instead of inheriting your own. The dials stay
+**independent**: the parameter overrides the pin, so sonnet at low effort and
+haiku at high effort are still one-line, ordinary choices. Small, well-specified
+work against clear instructions does not need a high level even on a strong
+model; work that needs debugging or adversarial reading probably does, whatever
+the model.
 
 **A model that does not support a level ignores it silently** rather than
 failing, so a dial can be inert without ever saying so. `haiku` ignores effort
@@ -98,14 +101,30 @@ honored all four levels when this was measured, but support is per-build and
 `xhigh` is the level most likely to be unavailable, so treat the top of the
 range as best-effort rather than guaranteed.
 
-`dm-brief.sh` records `model_recommended` / `effort_recommended` and surfaces
-them in the brief header. These are **unbiased anchors** (sonnet / medium), not
-judgments about the task — no keyword heuristic sizes your work for you. Start
-there and tune either dial per task; you hold the context.
+**The recommendation is computed, not a constant.** Ask for one per pass:
+
+```
+dm-task.sh recommend <build|review|verify> <id>
+# -> model=, effort=, subagent_type=, and the signals it used
+```
+
+It reads three things and nothing else: the **role** you declare (which pass
+this is), the task **kind**, and the branch's **real diff** measured against its
+base. Never the task title — a regex over prose steered real spend and
+over-fired (`auth` matched author/authority); it is not coming back.
+
+The table is **asymmetric on purpose**: a `review` never drops below
+`high` + opus (under-powering a review is how bad code lands), while a `build`
+pass over a small mechanical diff (≤2 files, ≤50 lines) does recommend
+`low` + haiku. With no measurable diff it falls back to sonnet / medium rather
+than guessing — a task with nothing built yet is not a small task. `dm-brief.sh`
+runs the build-pass recommendation at brief time and records
+`model_recommended` / `effort_recommended`. It stays a recommendation: you hold
+the context, and overriding either dial is one word.
 
 **Choosing is mandatory.** `dm-task.sh set agent_id` REFUSES until the task
 records both `model` and `effort`, and refuses an effort outside the valid set.
-Record your actual choice, not the anchor:
+Record your actual choice, not the recommendation:
 
 ```
 dm-task.sh set <id> model <tier>
@@ -119,11 +138,16 @@ against the `subagent_type` you actually passed — same shape as the `{TASK}`
 brief guard. It guarantees the choice was made and written down; it does NOT
 verify what was spawned. Record what you really passed, or the meta lies.
 
-`dm-status` flags a live task missing either dial as UNSIZED. The same judgment
-applies to **every** sub-unit you spawn downstream — review passes, verification,
-fix rounds, merge-gate reasoning (see `pr-workflow`) — not just the implementing
-crewmate. Never trade correctness for tokens: where being wrong is expensive,
-size up.
+`dm-status` flags a live task missing either dial as UNSIZED, and
+`dm-task.sh sizing` prints the fleet's distribution — counts by model, by
+effort, and how many dispatches never chose. Read it when you want to know
+whether the spend was proportionate; a bottom tier that never appears is the
+defect it was added to expose (#177).
+
+The same judgment applies to **every** sub-unit you spawn downstream — review
+passes, verification, fix rounds, merge-gate reasoning (see `pr-workflow`) — not
+just the implementing crewmate; `recommend <role> <id>` sizes those too. Never
+trade correctness for tokens: where being wrong is expensive, size up.
 
 For work that mutates files where a plain subagent would collide with siblings,
 prefer `isolation: "worktree"`; here the crew already has a dedicated worktree

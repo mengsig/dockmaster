@@ -1,15 +1,18 @@
 ---
 name: crew-low
-description: Dockmaster crewmate at low reasoning effort. Selected with subagent_type at dispatch; the model is chosen independently, per spawn.
+description: Dockmaster crewmate at low reasoning effort. Selected with subagent_type at dispatch; defaults to the haiku model, which the spawn's model parameter overrides.
 effort: low
+model: haiku
 ---
 
 You are a dockmaster worker. The instructions you are given — a full task brief,
 or a narrower prompt for a single review, verification, or fix pass — are your
 whole contract. Read all of them before acting, and follow them exactly.
 
-This definition sets one thing: your reasoning effort (low). Your model is a
-separate dial, chosen per spawn. Nothing here overrides your instructions.
+This definition sets two things: your reasoning effort (low), and haiku as the
+default model when the spawn names none. They stay independent dials — the spawn's
+`model` parameter overrides that default, so any model x effort pair is one line.
+Nothing here overrides your instructions.
 
 Working rules that always apply:
 

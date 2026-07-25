@@ -50,17 +50,33 @@ delivered. The contract a crewmate follows lives in the `task-lifecycle` and
 - **[convention]** Dispatch right-sizing is TWO INDEPENDENT DIALS, and choosing
   both is a GATE (#166). Model is the Agent `model` parameter; reasoning effort
   is the Agent `subagent_type`, selecting a `crew-<level>` definition under
-  `.claude/agents/` whose frontmatter carries `effort:`. No definition pins a
-  model, so every model x effort pair stays reachable. `dm_recommended_model`
-  and `dm_recommended_effort` (dm-lib, pure, no args) are UNBIASED ANCHORS —
-  constants `sonnet` and `medium`. They were keyword heuristics over the task
-  title until #166; a title regex that steers real spend is a weak signal
-  wearing the costume of a judgment, and it over-fired (`auth` matched
+  `.claude/agents/` whose frontmatter carries `effort:`. Since #177 each
+  definition ALSO pins `model:` (low haiku, medium sonnet, high/xhigh opus), so
+  an omitted parameter resolves to a considered default instead of the session
+  model. Documented resolution order is `CLAUDE_CODE_SUBAGENT_MODEL` env var >
+  per-invocation `model` parameter > frontmatter `model:` > the main
+  conversation's model — so the pin is a DEFAULT, never a coupling, and every
+  model x effort pair is still one line. `DM_EFFORT_LEVELS` is the closed set
+  the gate accepts — `max` exists in the runtime and is deliberately excluded as
+  a cost ceiling.
+- **[convention]** The dispatch RECOMMENDATION is computed by
+  `dm_recommended_dispatch <role> [<kind>] [<files>] [<lines>]` (dm-lib), which
+  prints "<model> <effort>"; `dm_recommended_model` / `dm_recommended_effort`
+  just split it, so the table has one owner. Signals: the caller-declared role
+  (`build|review|verify`, structural — never inferred), the task kind, and a
+  REAL diff from `dm_task_diff_size` / `dm_worktree_diff_size`. Asymmetric by
+  design: review never below high+opus, build+small reaches low+haiku, no signal
+  falls back to sonnet/medium. ZERO files is UNKNOWN, not small — an unbuilt
+  branch has an empty diff. An invalid role RETURNS 2 printing nothing rather
+  than anchoring, so a misrouted pass is loud. Reachable from the toolbelt as
+  `dm-task.sh recommend <role> <id>`, and `dm-task.sh sizing` prints the
+  distribution over task meta (counts by model, by effort, unsized). These were
+  keyword heuristics over the task TITLE until #166 and constants until #177; a
+  title regex that steers real spend over-fired (`auth` matched
   author/authority). Do not reintroduce keyword sizing in either direction.
-  `dm-brief` surfaces both and records `model_recommended` /
-  `effort_recommended`; `dm-status` flags a `working` task missing EITHER as
-  UNSIZED. `DM_EFFORT_LEVELS` is the closed set the gate accepts — `max` exists
-  in the runtime and is deliberately excluded as a cost ceiling.
+  `dm-brief` runs the build-pass recommendation and records `model_recommended`
+  / `effort_recommended`; `dm-status` flags a `working` task missing EITHER dial
+  as UNSIZED.
 - **[gotcha]** `dm-task.sh set agent_id` REFUSES unless the task records both
   `model` and `effort`, and refuses an effort outside `DM_EFFORT_LEVELS`. It is
   a RECORD gate, not a SPAWN gate: the agent is already running by the time it

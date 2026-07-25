@@ -24,13 +24,20 @@ default); when in doubt, use `default`.
 dials on every reviewer, verifier, and fix agent you spawn to fit the diff's
 difficulty — `model=<tier>` and `subagent_type=crew-<level>`, the same two
 independent dials as a crewmate dispatch (`task-lifecycle` §3 Dispatch has the
-levels and the haiku caveat). A low-stakes diff's cold review can run on a small
-fast model at low effort; a subtle safety / concurrency diff's review and
-adversarial verification get a strong model at `crew-xhigh`. The dials do not
-imply each other — a strong model reading a tiny diff still wants low effort.
-Bias toward enough power to catch what matters — never under-power a review to
-save tokens. These passes are spawns, not tasks, so no dispatch record gates
-them; the sizing is yours to get right.
+levels and the haiku caveat). Ask for the pass's recommendation instead of
+eyeballing it — it measures the branch's real diff:
+
+```
+bin/dm-task.sh recommend review <id>     # or: verify | build (a fix round)
+```
+
+A review never comes back below `high` + opus, and a large diff takes it to
+`crew-xhigh`; a fix round over a small mechanical diff can legitimately come
+back at `low` + haiku. The dials do not imply each other — a strong model
+reading a tiny diff still wants low effort. Bias toward enough power to catch
+what matters — never under-power a review to save tokens. These passes are
+spawns, not tasks, so no dispatch record gates them; the sizing is yours to get
+right.
 
 - **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial** changes
   only (see `change-review` for the criteria): one review pass instead of two,
