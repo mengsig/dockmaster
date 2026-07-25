@@ -8,11 +8,17 @@
 # Zero runtime dependencies: Node stdlib serves plain HTML/CSS/JS from ui/.
 # No build step, no CDN, no package.json. It works with the network off.
 #
+# Every panel is read by shelling out to the dm-* scripts, which own the on-disk
+# formats. Nothing under ui/ opens state/repos.json, state/tasks/*.meta or
+# state/backlog.json.
+#
 # Commands:
-#   start [--source fixture|live]  start the server (idempotent), print its URL
+#   start [--source live|fixture]  start the server (idempotent), print its URL.
+#                                  Default `live` - the real fleet. `fixture` is
+#                                  the committed demo fleet, for design work.
 #   open  [--source ...]           start it and open a browser
 #   url                            print the URL
-#   status                         is it running?
+#   status                         is it running, and on which source?
 #   stop                           stop the server this script started
 #   poll [--timeout <seconds>]     BLOCK until the operator sends a message,
 #                                  print it, exit 0. Exit 3 on timeout. Claiming
@@ -29,15 +35,20 @@ set -euo pipefail
 dm_need node
 dm_ensure_dirs
 
-UI_DIR="$DM_HOME/ui"
+# The page and the toolbelt are CODE: resolved from this script, like bin/ is,
+# not from DM_HOME. Only the runtime files below follow DM_HOME, so a distro can
+# serve a home that is not its own (which is exactly how this is developed).
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+UI_DIR="$(cd "$BIN_DIR/../ui" 2>/dev/null && pwd -P)" || UI_DIR="$BIN_DIR/../ui"
 RUN_DIR="$DM_STATE/ui"
 PID_FILE="$RUN_DIR/server.pid"
+SOURCE_FILE="$RUN_DIR/server.source"
 LOG_FILE="$RUN_DIR/server.log"
 PORT="${DM_UI_PORT:-4877}"
 URL="http://127.0.0.1:$PORT/"
 BOOT_TIMEOUT_SPINS=100   # 100 x 0.1s
 
-usage() { sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # Print the running server's pid, or nothing. A pid file naming a dead process
 # is stale; one naming a RECYCLED pid belongs to somebody else, so the command
@@ -52,17 +63,28 @@ running_pid() {
   printf '%s\n' "$pid"
 }
 
+running_source() { cat "$SOURCE_FILE" 2>/dev/null; }
+
 start_server() {
-  local source="$1" pid spins
-  if running_pid >/dev/null; then dm_info "$URL"; return 0; fi
+  local source="$1" pid spins was
+  # An already-running server on the OTHER source is the one failure this must
+  # never wave through: `start --source live` would otherwise print a URL and
+  # keep serving the demo fleet. Replace it, and say so.
+  if running_pid >/dev/null; then
+    was="$(running_source)"
+    if [ "$was" = "$source" ]; then dm_info "$URL"; return 0; fi
+    dm_warn "console: was serving '${was:-unknown}', restarting on '$source'"
+    stop_server >/dev/null
+  fi
 
   [ -f "$UI_DIR/server.js" ] || dm_die "console: $UI_DIR/server.js is missing"
   mkdir -p "$RUN_DIR"
   : > "$LOG_FILE"
-  DM_UI_PORT="$PORT" DM_UI_SOURCE="$source" \
+  DM_UI_PORT="$PORT" DM_UI_SOURCE="$source" DM_BIN="$BIN_DIR" \
     nohup node "$UI_DIR/server.js" >>"$LOG_FILE" 2>&1 &
   pid=$!
   printf '%s\n' "$pid" > "$PID_FILE"
+  printf '%s\n' "$source" > "$SOURCE_FILE"
 
   # The server prints its URL once it is actually listening; anything else in
   # the log is the real failure and belongs on screen, not swallowed.
@@ -72,7 +94,7 @@ start_server() {
       dm_info "$URL"
       return 0
     fi
-    kill -0 "$pid" 2>/dev/null || { rm -f "$PID_FILE"; cat "$LOG_FILE" >&2; dm_die "console: server exited during startup"; }
+    kill -0 "$pid" 2>/dev/null || { rm -f "$PID_FILE" "$SOURCE_FILE"; cat "$LOG_FILE" >&2; dm_die "console: server exited during startup"; }
     sleep 0.1
     spins=$((spins + 1))
   done
@@ -82,9 +104,9 @@ start_server() {
 
 stop_server() {
   local pid
-  pid="$(running_pid)" || { dm_info "console: not running"; rm -f "$PID_FILE"; return 0; }
+  pid="$(running_pid)" || { dm_info "console: not running"; rm -f "$PID_FILE" "$SOURCE_FILE"; return 0; }
   kill "$pid" 2>/dev/null || true
-  rm -f "$PID_FILE"
+  rm -f "$PID_FILE" "$SOURCE_FILE"
   dm_info "console: stopped"
 }
 
@@ -94,13 +116,14 @@ open_browser() {
   else dm_info "console: open this in a browser: $URL"; fi
 }
 
-# --source fixture|live, defaulting to fixture. Rejected here rather than in the
+# --source live|fixture, defaulting to live. Rejected here rather than in the
 # server so a typo fails before a process is spawned. Sets DM_UI_ARG_SOURCE and
 # returns a status: a dm_die inside $( ) would only kill the subshell, and the
-# caller would carry on with an empty value.
+# caller would carry on with an empty value - which is how an invalid source
+# used to start the console on the demo fleet.
 DM_UI_ARG_SOURCE=""
 read_source() {
-  local source="fixture"
+  local source="live"
   while [ $# -gt 0 ]; do
     case "$1" in
       --source) source="${2:-}"; shift 2 || { dm_warn "console: --source needs a value"; return 2; } ;;
@@ -109,7 +132,7 @@ read_source() {
   done
   case "$source" in
     fixture|live) DM_UI_ARG_SOURCE="$source" ;;
-    *) dm_warn "console: --source must be fixture or live, got '$source'"; return 2 ;;
+    *) dm_warn "console: --source must be live or fixture, got '$source'"; return 2 ;;
   esac
 }
 
@@ -119,7 +142,7 @@ case "$cmd" in
   open)  read_source "$@" || exit $?; start_server "$DM_UI_ARG_SOURCE"; open_browser ;;
   url)   dm_info "$URL" ;;
   status)
-    if pid="$(running_pid)"; then dm_info "console: running (pid $pid) $URL"
+    if pid="$(running_pid)"; then dm_info "console: running (pid $pid, source $(running_source)) $URL"
     else dm_info "console: not running"; exit 1; fi
     ;;
   stop) stop_server ;;

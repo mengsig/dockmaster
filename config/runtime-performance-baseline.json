@@ -3,8 +3,8 @@
   "base_commit": "#177",
   "shared_agents_bytes": 13126,
   "claude_settings_bytes": 1579,
-  "claude_skill_bytes": 97437,
-  "claude_skill_description_bytes": 4879,
+  "claude_skill_bytes": 100282,
+  "claude_skill_description_bytes": 5264,
   "claude_files_sha256": {
     ".claude/agents/crew-high.md": "6ba9373cd62f942dfeae79ca3b7c1e26f29d71b51362862860b5943131f77001",
     ".claude/agents/crew-low.md": "826eb8959989ef6c5bb5656068665c4af93915c1a85a7e347e0bbb5444e027a3",
@@ -16,6 +16,7 @@
     ".claude/skills/credential-handoff/SKILL.md": "03bd5a829ee39de335263931599e0e5829798c0575d0507c39f39b135dd23b08",
     ".claude/skills/decision-hold/SKILL.md": "2ecaeebd4ddeae7f139740d5a10ebeb70a9b594ae87b8d2d520a79b25d21efb6",
     ".claude/skills/diagnostic-reasoning/SKILL.md": "e079d4582c200e5c09a421d61b1a07b1d3203398789e04c9e73b4aa3749ae5a2",
+    ".claude/skills/dockmaster/SKILL.md": "92c76f65afd705fdbf5a1ac60492e180e5217eb50652ded94f6518129fa191fd",
     ".claude/skills/e2e-verification/SKILL.md": "a982db09f2417fae7b42bf647f2eedf03d47e66ae60b2c0f517c7994318ce516",
     ".claude/skills/fleet-change/SKILL.md": "b71bb80e05a10b200040b67344a0d94d489b3f521a4b37312241061d159f5961",
     ".claude/skills/memory-routing/SKILL.md": "a27ddcbc312125f1b3d6d94c91346c7db8b7d4208f90990d067a798ebf04cc9c",

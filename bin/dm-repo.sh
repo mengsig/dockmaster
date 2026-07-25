@@ -15,7 +15,7 @@
 #                            supply, initialize repos/<name> with a first commit,
 #                            set upstream, publish, and register it. (add clones
 #                            an EXISTING populated remote; create makes a new one.)
-#   list
+#   list [--json]
 #   get <name> [<field>]
 #   set <name> <field> <value>
 #   remove <name>            (registry entry only; never deletes a clone with
@@ -239,6 +239,35 @@ NOTE: the GitHub repository '$html' was just created and now exists (empty) on G
     ;;
 
   list)
+    json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) json=1; shift ;;
+        *) dm_die "unknown flag: $1 (usage: dm-repo.sh list [--json])" ;;
+      esac
+    done
+    if [ "$json" -eq 1 ]; then
+      # One jq document per repo, slurped into one array: jq owns every escape, so
+      # a remote or test command holding a quote/backslash/newline round-trips, and
+      # an empty registry still emits [] rather than nothing.
+      # `path` is read straight off the repo object (as `get <name>` does) — the
+      # toolbelt reserves dm_registry_get's `path` field for dm-lib's clone-path
+      # resolver, and this is display, not composition.
+      rows="$(while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        jq -c -n \
+          --arg name "$name" \
+          --arg authority "$(dm_merge_authority "$name")" \
+          --arg mode "$(dm_registry_get "$name" mode)" \
+          --arg branch "$(dm_registry_get "$name" default_branch)" \
+          --arg remote "$(dm_registry_get "$name" remote)" \
+          --arg test_cmd "$(dm_registry_get "$name" test_cmd)" \
+          --arg path "$(jq -r --arg n "$name" '.repos[$n].path // "" | tostring' "$DM_REGISTRY")" \
+          '{name:$name,authority:$authority,mode:$mode,branch:$branch,remote:$remote,test_cmd:$test_cmd,path:$path}'
+      done < <(dm_registry_keys))"
+      printf '%s' "$rows" | jq -c -s '.'
+      exit 0
+    fi
     # AUTH (merge authority) is resolved through dm_merge_authority per repo so
     # the display and the enforcement paths share one migration rule (a legacy
     # yolo-only entry still shows the derived authority), rather than duplicating

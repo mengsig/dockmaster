@@ -16,30 +16,56 @@ const path = require('node:path');
 
 const chat = require('./chat');
 const state = require('./state');
+const live = require('./live');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 // Allowlist, not a path resolver: traversal is unrepresentable rather than filtered.
 const ROUTES = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/console.css': ['console.css', 'text/css; charset=utf-8'],
-  '/console.js': ['console.js', 'text/javascript; charset=utf-8'],
+  '/console.mjs': ['console.mjs', 'text/javascript; charset=utf-8'],
+  '/views.mjs': ['views.mjs', 'text/javascript; charset=utf-8'],
+  '/dom.mjs': ['dom.mjs', 'text/javascript; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
 };
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
   + "connect-src 'self'; base-uri 'none'; form-action 'none'";
+// A review page is HTML this distro's crewmates wrote, with its styles and
+// scripts inline, so it needs 'unsafe-inline' to render at all. `connect-src
+// 'none'` + `form-action 'none'` are what make that safe: a script inside an
+// archived review can reach neither this server's API nor the network.
+const REVIEW_CSP = "default-src 'none'; script-src 'self' 'unsafe-inline'; "
+  + "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; "
+  + "connect-src 'none'; base-uri 'none'; form-action 'none'";
 const MAX_BODY_BYTES = 64 * 1024;
 const LONG_POLL_MS = 25000;
+// A review page ships beside its screenshots. One path segment, no slashes and
+// no leading dot, so `..` and dotfiles are unrepresentable rather than filtered.
+const ASSET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const ASSET_TYPES = {
+  html: 'text/html; charset=utf-8', css: 'text/css; charset=utf-8',
+  js: 'text/javascript; charset=utf-8', png: 'image/png', jpg: 'image/jpeg',
+  jpeg: 'image/jpeg', gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp',
+};
 
 function config() {
   const port = Number(process.env.DM_UI_PORT || 4877);
   const dmHome = process.env.DM_HOME;
+  const bin = process.env.DM_BIN || '';
+  const source = process.env.DM_UI_SOURCE || 'live';
   if (!Number.isInteger(port) || port < 1024 || port > 65535) {
     throw new RangeError(`console: DM_UI_PORT must be 1024-65535, got '${process.env.DM_UI_PORT}'`);
   }
   if (!dmHome || !fs.existsSync(dmHome)) {
     throw new Error(`console: DM_HOME is unset or missing ('${dmHome}') - start via bin/dm-ui.sh`);
   }
-  return { port, dmHome, source: process.env.DM_UI_SOURCE || 'fixture' };
+  // Refusing here rather than at the first request: a console that boots and
+  // only reveals it cannot read the fleet on page load is the failure mode this
+  // whole seam exists to prevent.
+  if (source === 'live' && !fs.existsSync(path.join(bin, 'dm-task.sh'))) {
+    throw new Error(`console: the live source needs the toolbelt; DM_BIN='${bin}' has no dm-task.sh`);
+  }
+  return { port, dmHome, bin, source };
 }
 
 function send(res, status, type, body, extra) {
@@ -89,6 +115,37 @@ function readBody(req) {
 function serveStatic(res, route) {
   const [file, type] = ROUTES[route];
   send(res, 200, type, fs.readFileSync(path.join(PUBLIC_DIR, file)));
+}
+
+// GET /review/<id>/[<asset>] - an archived review page, and the screenshots
+// beside it. The directory comes from dm-lavish.sh; the URL only selects.
+//
+// The TRAILING SLASH is load-bearing: a review page references its screenshots
+// relatively, and at /review/<id> those resolve to /review/<name>.png - one
+// segment up, where they are not. The bare form redirects rather than 404s, so
+// a link written either way still works.
+async function serveReview(res, cfg, pathname) {
+  const parts = pathname.split('/').slice(2).map(decodeURIComponent);
+  const id = parts[0];
+  const asset = parts.length === 2 && parts[1] !== '' ? parts[1] : undefined;
+  if (!id || parts.length > 2 || (asset !== undefined && !ASSET_NAME.test(asset))) {
+    return fail(res, 400, `review: '${pathname}' is not a review page`);
+  }
+  if (parts.length === 1) {
+    res.writeHead(302, { location: `/review/${encodeURIComponent(id)}/`, 'content-length': 0, 'cache-control': 'no-store' });
+    return res.end();
+  }
+  const found = await live.reviewDir(cfg.bin, id);
+  if (!found) return fail(res, 404, 'review: no review page for that work');
+  const file = asset === undefined ? found.file : path.join(found.dir, asset);
+  let body;
+  try {
+    body = fs.readFileSync(file);
+  } catch (err) {
+    return fail(res, 404, `review: ${err.code === 'ENOENT' ? 'that file is not in the review page' : err.message}`);
+  }
+  const type = ASSET_TYPES[String(file).split('.').pop().toLowerCase()] || 'application/octet-stream';
+  send(res, 200, type, body, { 'content-security-policy': REVIEW_CSP });
 }
 
 // GET /api/chat?since=N - returns messages after index N. With wait=1 it holds
@@ -152,7 +209,13 @@ function handle(req, res, cfg, watchers) {
     return serveStatic(res, url.pathname);
   }
   if (req.method === 'GET' && url.pathname === '/api/state') {
-    return sendJson(res, 200, state.collect(cfg.source));
+    // A failed collection is reported as a failure, never as an empty fleet.
+    return state.collect(cfg.source, cfg.bin, url.searchParams.get('refresh') === '1')
+      .then((doc) => sendJson(res, 200, doc))
+      .catch((err) => fail(res, 503, err.message));
+  }
+  if (req.method === 'GET' && url.pathname.startsWith('/review/')) {
+    return serveReview(res, cfg, url.pathname).catch((err) => fail(res, 500, `review: ${err.message}`));
   }
   if (req.method === 'GET' && url.pathname === '/api/chat') return serveChat(res, cfg, url, watchers);
   if (req.method === 'POST' && url.pathname === '/api/chat') {

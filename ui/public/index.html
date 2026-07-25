@@ -15,6 +15,8 @@
   <div class="wordmark"><span class="wordmark-cleat" aria-hidden="true"></span>dockmaster</div>
   <p class="pulse" id="pulse"></p>
   <div class="topbar-actions">
+    <button type="button" class="btn" id="refresh" title="Re-read the fleet, including every pull request">Refresh</button>
+    <button type="button" class="btn" id="focus-toggle" aria-pressed="false">Focus the chat</button>
     <button type="button" class="btn" id="chat-toggle" aria-expanded="false" aria-controls="chat">Chat</button>
     <button type="button" class="btn" id="theme-toggle">Light</button>
   </div>
@@ -30,20 +32,27 @@
       <span class="eyebrow">Conversation</span>
       <button type="button" class="btn btn-quiet" id="chat-close" aria-label="Close the conversation">Close</button>
     </header>
-    <div class="chat-log" id="chat-log" role="log" aria-live="polite"></div>
+    <div class="chat-log" id="chat-log" role="log" aria-live="polite">
+      <div class="chat-empty" id="chat-empty" hidden>
+        <p class="empty-head">Say what you need.</p>
+        <p class="empty-note">Ask for work, answer a question, or ask what is going on.
+          The dockmaster picks this up the next time it looks.</p>
+      </div>
+      <div class="chat-messages" id="chat-messages"></div>
+    </div>
     <p class="chat-pending" id="chat-pending" hidden>
       <span class="lamp lamp-brass lamp-pulse" aria-hidden="true"></span>
       <span id="chat-pending-text"></span>
     </p>
     <form class="chat-form" id="chat-form">
       <label class="sr-only" for="chat-input">Message the dockmaster</label>
-      <textarea id="chat-input" rows="3" placeholder="Ask for work, or answer a question…"></textarea>
+      <textarea id="chat-input" rows="2" placeholder="Ask for work, or answer a question…"></textarea>
       <button type="submit" class="btn btn-send">Send</button>
     </form>
   </aside>
 </div>
 
 <div class="scrim" id="scrim" hidden></div>
-<script src="/console.js"></script>
+<script type="module" src="/console.mjs"></script>
 </body>
 </html>

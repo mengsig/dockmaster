@@ -44,9 +44,11 @@
 #                                 (a `none` rollup keeps polling, not terminal,
 #                                 when the repo has CI configured)
 #   merge <id> [--method squash|merge|rebase] [--delete-branch]
-#   sweep                         read-only fleet sweep: every task with an open
+#   sweep [--json]                read-only fleet sweep: every task with an open
 #                                 PR, its CI rollup + whether a review requests
 #                                 changes (offline under DM_NO_FETCH: cached only)
+#   pipeline <repo> [--json]      the gate track a PR in <repo> must clear, from
+#                                 config/pr-pipeline.<repo>.json or the default
 #   security-scan <id>            grep the diff for security-surface signals
 #   url   <id>                    print recorded PR url
 
@@ -326,6 +328,8 @@ query($owner: String!, $name: String!, $number: Int!, $reviewsFirst: Int!) {
       state
       merged
       headRefOid
+      title
+      createdAt
       commits(last: 1) {
         nodes { commit { statusCheckRollup { state } } }
       }
@@ -340,7 +344,10 @@ GQL
 }
 
 # sweep_pr_snapshot <owner> <name> <number>  -> compact JSON
-# {state, checks, review, head} on stdout, or nonzero with nothing printed.
+# {state, checks, review, head, title, created_at} on stdout, or nonzero with
+# nothing printed. Only the first four are destructured by read_sweep_snapshot;
+# title/created_at are display-only for `--json` and are read straight off the
+# snapshot with jq, never through that line-based read (a title is free text).
 # Every field is validated at this API boundary before being trusted: an
 # unexpected shape, a GraphQL `errors` entry, or more than SWEEP_REVIEWS_PAGE
 # reviews (pageInfo.hasNextPage) all fail CLOSED to "unknown", never a false
@@ -379,7 +386,8 @@ sweep_pr_snapshot() {
         | any(. == "CHANGES_REQUESTED") ) as $cr
     | { state: $state, checks: $checks,
         review: (if $truncated then "unknown" elif $cr then "changes-requested" else "clean" end),
-        head: ($pr.headRefOid // "") }
+        head: ($pr.headRefOid // ""),
+        title: ($pr.title // ""), created_at: ($pr.createdAt // "") }
   ' 2>/dev/null
 }
 
@@ -407,6 +415,22 @@ read_sweep_snapshot() {
   case "$SWEEP_CHECKS" in passing|failing|pending|none|unknown) ;; *) return 1 ;; esac
   case "$SWEEP_REVIEW" in clean|changes-requested|unknown) ;; *) return 1 ;; esac
   [ -z "$SWEEP_HEAD" ] || is_git_oid "$SWEEP_HEAD" || return 1
+}
+
+# sweep_row <id> <repo> <url> <state> <checks> <review> <title> <created_at>
+#           <offline> <error>  -> one JSON object for `sweep --json`.
+# jq --arg, never string assembly: a PR title is free text. EVERY swept PR gets
+# a row, unreadable ones included with `error` set — a PR that drops out of the
+# list reads as a fleet with fewer problems than it has.
+sweep_row() {
+  jq -nc --arg id "$1" --arg repo "$2" --arg url "$3" --arg state "$4" \
+    --arg checks "$5" --arg review "$6" --arg title "$7" --arg created_at "$8" \
+    --arg offline "$9" --arg error "${10}" \
+    --arg authority "$(dm_merge_authority "$2")" '
+    { id: $id, repo: $repo, url: $url, state: $state, checks: $checks,
+      review: $review, title: $title, created_at: $created_at,
+      authority: $authority, offline: ($offline == "1"),
+      error: (if $error == "" then null else $error end) }'
 }
 
 check_runs_rollup() {
@@ -1014,6 +1038,16 @@ case "$cmd" in
     # Offline (DM_NO_FETCH=1 — how dm-status invokes it): perform NO network. Show
     # the cached pr_state/checks and skip the review query, matching how
     # dm_should_refresh_pr_state degrades offline.
+    # --json emits the same walk as one array instead of one line per PR, for
+    # the console. Same loop, same semantics: a second walk would drift.
+    json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) json=1; shift ;;
+        *) dm_die "usage: dm-pr.sh sweep [--json]" ;;
+      esac
+    done
+    rows=""
     offline=0
     [ "${DM_NO_FETCH:-0}" = "1" ] && offline=1
     [ "$offline" -eq 1 ] || dm_need gh
@@ -1032,13 +1066,22 @@ case "$cmd" in
       [ "$rdrc" -eq 0 ] || [ "$rdrc" -eq 2 ] || dm_die "sweep: could not resolve repo '$repo' — the registry could not be read"
       if [ "$rdrc" -ne 0 ] || [ ! -d "$dir/.git" ]; then
         missing=$((missing + 1))
-        printf '  %s  (repo unregistered or clone missing: %s — skipped)  %s\n' "$id" "${repo:-?}" "$url"
+        if [ "$json" -eq 1 ]; then
+          rows="$rows$(sweep_row "$id" "$repo" "$url" "" "" "" "" "" 0 "repo unregistered or clone missing")"$'\n'
+        else
+          printf '  %s  (repo unregistered or clone missing: %s — skipped)  %s\n' "$id" "${repo:-?}" "$url"
+        fi
         continue
       fi
       if [ "$offline" -eq 1 ]; then
-        checks="$(dm_meta_get "$id" checks)"; [ -n "$checks" ] || checks="?"
-        state="$(dm_meta_get "$id" pr_state)"; [ -n "$state" ] || state="?"
-        printf '  %s  state: %s  checks: %s (cached)  reviews: (no fetch)  %s\n' "$id" "$state" "$checks" "$url"
+        # `?` is a HUMAN placeholder for "never checked"; JSON keeps it empty.
+        checks="$(dm_meta_get "$id" checks)"
+        state="$(dm_meta_get "$id" pr_state)"
+        if [ "$json" -eq 1 ]; then
+          rows="$rows$(sweep_row "$id" "$repo" "$url" "$state" "$checks" "" "" "" 1 "")"$'\n'
+        else
+          printf '  %s  state: %s  checks: %s (cached)  reviews: (no fetch)  %s\n' "$id" "${state:-?}" "${checks:-?}" "$url"
+        fi
         case "$checks" in
           failing) red=$((red + 1)) ;;
           unknown) unknown_checks=$((unknown_checks + 1)) ;;
@@ -1068,18 +1111,28 @@ case "$cmd" in
         else
           consecutive_exhausted=0
         fi
-        printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
+        if [ "$json" -eq 1 ]; then
+          rows="$rows$(sweep_row "$id" "$repo" "$url" "" "" "" "" "" 0 "could not read the PR from GitHub")"$'\n'
+        else
+          printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
+        fi
         continue
       fi
       consecutive_exhausted=0
       state="$SWEEP_STATE"; checks="$SWEEP_CHECKS"; review="$SWEEP_REVIEW"
+      title="$(printf '%s' "$snap" | jq -r '.title // ""')"
+      created="$(printf '%s' "$snap" | jq -r '.created_at // ""')"
       if [ "$state" = "MERGED" ]; then
         if ! "$0" check "$id" >/dev/null 2>&1; then
-          printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
+          if [ "$json" -eq 1 ]; then
+            rows="$rows$(sweep_row "$id" "$repo" "$url" "" "" "" "" "" 0 "could not read the PR from GitHub")"$'\n'
+          else
+            printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
+          fi
           continue
         fi
-        checks="$(dm_meta_get "$id" checks)"; [ -n "$checks" ] || checks="?"
-        state="$(dm_meta_get "$id" pr_state)"; [ -n "$state" ] || state="?"
+        checks="$(dm_meta_get "$id" checks)"
+        state="$(dm_meta_get "$id" pr_state)"
       else
         dm_meta_set "$id" pr_state "$state"
         dm_meta_set "$id" checks "$checks"
@@ -1092,9 +1145,15 @@ case "$cmd" in
         changes-requested) changes=$((changes + 1)) ;;
         unknown) unknown_review=$((unknown_review + 1)) ;;
       esac
-      printf '  %s  state: %s  checks: %s  reviews: %s  %s\n' "$id" "$state" "$checks" "$review" "$url"
+      if [ "$json" -eq 1 ]; then
+        rows="$rows$(sweep_row "$id" "$repo" "$url" "$state" "$checks" "$review" "$title" "$created" 0 "")"$'\n'
+      else
+        printf '  %s  state: %s  checks: %s  reviews: %s  %s\n' "$id" "${state:-?}" "${checks:-?}" "$review" "$url"
+      fi
     done < <(dm_open_pr_tasks)
-    if [ "$total" -eq 0 ]; then
+    if [ "$json" -eq 1 ]; then
+      printf '%s' "$rows" | jq -s -c '.'
+    elif [ "$total" -eq 0 ]; then
       dm_info "  (no open PRs)"
     else
       note=""
@@ -1113,10 +1172,46 @@ case "$cmd" in
     fi
     ;;
 
+  pipeline)
+    # The gate track a PR in this repo must CLEAR - the declared list, offline,
+    # never a progress claim: nothing here records which gates have run.
+    repo="${1:-}"; shift 2>/dev/null || true
+    [ -n "$repo" ] || dm_die "usage: dm-pr.sh pipeline <repo> [--json]"
+    # Validated before it composes a filename, so a name cannot walk out of config/.
+    dm_require_id "$repo"
+    json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) json=1; shift ;;
+        *) dm_die "usage: dm-pr.sh pipeline <repo> [--json]" ;;
+      esac
+    done
+    # A per-repo override is OPERATOR content and lives in DM_HOME; the default
+    # is TRACKED DISTRO content, so fall back to the one shipped beside bin/ when
+    # DM_HOME is not the distro root.
+    file="$DM_CONFIG/pr-pipeline.$repo.json"
+    [ -f "$file" ] || file="$DM_CONFIG/pr-pipeline.default.json"
+    [ -f "$file" ] || file="$BIN_DIR/../config/pr-pipeline.default.json"
+    [ -f "$file" ] \
+      || dm_die "no pipeline config for '$repo': neither config/pr-pipeline.$repo.json nor a config/pr-pipeline.default.json (in DM_HOME or beside bin/) exists"
+    jq -e '(.gates | type) == "array" and (.gates | length) > 0' "$file" >/dev/null 2>&1 \
+      || dm_die "$file declares no gates array; refusing to report an empty gate track"
+    if [ "$json" -eq 1 ]; then
+      jq -c --arg repo "$repo" --arg config "$(basename "$file")" '
+        { repo: $repo, config: $config,
+          gates: [ .gates[] | { gate: .gate, pass: (.pass // ""),
+                                optional: (.optional == true), note: (.note // "") } ] }' "$file"
+    else
+      jq -r '.gates[] | .gate
+             + (if .pass then " (" + .pass + ")" else "" end)
+             + (if .optional == true then " [optional]" else "" end)' "$file"
+    fi
+    ;;
+
   url)
     id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-pr.sh url <id>"
     dm_meta_get "$id" pr ;;
 
   *)
-    echo "usage: dm-pr.sh {open|adopt|check|await-checks|merge|sweep|security-scan|url} ..." >&2; exit 2 ;;
+    echo "usage: dm-pr.sh {open|adopt|check|await-checks|merge|sweep|pipeline|security-scan|url} ..." >&2; exit 2 ;;
 esac

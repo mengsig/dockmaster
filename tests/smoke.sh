@@ -5680,6 +5680,67 @@ check "tests command cannot be hand-set" '! b dm-task.sh set ev-bare tests_cmd "
 check "the tests gate records what it ran" \
   '[ "$(b dm-task.sh get ev-clean tests)" = "skip" ] && [ "$(b dm-task.sh get ev-run tests_cmd)" = "test -f src/calc.py" ]'
 
+echo "== the console: refusals, the chat queue, and machine-readable state (#192) =="
+# The console reads the fleet ONLY through these scripts, so the JSON they emit
+# is a contract: a panel is only as honest as the output behind it.
+check "console prints its loopback url"        '[ "$(b dm-ui.sh url)" = "http://127.0.0.1:4877/" ]'
+check "console honors DM_UI_PORT"              '[ "$(DM_UI_PORT=4999 b dm-ui.sh url)" = "http://127.0.0.1:4999/" ]'
+check "console is not running in a fresh home" '! b dm-ui.sh status >/dev/null 2>&1'
+# An invalid source must fail BEFORE a process is spawned. This is the #119 shape:
+# a dm_die inside $( ) kills only the subshell, and the caller carried on with an
+# empty value - which used to start the console on the demo fleet silently.
+check "an invalid --source is refused"         '! b dm-ui.sh start --source bogus >/dev/null 2>&1'
+check "an invalid --source starts nothing"     '! b dm-ui.sh status >/dev/null 2>&1'
+check "an unexpected console argument is refused" '! b dm-ui.sh start --wat >/dev/null 2>&1'
+check "a non-numeric poll timeout is refused"  '! b dm-ui.sh poll --timeout soon >/dev/null 2>&1'
+check "an empty message is refused"            '! b dm-ui.sh say "" >/dev/null 2>&1'
+
+# The chat queue is files, not the server: `say` and `poll` round-trip with
+# nothing listening. Claiming is a rename, so a killed poll loses nothing.
+check "poll times out with nothing queued" \
+  'rc=0; b dm-ui.sh poll --timeout 1 >/dev/null 2>&1 || rc=$?; [ "$rc" -eq 3 ]'
+b dm-ui.sh say "the dockmaster speaks" >/dev/null
+check "a reply lands in the transcript" \
+  'grep -q "the dockmaster speaks" "$DM_HOME/state/ui/chat.jsonl"'
+check "a reply is NOT queued for the dockmaster" \
+  '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json" 2>/dev/null)" ]'
+# An operator message is what poll waits on; post one the way the page does.
+DM_UI_CHAT="$ROOT/ui/chat.js" node -e 'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", "ship the console")' \
+  >/dev/null 2>&1
+check "an operator message is queued"          '[ -n "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
+UI_POLLED="$(b dm-ui.sh poll --timeout 5 2>/dev/null || true)"
+check "poll returns the operator's message"    'grep -q "ship the console" <<<"$UI_POLLED"'
+check "poll claims it, so it is delivered once" \
+  '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
+check "a claimed message is kept, not deleted" \
+  '[ -n "$(find "$DM_HOME/state/ui/claimed" -name "*.json")" ]'
+
+# Every --json emitter: valid JSON, and the human output it sits beside is
+# untouched. A second parser in the page is what these exist to prevent.
+UI_HUMAN_REPOS="$(b dm-repo.sh list)"
+check "repos emit json"      'b dm-repo.sh list --json | jq -e "type==\"array\"" >/dev/null'
+check "repos human output is unchanged"  '[ "$(b dm-repo.sh list)" = "$UI_HUMAN_REPOS" ]'
+check "tasks emit json"      'b dm-task.sh list --json | jq -e "type==\"array\"" >/dev/null'
+check "tasks never emit a local-copy path" \
+  '! b dm-task.sh list --json | jq -e "any(.[]; has(\"worktree\"))" >/dev/null'
+check "the backlog emits json" 'b dm-backlog.sh list --json | jq -e "has(\"items\") and has(\"decisions\")" >/dev/null'
+check "decisions emit json"  'b dm-backlog.sh decisions --json | jq -e "type==\"array\"" >/dev/null'
+check "local copies emit json" 'b dm-worktree.sh list --json | jq -e "type==\"array\"" >/dev/null'
+check "review pages emit json" 'b dm-lavish.sh list --json | jq -e "type==\"array\"" >/dev/null'
+check "health emits json"    'b dm-doctor.sh check --json | jq -e "has(\"verdict\") and (.checks|type==\"array\")" >/dev/null'
+check "the gate track emits json" \
+  'b dm-pr.sh pipeline smokerepo --json | jq -e "(.gates|length) > 0" >/dev/null'
+check "the gate track has a human form too" \
+  '[ -n "$(b dm-pr.sh pipeline smokerepo)" ]'
+# The repo name composes a config filename, so it is validated before it can
+# walk out of config/.
+check "a traversing repo name is refused"      '! b dm-pr.sh pipeline ../../etc >/dev/null 2>&1'
+check "the offline sweep emits json"           'DM_NO_FETCH=1 b dm-pr.sh sweep --json | jq -e "type==\"array\"" >/dev/null'
+check "an unexpected sweep argument is refused" '! b dm-pr.sh sweep --wat >/dev/null 2>&1'
+
+# The page's own promises, pinned separately (track honesty + vocabulary).
+check "console checks pass" 'node "$ROOT/tests/check-console.js" >/dev/null 2>&1'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

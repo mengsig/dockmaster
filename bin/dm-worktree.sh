@@ -34,7 +34,7 @@
 #                                    the clone, so the commit survives gc — on
 #                                    both force paths, including the one that
 #                                    prunes a vanished worktree's admin record.
-#   list                            list task worktrees
+#   list [--json]                   list task worktrees
 #   tangle <repo>                   is the primary clone tangled onto a feature branch?
 
 set -euo pipefail
@@ -571,6 +571,29 @@ Its commit cannot be preserved without the clone. Re-run with --force (explicit 
     ;;
 
   list)
+    json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) json=1; shift ;;
+        *) dm_die "unknown flag: $1 (usage: dm-worktree.sh list [--json])" ;;
+      esac
+    done
+    if [ "$json" -eq 1 ]; then
+      dm_need jq
+      # Same selection as the human list (a recorded worktree), plus whether the
+      # directory is still there — a record whose directory vanished is the
+      # interrupted-cleanup shape `remove` reports on.
+      rows="$(while IFS= read -r id; do
+        wt="$(dm_meta_get "$id" worktree)"
+        [ -n "$wt" ] || continue
+        if [ -d "$wt" ]; then exists=true; else exists=false; fi
+        jq -c -n --arg id "$id" --arg repo "$(dm_meta_get "$id" repo)" \
+          --arg path "$wt" --argjson exists "$exists" \
+          '{id:$id,repo:$repo,path:$path,exists:$exists}'
+      done < <(dm_all_task_ids))"
+      printf '%s' "$rows" | jq -c -s '.'
+      exit 0
+    fi
     while IFS= read -r id; do
       wt="$(dm_meta_get "$id" worktree)"
       [ -n "$wt" ] && printf '%s\t%s\t%s\n' "$id" "$(dm_meta_get "$id" repo)" "$wt"

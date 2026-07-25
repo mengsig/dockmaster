@@ -11,8 +11,9 @@
 #   done <id> [--note "..."]
 #   ready                 queued items whose blockers are all done/absent
 #   campaign <id>         items grouped under a campaign, with their status
-#   decisions             open operator decisions (key + question), one per line
-#   list                  print the rendered backlog
+#   decisions [--json]    open operator decisions (key + question), one per line;
+#                         --json emits ALL of them, open and resolved
+#   list [--json]         print the rendered backlog (--json: the whole document)
 #   validate              exit 0 if backlog.json parses, nonzero + message if not
 #
 # A campaign groups the child items of one multi-repo intent (one child task per
@@ -180,6 +181,24 @@ EOF
     printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"
     ;;
   decisions)
+    json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) json=1; shift ;;
+        *) dm_die "unknown flag: $1 (usage: dm-backlog.sh decisions [--json])" ;;
+      esac
+    done
+    if [ "$json" -eq 1 ]; then
+      # EVERY hold, open and resolved — a consumer that renders the log needs the
+      # answers too. Fields are exactly what `hold`/`resolve` write; a hold
+      # recorded before a field existed reads as "" rather than going missing.
+      jq -c '[.decisions[] | {
+        key:(.key//""|tostring), question:(.question//""|tostring),
+        options:(.options//""|tostring), origin:(.origin//""|tostring),
+        status:(.status//""|tostring), answer:(.answer//""|tostring),
+        ts:(.ts//""|tostring)}]' "$BJSON"
+      exit 0
+    fi
     # open operator decisions, machine-readable (key<TAB>question); consumed by
     # status views. Resolved holds are omitted.
     out="$(jq -r '.decisions[] | select(.status=="open") | "\(.key)\t\(.question)"' "$BJSON")"
@@ -210,6 +229,17 @@ EOF
     render; dm_info "backlog: decision '$key' resolved"
     ;;
   list|show|"")
+    json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) json=1; shift ;;
+        *) dm_die "unknown flag: $1 (usage: dm-backlog.sh list [--json])" ;;
+      esac
+    done
+    # This script OWNS backlog.json's shape, so --json hands the document over
+    # verbatim (validated above) instead of re-deriving it. No render: a
+    # machine read must not rewrite the human file as a side effect.
+    if [ "$json" -eq 1 ]; then jq -c '.' "$BJSON"; exit 0; fi
     render; cat "$BMD"
     ;;
   *) echo "usage: dm-backlog.sh {add|move|done|ready|campaign|decisions|hold|resolve|list|validate} ..." >&2; exit 2 ;;

@@ -1,40 +1,55 @@
 // state.js - the one document the console renders, and the only place that
 // decides where it comes from.
 //
-// THE SEAM. The page knows this shape and nothing else. Today the shape is
-// filled from a committed fixture; the live source fills the SAME shape by
-// shelling out to the dm-* scripts, which own every on-disk format. Nothing in
-// ui/ ever opens state/repos.json, state/tasks/*.meta or state/backlog.json -
-// a second parser is a second thing to keep in sync, and it would drift.
+// THE SEAM. The page knows this shape and nothing else. `live` fills it by
+// shelling out to the dm-* scripts (ui/live.js), which own every on-disk format;
+// `fixture` fills the same shape from a committed demo fleet, so the design can
+// be worked on without a fleet. Nothing in ui/ ever opens state/repos.json,
+// state/tasks/*.meta or state/backlog.json - a second parser is a second thing
+// to keep in sync, and it would drift.
 //
 // Document shape (every field required unless marked optional):
 //   generated_at  ISO timestamp
 //   source        "fixture" | "live"
+//   degraded[]    { source, error }  - what could NOT be read, named on screen
 //   fleet         { repos, in_flight, open_prs, needs_you }   headline counts
-//   needs_you[]   { lamp, state, headline, detail, repo, age, action? }
-//   prs[]         { repo, title, number, url, checks, checks_detail, reviews,
-//                   merge, blocker?, age }
-//   work[]        { title, repo, kind, state, since, blocker?, review? }
-//   repos[]       { name, authority, mode, branch, remote, test_cmd, sync,
-//                   copies, disk, notes[] }
+//   needs_you[]   { lamp, kind, ... }  the operator's queue; `kind` selects how
+//                 the page words it, so no prose crosses this seam
+//   work[]        { title, repo, kind, state, since, last_signal_at,
+//                   quiet_after_hours, blocker, review_href, track }
+//   track         { mode, stages[{key,state,evidence}], gates[] } | null
+//   prs[]         { title, repo, url, checks, review, state, authority,
+//                   opened_at, cached, error }
+//   repos[]       { name, authority, mode, branch, remote, test_cmd, tangled,
+//                   tangle_note, notes[], notes_hidden }
 //   backlog       { in_flight[], queued[], done[] }
 //   decisions     { open[], resolved[] }
 //   reviews[]     { title, repo, state, at, href }
-//   health        { verdict, checks[], cleanup[], sizing[] }
+//   health        { verdict, checks[], cleanup[] }
 //
-// `lamp` is one of port|brass|starboard|neutral and is ALWAYS accompanied by a
-// text state - the page never carries meaning in color alone.
+// A stage `state` is done | active | ahead | unknown. `ahead` means the work has
+// not reached it; `unknown` means it could not be determined. They are NOT the
+// same claim and the page must never render them alike.
 
 'use strict';
 
 const fs = require('node:fs');
 const path = require('node:path');
 
+const live = require('./live');
+
 const FIXTURE = path.join(__dirname, 'fixtures', 'console.json');
 
 const REQUIRED_KEYS = [
-  'fleet', 'needs_you', 'prs', 'work', 'repos', 'backlog', 'decisions', 'reviews', 'health',
+  'fleet', 'needs_you', 'work', 'prs', 'repos', 'backlog', 'decisions', 'reviews', 'health', 'degraded',
 ];
+
+// Collecting live state runs the toolbelt; the local half walks every task and
+// the PR half costs a GitHub round trip per open PR. So each is a SNAPSHOT with
+// its own life: cheap local state refreshes often, the sweep rarely, and every
+// open tab shares one collection instead of each triggering its own.
+const LOCAL_TTL_MS = 20000;
+const PR_TTL_MS = 150000;
 
 // Validate at the boundary: a half-shaped document must fail here, loudly, not
 // render as an empty console - "nothing needs you" is the one lie that matters.
@@ -45,7 +60,7 @@ function assertShape(doc, origin) {
   for (const key of REQUIRED_KEYS) {
     if (!(key in doc)) throw new Error(`${origin}: console state is missing '${key}'`);
   }
-  for (const key of ['needs_you', 'prs', 'work', 'repos', 'reviews']) {
+  for (const key of ['needs_you', 'work', 'prs', 'repos', 'reviews', 'degraded']) {
     if (!Array.isArray(doc[key])) throw new TypeError(`${origin}: '${key}' must be an array`);
   }
   const counted = doc.needs_you.length;
@@ -55,38 +70,74 @@ function assertShape(doc, origin) {
   return doc;
 }
 
+const ISO_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
+
+// The demo fleet must not age. Every stamp in the fixture is written against its
+// own `anchor`, and the whole document is shifted onto now on load - otherwise a
+// year from now the design work happens against "started 400d ago" everywhere.
+function reanchor(value, shiftMs) {
+  if (typeof value === 'string') {
+    return ISO_STAMP.test(value) ? new Date(Date.parse(value) + shiftMs).toISOString() : value;
+  }
+  if (Array.isArray(value)) return value.map((item) => reanchor(item, shiftMs));
+  if (value && typeof value === 'object') {
+    for (const key of Object.keys(value)) value[key] = reanchor(value[key], shiftMs);
+  }
+  return value;
+}
+
 function fromFixture() {
   const raw = fs.readFileSync(FIXTURE, 'utf8');
-  const doc = assertShape(JSON.parse(raw), FIXTURE);
+  const parsed = JSON.parse(raw);
+  const anchor = Date.parse(parsed.anchor || '');
+  if (Number.isNaN(anchor)) throw new Error(`${FIXTURE}: needs an 'anchor' ISO timestamp to age from`);
+  const doc = assertShape(reanchor(parsed, Date.now() - anchor), FIXTURE);
   doc.source = 'fixture';
   doc.generated_at = new Date().toISOString();
   return doc;
 }
 
-// Collecting live state means running the dm-* scripts, and the PR sweep alone
-// costs seconds and network. So the document is a SNAPSHOT with a short life:
-// every open page shares one collection instead of each triggering its own.
-// A failure is never cached - the next request retries it.
-const CACHE_TTL_MS = 20000;
-let snapshot = null;
-
-// collect(source) -> the console document.
-// "live" is stage two: it fills this same shape from dm-status/dm-pr/dm-repo/
-// dm-task/dm-backlog output. Until it exists, asking for it must fail rather
-// than quietly serve the fixture and call it the fleet.
-function collect(source) {
-  const now = Date.now();
-  if (snapshot && snapshot.source === source && now - snapshot.at < CACHE_TTL_MS) {
-    return snapshot.doc;
-  }
-  if (source !== 'fixture' && source !== 'live') {
-    throw new TypeError(`console: unknown source '${source}'`);
-  }
-  if (source === 'live') {
-    throw new Error('console: the live source is not wired yet (DM_UI_SOURCE=fixture)');
-  }
-  snapshot = { at: now, source, doc: fromFixture() };
-  return snapshot.doc;
+// One tier of the live cache. A FAILED collection is never stored, so the next
+// request retries it rather than serving an error for the whole TTL.
+function makeTier(ttl, collect) {
+  return { ttl, collect, at: 0, value: null, inflight: null };
 }
 
-module.exports = { collect, assertShape, FIXTURE, CACHE_TTL_MS };
+const tiers = {
+  local: makeTier(LOCAL_TTL_MS, live.collectLocal),
+  prs: makeTier(PR_TTL_MS, live.collectPullRequests),
+};
+
+function fresh(tier, bin, force) {
+  const now = Date.now();
+  if (!force && tier.value && now - tier.at < tier.ttl) return Promise.resolve(tier.value);
+  // Ten open tabs, or a refresh landing mid-collection, join the walk already
+  // running instead of starting a second one.
+  if (tier.inflight) return tier.inflight;
+  tier.inflight = tier.collect(bin)
+    .then((value) => {
+      tier.value = value;
+      tier.at = Date.now();
+      return value;
+    })
+    .finally(() => { tier.inflight = null; });
+  return tier.inflight;
+}
+
+// collect(source, bin, force) -> Promise of the console document.
+// An unknown source THROWS. It must never fall through to the fixture and
+// present a demo fleet as the operator's own.
+async function collect(source, bin, force) {
+  if (source === 'fixture') return fromFixture();
+  if (source !== 'live') throw new TypeError(`console: unknown source '${source}'`);
+  if (typeof bin !== 'string' || bin.length === 0) {
+    throw new Error('console: the live source needs the toolbelt path (DM_BIN) - start via bin/dm-ui.sh');
+  }
+  const [local, prs] = await Promise.all([
+    fresh(tiers.local, bin, force),
+    fresh(tiers.prs, bin, force),
+  ]);
+  return assertShape(live.buildDocument(local, prs), 'live');
+}
+
+module.exports = { collect, assertShape, FIXTURE, LOCAL_TTL_MS, PR_TTL_MS };
