@@ -186,8 +186,8 @@ meant to bind: when it blocks you, cut or relocate rather than raise it.
 Three constraints apply to almost any edit here, so they stay in this file:
 - `bin/` must run on bash 3.2 (macOS default) — no `mapfile`, no `declare -A`,
   no `${var^^}`, no `&>>`. CI pins this: it greps `bin/*.sh` for those
-  constructs and PARSES them with macOS system bash 3.2. Only the smoke
-  harness runs under 3.2; the toolbelt it invokes does not (#164).
+  constructs, and a `bash:3.2` container runs the whole suite — harness AND
+  toolbelt — on real 3.2 (`.dm-knowledge/ci.md`).
 - New behavior = a skill under `.claude/skills/` plus a trigger bullet above,
   never an inline contract; `tests/check-skill-triggers.js` enforces it.
 - Never hand-edit `state/tasks/*.meta`, `state/repos.json`, or the backlog —
@@ -202,6 +202,8 @@ SHARED store. Open the one covering what you are editing:
   reconcile, dispatch right-sizing, the requested-change delivery flow.
 - `.dm-knowledge/merge-safety.md` — the enforcement behind directive 3:
   never-merge-red, `merge_authority`, `merge_allowed_bases`, PR field ownership.
+- `.dm-knowledge/ci.md` — the CI job graph, the fail-safe path filter, the
+  aggregate gate, and where each platform's coverage actually lives.
 - `.dm-knowledge/runtime-and-tests.md` — skills and their triggers, test
   coverage gaps, the context budget.
 

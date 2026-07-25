@@ -24,12 +24,17 @@ behavior.
 authenticated session can observe whether a background child's completion wakes
 its parent. Run it by hand when changing how background work is awaited.
 
-CI (`.github/workflows/ci.yml`) runs on `ubuntu-latest` and `macos-latest` for
-every pull request and every push to `main` (a push to a feature branch with no
-open PR does not trigger it). Beyond the four commands above it also runs
-`tests/check-gate-drift.js`, `tests/check-pr-runner.js`, and a deterministic
-waiter-child check, plus bash/JS syntax and bash-3.2 lint checks. A separate
-`node14-compat` job re-runs the JS checks under Node 14 on ubuntu only.
+CI (`.github/workflows/ci.yml`) runs on every pull request, every push to `main`
+(a push to a feature branch with no open PR does not trigger it), and nightly.
+Two jobs run unconditionally: `fast` (every cheap check — the JS checks, the
+waiter child, bash/JS syntax, the bash-3.2 lint) and `node14-compat`, which
+re-runs the JS checks under Node 14. The suite itself runs in `smoke-linux`
+(bash 5), `smoke-bash32` (a `bash:3.2` container, where the toolbelt too runs on
+3.2) and `macos`; those three are skipped only when a PR touches nothing any
+test reads. `macos` runs the 3.2 parse and the BSD-sensitive scripts; the full
+suite on macOS is `macos-full`, which runs on `main`, nightly, and on a PR
+labelled `ci:macos`. `ci-gate` aggregates them all and fails closed.
+`.dm-knowledge/ci.md` has the reasoning and the measured numbers.
 
 ## Portability
 
