@@ -3989,6 +3989,112 @@ check "the refused close recorded no terminal state" \
 check "the discard-authority path is what reaches discarded" \
   'b dm-worktree.sh remove ri-ghost --force >/dev/null 2>&1 && grep -q " discarded: " "$DM_HOME/state/tasks/ri-ghost.status"'
 
+# --- command guard: precision fixes, closed holes, and the armed hook --------
+# Every fixed false positive is pinned in BOTH directions: the benign form is
+# ALLOWED and the destructive form it resembles is still REFUSED. A change that
+# only stops blocking things is a regression, not a fix.
+echo "== command guard precision and wiring (#143/#144/#139/#138/#89) =="
+
+# #143. Each body's first word reads like a wrapper, a runner, or an assignment,
+# which is what used to fire re-entry and refuse the sentence.
+check "guard permits ordinary PR prose that mentions git (#143)" \
+  'all_allowed "gh pr create --body \"watch the git log for changes\"" \
+     "gh pr create --body \"exec path handling in git changed\"" \
+     "gh pr create --body \"parallel git fetch across repos\"" \
+     "gh pr create --body \"time spent on git rebase was wasted\"" \
+     "gh pr create --body \"script that wraps git push\"" \
+     "gh pr create --body \"xargs with git ls-files is faster\"" \
+     "gh pr create --body \"strace showed git stat calls\"" \
+     "gh pr create --body \"flock around git index writes\"" \
+     "gh pr create --body=\"watch the git log for changes\"" \
+     "gh pr create --title \"git push --force is now refused\"" \
+     "git commit -m \"env=prod git deploy notes\""'
+# The same words in COMMAND position, not option-value position, still refuse.
+check "guard still refuses a real command behind the same words (#143)" \
+  'all_blocked "parallel \"git push --force origin main\"" \
+     "parallel \" git push --force\"" \
+     "parallel \"timeout 5 git push --force\"" \
+     "flock -c \"git push --force\"" \
+     "./wrapper.sh \"git push --force\"" \
+     "xargs git push --force" \
+     "find . -exec git reset --hard {} +" \
+     "gh pr create --body x; git push --force origin main"'
+
+# #144. A blanket *.path refused submodule.<name>.path, which is a tree path.
+check "guard permits benign submodule.<name>.path (#144)" \
+  'all_allowed "git config submodule.lib.path" "git -c submodule.lib.path=vendor/lib status"'
+check "guard still refuses every .path that names an executable (#144)" \
+  'all_blocked "git config difftool.x.path /bin/sh" "git config mergetool.x.path /bin/sh" \
+     "git config browser.x.path /bin/sh" "git config man.x.path /bin/sh" \
+     "git -c include.path=/tmp/evil status"'
+
+# #139. GIT_TRACE=<path> was an unguarded file append through an allowed command.
+check "guard permits the GIT_TRACE stderr debugging idiom (#139)" \
+  'all_allowed "GIT_TRACE=1 git status" "GIT_TRACE_PACKET=true git fetch origin" "GIT_TRACE2=2 git log"'
+check "guard refuses a GIT_TRACE destination that is a file (#139)" \
+  'all_blocked "GIT_TRACE=/tmp/pwn git status" "GIT_TRACE2_EVENT=/tmp/pwn git status" \
+     "GIT_TRACE_PERFORMANCE=/tmp/pwn git log" "GIT_TRACE=\$DEST git status" \
+     "git -c trace2.eventTarget=/tmp/pwn status" "git config trace2.perfTarget /tmp/pwn"'
+
+# #138. Substitution content was classified as the executable and in process
+# substitution, but NOT in argument position, where it still ran.
+check "guard classifies substitution content in argument position (#138)" \
+  'all_blocked "echo \$(git push --force origin main)" \
+     "git log --oneline \$(git reset --hard HEAD~5)" \
+     "X=\$(git push --mirror origin)" \
+     "echo \`git push --force origin main\`" \
+     "echo \"\$(git push --force origin main)\"" \
+     "echo \"\`git reset --hard\`\""'
+check "guard leaves inert and harmless substitutions alone (#138)" \
+  "all_allowed 'git commit -m \"\$(cat msg.txt)\"' 'echo \"\$(git log --oneline)\"' \
+     'echo '\''\$(git push --force)'\'''"
+
+# #89. Restoring a drifted tracked file is ordinary crew work; discarding the
+# whole worktree with the same subcommand is the thing the guard exists to stop.
+check "guard permits a path-scoped file restore (#89)" \
+  'all_allowed "git restore package-lock.json" "git restore src/a.py src/b.py" \
+     "git restore -- package-lock.json" "git restore --staged --worktree package-lock.json" \
+     "git restore -s HEAD~1 package-lock.json" \
+     "git checkout -- package-lock.json" "git checkout HEAD -- package-lock.json"'
+check "guard still refuses an unscoped restore or a checkout that moves HEAD (#89)" \
+  'all_blocked "git restore ." "git restore" "git restore :/" "git restore \"*.json\"" \
+     "git restore --pathspec-from-file=list" "git restore \$FILE" \
+     "git checkout ." "git checkout -- ." "git checkout feature" "git checkout -b feature" \
+     "git checkout -f main" "git checkout main -b other -- file" "git checkout HEAD~5 --"'
+
+# The hook is ARMED, not merely present: run the exact command string
+# .claude/settings.json installs, in a throwaway distro, and check the verdict.
+GUARD_ARMED="$TMP/guard-armed"
+mkdir -p "$GUARD_ARMED/bin" "$GUARD_ARMED/nested/deep" "$TMP/no-distro"
+cp "$ROOT/bin/dm-command-guard.sh" "$GUARD_ARMED/bin/dm-command-guard.sh"
+chmod +x "$GUARD_ARMED/bin/dm-command-guard.sh"
+SETTINGS_HOOK="$(jq -r '.hooks.PreToolUse[0].hooks[0].command' "$ROOT/.claude/settings.json")"
+# $1 = cwd the hook runs from, $2 = the PreToolUse payload. DM_HOME unset forces
+# the walk-up resolver; armed_home exercises the DM_HOME branch instead.
+armed_cwd()  { printf '%s' "$2" | ( cd "$1" && env -u DM_HOME bash -c "$SETTINGS_HOOK" ); }
+armed_home() { printf '%s' "$1" | ( cd "$TMP/no-distro" && DM_HOME="$GUARD_ARMED" bash -c "$SETTINGS_HOOK" ); }
+ARMED_RESET='{"tool_name":"Bash","tool_input":{"command":"git reset --hard"}}'
+ARMED_FORCE='{"tool_name":"Bash","tool_input":{"command":"git push --force origin main"}}'
+ARMED_STATUS='{"tool_name":"Bash","tool_input":{"command":"git status"}}'
+ARMED_PROSE='{"tool_name":"Bash","tool_input":{"command":"gh pr create --body \"watch the git log for changes\""}}'
+ARMED_LOCKFILE='{"tool_name":"Bash","tool_input":{"command":"git checkout -- package-lock.json"}}'
+check "settings.json installs exactly one PreToolUse hook on Bash (#89)" \
+  'jq -e ".hooks.PreToolUse | length == 1" "$ROOT/.claude/settings.json" >/dev/null \
+     && [ "$(jq -r ".hooks.PreToolUse[0].matcher" "$ROOT/.claude/settings.json")" = Bash ]'
+check "the wired hook string reaches the guard via DM_HOME (#89)" \
+  '! armed_home "$ARMED_RESET" >/dev/null 2>&1 && armed_home "$ARMED_STATUS" >/dev/null 2>&1'
+check "the wired hook string reaches the guard by walking up from the cwd (#89)" \
+  '! armed_cwd "$GUARD_ARMED/nested/deep" "$ARMED_FORCE" >/dev/null 2>&1 \
+     && armed_cwd "$GUARD_ARMED/nested/deep" "$ARMED_STATUS" >/dev/null 2>&1'
+check "the armed hook refuses none of the work the operator actually does (#89)" \
+  'armed_home "$ARMED_PROSE" >/dev/null 2>&1 && armed_home "$ARMED_LOCKFILE" >/dev/null 2>&1'
+check "the wired hook blocks with exit 2, the code the runtime reads as a deny" \
+  'armed_home "$ARMED_RESET" >/dev/null 2>&1; [ "$?" -eq 2 ]'
+# No distro above the cwd means no guard to run; that must not brick every Bash
+# call, so the hook exits clean rather than failing an unguardable session.
+check "the wired hook is inert where no distro is above the cwd" \
+  'armed_cwd "$TMP/no-distro" "$ARMED_RESET" >/dev/null 2>&1'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "base_commit": "#131",
+  "base_commit": "#89",
   "shared_agents_bytes": 12533,
-  "claude_settings_bytes": 1579,
+  "claude_settings_bytes": 2063,
   "claude_skill_bytes": 85285,
   "claude_skill_description_bytes": 4603,
   "claude_files_sha256": {
-    ".claude/settings.json": "2efe4d84bb21b43c94cb2782093f4b75432ea7de8e425f3edb8a1c721acade35",
+    ".claude/settings.json": "dce252b3c3e64caf7c5490b232271605a7f111b24147c9c3bcdd38db124156ec",
     ".claude/skills/change-review/SKILL.md": "8ac9280934e810571d8218040d99d3c1f455c866eed3f65ba16bcd0dd8df49fc",
     ".claude/skills/coding-guidelines/SKILL.md": "38e89cd6d4352fb30f148fc1b343063f3f4be9ba21bcd47098623f200a1b036d",
     ".claude/skills/credential-handoff/SKILL.md": "03bd5a829ee39de335263931599e0e5829798c0575d0507c39f39b135dd23b08",

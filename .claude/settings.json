@@ -48,5 +48,19 @@
       "Bash(git worktree list:*)",
       "Bash(git fetch:*)"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "g=\"${DM_HOME:-}/bin/dm-command-guard.sh\"; if [ ! -x \"$g\" ]; then d=\"$PWD\"; while [ \"$d\" != / ] && [ ! -x \"$d/bin/dm-command-guard.sh\" ]; do d=\"$(dirname \"$d\")\"; done; g=\"$d/bin/dm-command-guard.sh\"; fi; [ -x \"$g\" ] || exit 0; exec \"$g\" hook",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }
