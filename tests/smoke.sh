@@ -4548,6 +4548,103 @@ check "the old pattern is still a live regex (guard the guard)" \
 check "the lint does not flag the safe split or a refusing handler" \
   '[ -z "$(w6_swallowed_refusals "$W6PLANT/dm-lib.sh" "$W6PLANT/dm-safe.sh")" ]'
 
+
+echo "== command guard: a heredoc OPERATOR, not a string that looks like one (#163) =="
+# note_heredoc_operator ran on every token AFTER quote stripping, so `echo
+# "<<EOF"` and a real `<<EOF` arrived identical. Believing the lookalike put the
+# lexer into heredoc state and skipped to a delimiter line that never comes --
+# and an unterminated heredoc is accepted, so every later command rode through
+# unclassified. Same swallow-the-next-command shape #160 closed for `<<<`, one
+# spelling over.
+HD_LOOKALIKE=$'echo "<<EOF"\ngit push --force'
+HD_LOOKALIKE_GREP=$'grep "<<EOF" README.md\ngit push --force'
+HD_LOOKALIKE_BARE=$'echo "<<" marker\ngit push --force'
+HD_LOOKALIKE_DASH=$'echo "<<-EOF"\ngit push --force'
+HD_LOOKALIKE_ESCAPED=$'echo \\<\\<EOF\ngit push --force'
+check "a quoted heredoc lookalike no longer swallows the next command (#163)" \
+  'all_blocked "$HD_LOOKALIKE" "$HD_LOOKALIKE_GREP" "$HD_LOOKALIKE_BARE" \
+     "$HD_LOOKALIKE_DASH" "$HD_LOOKALIKE_ESCAPED"'
+# The other half of the same bit, or the fix is just the old over-blocking: a
+# REAL operator must still skip its body, in every spelling.
+HD_REAL_PROSE=$'cat <<EOF\ngit push --force is what broke it\nEOF'
+HD_REAL_QUOTED=$'cat <<\'EOF\'\ngit reset --hard everywhere\nEOF'
+HD_REAL_DASH=$'cat <<-EOF\n\tgit clean -fdx in the notes\n\tEOF'
+HD_REAL_SPACED=$'cat << EOF\ngit push --force in prose\nEOF'
+check "a real heredoc still skips its body as data (#163)" \
+  'all_allowed "$HD_REAL_PROSE" "$HD_REAL_QUOTED" "$HD_REAL_DASH" "$HD_REAL_SPACED"'
+
+echo "== command guard: an unquoted heredoc delimiter EXPANDS its body (#163) =="
+# `<<'EOF'` is literal; `<<EOF` is interpolated, so a `$( )` in its body is a
+# command bash really runs. The lexer skipped both bodies identically, which
+# made the interpolated one a clean channel for anything.
+HD_EXPAND=$'cat <<EOF\n$(git push --force)\nEOF'
+HD_EXPAND_TICK=$'cat <<EOF\n`git clean -fdx`\nEOF'
+HD_EXPAND_DASH=$'cat <<-EOF\n\t$(git reset --hard)\n\tEOF'
+HD_EXPAND_SPACED=$'cat << EOF\n$(git reset --hard)\nEOF'
+HD_EXPAND_NESTED=$'cat <<EOF\nbefore $(git -C "$(pwd)" push --force) after\nEOF'
+check "a substitution in an expanded heredoc body is classified (#163)" \
+  'all_blocked "$HD_EXPAND" "$HD_EXPAND_TICK" "$HD_EXPAND_DASH" "$HD_EXPAND_SPACED" "$HD_EXPAND_NESTED"'
+# Paired the other way. bash does NOT expand a quoted delimiter, so the same
+# text there is inert and refusing it is over-blocking. `<<"EO"F` counts as
+# quoted too: ANY quoted character in the delimiter word makes the body literal
+# (verified against bash), as does a backslash in the body itself.
+HD_INERT=$'cat <<\'EOF\'\n$(git push --force)\nEOF'
+HD_INERT_DQ=$'cat <<"EOF"\n$(git push --force)\nEOF'
+HD_INERT_PARTIAL=$'cat <<"EO"F\n$(git push --force)\nEOF'
+HD_INERT_ESCAPED=$'cat <<EOF\n\\$(git push --force)\nEOF'
+HD_INERT_PR=$'gh pr create --body "$(cat <<\'EOF\'\nthe git reset --hard path is fixed\nEOF\n)"'
+check "a quoted delimiter keeps its body inert (#163)" \
+  'all_allowed "$HD_INERT" "$HD_INERT_DQ" "$HD_INERT_PARTIAL" "$HD_INERT_ESCAPED" "$HD_INERT_PR"'
+# A heredoc fed to a SHELL is a separate rule and must survive both fixes.
+HD_SHELL_EXPAND=$'bash <<EOF\ngit push --force\nEOF'
+HD_SHELL_LITERAL=$'bash <<\'EOF\'\ngit clean -fdx\nEOF'
+check "a heredoc fed to a shell is still refused either way (#163)" \
+  'all_blocked "$HD_SHELL_EXPAND" "$HD_SHELL_LITERAL"'
+# The same class one spelling over: `0<file` redirects the very stdin `<file`
+# does, and only the bare form was guarded.
+check "the fd-numbered stdin redirect into a shell is refused (#163)" \
+  'all_blocked "bash 0<payload.sh" "bash 0<&3" && all_allowed "echo 0<x" "git -C /tmp status"'
+
+echo "== bin/ must PARSE under bash 3.2: no bare esac in a pattern list (#164) =="
+# bash 3.2 reads a bare `esac` ANYWHERE in a case pattern list as the reserved
+# word and the file stops parsing; bash >= 4 accepts it. So a construct that is
+# fine on every dev machine, and on every CI leg that resolves `bash` through
+# PATH, makes the file unloadable on a stock macOS shell -- which is how #160
+# shipped a dm-command-guard.sh that did not parse at all. Measured: only `esac`
+# behaves this way; case/do/done/in/time/function are all fine unquoted.
+esac_in_pattern_list() {
+  grep -nE '(\|[[:space:]]*esac[[:space:]]*[|)])|((^|[[:space:]])esac[[:space:]]*\|)' "$@" || true
+}
+BARE_ESAC="$(esac_in_pattern_list "$ROOT"/bin/*.sh)"
+[ -z "$BARE_ESAC" ] || printf '%s\n' "$BARE_ESAC" >&2
+check "no bin/*.sh puts a bare esac in a case pattern list (#164)" '[ -z "$BARE_ESAC" ]'
+# Guard the guard, in both spellings the construct actually takes.
+ESAC_LINT="$TMP/esac-lint"; mkdir -p "$ESAC_LINT"
+cat > "$ESAC_LINT/bad.sh" <<'ESACBAD'
+#!/usr/bin/env bash
+one_line() { case "$1" in for|esac|while) return 0 ;; esac; return 1; }
+continued() { case "$1" in for|while|\
+esac|until) return 0 ;; esac; return 1; }
+ESACBAD
+cat > "$ESAC_LINT/good.sh" <<'ESACGOOD'
+#!/usr/bin/env bash
+quoted() { case "$1" in for|'esac'|while) return 0 ;; esac; return 1; }
+plain()  { case "$1" in for) return 0 ;; esac; return 1; }
+ESACGOOD
+check "the lint catches both spellings of the planted construct (#164)" \
+  '[ "$(grep -c . <<<"$(esac_in_pattern_list "$ESAC_LINT/bad.sh")")" = 2 ]'
+check "the lint clears a quoted esac and an ordinary terminator (#164)" \
+  '[ -z "$(esac_in_pattern_list "$ESAC_LINT/good.sh")" ]'
+# The lint is the portable half. CI's own `bash -n` over bin/*.sh runs PATH
+# bash, which on the macOS runner is Homebrew 5 -- so nothing ever parsed the
+# toolbelt with the 3.2 the invariant is about. Pin the explicit step, and pin
+# that it stays behind the assertion that the runner still ships 3.2.
+CI_YML="$ROOT/.github/workflows/ci.yml"
+check "CI parses bin/*.sh with the macOS system bash 3.2 (#164)" \
+  'grep -q "/bin/bash -n" "$CI_YML"'
+check "that step stays behind the system-bash-is-v3 assertion (#164)" \
+  '[ "$(grep -n "no longer version 3" "$CI_YML" | cut -d: -f1)" -lt "$(grep -n "/bin/bash -n" "$CI_YML" | cut -d: -f1)" ]'
+
 echo
 echo "smoke: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

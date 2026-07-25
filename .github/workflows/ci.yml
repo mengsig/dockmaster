@@ -58,10 +58,28 @@ jobs:
             *) echo "macOS system /bin/bash is no longer version 3; the bash-3.2 leg is no longer testing what it claims"; exit 1 ;;
           esac
 
+      # The "Check bin/*.sh syntax" step below runs `bash` from PATH, which on
+      # the macOS runner is Homebrew bash 5 -- so the toolbelt was never parsed
+      # by the 3.2 the invariant is about, and a 3.2-only parse error shipped
+      # green on all three legs (#164). Parse with the system 3.2 explicitly.
+      # Ordered after the v3 assertion above so a runner image that stops
+      # shipping 3.2 fails loudly there rather than silently passing here.
+      - name: Check bin/*.sh syntax (system bash 3.2)
+        if: matrix.os == 'macos-latest'
+        run: |
+          for f in bin/*.sh; do
+            echo "checking $f"
+            /bin/bash -n "$f"
+          done
+
       # macOS runners default /bin/bash to the system bash (3.2), which is the
       # exact shell the toolbelt's bash-3.2 portability invariant targets.
       # Invoke it explicitly so a PATH-shadowing bash (e.g. a Homebrew bash 5)
       # can never mask a 3.2 regression.
+      # NOTE: this pins the HARNESS only. Every bin/dm-*.sh it shells out to
+      # carries `#!/usr/bin/env bash` and resolves through PATH to bash 5, so
+      # the toolbelt's RUNTIME 3.2 behavior is still untested here; the step
+      # above covers it at parse level.
       - name: Run smoke tests (system bash)
         run: /bin/bash tests/smoke.sh
 
