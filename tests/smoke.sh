@@ -4168,6 +4168,253 @@ check "the refusal names the size limit rather than a git verdict" \
 # fail-open behavior above is answered for.
 check "no settings.json installs the guard as a hook yet (#89 stays open)" \
   '! jq -e ".hooks" "$ROOT/.claude/settings.json" >/dev/null 2>&1'
+echo "== dispatch right-sizing: dm_recommended_effort sizes deliberation, not capability =="
+# Sibling of dm_recommended_model on the same inputs, pure and offline. They are
+# sized on different axes, so the interesting cases are the ones where they
+# DISAGREE — pinned below so a later edit cannot quietly collapse one into the other.
+w6rec() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_model "$1" "$2" ); }
+w6eff() { ( . "$ROOT/bin/dm-lib.sh"; dm_recommended_effort "$1" "$2" ); }
+check "risk work gets the top effort"           '[ "$(w6eff ship "harden auth token security")" = xhigh ]'
+check "a migration gets the top effort"         '[ "$(w6eff ship "add Alembic migration")" = xhigh ]'
+check "risk dominates the scout kind"           '[ "$(w6eff scout "security audit of auth flow")" = xhigh ]'
+check "a scout must deliberate"                 '[ "$(w6eff scout "look into the page layout")" = high ]'
+check "investigation words reach high"          '[ "$(w6eff ship "diagnose the flaky drain")" = high ]'
+check "a refactor reaches high"                 '[ "$(w6eff ship "refactor the report renderer")" = high ]'
+check "ordinary implementation is medium"       '[ "$(w6eff ship "add a multiply endpoint")" = medium ]'
+check "a typo or rename is the floor"           '[ "$(w6eff ship "fix docs typo")" = low ] && [ "$(w6eff ship "rename a variable")" = low ]'
+check "effort is pure: same input, same answer" '[ "$(w6eff ship "add a multiply endpoint")" = "$(w6eff ship "add a multiply endpoint")" ]'
+check "every answer is one of the four tiers" \
+  '( for w6k in ship scout; do for w6t in "harden auth" "look into it" "add a widget" "fix a typo"; do
+       grep -qE "^(low|medium|high|xhigh)$" <<<"$(w6eff "$w6k" "$w6t")" || exit 1; done; done )'
+# The disagreements, stated as pairs. A scout is cheap to RUN and expensive to
+# THINK; a test edit is the reverse of a rename.
+check "a scout is a small model at high effort"    '[ "$(w6rec scout "look into the page layout")" = haiku ] && [ "$(w6eff scout "look into the page layout")" = high ]'
+check "a test edit is a small model at medium"     '[ "$(w6rec ship "add tests for the parser")" = haiku ] && [ "$(w6eff ship "add tests for the parser")" = medium ]'
+check "the floor agrees on a typo"                 '[ "$(w6rec ship "fix docs typo")" = haiku ] && [ "$(w6eff ship "fix docs typo")" = low ]'
+check "the ceiling agrees on security work"        '[ "$(w6rec ship "rotate the signing secret")" = opus ] && [ "$(w6eff ship "rotate the signing secret")" = xhigh ]'
+# Down-sizing terms match as WORDS, not substrings: `doc` inside dockmaster and
+# `nit` inside unit would otherwise size real work down to the floor, which is
+# the wrong direction for a stated over-size bias.
+check "a down-sizing term does not fire inside a longer word" \
+  '[ "$(w6rec ship "fix dockmaster brief generation")" = sonnet ] && [ "$(w6eff ship "add unit conversion helper")" = medium ] && [ "$(w6eff ship "update the information banner")" = medium ]'
+check "the down-sizing terms still fire as words" \
+  '[ "$(w6rec ship "update the docs")" = haiku ] && [ "$(w6eff ship "rename the helper")" = low ]'
+
+echo "== brief: both recommendations are surfaced, and only one is claimed enforceable =="
+b dm-task.sh new w6eff-1 --kind ship --repo demo --title "add a multiply endpoint" >/dev/null
+b dm-worktree.sh create w6eff-1 demo >/dev/null
+b dm-brief.sh w6eff-1 >/dev/null
+W6BR="$DM_HOME/data/w6eff-1/brief.md"
+check "brief surfaces the recommended effort"      'grep -q "Recommended reasoning effort: medium" "$W6BR"'
+check "brief records effort_recommended in meta"   '[ "$(b dm-task.sh get w6eff-1 effort_recommended)" = medium ]'
+check "brief still records model_recommended"      '[ "$(b dm-task.sh get w6eff-1 model_recommended)" = sonnet ]'
+# The honesty requirement: the Agent tool has a per-spawn `model` and no effort
+# parameter, so presenting effort as binding would be a quiet lie.
+check "brief says the effort tier is not enforceable at spawn" 'grep -q "NOT ENFORCEABLE AT SPAWN" "$W6BR"'
+check "brief names why (no effort parameter)"                  'grep -q "no effort parameter" "$W6BR"'
+check "brief still marks the model tier enforceable"           'grep -q "this one is ENFORCEABLE" "$W6BR"'
+check "the task section carries the recorded title"            'grep -q "Recorded title: add a multiply endpoint" "$W6BR"'
+b dm-task.sh event w6eff-1 working "started" >/dev/null
+W6STATUS="$(b dm-status.sh 2>&1 || true)"   # capture once (grep -q + pipefail)
+check "status names both tiers on an unsized dispatch" \
+  'grep -q "UNSIZED.*w6eff-1.*recommended: sonnet, medium effort" <<<"$W6STATUS"'
+
+echo "== brief: an unfilled {TASK} placeholder is refused before dispatch (#115) =="
+W6UNFILLED="$(b dm-brief.sh check w6eff-1 2>&1 || true)"
+check "check refuses a brief whose task section is still the placeholder" \
+  '! b dm-brief.sh check w6eff-1 >/dev/null 2>&1'
+check "the refusal names the placeholder"    'grep -q "{TASK}" <<<"$W6UNFILLED"'
+check "check refuses a task with no brief"   '! b dm-brief.sh check w6-no-such-brief >/dev/null 2>&1'
+sed 's/{TASK}/Add a multiply endpoint to src\/calc.py, with a test./' "$W6BR" > "$TMP/w6-filled" && mv "$TMP/w6-filled" "$W6BR"
+check "check passes once the placeholder is filled" 'b dm-brief.sh check w6eff-1 >/dev/null 2>&1'
+# The subcommand must not shadow a task that is literally named `check`.
+b dm-task.sh new check --kind ship --repo demo --title "task named check" >/dev/null
+b dm-worktree.sh create check demo >/dev/null
+check "a task literally named 'check' still generates" \
+  'b dm-brief.sh check >/dev/null 2>&1 && [ -f "$DM_HOME/data/check/brief.md" ]'
+
+echo "== DM_HOME override: a relocated state root still points at real scripts (#116) =="
+# DM_HOME relocates STATE. The scripts stay where they are, so every command the
+# brief hands a crewmate must follow bin/, not the state root.
+W6HOME="$TMP/alt-home"
+w6alt() { ( export DM_HOME="$W6HOME"; "$ROOT/bin/$@" ); }
+w6alt dm-repo.sh add demo "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+w6alt dm-task.sh new w6alt-1 --kind ship --repo demo --title "add a widget" >/dev/null
+w6alt dm-worktree.sh create w6alt-1 demo >/dev/null 2>&1
+w6alt dm-brief.sh w6alt-1 >/dev/null 2>&1
+W6ALTBR="$W6HOME/data/w6alt-1/brief.md"
+check "the relocated brief is generated"     '[ -f "$W6ALTBR" ]'
+check "state did relocate to the override"   '[ -f "$W6HOME/state/tasks/w6alt-1.meta" ] && [ ! -d "$W6HOME/bin" ]'
+check "no brief command points into the nonexistent relocated bin/" \
+  '! grep -q "$W6HOME/bin/" "$W6ALTBR"'
+check "every toolbelt command in the brief resolves to a real script" \
+  '( W6N=0; for w6p in $(grep -oE "/[^ \`]*/bin/dm-[a-z-]*\.sh" "$W6ALTBR" | sort -u); do
+       [ -x "$w6p" ] || exit 1; W6N=$((W6N+1)); done; [ "$W6N" -ge 3 ] )'
+
+echo "== tangle: an unborn HEAD is not reported as a doubled branch name (#123) =="
+# `git rev-parse --abbrev-ref HEAD` on an unborn HEAD prints "HEAD" to STDOUT and
+# exits 128, so an `|| echo HEAD` fallback captured both and corrupted the
+# diagnostic in exactly the case that needs a clear one.
+b dm-repo.sh add w6unborn "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+git -C "$DM_HOME/repos/w6unborn" checkout -q --orphan w6-unborn-branch
+W6UNBORN="$(b dm-worktree.sh tangle w6unborn 2>&1 || true)"
+check "an unborn HEAD reports no tangle at all"  '[ -z "$W6UNBORN" ]'
+check "no output line is a bare doubled HEAD"    '! grep -qx "HEAD" <<<"$W6UNBORN"'
+# A clone whose HEAD is CORRUPT is a different thing from an unborn one: the
+# resolver still finds the clone (.git is present), so tangle_check is what has
+# to fail closed rather than report a tangle onto an empty branch name.
+cp "$DM_HOME/repos/w6unborn/.git/HEAD" "$TMP/w6-head-backup"
+printf 'garbage\n' > "$DM_HOME/repos/w6unborn/.git/HEAD"
+W6BADRC=0
+W6BADHEAD="$(b dm-worktree.sh tangle w6unborn 2>&1)" || W6BADRC=$?
+cp "$TMP/w6-head-backup" "$DM_HOME/repos/w6unborn/.git/HEAD"
+check "a corrupt HEAD refuses instead of naming an empty branch" \
+  'grep -q "cannot read the current branch" <<<"$W6BADHEAD"'
+check "that refusal is a nonzero result, not a clean clone" '[ "$W6BADRC" -ne 0 ]'
+git -C "$DM_HOME/repos/w6unborn" checkout -q main
+
+echo "== worktree cleanup: a legacy flat discard ref no longer blocks parking (#145) =="
+# refs/dm-discarded/<id> (an earlier build's flat layout) is a git directory/file
+# conflict: nothing can be created beneath it, so parking failed outright.
+b dm-task.sh new w6dfl --kind ship --repo demo >/dev/null
+W6DFLWT="$(b dm-worktree.sh create w6dfl demo | tail -n1)"
+( cd "$W6DFLWT"; printf 'unlanded\n' > w6dfl.txt; git add w6dfl.txt; git commit -qm "unlanded work" ) >/dev/null 2>&1
+W6DFLHEAD="$(git -C "$W6DFLWT" rev-parse HEAD)"
+W6LEGACY="$(git -C "$DM_HOME/repos/demo" rev-parse HEAD)"
+git -C "$DM_HOME/repos/demo" update-ref "refs/dm-discarded/w6dfl" "$W6LEGACY"
+b dm-worktree.sh remove w6dfl --force >/dev/null 2>&1
+check "the discarded head is parked despite the legacy flat ref" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/w6dfl/$W6DFLHEAD" || true)" = "$W6DFLHEAD" ]'
+check "the legacy head is migrated into the nested layout, not dropped" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/w6dfl/$W6LEGACY" || true)" = "$W6LEGACY" ]'
+check "the record claims preservation only because it happened" \
+  'grep -q "kept at refs/dm-discarded/w6dfl/$W6DFLHEAD" "$DM_HOME/state/tasks/w6dfl.status"'
+
+echo "== dm_untracked: a failed read names its cause, and cannot race to empty (#146) =="
+# The error was re-read by a SECOND git run. A second run that succeeds leaves
+# the refusal with nothing to name. This git fails once, then succeeds — exactly
+# the race — so the cause survives only if it was captured from the first run.
+W6GITSTUB="$TMP/w6-git-stub"; mkdir -p "$W6GITSTUB"
+cat > "$W6GITSTUB/git" <<'W6STUB'
+#!/usr/bin/env bash
+if [ ! -f "$W6_STUB_MARKER" ]; then
+  : > "$W6_STUB_MARKER"
+  echo "fatal: unable to read index file (simulated)" >&2
+  exit 128
+fi
+exit 0
+W6STUB
+chmod +x "$W6GITSTUB/git"
+cat > "$TMP/w6-untracked.sh" <<'W6DRV'
+. "$1/bin/dm-lib.sh"
+dm_untracked "$2" || true
+W6DRV
+W6UNTR="$(PATH="$W6GITSTUB:$PATH" W6_STUB_MARKER="$TMP/w6-stub-fired" bash "$TMP/w6-untracked.sh" "$ROOT" "$TMP" 2>&1)"
+check "the refusal carries git's actual message"  'grep -q "unable to read index file" <<<"$W6UNTR"'
+check "it does not degrade to 'no detail from git'" '! grep -q "no detail from git" <<<"$W6UNTR"'
+check "it still names the exit code and directory" 'grep -q "exit 128" <<<"$W6UNTR" && grep -q "$TMP" <<<"$W6UNTR"'
+# The success path is unchanged, and the error temp never lands in the inspected
+# tree (a scratch file written there would itself read as untracked work).
+W6CLEANREPO="$TMP/w6-clean-repo"; git init -q -b main "$W6CLEANREPO"
+check "a clean tree still reports nothing" \
+  '[ -z "$( ( . "$ROOT/bin/dm-lib.sh"; dm_untracked "$W6CLEANREPO" ) | tr -d "\n" )" ]'
+: > "$W6CLEANREPO/stray.txt"
+check "an untracked file is still reported" \
+  '[ "$( ( . "$ROOT/bin/dm-lib.sh"; dm_untracked "$W6CLEANREPO" ) )" = stray.txt ]'
+
+echo "== local landing: a second land reports the truth instead of a second merge (#126.1) =="
+# Its own clone: by this point in the suite the shared `demo` clone is dirty from
+# earlier sections, and a dirty clone refuses to land before this gate is reached.
+b dm-repo.sh add w6merge "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-task.sh new w6land --kind ship --repo w6merge >/dev/null
+W6LANDWT="$(b dm-worktree.sh create w6land w6merge | tail -n1)"
+git -C "$W6LANDWT" checkout -q -b fix/x/w6-land
+( cd "$W6LANDWT"; printf 'landed\n' > w6land.txt; git add w6land.txt; git commit -qm "w6 land" ) >/dev/null 2>&1
+W6LAND1RC=0
+W6LAND1="$(b dm-merge.sh local w6land 2>&1)" || W6LAND1RC=$?
+[ "$W6LAND1RC" -eq 0 ] || printf '       first land said: %s\n' "$W6LAND1" >&2
+check "the first land succeeds"  '[ "$W6LAND1RC" -eq 0 ]'
+W6RELAND="$(b dm-merge.sh local w6land 2>&1 || true)"
+check "a second land reports already-landed"  'grep -qi "already landed" <<<"$W6RELAND"'
+check "it does not claim a new landing"       '! grep -qE "^landed w6land" <<<"$W6RELAND"'
+check "exactly one merged event is on the record" \
+  '[ "$(grep -c "merged: local" "$DM_HOME/state/tasks/w6land.status")" = 1 ]'
+
+echo "== docs: every DM_* override bin/ reads is documented (#113) =="
+# Derived from the code, not a hand-kept list: `${DM_X:-default}` in bin/ is
+# exactly the set of knobs an adopter can turn.
+W6ENVVARS="$(grep -rhoE '\$\{DM_[A-Z_]+:-' "$ROOT"/bin/*.sh "$ROOT"/bin/dm | sed 's/^\${//; s/:-$//' | sort -u)"
+check "the derived override list is not empty (guard the guard)" '[ "$(grep -c . <<<"$W6ENVVARS")" -ge 5 ]'
+check "README documents every one of them" \
+  'W6MISS=""; for w6v in $W6ENVVARS; do grep -q "\`$w6v\`" "$ROOT/README.md" || W6MISS="$W6MISS $w6v"; done
+   [ -z "$W6MISS" ] || { printf "       undocumented:%s\n" "$W6MISS" >&2; false; }'
+check "the phantom lock-staleness knob stays gone" '! grep -rq "DM_LOCK_STALE_SECS" "$ROOT/bin/"'
+
+echo "== refusal-swallow lint: generalized to every refusing function (#137) =="
+# A function that refuses with dm_die/exit does not stop its CALLER when invoked
+# inside $( ) — the exit kills only the subshell. The lint used to know one name
+# (dm_repo_dir); three bugs of this class shipped in functions it had never heard
+# of. Derive the refusing set from the code instead.
+w6_refusing_in() {
+  awk '
+    /^[ \t]*#/ { next }
+    /^[A-Za-z_][A-Za-z0-9_]*\(\)[ \t]*\{/ { n=$0; sub(/\(\).*/, "", n); inf=1; ref=0; next }
+    inf && (/dm_die/ || /(^|[;&| \t])exit([ \t]|$)/) { ref=1 }
+    inf && /^\}/ { if (ref) print n; inf=0 }
+  ' "$1"
+}
+# Per-file: a script can call only its own functions plus dm-lib's, so a
+# same-named helper in an unrelated script is not a call site here.
+w6_swallowed_refusals() {
+  local lib="$1" f alt; shift
+  for f in "$@"; do
+    alt="$( { w6_refusing_in "$f"; w6_refusing_in "$lib"; } | sort -u | tr '\n' '|' | sed 's/|$//' )"
+    [ -n "$alt" ] || continue
+    grep -nE '\[[^]]*\$\(('"$alt"')[ )]|\$\([^)]*\$\(('"$alt"')[ )]|case[^)]*\$\(('"$alt"')[ )]|local [^=;]*=[^=]*\$\(('"$alt"')[ )]|="?\$\(('"$alt"')[ )][^;]*(\|\||&&)[ ]*(return 0|true|:|continue)' "$f" \
+      | sed "s|^|${f##*/}:|" || true
+  done
+}
+W6REFUSERS="$(w6_refusing_in "$ROOT/bin/dm-lib.sh")"
+check "the enumerator finds the known refusing helpers (guard the guard)" \
+  '( for w6f in dm_repo_dir dm_require_worktree dm_meta_set dm_registry_require_valid dm_require_id; do
+       grep -qx "$w6f" <<<"$W6REFUSERS" || exit 1; done )'
+check "the enumerator does not flag a non-refusing helper (guard the guard)" \
+  '! grep -qx "dm_first_line" <<<"$W6REFUSERS" && ! grep -qx "dm_default_branch" <<<"$W6REFUSERS"'
+check "the lint knows far more than the one hardcoded resolver" \
+  '[ "$(grep -c . <<<"$W6REFUSERS")" -ge 20 ]'
+W6SWALLOWED="$(w6_swallowed_refusals "$ROOT/bin/dm-lib.sh" "$ROOT"/bin/dm-*.sh "$ROOT"/bin/dm)"
+[ -z "$W6SWALLOWED" ] || printf '%s\n' "$W6SWALLOWED" >&2
+check "no refusing function's status is swallowed anywhere in bin/" '[ -z "$W6SWALLOWED" ]'
+# Guard the guard, on code the old lint was blind to: five real instances of the
+# class, none of them dm_repo_dir.
+W6PLANT="$TMP/w6-plant"; mkdir -p "$W6PLANT"
+cp "$ROOT/bin/dm-lib.sh" "$W6PLANT/dm-lib.sh"
+cat > "$W6PLANT/dm-planted.sh" <<'W6PLANTED'
+#!/usr/bin/env bash
+p_bracket() { if [ -n "$(dm_require_worktree "$1")" ]; then :; fi; }
+p_nested()  { local top; top="$(cd "$(dm_require_worktree "$1")" && pwd -P)"; echo "$top"; }
+p_case()    { case "$(dm_require_worktree "$1")" in *) : ;; esac; }
+p_local()   { local wt="$(dm_require_worktree "$1")"; echo "$wt"; }
+p_permit()  { local ok; ok="$(dm_registry_has "$1")" || return 0; echo "$ok"; }
+W6PLANTED
+cat > "$W6PLANT/dm-safe.sh" <<'W6SAFE'
+#!/usr/bin/env bash
+s_split() { local wt; wt="$(dm_require_worktree "$1")" || dm_die "no worktree"; echo "$wt"; }
+s_guard() { local dir; dir="$(dm_repo_dir "$1")" || return 1; echo "$dir"; }
+W6SAFE
+W6PLANTHITS="$(w6_swallowed_refusals "$W6PLANT/dm-lib.sh" "$W6PLANT/dm-planted.sh")"
+check "the generalized lint catches all five planted instances" \
+  '[ "$(grep -c . <<<"$W6PLANTHITS")" = 5 ]'
+# The pattern MUST live in a single-quoted variable: written inline in a
+# double-quoted grep argument, `\$\(` collapses to `$(` and ERE `$` anchors the
+# line, so the check would match nothing and could never fail.
+W6OLDPAT='\[[^]]*\$\(dm_repo_dir|\$\([^)]*\$\(dm_repo_dir|case[^)]*\$\(dm_repo_dir|local [^=;]*=[^=]*\$\(dm_repo_dir'
+check "the old dm_repo_dir-only pattern was blind to every one of them" \
+  '! grep -qE "$W6OLDPAT" "$W6PLANT/dm-planted.sh"'
+check "the old pattern is still a live regex (guard the guard)" \
+  'grep -qE "$W6OLDPAT" <<<'"'"'  local dir="$(dm_repo_dir "$repo")"'"'"''
+check "the lint does not flag the safe split or a refusing handler" \
+  '[ -z "$(w6_swallowed_refusals "$W6PLANT/dm-lib.sh" "$W6PLANT/dm-safe.sh")" ]'
 
 echo
 echo "smoke: $pass passed, $fail failed"
