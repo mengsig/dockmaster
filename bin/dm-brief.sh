@@ -8,6 +8,13 @@
 #   {TASK} placeholder the dockmaster MUST replace with the concrete task
 #   description, acceptance criteria, constraints, and context before dispatch.
 #
+#        dm-brief.sh check <id>
+#   Refuses when <id> has no brief, or when its {TASK} placeholder is still
+#   unfilled — the scaffold called itself a safety contract but nothing enforced
+#   it, so a crewmate could be dispatched against an empty task section (#115).
+#   Run it before dispatch. (A task literally named `check` still generates with
+#   the bare `dm-brief.sh check` form; only `check <id>` selects this mode.)
+#
 # The scaffold is a safety contract, not a suggestion. Fill {TASK}; do not strip
 # the isolation, memory, or status sections.
 
@@ -15,7 +22,24 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
 dm_ensure_dirs
 
-id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-brief.sh <id>"
+# Where the toolbelt scripts LIVE, which is not necessarily $DM_HOME: DM_HOME is
+# overridable and relocates state only, so interpolating $DM_HOME/bin into the
+# brief handed every crewmate its status/memory commands under a path that does
+# not exist (#116). Follow the running script instead, as the sourcing above does.
+bindir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+if [ "${1:-}" = "check" ] && [ -n "${2:-}" ]; then
+  id="$2"
+  dm_require_id "$id"
+  brief="$DM_DATA/$id/brief.md"
+  [ -f "$brief" ] || dm_die "no brief for $id at $brief; generate it with: dm-brief.sh $id"
+  ! grep -q '{TASK}' "$brief" \
+    || dm_die "brief for $id still holds the unfilled {TASK} placeholder ($brief); replace it with the concrete task, acceptance criteria, and constraints before dispatching"
+  dm_info "$brief"
+  exit 0
+fi
+
+id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-brief.sh <id> | dm-brief.sh check <id>"
 dm_require_id "$id"
 kind="$(dm_meta_get "$id" kind)"; repo="$(dm_meta_get "$id" repo)"
 mode="$(dm_meta_get "$id" mode)"; wt="$(dm_meta_get "$id" worktree)"
@@ -23,10 +47,14 @@ title="$(dm_meta_get "$id" title)"
 [ -n "$kind" ] || dm_die "task $id has no kind; run dm-task.sh new first"
 [ -n "$wt" ] || dm_die "task $id has no worktree; run dm-worktree.sh create first"
 
-# Advisory dispatch right-sizing (#77): recommend a model tier from kind + title
-# and record it in meta so dm-status can flag an unsized dispatch. Advisory only.
+# Advisory dispatch right-sizing (#77): recommend a model tier and a reasoning
+# effort from kind + title, and record both in meta so dm-status can flag an
+# unsized dispatch. Advisory only — and the two are enforceable to different
+# degrees at spawn, which the brief states rather than implies.
 model_rec="$(dm_recommended_model "$kind" "$title")"
+effort_rec="$(dm_recommended_effort "$kind" "$title")"
 dm_meta_set "$id" model_recommended "$model_rec"
+dm_meta_set "$id" effort_recommended "$effort_rec"
 
 out="$DM_DATA/$id"; mkdir -p "$out"
 brief="$out/brief.md"
@@ -71,8 +99,15 @@ fleet="$(recall_block "recall(--global)" "(no fleet-wide context recorded yet.)"
 cat <<EOF
 # Task $id ($kind) - repo: $repo
 
-> Recommended model tier: $model_rec - pass it as the Agent \`model\`. This is
-> advisory - the dockmaster decides the final resourcing.
+> Recommended model tier: $model_rec - pass it as the Agent \`model\`. Advisory:
+> the dockmaster decides the final resourcing, but this one is ENFORCEABLE, so a
+> dispatch can honor it exactly.
+>
+> Recommended reasoning effort: $effort_rec (low|medium|high|xhigh) - how much
+> deliberation this task is worth. ADVISORY AND NOT ENFORCEABLE AT SPAWN: the
+> Agent tool takes a \`model\` but has no effort parameter, so this binds only if
+> the work is dispatched through a mechanism that accepts one. Otherwise treat it
+> as the intended care level, not a setting that was applied.
 
 You are a crewmate working one task to completion. You report only to the
 dockmaster through short status lines, never to a human. Work only inside your
@@ -90,7 +125,7 @@ Before doing anything else, confirm you are isolated:
 The toplevel MUST equal your worktree path above and MUST NOT be the repo's
 primary clone. If it is not, do nothing else - append a blocked status and stop:
 
-    $DM_HOME/bin/dm-task.sh event $id blocked "not in isolated worktree"
+    $bindir/dm-task.sh event $id blocked "not in isolated worktree"
 
 ## Memory (per-repo, plain markdown - no bespoke tool)
 
@@ -115,17 +150,19 @@ $fleet
 When you learn something durable, non-obvious, and repo-specific, record it:
 - A SHARED, contributor-relevant fact (a build/test command, an invariant, a
   pitfall, a convention, a routing hint) → record it IN YOUR WORKTREE with
-  \`$DM_HOME/bin/dm-memory.sh remember $id --shared --kind <kind> "<fact>"\` (writes
+  \`$bindir/dm-memory.sh remember $id --shared --kind <kind> "<fact>"\` (writes
   a \`- **[<kind>]** <fact>\` bullet to \`.dm-knowledge/$id.md\`), then \`git add\` and
   commit that file with your change. One file per task, so concurrent work never
   collides; to supersede a fact, edit the note file that holds it.
-- A private/orchestration fact → \`$DM_HOME/bin/dm-memory.sh remember $repo --private --kind <kind> "<fact>"\`.
+- A private/orchestration fact → \`$bindir/dm-memory.sh remember $repo --private --kind <kind> "<fact>"\`.
 
 Do not store secrets, transient failures, task status, or code excerpts.
 
 ## The task
 
-{TASK}
+${title:+Recorded title: $title
+
+}{TASK}
 
 EOF
 
@@ -156,12 +193,12 @@ in the report so it is not lost.
 
 When the report is written, signal done:
 
-    $DM_HOME/bin/dm-task.sh event $id done "report at data/$id/report.md"
+    $bindir/dm-task.sh event $id done "report at data/$id/report.md"
 EOF
 else
   # ship
   branch_hint="Create a branch with a name of the form <type>/<issue>/<slug>. Compute it with:
-    $DM_HOME/bin/dm-branch-name.sh <type> <issue-or-x> \"<short summary>\"
+    $bindir/dm-branch-name.sh <type> <issue-or-x> \"<short summary>\"
   types: feat fix bug chore refactor docs perf test build ci"
 cat <<EOF
 ## Definition of done (ship, mode: $mode)
@@ -184,11 +221,11 @@ operator. Write a self-contained HTML page to:
 
     $DM_DATA/$id/lavish/change.html
 
-(get this path with \`$DM_HOME/bin/dm-lavish.sh path $id\`). Show, at a glance:
+(get this path with \`$bindir/dm-lavish.sh path $id\`). Show, at a glance:
 what changed and why, the meaningful diff, before/after where it helps, and the
 risk. Then signal:
 
-    $DM_HOME/bin/dm-task.sh event $id review-ready "lavish artifact ready"
+    $bindir/dm-task.sh event $id review-ready "lavish artifact ready"
 
 The operator reviews it. If the dockmaster relays feedback, revise BOTH the code
 and the page, then signal \`review-ready\` again. Repeat until approved.
@@ -221,7 +258,7 @@ cat <<EOF
 Append a status line only at meaningful, supervisor-actionable transitions -
 not routine progress. Use:
 
-    $DM_HOME/bin/dm-task.sh event $id <state> "<one line>"
+    $bindir/dm-task.sh event $id <state> "<one line>"
 
 States: working (starting), review-ready (lavish artifact ready for the operator
 to review - the main ship signal), ready / done (see above), blocked (you need
