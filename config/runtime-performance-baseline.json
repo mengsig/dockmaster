@@ -3,13 +3,13 @@
   "base_commit": "#166",
   "shared_agents_bytes": 12533,
   "claude_settings_bytes": 1579,
-  "claude_skill_bytes": 87410,
+  "claude_skill_bytes": 87680,
   "claude_skill_description_bytes": 4603,
   "claude_files_sha256": {
-    ".claude/agents/crew-high.md": "8a92defaf7f3558ff997b4d5efaddcc94f43f6c96493e43abdffd84c14e16c15",
-    ".claude/agents/crew-low.md": "f4cdfd3ebf2a5d63b753e412d911db54ce97fbcccb62bf0975d9d34cea501383",
-    ".claude/agents/crew-medium.md": "93c2d4cfcd8c3c37fdb0a2b29029c69ded299faca0e4903825a3be88c382bda5",
-    ".claude/agents/crew-xhigh.md": "b1775e599b3353add159e57f6eb834fbaf827ac9f7d2cf70387620e3998442f1",
+    ".claude/agents/crew-high.md": "bac99327c5b49a4c220d5c3e98b8d94902e848be827080d552dc9cce39f5cfe0",
+    ".claude/agents/crew-low.md": "a16d6c2cd554374923ee9e412fd5f14df4807959347d0df187a6ea82a18a3952",
+    ".claude/agents/crew-medium.md": "5823781b779527e200859764f313a2bacab472049ce74d8bf4605fe11082c999",
+    ".claude/agents/crew-xhigh.md": "eaa66065ea898a5b0ee9a25489328c949b953dfe6d25e76efe3ba6bb2bf2a4e6",
     ".claude/settings.json": "2efe4d84bb21b43c94cb2782093f4b75432ea7de8e425f3edb8a1c721acade35",
     ".claude/skills/change-review/SKILL.md": "8ac9280934e810571d8218040d99d3c1f455c866eed3f65ba16bcd0dd8df49fc",
     ".claude/skills/coding-guidelines/SKILL.md": "38e89cd6d4352fb30f148fc1b343063f3f4be9ba21bcd47098623f200a1b036d",
@@ -27,7 +27,7 @@
     ".claude/skills/secondmate/SKILL.md": "de070f494e3c27d54bcd4f8b6dccbf3a13dccf6e7a599bf793dfc5e8457d32d4",
     ".claude/skills/stuck-worker/SKILL.md": "a0713e0d518cbfb288ca456ebafd3e4f65344c9f79437823c10986e4b446c193",
     ".claude/skills/supervision/SKILL.md": "77288dd8aa1423ce769583be33f736af0361cb0b90509f3b3c681663960c3105",
-    ".claude/skills/task-lifecycle/SKILL.md": "09cb97f68354832553e5906407836b92c81dfee006e663130645b0849cc39e41",
+    ".claude/skills/task-lifecycle/SKILL.md": "c8e69bad8c46016ad4542f96ed2b43b507064fb4f98eea416873f8396f7716c6",
     ".claude/skills/testing-policy/SKILL.md": "3632ab3a7c0e39b4c6ad35acfa2178e753d73ec0f4df45542e5d29f86ceef475"
   },
   "limits": {

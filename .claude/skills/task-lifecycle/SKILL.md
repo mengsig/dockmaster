@@ -90,9 +90,13 @@ ordinary, deliberate choices. Small, well-specified work against clear
 instructions does not need a high level even on a strong model; work that needs
 debugging or adversarial reading probably does, whatever the model.
 
-Effort is honored on `sonnet`, `opus`, and `fable`. On `haiku` it is silently
-ignored — the model has no effort support and always runs at its own default, so
-`crew-low` + haiku buys nothing. Pick haiku for cheapness, not for restraint.
+**A model that does not support a level ignores it silently** rather than
+failing, so a dial can be inert without ever saying so. `haiku` ignores effort
+entirely and always runs at its own default — `crew-low` + haiku buys nothing;
+pick haiku for cheapness, never for restraint. `sonnet`, `opus`, and `fable`
+honored all four levels when this was measured, but support is per-build and
+`xhigh` is the level most likely to be unavailable, so treat the top of the
+range as best-effort rather than guaranteed.
 
 `dm-brief.sh` records `model_recommended` / `effort_recommended` and surfaces
 them in the brief header. These are **unbiased anchors** (sonnet / medium), not

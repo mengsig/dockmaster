@@ -74,6 +74,17 @@ delivered. The contract a crewmate follows lives in the `task-lifecycle` and
 - **[gotcha]** Agent definitions load at SESSION START, not on write. A newly
   added `.claude/agents/*.md` is invisible to the running session ("agent type
   not found"); it takes a restart.
+- **[gotcha]** The frontmatter `name:` is the DISPATCH KEY, not the filename.
+  The loader reads `agentType` from `name:` and drops a file with no `name:`
+  entirely. Verified: a file `probe-alpha.md` declaring `name: probe-beta`
+  resolves only as `probe-beta`. So a `crew-*.md` whose `name:` is missing or
+  misspelled passes every filename-based check and still fails at spawn — the
+  drift guard checks `name:` and `effort:`, not just the path.
+- **[gotcha]** A `crew-*` spawn REPLACES the general-purpose system prompt with
+  the definition body — it is not appended. Anything the built-in preamble
+  provided (absolute-path guidance, "don't create unnecessary files", the
+  report-shaped-.md deterrence `dm-brief` relies on) is gone unless the body
+  restates it. Keep those few lines in the crew bodies.
 - **[decision]** Requested-change delivery flow: crewmate implements in a
   worktree and renders a lavish artifact (review-ready) → operator approves via
   lavish (mediated by the dockmaster) → ask PR-or-local → on PR: coldstart

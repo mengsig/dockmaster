@@ -183,9 +183,10 @@ Produce a self-contained report at:
 
     $out/report.md
 
-Do NOT use the Write tool for this file - the harness blocks/deters writing
-report-shaped .md files (report/summary/findings/analysis). Use a shell
-heredoc instead:
+Do NOT use the Write tool for this file - a report-shaped .md (report/summary/
+findings/analysis) is exactly what a worker is told not to write, so the write
+may be refused. This report is the deliverable and the exception. Write it with
+a shell heredoc, which is never ambiguous:
 
     cat > $out/report.md <<'REPORT'
     ...report body...

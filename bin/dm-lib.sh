@@ -1109,13 +1109,14 @@ dm_recommended_effort() {
   printf 'medium\n'
 }
 
-# True when <value> is an effort level a dispatch may record. The empty guard is
-# defence, not correction — an empty value already misses the case (the pattern
-# needs a double space, and the list has none). It keeps that safety a property
-# of this function rather than of how the list happens to be spelled.
+# True when <value> is EXACTLY one effort level. Whole-word equality, never a
+# substring test against the joined list: `case " $LEVELS " in *" $v "*)` also
+# accepted any adjacent run ("low medium", "high xhigh"), storing a level with no
+# crew-*.md behind it. Equality makes empty and multi-word refusals structural.
 dm_effort_is_valid() {
-  local value="${1:-}"
-  [ -n "$value" ] || return 1
-  case " $DM_EFFORT_LEVELS " in *" $value "*) return 0 ;; esac
+  local value="${1:-}" level
+  for level in $DM_EFFORT_LEVELS; do
+    [ "$value" = "$level" ] && return 0
+  done
   return 1
 }

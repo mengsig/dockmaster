@@ -4182,7 +4182,7 @@ check "mechanical words do not size down"       '[ "$(w6eff ship "fix docs typo"
 check "the two dials are anchored independently" '[ "$(w6rec)" = sonnet ] && [ "$(w6eff)" = medium ]'
 # The dead signal sets must stay dead — an orphaned regex is the seed of the
 # next quiet re-bias.
-check "the keyword signal sets are gone"        '! grep -q "DM_RISK_SIGNAL_RE\|DM_MECHANICAL_SIGNAL_RE" "$ROOT/bin/dm-lib.sh"'
+check "the keyword signal sets are gone"        '! grep -qE "DM_RISK_SIGNAL_RE|DM_MECHANICAL_SIGNAL_RE" "$ROOT/bin/dm-lib.sh"'
 
 echo "== dispatch right-sizing: the effort set is closed, and each level has an agent (#166) =="
 w6valid() { ( . "$ROOT/bin/dm-lib.sh"; dm_effort_is_valid "$@" ); }
@@ -4190,24 +4190,41 @@ check "the four levels are valid"    '( for w6l in low medium high xhigh; do w6v
 check "max is refused on purpose"    '! w6valid max'
 check "an empty effort is refused"   '! w6valid ""'
 check "a junk effort is refused"     '! w6valid nonsense && ! w6valid LOW'
+# The set must be CLOSED. A substring test against the space-joined list
+# accepted any adjacent run — "low medium" stored a level with no crew-*.md
+# behind it, defeating the forward drift guard through the ordinary CLI.
+check "an adjacent run of levels is refused" \
+  '! w6valid "low medium" && ! w6valid "medium high" && ! w6valid "high xhigh" && ! w6valid "low medium high xhigh"'
+check "surrounding whitespace is refused"  '! w6valid " low" && ! w6valid "low "'
+check "the CLI refuses a multi-level value and stores nothing" \
+  'b dm-task.sh new w6closed --kind ship --repo demo >/dev/null 2>&1
+   ! b dm-task.sh set w6closed effort "low medium" >/dev/null 2>&1 && [ -z "$(b dm-task.sh get w6closed effort)" ]'
 # The drift guard that matters: an effort level the gate ACCEPTS but that names
 # no agent definition on disk is a dispatch that cannot be spawned.
+# `name:` is the DISPATCH KEY, not the filename: the loader reads agentType from
+# frontmatter and drops a file with no `name:` entirely, so a misspelled or
+# missing name resolves to nothing at runtime while every filename check passes.
 check "every accepted level has a crew-<level> agent definition" \
   '( . "$ROOT/bin/dm-lib.sh"; for w6l in $DM_EFFORT_LEVELS; do
        [ -f "$ROOT/.claude/agents/crew-$w6l.md" ] || exit 1
+       grep -qx "name: crew-$w6l" "$ROOT/.claude/agents/crew-$w6l.md" || exit 1
        grep -qx "effort: $w6l" "$ROOT/.claude/agents/crew-$w6l.md" || exit 1; done )'
-check "the crew definitions exist at all (guard the guard)" \
-  '[ "$(ls "$ROOT"/.claude/agents/crew-*.md | wc -l)" -eq 4 ]'
+check "there is exactly one crew definition per accepted level (guard the guard)" \
+  '( . "$ROOT/bin/dm-lib.sh"
+     w6n=0; for w6l in $DM_EFFORT_LEVELS; do w6n=$((w6n + 1)); done
+     [ "$(ls "$ROOT"/.claude/agents/crew-*.md | wc -l)" -eq "$w6n" ] )'
 check "no agent definition pins a model (the dials stay independent)" \
   '! grep -q "^model:" "$ROOT"/.claude/agents/crew-*.md'
 # The drift guard runs BOTH ways. Forward (above): every level the gate accepts
-# has a file. Reverse (here): every file names a level the gate accepts, so a
-# stray crew-<junk>.md — a definition nothing can dispatch through — is caught,
-# not just crew-max.
-check "every crew-*.md names a level the gate accepts" \
+# has a file whose `name:` and `effort:` both match. Reverse (here): every file
+# DECLARES a name the gate accepts and matching its own basename — so a stray
+# crew-<junk>.md, and a file whose dispatch key has drifted from its filename,
+# are both caught.
+check "every crew-*.md declares a name matching its basename and an accepted level" \
   '( . "$ROOT/bin/dm-lib.sh"
      for w6f in "$ROOT"/.claude/agents/crew-*.md; do
        w6b="${w6f##*/}"; w6b="${w6b%.md}"
+       grep -qx "name: $w6b" "$w6f" || exit 1
        dm_effort_is_valid "${w6b#crew-}" || exit 1
      done )'
 check "no crew agent exists for the excluded max tier" '[ ! -f "$ROOT/.claude/agents/crew-max.md" ]'
@@ -4248,14 +4265,14 @@ check "brief still records model_recommended"      '[ "$(b dm-task.sh get w6eff-
 # The honesty requirement, inverted: effort IS applied at spawn now, so the old
 # "not enforceable" disclaimer must not survive anywhere in the distro.
 check "brief no longer claims effort is unenforceable" \
-  '! grep -qi "NOT ENFORCEABLE AT SPAWN\|no effort parameter" "$W6BR"'
+  '! grep -qiE "NOT ENFORCEABLE AT SPAWN|no effort parameter" "$W6BR"'
 # The scan MUST cover .dm-knowledge: AGENTS.md names those notes as the
 # authority a future editor opens before touching this code, and the first
 # version of this guard missed the one stale claim that survived there.
 check "no distro text claims effort is unenforceable" \
-  '! grep -rqi "NOT ENFORCEABLE AT SPAWN\|has no effort parameter\|effort is not a spawn parameter" "$ROOT/bin" "$ROOT/.claude/skills" "$ROOT/.dm-knowledge" "$ROOT/AGENTS.md"'
+  '! grep -rqiE "NOT ENFORCEABLE AT SPAWN|has no effort parameter|effort is not a spawn parameter" "$ROOT/bin" "$ROOT/.claude/skills" "$ROOT/.dm-knowledge" "$ROOT/config/README.md" "$ROOT/docs" "$ROOT/AGENTS.md"'
 check "no distro text still calls right-sizing advisory-only" \
-  '! grep -rqi "right-sizing is ADVISORY\|never blocks dispatch" "$ROOT/bin" "$ROOT/.claude/skills" "$ROOT/.dm-knowledge" "$ROOT/AGENTS.md"'
+  '! grep -rqiE "right-sizing is ADVISORY|never blocks dispatch" "$ROOT/bin" "$ROOT/.claude/skills" "$ROOT/.dm-knowledge" "$ROOT/config/README.md" "$ROOT/docs" "$ROOT/AGENTS.md"'
 check "the lifecycle note documents the gate and both dials" \
   'grep -q "crew-<level>" "$ROOT/.dm-knowledge/lifecycle.md" && grep -q "RECORD gate, not a SPAWN gate" "$ROOT/.dm-knowledge/lifecycle.md"'
 check "the task section carries the recorded title" 'grep -q "Recorded title: add a multiply endpoint" "$W6BR"'
@@ -4396,8 +4413,13 @@ check "the skill says choosing both dials is mandatory" \
   'grep -q "REFUSES until the task" "$W6TLSKILL"'
 check "the skill records that the dials are independent" \
   'grep -qi "independent" "$W6TLSKILL"'
+# Anchored on a phrase that lives on ONE line: grep is line-based, and the
+# earlier "haiku.*silently ignored" spanned a wrap, so it could never match and
+# the check collapsed to "the word `ignored` appears somewhere".
 check "the skill warns that haiku ignores effort" \
-  'grep -qi "haiku.*silently ignored\|ignored" "$W6TLSKILL"'
+  'grep -q "ignores effort" "$W6TLSKILL"'
+check "the skill does not overclaim per-model effort support" \
+  'grep -q "support is per-build" "$W6TLSKILL"'
 
 echo "== DM_HOME override: a relocated state root still points at real scripts (#116) =="
 # DM_HOME relocates STATE. The scripts stay where they are, so every command the

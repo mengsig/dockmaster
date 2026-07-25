@@ -43,8 +43,9 @@ function regularFiles(relativeRoot) {
 
 function claudeRuntimeFiles() {
   const all = regularFiles('.claude')
-  // Agent definitions count as always-loaded: every one's `description` is
-  // listed to the dispatcher on every turn, so they are part of the budget.
+  // Agent definitions are always-loaded (every `description` is listed to the
+  // dispatcher each turn), so they are hash-pinned here — a change must be
+  // deliberate. They are NOT in the byte budget below, which walks only skills.
   const runtime = all.filter((file) => file === '.claude/settings.json'
     || /^\.claude\/skills\/[^/]+\/SKILL\.md$/.test(file)
     || /^\.claude\/agents\/[^/]+\.md$/.test(file))
