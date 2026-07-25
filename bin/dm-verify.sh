@@ -521,6 +521,13 @@ run_browser() {
 session_open_isolated() {
   local id="$1" profile axi_home bport cport pid reported
   [ "${DM_VERIFY_BROWSER_SHARED:-0}" = "1" ] && return 1
+  # Readiness of a launched browser is polled over CDP with curl. Without it we
+  # cannot tell a live browser from a dead one, so degrade to the leased shared
+  # browser rather than hand back one we never confirmed.
+  if ! command -v curl >/dev/null 2>&1; then
+    dm_warn "curl is not installed, so a per-task browser cannot be confirmed ready"
+    return 1
+  fi
   profile="$(verify_dir "$id")/chrome-profile"; axi_home="$(verify_dir "$id")/axi-home"
   # Retire this task's PREVIOUS browser first. Its bridge would otherwise still
   # hold the task's port and still be named by the pid file, so the new session
@@ -878,7 +885,11 @@ case "$cmd" in
     ;;
 
   session)
-    dm_need chrome-devtools-axi; dm_need curl
+    # NOT `dm_need curl` here: curl is used only to poll CDP while launching a
+    # per-task browser. Requiring it up front made the whole gate unavailable on
+    # a host without curl, including the degraded shared-browser path that never
+    # calls it. The isolated path checks for it and falls back instead.
+    dm_need chrome-devtools-axi
     [ "$(dm_meta_get "$id" verify_app_state)" = "up" ] \
       || dm_die "the app for '$id' is not up; run: dm-verify.sh up $id"
     if ! session_is_live "$id"; then
