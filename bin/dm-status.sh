@@ -132,9 +132,8 @@ if [ -n "$tasks" ]; then
     # A live task dispatched against a brief whose {TASK} was never filled (#115).
     # dm-task.sh set agent_id refuses that at the dispatch record; this catches a
     # dispatch that never recorded an owner. Soft hint, like UNSIZED.
-    if [ "$short" = "working" ] && [ -f "$DM_DATA/$tid/brief.md" ] \
-       && grep -q '{TASK}' "$DM_DATA/$tid/brief.md"; then
-      unfilled+="  UNFILLED: task $tid is working against an unfilled brief ($DM_DATA/$tid/brief.md); its {TASK} placeholder was never replaced"$'\n'
+    if [ "$short" = "working" ] && dm_brief_unfilled "$DM_DATA/$tid/brief.md"; then
+      unfilled+="  UNFILLED: task $tid is working against a brief that is not dispatch-ready ($DM_DATA/$tid/brief.md); it is empty, or its bare {TASK} line was never replaced"$'\n'
     fi
     created="$(dm_meta_get "$tid" created)"
     epoch="$(iso_to_epoch "$created")"

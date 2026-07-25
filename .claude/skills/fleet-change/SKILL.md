@@ -62,7 +62,7 @@ bin/dm-worktree.sh create <child-id> <repo>
 bin/dm-brief.sh <child-id>
 bin/dm-brief.sh check <child-id>          # refuses while {TASK} is still unfilled
 Agent(prompt=<brief>, run in background,
-      subagent_type/model/effort per task-lifecycle)
+      subagent_type + model per task-lifecycle; effort is not a spawn parameter)
 bin/dm-task.sh set <child-id> agent_id <returned-agent-id>
 bin/dm-backlog.sh move <child-id> inflight
 ```

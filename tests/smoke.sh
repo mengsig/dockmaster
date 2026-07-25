@@ -4268,6 +4268,78 @@ check "task-lifecycle names the pre-dispatch check" \
 check "fleet-change names it for a child too" \
   'grep -q "dm-brief.sh check <child-id>" "$ROOT/.claude/skills/fleet-change/SKILL.md"'
 
+# The predicate is the bare {TASK} LINE, never any mention of the token. A brief
+# correctly filled with text that CONTAINS "{TASK}" — issue #115's own text does
+# — is filled. Refusing it would strand an already-spawned crewmate: fleet-change
+# spawns first and records second, and stops the returned id when the record
+# fails, so a false refusal here terminates correct work.
+b dm-task.sh new w6mention --kind ship --repo demo --title "make the {TASK} guard real" >/dev/null
+b dm-worktree.sh create w6mention demo >/dev/null
+b dm-brief.sh w6mention >/dev/null
+W6MENTBR="$DM_HOME/data/w6mention/brief.md"
+cat > "$TMP/w6-mention-fill" <<'W6FILL'
+Nothing verifies a dispatched brief had its {TASK} placeholder filled.
+`dm-brief.sh <id>` exits 0 with a literal {TASK} in the body. Prose about
+${TASK} and a fenced block are fine too:
+
+    grep -n '{TASK}' data/gq-1/brief.md
+W6FILL
+awk 'BEGIN{while((getline l < ARGV[2])>0) fill=fill l "\n"; ARGC=2}
+     $0 ~ /^[[:space:]]*\{TASK\}[[:space:]]*$/ { printf "%s", fill; next } { print }' \
+  "$W6MENTBR" "$TMP/w6-mention-fill" > "$TMP/w6-mention-out"
+mv "$TMP/w6-mention-out" "$W6MENTBR"
+check "the fill really did embed the literal token (guard the guard)" \
+  '[ "$(grep -c "{TASK}" "$W6MENTBR")" -ge 2 ]'
+check "no bare {TASK} line survives the fill (guard the guard)" \
+  '! grep -qx "[[:space:]]*{TASK}[[:space:]]*" "$W6MENTBR"'
+check "a filled brief that MENTIONS {TASK} passes the check" \
+  'b dm-brief.sh check w6mention >/dev/null 2>&1'
+check "and its dispatch records" \
+  'b dm-task.sh set w6mention agent_id agent-789 >/dev/null 2>&1 && [ "$(b dm-task.sh get w6mention agent_id)" = agent-789 ]'
+check "a title holding the token does not bake a second permanent refusal" \
+  'grep -q "Recorded title: make the {TASK} guard real" "$W6MENTBR"'
+b dm-task.sh event w6mention working "started" >/dev/null
+check "status does not flag it as UNFILLED" \
+  '! grep -q "UNFILLED.*w6mention" <<<"$(b dm-status.sh 2>&1 || true)"'
+# An empty brief is not dispatch-ready either: the file is written
+# truncate-then-write, so a death mid-write leaves exactly this.
+b dm-task.sh new w6empty --kind ship --repo demo >/dev/null
+b dm-worktree.sh create w6empty demo >/dev/null
+b dm-brief.sh w6empty >/dev/null
+: > "$DM_HOME/data/w6empty/brief.md"
+check "an empty brief fails the check rather than passing it" \
+  '! b dm-brief.sh check w6empty >/dev/null 2>&1'
+check "an empty brief blocks the dispatch record" \
+  '! b dm-task.sh set w6empty agent_id agent-000 >/dev/null 2>&1'
+# The refusal must not send the reader to regeneration, which overwrites a
+# partial fill.
+W6REGEN="$(b dm-task.sh set w6empty agent_id agent-000 2>&1 || true)"
+check "the refusal says edit in place, not regenerate" \
+  'grep -q "Edit that file in place" <<<"$W6REGEN" && grep -q "would overwrite it" <<<"$W6REGEN"'
+
+echo "== risk sizing: 'lock' is word-anchored so 'blocked' does not buy the top tier =="
+# `blocked` is this distro's own status word; substring-matching `lock` bought
+# opus/xhigh for every routine unblock. Direction was safe, cost was not.
+check "block/blocking/unblock do not reach the top tier" \
+  '[ "$(w6rec ship "commented out the block")" != opus ] && [ "$(w6rec ship "fix blocking scroll")" != opus ] && [ "$(w6rec ship "unblock the docs build")" != opus ]'
+check "neither does a lockfile or a clock" \
+  '[ "$(w6eff ship "add a lockfile")" != xhigh ] && [ "$(w6eff ship "clock drift in the header")" != xhigh ]'
+check "a real lock/mutex/deadlock still does" \
+  '[ "$(w6rec ship "fix mutex lock race")" = opus ] && [ "$(w6rec ship "deadlock in the scheduler")" = opus ] && [ "$(w6eff ship "lock contention on the registry")" = xhigh ]'
+check "so do its inflections" \
+  '[ "$(w6rec ship "locking order audit")" = opus ] && [ "$(w6rec ship "unlock the advisory lock")" = opus ]'
+
+echo "== dispatch docs: the skill must not contradict the brief about what binds =="
+W6TLSKILL="$ROOT/.claude/skills/task-lifecycle/SKILL.md"
+check "the skill no longer tells you to set an effort parameter" \
+  '! grep -q "set .model. and .effort." "$W6TLSKILL" && ! grep -q "subagent_type/model/effort" "$W6TLSKILL"'
+check "fleet-change does not either" \
+  '! grep -q "subagent_type/model/effort" "$ROOT/.claude/skills/fleet-change/SKILL.md"'
+check "the skill names effort_recommended alongside model_recommended" \
+  'grep -q "effort_recommended" "$W6TLSKILL"'
+check "the skill states the same enforceability the brief does" \
+  'grep -q "NO effort parameter" "$W6TLSKILL"'
+
 echo "== DM_HOME override: a relocated state root still points at real scripts (#116) =="
 # DM_HOME relocates STATE. The scripts stay where they are, so every command the
 # brief hands a crewmate must follow bin/, not the state root.

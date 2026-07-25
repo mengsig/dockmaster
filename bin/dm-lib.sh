@@ -1055,6 +1055,23 @@ dm_open_pr_tasks() {
   done < <(dm_all_task_ids)
 }
 
+# --- brief readiness: one owner for "was {TASK} actually filled?" -------------
+# Exit 0 = the brief is NOT dispatch-ready. Two ways that happens:
+#   - the file exists but is empty (the brief is written truncate-then-write, so
+#     a death mid-write leaves exactly this);
+#   - it still carries the scaffold's bare {TASK} placeholder LINE.
+# LINE-anchored, never a whole-file match: a correctly filled brief whose task
+# text merely MENTIONS {TASK} is filled — issue #115's own text does — and
+# refusing it would strand an already-spawned crewmate on a false alarm. A
+# missing file is not "unfilled": nothing was scaffolded to fill.
+# Single owner because three call sites drifting on this predicate is the bug.
+dm_brief_unfilled() {
+  local brief="$1"
+  [ -f "$brief" ] || return 1
+  [ -s "$brief" ] || return 0
+  grep -qx '[[:space:]]*{TASK}[[:space:]]*' "$brief"
+}
+
 # --- dispatch right-sizing: advisory model + effort recommendations -----------
 # Two pure functions (offline, no side effects) over the same <kind> <text>
 # inputs, so dm-brief can surface them and smoke can test them. Both ADVISORY,
@@ -1063,12 +1080,16 @@ dm_open_pr_tasks() {
 # Shared signal sets, so the two siblings cannot drift apart on the same input:
 #   RISK       dominates both and sizes UP. Matched as a case-insensitive
 #              SUBSTRING, so `auth` also fires on author/authority — a deliberate
-#              over-size bias, the safe direction for an advisory hint.
+#              over-size bias, the safe direction for an advisory hint. ONE
+#              exception: `lock` is word-anchored, because it otherwise fires on
+#              block/blocking/unblock, and `blocked` is this distro's own status
+#              word — every routine "unblock X" task would buy the top tier.
+#              `deadlock` is kept explicitly; `lockfile` is deliberately not.
 #   MECHANICAL sizes DOWN, so a substring hit is the WRONG direction: `doc`
 #              inside dockmaster and `nit` inside unit would size real work down
 #              to the floor. Whole words only, with a small suffix set; a term
 #              this misses stays at the default tier, which is the safe miss.
-DM_RISK_SIGNAL_RE='authz|permission|auth|migration|alembic|concurren|lock|mutex|security|secret|crypto|merge.gate|memory governance'
+DM_RISK_SIGNAL_RE='authz|permission|auth|migration|alembic|concurren|(^|[^[:alpha:]])(un)?lock(s|ing|ed)?([^[:alpha:]]|$)|deadlock|mutex|security|secret|crypto|merge.gate|memory governance'
 DM_MECHANICAL_SIGNAL_RE='(^|[^[:alpha:]])(test|doc|chore|nit|typo|format|comment|rename)(s|es|ed|ing)?([^[:alpha:]]|$)'
 
 # Least model tier that still fits the work: what the crewmate must be able to

@@ -33,8 +33,10 @@ if [ "${1:-}" = "check" ] && [ -n "${2:-}" ]; then
   dm_require_id "$id"
   brief="$DM_DATA/$id/brief.md"
   [ -f "$brief" ] || dm_die "no brief for $id at $brief; generate it with: dm-brief.sh $id"
-  ! grep -q '{TASK}' "$brief" \
-    || dm_die "brief for $id still holds the unfilled {TASK} placeholder ($brief); replace it with the concrete task, acceptance criteria, and constraints before dispatching"
+  # EDIT the file in place. Never "regenerate to fix it": dm-brief.sh <id>
+  # rewrites the brief from the scaffold and would destroy a partial fill.
+  ! dm_brief_unfilled "$brief" \
+    || dm_die "brief for $id is not dispatch-ready ($brief): it is empty, or its bare {TASK} line was never replaced. Edit that file in place — replace the {TASK} line with the concrete task, acceptance criteria and constraints."
   dm_info "$brief"
   exit 0
 fi

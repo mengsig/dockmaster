@@ -130,8 +130,12 @@ case "$cmd" in
       agent_id)
         dm_require_id "$id"
         brief="$DM_DATA/$id/brief.md"
-        if [ -f "$brief" ] && grep -q '{TASK}' "$brief"; then
-          dm_die "REFUSED: $id's brief still holds the unfilled {TASK} placeholder ($brief), so the crewmate you just spawned has no task. Fill it, confirm with 'dm-brief.sh check $id', then record the owner."
+        # A crewmate is already spawned by the time this runs (fleet-change
+        # terminates the returned id on a persistence failure), so the predicate
+        # must be exact: dm_brief_unfilled matches the bare placeholder LINE, not
+        # any mention of it. EDIT is the recovery — regenerating overwrites.
+        if dm_brief_unfilled "$brief"; then
+          dm_die "REFUSED: $id's brief is not dispatch-ready ($brief) — it is empty, or its bare {TASK} line was never replaced, so the crewmate you just spawned has no task. Edit that file in place (do NOT regenerate: dm-brief.sh $id would overwrite it), confirm with 'dm-brief.sh check $id', then record the owner."
         fi
         ;;
     esac
