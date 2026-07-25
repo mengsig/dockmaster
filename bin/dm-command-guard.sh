@@ -3,12 +3,13 @@
 # Git forms that can lose work. Runs as `check <command>` or as a PreToolUse
 # hook reading the tool JSON on stdin.
 #
-# UNWIRED TODAY — do not read this file as an active control. Its only caller was
-# the Codex `.codex/config.toml` PreToolUse hook, removed with that runtime; no
-# Claude `settings.json` installs it. #89 owns the Claude-side wiring, and it is
-# deliberately not armed yet: #143 (prose false positives — the guard refuses
-# e.g. `gh pr create --body "watch the git log"`) must land first, or arming it
-# blocks ordinary work. Until then the logic is exercised only by the tests.
+# ARMED (#89). The project `.claude/settings.json` installs this as a PreToolUse
+# hook on Bash, resolving the script from DM_HOME else by walking up from $PWD —
+# NOT git-toplevel, which in a managed clone or worktree has no `bin/`. So it
+# sees every command a Claude session in THIS project runs through Bash, and
+# nothing else: a tool that emits no Bash event, a session in another project,
+# and a shell the operator drives by hand are all outside it. Scope, and what is
+# NOT covered, is stated in SECURITY.md; the honest summary is below.
 #
 # SHAPE: allowlist, not denylist (#121). A denylist has to enumerate every
 # destructive Git form and every wrapper that reaches one, and loses that race
@@ -68,6 +69,14 @@
 # collateral. Text tools that provably never execute their argv are exempt so
 # `grep git .` still works; sed/awk/find/perl are deliberately NOT exempt.
 #
+# COMMAND POSITION vs ARGUMENT POSITION: an option, or the VALUE of the option
+# before it, is data the executable was handed, so a quoted sentence there is
+# prose and is not re-entered (#143). That is a NARROWING, stated plainly: an
+# unmodelled local script that runs its own `--cmd "git push --force"` value is
+# no longer caught. A bare `git` token is still refused in every position, a
+# command RUNNER keeps all of its arguments strict, and `sh -c` is classified by
+# check_nested_shell before any of this applies.
+#
 # DELIBERATELY PERMITTED, each with a test that says so:
 #   - `git push --force-with-lease` / `--force-if-includes`: the toolbelt itself
 #     uses lease-pinned force (dm-pr.sh) and #89 records it as intentional.
@@ -75,6 +84,9 @@
 #   - `git rebase` / `merge` / `pull`: they refuse to run on a dirty tree.
 #   - `git <sub> --help`: renders documentation, executes nothing.
 #   - `git config` on a key Git does not execute, read or write.
+#   - `git restore <path>` and `git checkout [<tree-ish>] -- <path>`: restoring
+#     a drifted tracked file is ordinary work (#89). Scoped to literal paths
+#     only — no pathspec, `.`, a glob or `:` magic is a whole-tree discard.
 #
 # NOT A SANDBOX. A tool that emits no Bash hook event is never seen at all.
 # See SECURITY.md for the coverage statement and the known limits.
@@ -93,9 +105,49 @@ append_token() {
   token=""; dynamic=0; started=0
 }
 
+# Consume the balanced `$( ... )` that starts at index $2, append the raw text
+# to the token being built, RECORD the inner command, and leave the index of the
+# closing paren in SUBSTITUTION_END. Sets a global rather than printing it: a
+# command substitution would run this in a subshell and lose both the token text
+# and the recorded command.
+consume_command_substitution() {
+  local input="$1" i="$2" depth=1 inner="" char
+  token+='$('; dynamic=1; started=1
+  i=$((i + 2))
+  while [ "$i" -lt "${#input}" ] && [ "$depth" -gt 0 ]; do
+    char="${input:$i:1}"
+    case "$char" in '(') depth=$((depth + 1)) ;; ')') depth=$((depth - 1)) ;; esac
+    token+="$char"
+    [ "$depth" -eq 0 ] || inner+="$char"
+    i=$((i + 1))
+  done
+  [ "$depth" -eq 0 ] || deny "unterminated command substitution"
+  SUBSTITUTIONS+=("$inner")
+  SUBSTITUTION_END=$((i - 1))
+}
+
+# Same for the backtick spelling. An escape inside backticks is passed through
+# verbatim: the content is re-classified by a fresh lexer, which applies its own
+# escape rules to it.
+consume_backtick_substitution() {
+  local input="$1" i="$2" inner="" char closed=0
+  token+='`'; dynamic=1; started=1
+  i=$((i + 1))
+  while [ "$i" -lt "${#input}" ]; do
+    char="${input:$i:1}"
+    token+="$char"
+    if [ "$char" = '`' ]; then closed=1; i=$((i + 1)); break; fi
+    inner+="$char"
+    i=$((i + 1))
+  done
+  [ "$closed" -eq 1 ] || deny "unterminated command substitution"
+  SUBSTITUTIONS+=("$inner")
+  SUBSTITUTION_END=$((i - 1))
+}
+
 lex_shell_command() {
-  local input="$1" i=0 char next state="plain" escaped=0 depth
-  TOKENS=(); DYNAMIC=(); token=""; dynamic=0; started=0
+  local input="$1" i=0 char next state="plain" escaped=0
+  TOKENS=(); DYNAMIC=(); SUBSTITUTIONS=(); token=""; dynamic=0; started=0
   while [ "$i" -lt "${#input}" ]; do
     char="${input:$i:1}"; next="${input:$((i + 1)):1}"
     if [ "$escaped" -eq 1 ]; then
@@ -111,7 +163,14 @@ lex_shell_command() {
         case "$char" in
           '"') state="plain" ;;
           \\) escaped=1 ;;
-          '$'|'`') token+="$char"; dynamic=1 ;;
+          '$')
+            if [ "$next" = "(" ]; then
+              consume_command_substitution "$input" "$i"; i="$SUBSTITUTION_END"
+            else
+              token+="$char"; dynamic=1
+            fi
+            ;;
+          '`') consume_backtick_substitution "$input" "$i"; i="$SUBSTITUTION_END" ;;
           *) token+="$char" ;;
         esac
         started=1
@@ -123,19 +182,12 @@ lex_shell_command() {
           \\) escaped=1; started=1 ;;
           '$')
             if [ "$next" = "(" ]; then
-              token+='$('; dynamic=1; started=1; depth=1; i=$((i + 2))
-              while [ "$i" -lt "${#input}" ] && [ "$depth" -gt 0 ]; do
-                char="${input:$i:1}"; token+="$char"
-                case "$char" in '(') depth=$((depth + 1)) ;; ')') depth=$((depth - 1)) ;; esac
-                i=$((i + 1))
-              done
-              [ "$depth" -eq 0 ] || deny "unterminated command substitution"
-              i=$((i - 1))
+              consume_command_substitution "$input" "$i"; i="$SUBSTITUTION_END"
             else
               token+="$char"; dynamic=1; started=1
             fi
             ;;
-          '`') token+="$char"; dynamic=1; started=1 ;;
+          '`') consume_backtick_substitution "$input" "$i"; i="$SUBSTITUTION_END" ;;
           '#')
             # A comment ends at end of LINE, not end of input. `break` here
             # discarded every later newline-separated command, unguarded (#121).
@@ -371,12 +423,23 @@ config_key_executes() {
     uploadpack.packobjectshook|init.templatedir|protocol.ext.allow|\
     pager.*|filter.*|submodule.*.update|\
     *.command|*.driver|*.textconv|*.askpass|*.cmd|*.program|*.helper) return 0 ;;
-    # The merge-tool family (difftool/mergetool/browser/man <tool>.path are all
-    # executables) plus include.path, which injects config. Blanket rather than
-    # enumerated so a future tool family is covered; the accepted cost is that
-    # benign `submodule.<name>.path` refuses too.
-    *.path) return 0 ;;
+    # The tool families whose `.path` names an EXECUTABLE, plus include.path,
+    # which injects config. Enumerated rather than a blanket `*.path`: that
+    # blanket also refused `submodule.<name>.path`, which is a tree path and
+    # executes nothing (#144). A new tool family must be added here.
+    difftool.*.path|mergetool.*.path|browser.*.path|man.*.path|guitool.*.path|\
+    include.path|includeif.*.path) return 0 ;;
   esac
+  return 1
+}
+
+# Config keys whose value is a FILE GIT APPENDS TO. Not execution, but an
+# unguarded write through an allowed command, so it is refused alongside its
+# environment twin GIT_TRACE* (#139).
+config_key_writes_file() {
+  local key
+  key="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$key" in trace2.*target) return 0 ;; esac
   return 1
 }
 
@@ -388,6 +451,7 @@ check_config_entry() {
   case "$entry" in *=*) ;; *) return 0 ;; esac
   key="${entry%%=*}"
   config_key_executes "$key" && deny "Git config key '$key' has a value Git executes"
+  config_key_writes_file "$key" && deny "Git config key '$key' names a file Git writes"
   case "$key" in alias.*) ;; *) return 0 ;; esac
   name="${key#alias.}"
   [ "$name" = "$subcommand" ] || return 0
@@ -429,6 +493,18 @@ check_environment_prefixes() {
       # against git 2.54; MANPAGER is the same family, unproven here.
       PAGER=*|EDITOR=*|VISUAL=*|SSH_ASKPASS=*|MANPAGER=*)
         deny "environment variable '${token%%=*}' is a Git fallback whose value Git executes"
+        ;;
+      # The whole GIT_TRACE* family takes a destination: `1`/`2`/`true` writes
+      # to stderr, but any other value names a file Git APPENDS trace output to
+      # (or a socket, `af_unix:...`). That is an unguarded filesystem write
+      # through an allowed command (#139), so only the stderr spellings pass --
+      # `GIT_TRACE=1 git status` is the debugging idiom worth keeping.
+      GIT_TRACE*=*)
+        [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git trace destination cannot be safety-classified"
+        case "${token#*=}" in
+          0|1|2|true|false) ;;
+          *) deny "Git environment variable '${token%%=*}' names a file Git writes trace output to" ;;
+        esac
         ;;
       GIT_CONFIG_COUNT=*)
         [ "${DYNAMIC[$i]}" -eq 0 ] || deny "dynamic Git config count cannot be safety-classified"
@@ -575,8 +651,87 @@ check_git_config() {
     if config_key_executes "$token"; then
       deny "git config touching a key whose value Git executes: $token"
     fi
+    if config_key_writes_file "$token"; then
+      deny "git config touching a key that names a file Git writes: $token"
+    fi
     i=$((i + 1))
   done
+}
+
+# A pathspec naming ONE literal path, so a restore scoped to it cannot widen
+# into a whole-tree discard. `.`, `/` and a glob reach every tracked file, and
+# `:` opens Git's pathspec magic (`:/` IS the whole repository).
+is_scoped_pathspec() {
+  case "$1" in
+    ""|.|..|/|./|../|:*) return 1 ;;
+    *"*"*|*"?"*|*"["*) return 1 ;;
+  esac
+  return 0
+}
+
+restore_option_class() {
+  case "$1" in
+    -s|--source) printf 'value\n' ;;
+    --source=*|--staged|-S|--worktree|-W|--ours|--theirs|--overlay|\
+    --no-overlay|--ignore-unmerged|--progress|--no-progress|-q|--quiet)
+      printf 'flag\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# Restoring a drifted tracked file (the regenerated-lockfile case) is a
+# legitimate crewmate operation, so the subcommand cannot be refused outright
+# (#89) -- but `git restore .` discards the entire working tree, which is the
+# prime-directive violation the guard exists to prevent. Permitted ONLY when
+# every operand is a scoped literal path, and refused with none: no pathspec
+# means the whole tree. An unmodelled option fails closed like everywhere else.
+check_git_restore() {
+  local start="$1" end="$2" i token class paths=0 operands_only=0
+  i=$((start + 1))
+  while [ "$i" -lt "$end" ]; do
+    token="${TOKENS[$i]}"
+    if [ "$operands_only" -eq 0 ]; then
+      if [ "$token" = "--" ]; then operands_only=1; i=$((i + 1)); continue; fi
+      case "$token" in
+        -?*)
+          class="$(restore_option_class "$token")"
+          case "$class" in
+            value) i=$((i + 2)) ;;
+            flag) i=$((i + 1)) ;;
+            *) deny "git restore has an option the guard cannot classify: $token" ;;
+          esac
+          continue
+          ;;
+      esac
+    fi
+    is_scoped_pathspec "$token" || deny "git restore pathspec is not one scoped path: $token"
+    paths=$((paths + 1)); i=$((i + 1))
+  done
+  [ "$paths" -gt 0 ] || deny "git restore without a pathspec discards the whole worktree"
+}
+
+# Only the file-restore spelling, `git checkout [<tree-ish>] -- <path>...`.
+# Every other form switches branches, detaches HEAD, creates (-b/-B) or forces,
+# and the required `--` is what stops this reopening `git checkout .`.
+check_git_checkout() {
+  local start="$1" end="$2" i separator=-1 paths=0 token
+  i=$((start + 1))
+  while [ "$i" -lt "$end" ]; do
+    if [ "${TOKENS[$i]}" = "--" ]; then separator="$i"; break; fi
+    i=$((i + 1))
+  done
+  [ "$separator" -ge 0 ] || deny "git checkout without '-- <path>' changes what the worktree points at"
+  [ $((separator - start)) -le 2 ] || deny "git checkout takes at most one tree-ish before '--'"
+  if [ $((separator - start)) -eq 2 ]; then
+    token="${TOKENS[$((start + 1))]}"
+    case "$token" in -*) deny "git checkout option before '--' is not the file-restore form: $token" ;; esac
+  fi
+  i=$((separator + 1))
+  while [ "$i" -lt "$end" ]; do
+    is_scoped_pathspec "${TOKENS[$i]}" || deny "git checkout pathspec is not one scoped path: ${TOKENS[$i]}"
+    paths=$((paths + 1)); i=$((i + 1))
+  done
+  [ "$paths" -gt 0 ] || deny "git checkout -- without a pathspec discards the whole worktree"
 }
 
 check_git_switch() {
@@ -595,7 +750,7 @@ check_git_switch() {
 # refused: that is the point of the inversion (#121).
 #
 # REFUSED WITH NO CLEAN SPLIT, recorded so it reads as a decision:
-#   reset, clean, restore, checkout      discard worktree/index state
+#   reset, clean                         discard worktree/index state
 #   gc, prune, prune-packed, repack      destroy the dangling-commit recovery net
 #   filter-branch, replay, fast-import   rewrite history
 #   update-ref, symbolic-ref, pack-refs, read-tree, update-index
@@ -639,6 +794,8 @@ check_git_subcommand() {
     worktree) check_git_worktree "$sub_index" "$end" ;;
     config) check_git_config "$sub_index" "$end" ;;
     switch) check_git_switch "$sub_index" "$end" ;;
+    restore) check_git_restore "$sub_index" "$end" ;;
+    checkout) check_git_checkout "$sub_index" "$end" ;;
     rm) check_git_rm "$sub_index" "$end" ;;
     rebase) check_git_rebase "$sub_index" "$end" ;;
     difftool) check_git_difftool "$sub_index" "$end" ;;
@@ -820,16 +977,44 @@ token_begins_a_command() {
   return 1
 }
 
+# COMMAND POSITION vs ARGUMENT POSITION. A token that is an option, or the VALUE
+# of the option before it, is DATA the executable was handed -- a `--body`, a
+# `--title`, an `-m` message -- not a command it runs. Re-entering such a value
+# classified ordinary prose as a command, so any sentence whose first word reads
+# like a wrapper or a runner refused once it also said "git" (#143):
+# `--body "watch the git log for changes"`. `--` is excluded: it ends the
+# options, so what follows it is an operand, not a value.
+token_is_option_data() {
+  local i="$1" start="$2" previous
+  case "${TOKENS[$i]}" in --) return 1 ;; -?*) return 0 ;; esac
+  [ "$i" -gt $((start + 1)) ] || return 1
+  previous="${TOKENS[$((i - 1))]}"
+  case "$previous" in
+    --) return 1 ;;
+    *=*) return 1 ;;
+    -?*) return 0 ;;
+  esac
+  return 1
+}
+
 # A MULTI-WORD string is classified by re-entering the guard rather than refused
 # outright: refusing every token whose first word is "git" blocked ordinary prose
 # (`--body "git config write path now routed"`), and over-blocking is what gets a
 # guard switched off. Re-entry hands the whole string to the normal segmentation
 # and wrapper handling, so a leading space, a tab, or a `sh -c`/`env`/`timeout`
 # prefix cannot walk past it. A BARE git token still refuses -- the wrapper's
-# real argv is the rest of the segment, which this token does not describe.
+# real argv is the rest of the segment, which this token does not describe, and
+# an option value is NOT exempted from that, so `find . -exec git reset --hard`
+# stays refused.
+# A command RUNNER keeps every argument strict: its options do run commands
+# (`flock -c`), and its real argv is unknowable anyway, which is why it is not
+# unwrapped in the first place.
 check_stray_git_tokens() {
-  local start="$1" end="$2" executable="$3" i token flat first
+  local start="$1" end="$2" executable="$3" i token flat first data_args=1
   argument_inert "$executable" && return 0
+  if is_command_runner "$executable" || is_shell_executable "$executable"; then
+    data_args=0
+  fi
   i=$((start + 1))
   while [ "$i" -lt "$end" ]; do
     token="${TOKENS[$i]}"
@@ -838,7 +1023,11 @@ check_stray_git_tokens() {
     first="${flat%% *}"
     if token_begins_a_command "$first"; then
       case "$flat" in
-        *" "*) DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token" ;;
+        *" "*)
+          if [ "$data_args" -eq 0 ] || ! token_is_option_data "$i" "$start"; then
+            DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "$token"
+          fi
+          ;;
         *) case "${first##*/}" in
              git) deny "'$executable' may execute the git command in its arguments" ;;
            esac ;;
@@ -856,10 +1045,23 @@ check_indirect_segment() {
   fi
 }
 
+# Substitution content executes wherever it appears, so it is classified in its
+# own right BEFORE segmentation. The executable and process-substitution
+# positions were already refused; argument position was not, so
+# `echo $(git push --force)` ran the push (#138).
+check_substitutions() {
+  local i=0
+  while [ "$i" -lt "${#SUBSTITUTIONS[@]}" ]; do
+    DM_GUARD_DEPTH=$((DM_GUARD_DEPTH + 1)) "$0" check "${SUBSTITUTIONS[$i]}"
+    i=$((i + 1))
+  done
+}
+
 check_shell_command() {
   local command="$1" i=0 end command_index token executable
   [ "$DM_GUARD_DEPTH" -le 4 ] || deny "excessively nested shell command"
   lex_shell_command "$command"
+  check_substitutions
   while [ "$i" -lt "${#TOKENS[@]}" ]; do
     if is_segment_end "${TOKENS[$i]}"; then i=$((i + 1)); continue; fi
     end="$i"

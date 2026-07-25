@@ -65,14 +65,16 @@ check "invalid durable id and role are rejected separately" '! b dm-thread-name.
 check "guard blocks git -C reset flag permutation" '! b dm-command-guard.sh check "git -C /tmp reset HEAD --hard" >/dev/null 2>&1'
 check "guard blocks absolute git clean flag permutation" '! b dm-command-guard.sh check "/usr/bin/git --no-pager -C /tmp clean -d -f" >/dev/null 2>&1'
 check "guard blocks non-hard reset and dry-run clean bypasses" '! b dm-command-guard.sh check "/usr/bin/git -C /tmp reset --merge HEAD" >/dev/null 2>&1 && ! b dm-command-guard.sh check "/usr/bin/git -C /tmp clean -n" >/dev/null 2>&1'
-check "guard blocks restore and destructive switch" '! b dm-command-guard.sh check "git restore file" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch --discard-changes main" >/dev/null 2>&1'
+# `git restore <path>` became permitted with #89's scoped carve-out; the
+# whole-tree form it was standing in for is what must stay refused.
+check "guard blocks restore and destructive switch" '! b dm-command-guard.sh check "git restore ." >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch --discard-changes main" >/dev/null 2>&1'
 check "guard blocks checkout and combined switch flags" '! b dm-command-guard.sh check "git checkout feature" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git switch -fq main" >/dev/null 2>&1'
 check "guard blocks quoted spaced-path destructive Git" '! b dm-command-guard.sh check "git -C \"/tmp/path with spaces\" reset --hard" >/dev/null 2>&1'
 check "guard blocks nested, indirect, and alias destructive Git" '! b dm-command-guard.sh check "bash -c \"git clean -fd\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env bash -c \"git reset --hard\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "\$GIT restore file" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git -c alias.nuke=\"!git reset --hard\" nuke" >/dev/null 2>&1'
 check "guard blocks dynamic Git executable and subcommands" '! b dm-command-guard.sh check "op=reset; git \"\$op\" --hard" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git \"\$(printf reset)\" --hard" >/dev/null 2>&1 && ! b dm-command-guard.sh check "\$(printf git) reset --hard" >/dev/null 2>&1'
 ESCAPED_RESET=$'git re\\\nset --hard'
 check "guard blocks escaped-newline destructive Git" '! b dm-command-guard.sh check "$ESCAPED_RESET" >/dev/null 2>&1'
-check "guard blocks shell-fed and alternate-shell destructive content" '! b dm-command-guard.sh check "printf \"git reset --hard\" | bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env dash -c \"git restore file\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "bash <<< \"git clean -fd\"" >/dev/null 2>&1'
+check "guard blocks shell-fed and alternate-shell destructive content" '! b dm-command-guard.sh check "printf \"git reset --hard\" | bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env dash -c \"git restore .\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "bash <<< \"git clean -fd\"" >/dev/null 2>&1'
 check "guard propagates piped stdin through shell wrappers" '! b dm-command-guard.sh check "printf \"git reset --hard\" | env bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "printf \"git reset --hard\" | command bash" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env command bash -s" >/dev/null 2>&1'
 check "guard rejects unresolved command positions" '! b dm-command-guard.sh check "\$SHELL -c \"git reset --hard\"" >/dev/null 2>&1 && ! b dm-command-guard.sh check "git \"\$OP\" --hard" >/dev/null 2>&1'
 check "guard blocks invoked environment Git aliases" '! b dm-command-guard.sh check "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0=\"!git reset --hard\" git nuke" >/dev/null 2>&1 && ! b dm-command-guard.sh check "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.nuke GIT_CONFIG_VALUE_0=\"\$ALIAS\" git nuke" >/dev/null 2>&1'
@@ -302,7 +304,7 @@ GUARD_CLONE="$GUARD_DISTRO/repos/veriflow/src"
 guard_from() { ( cd "$1" && printf '%s' "$2" | env -u DM_HOME "$GUARD_HOOK" hook ); }
 guard_dmhome() { ( cd "$TMP" && printf '%s' "$1" | DM_HOME="$GUARD_DISTRO" "$GUARD_HOOK" hook ); }
 GUARD_RESET='{"tool_input":{"command":"git reset --hard"}}'
-GUARD_CHECKOUT='{"tool_input":{"command":"git checkout -- package-lock.json"}}'
+GUARD_CHECKOUT='{"tool_input":{"command":"git checkout -- ."}}'
 GUARD_CLEAN='{"tool_input":{"command":"git clean -fdx"}}'
 GUARD_STATUS='{"tool_input":{"command":"git status"}}'
 check "hook blocks destructive git from a managed worktree (no DM_HOME)" '! guard_from "$GUARD_WT" "$GUARD_RESET" >/dev/null 2>&1'
