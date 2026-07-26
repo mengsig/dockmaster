@@ -1071,6 +1071,15 @@ git -C "$DM_HOME/repos/demo" checkout -q -b sidebranch
 check "tangle: detects non-default branch"  '! b dm-worktree.sh tangle demo >/dev/null 2>&1'
 TANGLE="$(b dm-worktree.sh tangle demo 2>&1 || true)"
 check "tangle: message names the branch"    'grep -q "TANGLE.*sidebranch" <<<"$TANGLE"'
+# --json answers the same question but EXITS 0, because a reader cannot tell the
+# human form's "exit 1 = tangled" from the script having failed - which is how a
+# tangled clone came to render as "On main" in the console.
+TANGLEJ="$(b dm-worktree.sh tangle demo --json)"
+check "tangle --json exits 0 on a tangled clone" 'b dm-worktree.sh tangle demo --json >/dev/null'
+check "tangle --json says it is tangled"    '[ "$(jq -r ".tangled" <<<"$TANGLEJ")" = "true" ]'
+check "tangle --json names the branch it is on" '[ "$(jq -r ".on" <<<"$TANGLEJ")" = "sidebranch" ]'
+check "tangle --json names the one expected"    '[ "$(jq -r ".expected" <<<"$TANGLEJ")" = "main" ]'
+check "tangle --json carries no path or command" '! grep -qE "/|checkout" <<<"$TANGLEJ"'
 git -C "$DM_HOME/repos/demo" checkout -q main
 git -C "$DM_HOME/repos/demo" branch -q -D sidebranch
 check "tangle: clears after return to default" 'b dm-worktree.sh tangle demo >/dev/null 2>&1'
@@ -1647,6 +1656,14 @@ b dm-task.sh new sweep-noclone --kind ship --repo sweepnoclone >/dev/null 2>&1 |
 ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set sweep-noclone pr "https://github.com/o/r/pull/9" ) >/dev/null 2>&1
 SWEEP2="$(DM_NO_FETCH=1 b dm-pr.sh sweep 2>&1 || true)"
 check "sweep flags a missing clone, keeps going" 'grep -q "clone missing" <<<"$SWEEP2" && grep -q "sweep-open" <<<"$SWEEP2"'
+# The sweep's HUMAN lines, pinned byte for byte. Other callers and tests read
+# them, and adding `sweep --json` (#192) edited every one of these printfs -
+# "it still contains the id" would not have caught a changed separator or a
+# dropped `?` placeholder. -x -F: whole line, literal, no regex.
+check "the cached sweep line is unchanged, to the byte" \
+  'grep -qxF "  sweep-open  state: ?  checks: ? (cached)  reviews: (no fetch)  https://github.com/o/r/pull/1" <<<"$SWEEP2"'
+check "the missing-clone sweep line is unchanged, to the byte" \
+  'grep -qxF "  sweep-noclone  (repo unregistered or clone missing: sweepnoclone — skipped)  https://github.com/o/r/pull/9" <<<"$SWEEP2"'
 
 echo "== pr-sweep: status surfaces the open-PRs section (#26) =="
 STATUS_PR="$(b dm-status.sh 2>&1 || true)"
@@ -5714,6 +5731,33 @@ check "poll claims it, so it is delivered once" \
   '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
 check "a claimed message is kept, not deleted" \
   '[ -n "$(find "$DM_HOME/state/ui/claimed" -name "*.json")" ]'
+
+# An unreadable queue entry must NOT kill the poll. `take` runs from an fs.watch
+# and a timer, where a throw is unhandled and exits the process - and nothing
+# restarts a poll, so that silently ends the dockmaster's wake mechanism while
+# the message sits in the inbox exactly as promised. A 0-byte file is what a
+# crashed writeFileSync leaves; the second is valid JSON of the wrong shape.
+: > "$DM_HOME/state/ui/inbox/1000000000000-0-torn.json"
+printf '{"at":"2026-01-01T00:00:00Z"}\n' > "$DM_HOME/state/ui/inbox/1000000000001-0-shape.json"
+DM_UI_CHAT="$ROOT/ui/chat.js" node -e 'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", "delivered past the torn ones")' \
+  >/dev/null 2>&1
+UI_PAST_TORN="$(b dm-ui.sh poll --timeout 8 2>/dev/null || true)"
+check "a torn queue entry does not end the poll" \
+  'grep -q "delivered past the torn ones" <<<"$UI_PAST_TORN"'
+check "and the unreadable entries are set aside, not left to retry" \
+  '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
+check "the set-aside entries are kept for inspection" \
+  '[ -n "$(find "$DM_HOME/state/ui/claimed" -name "*torn.json")" ]'
+
+# tangle --json answers in the object and exits 0; the human form exits 1 to
+# report a tangle, which a machine reader cannot tell from the script failing.
+check "tangle emits json"          'b dm-worktree.sh tangle demo --json | jq -e "has(\"on\") and has(\"tangled\")" >/dev/null'
+check "tangle --json exits 0 on a readable clone" 'b dm-worktree.sh tangle demo --json >/dev/null'
+check "tangle --json reports the branch it found" \
+  '[ "$(b dm-worktree.sh tangle demo --json | jq -r ".on")" = "$(b dm-worktree.sh tangle demo --json | jq -r ".expected")" ]'
+check "tangle keeps its human form"  'b dm-worktree.sh tangle demo'
+check "an unexpected tangle argument is refused" '! b dm-worktree.sh tangle demo --wat >/dev/null 2>&1'
+check "tangle --json refuses an unregistered repo" '! b dm-worktree.sh tangle nosuchrepo --json >/dev/null 2>&1'
 
 # A pid file naming a LIVE process that is not the console must never be deleted
 # or killed. Deleting it orphans whatever holds the port, and the next `start`

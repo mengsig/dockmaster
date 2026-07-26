@@ -75,7 +75,15 @@ async function run(bin, script, args, timeoutMs) {
     // to say precisely what refused. Keep it, bounded.
     const detail = String(err.stderr || err.message || '').trim().split('\n').slice(-3).join(' · ');
     const code = err.code === undefined ? 'no exit code' : `exit ${err.code}`;
-    throw new Error(`${script} ${args.join(' ')} failed (${code}): ${detail || 'no output'}`);
+    const wrapped = new Error(`${script} ${args.join(' ')} failed (${code}): ${detail || 'no output'}`);
+    // Some scripts exit NONZERO to report their answer, and print that answer on
+    // STDOUT (dm-doctor's verdict, dm-worktree's tangle report). Discarding it
+    // here left those callers reconstructing it from the message text, which
+    // never contained it - so the panel went blank in exactly the case it
+    // existed to describe. Carried explicitly; only a caller that knows the
+    // script's contract may use it.
+    wrapped.stdout = typeof err.stdout === 'string' ? err.stdout : '';
+    throw wrapped;
   }
 }
 
@@ -216,10 +224,13 @@ function buildTrack(task, gates) {
   return {
     mode: task.kind === 'scout' ? 'scout' : task.mode,
     stages,
+    // `note` is the sentence the pipeline config already writes for each gate
+    // ("fresh independent read of the diff against base"). The gate/pass TOKENS
+    // do not cross: they put `review (coldstart)` and `review (merge-gate)` on
+    // the operator's screen, which is the crew's vocabulary for its own machine.
     gates: inGates && gates ? gates.map((g) => ({
-      gate: g.gate,
-      pass: g.pass,
-      optional: g.optional,
+      note: g.note || '',
+      optional: Boolean(g.optional),
       state: g.gate === 'tests' && task.tests ? task.tests : 'unrecorded',
     })) : [],
   };
@@ -254,8 +265,17 @@ async function collectRepos(bin, degraded) {
   return Promise.all(repos.map(async (repo) => {
     // Both are per-repo shell-outs over a handful of repos, and both are the
     // owning script's answer - never a re-read of the clone from here.
-    const branch = await attempt(degraded, 'clone_branch',
-      async () => (await run(bin, 'dm-worktree.sh', ['tangle', repo.name])).trim(), repo.name);
+    // --json, because the human form EXITS 1 to report a tangle: read through
+    // run() that is indistinguishable from the script failing, so a clone on a
+    // side branch degraded instead of being reported, and the panel then said
+    // "On main". The prose it prints also names a path and a git command.
+    const tangle = await attempt(degraded, 'clone_branch', async () => {
+      const doc = await runJson(bin, 'dm-worktree.sh', ['tangle', repo.name, '--json']);
+      if (!doc || typeof doc.on !== 'string' || typeof doc.tangled !== 'boolean') {
+        throw new TypeError('dm-worktree.sh tangle --json did not report a branch');
+      }
+      return doc;
+    }, repo.name);
     // --crew: the same view a worker is given. The dockmaster-only store is
     // deliberately left out - it exists to be excluded from anything relayed,
     // and this page is served over a socket the operator is not the only thing
@@ -270,9 +290,11 @@ async function collectRepos(bin, degraded) {
       branch: repo.branch,
       remote: repo.remote,
       test_cmd: repo.test_cmd,
-      // `tangle` prints nothing when the clone sits on its default branch.
-      tangled: Boolean(branch),
-      tangle_note: branch || '',
+      // Three states, not two: on its branch, on another one, or NOT READ. The
+      // third may not render as either of the first two.
+      branch_read: tangle !== null,
+      tangled: Boolean(tangle && tangle.tangled),
+      on_branch: tangle ? tangle.on : '',
       notes: lines.slice(0, MEMORY_LINES),
       notes_hidden: Math.max(0, lines.length - MEMORY_LINES),
     };
@@ -293,6 +315,29 @@ function withArtifacts(tasks, rendered) {
     has_review_artifact: byId.has(task.id),
     review_at: byId.has(task.id) ? byId.get(task.id).rendered_at : '',
   }));
+}
+
+// dm-doctor.sh exits NONZERO when a required tool is missing - that is its
+// REPORT, not a failure to read it, and it prints the whole verdict on STDOUT
+// with nothing on stderr. So the recovery has to read stdout: matching the
+// error TEXT for a JSON body could never work, and the health panel went blank
+// in precisely the case it exists to describe.
+async function collectHealth(bin) {
+  let raw;
+  try {
+    raw = await run(bin, 'dm-doctor.sh', ['check', '--json']);
+  } catch (err) {
+    if (!err.stdout || err.stdout.trim() === '') throw err;
+    raw = err.stdout;
+  }
+  const doc = JSON.parse(raw);
+  // The one collector that used to skip the shape check its siblings all make:
+  // null, [] and {} each yielded an empty Tools table and no degraded row.
+  if (doc === null || typeof doc !== 'object' || Array.isArray(doc)
+    || typeof doc.verdict !== 'string' || !Array.isArray(doc.checks)) {
+    throw new TypeError('dm-doctor.sh check --json did not emit a verdict and a checks array');
+  }
+  return doc;
 }
 
 async function collectPipelines(bin, repoNames, degraded) {
@@ -529,17 +574,7 @@ async function collectLocal(bin) {
       if (!Array.isArray(rows)) throw new TypeError('dm-worktree.sh list --json did not emit an array');
       return rows;
     }),
-    // dm-doctor exits nonzero when a required tool is missing - that is its
-    // REPORT, not a failure to read it, so the verdict it printed still shows.
-    attempt(degraded, 'health', async () => {
-      try {
-        return await runJson(bin, 'dm-doctor.sh', ['check', '--json']);
-      } catch (err) {
-        const body = String(err.message).match(/\{[\s\S]*\}/);
-        if (body) return JSON.parse(body[0]);
-        throw err;
-      }
-    }),
+    attempt(degraded, 'health', () => collectHealth(bin)),
   ]);
 
   const tasks = withArtifacts(rawTasks, rendered);
@@ -549,6 +584,10 @@ async function collectLocal(bin) {
   const pipelines = await collectPipelines(bin, openRepos, degraded);
 
   return {
+    // When this collection FINISHED, not when a later request formatted it. The
+    // page says "as of 12:43" off this, and a cached collection can be up to a
+    // TTL old - stamping at request time made every read claim to be current.
+    at: new Date().toISOString(),
     degraded,
     repos,
     work: toWork(tasks, pipelines),
@@ -565,7 +604,7 @@ async function collectLocal(bin) {
 async function collectPullRequests(bin) {
   const rows = await runJson(bin, 'dm-pr.sh', ['sweep', '--json'], SWEEP_TIMEOUT_MS);
   if (!Array.isArray(rows)) throw new TypeError('dm-pr.sh sweep --json did not emit an array');
-  return rows;
+  return { rows, at: new Date().toISOString() };
 }
 
 // buildDocument(local, sweep) - `sweep.rows === null` means the sweep could not
@@ -586,7 +625,11 @@ function buildDocument(local, sweep) {
   const needs = toNeedsYou(local.work, prs, decisions);
   const inFlight = local.work.filter((w) => OPEN_STATES.includes(w.state) && w.state !== 'queued').length;
   return {
-    generated_at: new Date().toISOString(),
+    // Both halves carry their OWN age, because they are cached separately: the
+    // sweep can be two and a half minutes older than everything else, and the
+    // page must not present one time for both.
+    generated_at: local.at,
+    prs_read_at: sweep.at || '',
     source: 'live',
     degraded,
     fleet: {

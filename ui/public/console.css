@@ -353,6 +353,22 @@ body.is-focused .view { opacity: 0; padding-left: 0; padding-right: 0; overflow:
 .gates { margin-top: 1rem; }
 .gates .chips { margin-top: 0.5rem; }
 
+/* What the change must still clear, in the sentence the pipeline wrote for each
+ * step. A step nothing has reported on is dimmed and marked hollow — the same
+ * distinction the track above draws, in prose. */
+.gate-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+.gate-step {
+  display: flex; align-items: baseline; gap: 0.625rem;
+  padding: 0.3125rem 0; color: var(--fg-dim); font-size: 0.8125rem;
+}
+.gate-step.is-unrecorded { color: var(--fg-mute); }
+.gate-mark {
+  flex: 0 0 auto; width: 0.4375rem; height: 0.4375rem; border-radius: 50%;
+  background: var(--brass); align-self: center;
+}
+.gate-step.is-unrecorded .gate-mark { background: transparent; border: 1px dashed var(--fg-mute); }
+.gate-note { flex: 1 1 auto; min-width: 0; }
+
 /* --- lamps --------------------------------------------------------------- */
 
 .lamp {

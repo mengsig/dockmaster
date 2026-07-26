@@ -5,7 +5,9 @@
 // `lavish-axi poll`. Claiming is a rename, so a killed or timed-out poll loses
 // nothing - re-run it and the queued message is still there.
 //
-// Exit: 0 printed a message, 3 timed out with nothing queued.
+// Exit: 0 printed a message, 3 timed out with nothing queued, 1 could not read
+// the inbox at all. A single unreadable queue entry is set aside and reported;
+// it never ends the poll, because nothing restarts one.
 
 'use strict';
 
@@ -15,6 +17,9 @@ const path = require('node:path');
 const chat = require('./chat');
 
 const IDLE_RECHECK_MS = 1000;
+// A poll that cannot read its inbox at all is broken, not busy. It says so and
+// exits rather than spinning silently while the dockmaster waits on it.
+const MAX_CONSECUTIVE_FAILURES = 5;
 
 function config() {
   const dmHome = process.env.DM_HOME;
@@ -38,8 +43,25 @@ function main() {
   const cfg = config();
   const inbox = path.join(chat.ensureDirs(cfg.dmHome), 'inbox');
 
+  // `take` is registered on a filesystem watch and a timer, both OUTSIDE any
+  // caller that could catch: a throw there is an unhandled exception and exits
+  // the process. That killed the dockmaster's wake mechanism outright - the
+  // message survived in the inbox, as promised, but nothing was left listening
+  // for it and nothing re-runs the poll. So every failure is contained, and
+  // only a persistent one ends the poll, with a reason.
+  let failures = 0;
   const take = () => {
-    const message = chat.claimOldest(cfg.dmHome);
+    let message;
+    try {
+      message = chat.claimOldest(cfg.dmHome);
+    } catch (err) {
+      failures += 1;
+      process.stderr.write(`console: poll: could not read the inbox: ${err.message}\n`);
+      if (failures < MAX_CONSECUTIVE_FAILURES) return;
+      process.stderr.write(`console: poll: giving up after ${failures} failures in a row\n`);
+      process.exit(1);
+    }
+    failures = 0;
     if (message) emit(message);
   };
   take();

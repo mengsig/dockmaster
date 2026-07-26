@@ -10,7 +10,7 @@ import {
   el, add, lamp, stateCell, meta, link, table, cell, section, head, empty,
   plural, lookup, word, ago, hoursSince,
   WORK_STATE, CHECKS, REVIEW_VERDICT, AUTHORITY, KIND, CHECK_STATUS, MODE,
-  STAGE_LABEL, STAGE_STATE, SOURCE_WORD, PR_UNREADABLE,
+  STAGE_LABEL, STAGE_STATE, SOURCE_WORD, PR_UNREADABLE, TESTS_RESULT,
 } from './dom.mjs';
 
 // --- what this panel could not read ------------------------------------------
@@ -67,8 +67,7 @@ function evidenceChip(stage) {
   const e = stage.evidence;
   if (!e) return null;
   if (e.kind === 'tests') {
-    const words = { pass: 'Tests passed', fail: 'Tests failed', skip: 'No tests registered' };
-    const chip = el('span', `chip${e.value === 'fail' ? ' chip-port' : ''}`, words[e.value] || `Tests ${e.value}`);
+    const chip = el('span', `chip${e.value === 'fail' ? ' chip-port' : ''}`, word(TESTS_RESULT, e.value));
     if (e.detail) chip.title = e.detail;
     return chip;
   }
@@ -84,17 +83,19 @@ function gateStrip(gates) {
   if (!gates || gates.length === 0) return null;
   const wrap = el('div', 'gates');
   add(wrap, el('span', 'eyebrow', 'Still to clear'));
-  const row = el('div', 'chips');
+  const list = el('ul', 'gate-list');
   for (const gate of gates) {
-    const name = gate.pass ? `${gate.gate} (${gate.pass})` : gate.gate;
+    // The sentence the pipeline writes for the gate, never its token. A gate
+    // with nothing written for it says only what is true: it is not reported on.
     const known = gate.state !== 'unrecorded';
-    const chip = el('span', `chip ${known ? '' : 'chip-faint'}`,
-      known ? `${name} — ${gate.state}` : name);
-    if (!known) chip.title = 'Not reported — this gate leaves no record';
-    if (gate.optional) chip.title = 'Only when the change has a security surface';
-    add(row, chip);
+    const item = el('li', known ? 'gate-step' : 'gate-step is-unrecorded');
+    add(item, el('span', 'gate-mark'));
+    add(item, el('span', 'gate-note', gate.note || 'A step with nothing recorded about it.'));
+    if (known) add(item, el('span', 'chip', word(TESTS_RESULT, gate.state)));
+    if (gate.optional) add(item, el('span', 'chip chip-faint', 'only if needed'));
+    add(list, item);
   }
-  return add(wrap, row);
+  return add(wrap, list);
 }
 
 // The document carries a token for where a piece of work stands; the sentence is
@@ -276,7 +277,11 @@ export function viewNeedsYou(state, ctx) {
 
 export function viewPullRequests(state) {
   const frag = document.createDocumentFragment();
-  add(frag, head('Pull requests', 'Every pull request the crew has open, and who is allowed to merge it.'));
+  // This panel is read from GitHub on a much slower cycle than the rest of the
+  // page, so it carries its own age rather than borrowing the header's.
+  add(frag, head('Pull requests',
+    'Every pull request the crew has open, and who is allowed to merge it.'
+    + (state.prs_read_at ? ` Read from GitHub ${ago(state.prs_read_at)}.` : '')));
   const lost = lostHere(state, 'prs');
   add(frag, lost);
   if (state.prs.length === 0) {
@@ -373,10 +378,15 @@ export function viewBacklog(state) {
 function repoBlock(repo) {
   const node = el('section', 'repo');
   const header = el('div', 'repo-head');
-  add(header, el('span', 'repo-name', repo.name),
-    repo.tangled
-      ? stateCell('brass', 'Left on a side branch')
-      : stateCell('starboard', `On ${repo.branch}`));
+  // Not read is its own answer. Rendering it as "On main" was a claim about a
+  // clone nothing had looked at.
+  let branch = stateCell('neutral', 'Branch not read');
+  if (repo.branch_read) {
+    branch = repo.tangled
+      ? stateCell('brass', `Left on ${repo.on_branch}, not ${repo.branch}`)
+      : stateCell('starboard', `On ${repo.on_branch || repo.branch}`);
+  }
+  add(header, el('span', 'repo-name', repo.name), branch);
   add(node, header);
 
   const facts = el('dl', 'facts');

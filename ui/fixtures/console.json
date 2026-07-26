@@ -195,50 +195,42 @@
         ],
         "gates": [
           {
-            "gate": "review",
-            "pass": "coldstart",
+            "note": "fresh independent read of the diff against base",
             "optional": false,
             "state": "unrecorded"
           },
           {
-            "gate": "fix",
-            "pass": "",
+            "note": "apply the review findings on the same branch",
             "optional": false,
             "state": "unrecorded"
           },
           {
-            "gate": "tests",
-            "pass": "",
+            "note": "must pass after the fixes",
             "optional": false,
             "state": "pass"
           },
           {
-            "gate": "review",
-            "pass": "merge-gate",
+            "note": "second independent review of the fixed tree; the merge gate",
             "optional": false,
             "state": "unrecorded"
           },
           {
-            "gate": "fix",
-            "pass": "",
+            "note": "apply the review findings on the same branch",
             "optional": false,
             "state": "unrecorded"
           },
           {
-            "gate": "tests",
-            "pass": "",
+            "note": "must pass after the fixes",
             "optional": false,
             "state": "unrecorded"
           },
           {
-            "gate": "security",
-            "pass": "",
+            "note": "run only when the change has a security surface",
             "optional": true,
             "state": "unrecorded"
           },
           {
-            "gate": "pr",
-            "pass": "",
+            "note": "open the pull request with a short human description",
             "optional": false,
             "state": "unrecorded"
           }
@@ -960,7 +952,6 @@
       "remote": "git@github.com:example-org/harbourmaster.git",
       "test_cmd": "npm test -- --run",
       "tangled": false,
-      "tangle_note": "",
       "notes": [
         {
           "kind": "invariant",
@@ -978,7 +969,9 @@
           "at": "2026-01-11"
         }
       ],
-      "notes_hidden": 0
+      "notes_hidden": 0,
+      "branch_read": true,
+      "on_branch": "main"
     },
     {
       "name": "tidebook",
@@ -988,7 +981,6 @@
       "remote": "git@github.com:example-org/tidebook.git",
       "test_cmd": "uv run --frozen pytest -q",
       "tangled": true,
-      "tangle_note": "clone is on feat/quota-window, not main",
       "notes": [
         {
           "kind": "pitfall",
@@ -996,7 +988,9 @@
           "at": "2026-01-09"
         }
       ],
-      "notes_hidden": 4
+      "notes_hidden": 4,
+      "branch_read": true,
+      "on_branch": "feat/quota-window"
     },
     {
       "name": "beacon",
@@ -1006,9 +1000,10 @@
       "remote": "git@github.com:example-org/beacon.git",
       "test_cmd": "cargo test --all",
       "tangled": false,
-      "tangle_note": "",
       "notes": [],
-      "notes_hidden": 0
+      "notes_hidden": 0,
+      "branch_read": true,
+      "on_branch": "main"
     },
     {
       "name": "lantern",
@@ -1018,7 +1013,6 @@
       "remote": "git@github.com:example-org/lantern.git",
       "test_cmd": "",
       "tangled": false,
-      "tangle_note": "",
       "notes": [
         {
           "kind": "routing",
@@ -1026,7 +1020,9 @@
           "at": "2026-01-02"
         }
       ],
-      "notes_hidden": 0
+      "notes_hidden": 0,
+      "branch_read": true,
+      "on_branch": "trunk"
     }
   ],
   "backlog": {

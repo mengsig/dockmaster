@@ -40,7 +40,7 @@ set -euo pipefail
 # Only REQUIRED tools gate the verdict; the other two tiers only warn — but a
 # missing/unauthenticated gh does qualify the VERDICT (see report_pr_delivery).
 REQUIRED_TOOLS=(
-  "git" "clone, worktree, and all git operations"
+  "git" "cloning, branching, and every git operation"
   "jq"  "registry and backlog JSON (single-owner parsers)"
 )
 PRFLOW_TOOLS=(

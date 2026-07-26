@@ -109,9 +109,9 @@ function checkUndeterminableIsNotNotStarted() {
 
 function checkGatesAreAPlanNotProgress() {
   const declared = [
-    { gate: 'review', pass: 'coldstart', optional: false },
-    { gate: 'tests', pass: '', optional: false },
-    { gate: 'pr', pass: '', optional: false },
+    { gate: 'review', pass: 'coldstart', optional: false, note: 'fresh independent read of the diff against base' },
+    { gate: 'tests', pass: '', optional: false, note: 'must pass after coldstart fixes' },
+    { gate: 'pr', pass: '', optional: false, note: 'open the PR with a short human description' },
   ]
   // The gate list shows only while the work is IN the gates.
   const inGates = live.buildTrack(task({ tests: 'pass', tests_cmd: 'npm test' }), declared)
@@ -119,12 +119,23 @@ function checkGatesAreAPlanNotProgress() {
   equal(inGates.gates.length, 3, 'the declared gates are listed')
   equal(inGates.gates[0].state, 'unrecorded', 'a review gate records nothing and must say so')
   equal(inGates.gates[1].state, 'pass', 'the tests gate reports what it recorded')
-  ok(!inGates.gates.some((g) => g.state === 'pass' && g.gate !== 'tests'),
-    'no gate is inferred to have passed from its position in the list')
+  equal(inGates.gates.filter((g) => g.state !== 'unrecorded').length, 1,
+    'only the one gate that recorded something claims anything')
+
+  // The gate TOKENS must not cross at all: `review (coldstart)` and
+  // `review (merge-gate)` are the crew's names for its own machine, and they
+  // were being printed on the operator's In-flight panel verbatim.
+  for (const gate of inGates.gates) {
+    ok(!('gate' in gate) && !('pass' in gate), 'a gate token does not cross to the page')
+    ok(typeof gate.note === 'string' && gate.note.length > 0, 'each gate crosses as the sentence written for it')
+  }
+
+  const unwritten = live.buildTrack(task({ tests: 'pass' }), [{ gate: 'review', pass: 'merge-gate' }])
+  equal(unwritten.gates[0].note, '', 'a gate with no sentence written for it carries none, rather than its token')
 
   const notInGates = live.buildTrack(task({ state: 'in_progress' }), declared)
   equal(notInGates.gates.length, 0, 'work that has not reached the gates lists none')
-  console.log('ok   the gate list is what must still be cleared, never a progress claim')
+  console.log('ok   the gate list is what must still be cleared, in words, never a progress claim')
 }
 
 // --- 2. nothing internal reaches the screen ----------------------------------
@@ -181,6 +192,7 @@ function checkMemoryFramingIsNotShown() {
 
 function checkAFailedSweepIsNeverAnEmptyFleet() {
   const local = {
+    at: '2026-01-01T00:00:00Z',
     degraded: [], repos: [], work: [], reviews: [],
     backlog: { in_flight: [], queued: [], done: [] },
     decisions: { open: [], resolved: [] },
@@ -189,12 +201,12 @@ function checkAFailedSweepIsNeverAnEmptyFleet() {
   // The whole point: sabotaging the sweep used to produce open_prs: 0,
   // needs_you: [] and "Nothing is waiting to land" - a red PR, a
   // changes-requested PR and a merge-ready PR all vanishing into "All clear".
-  const lostSweep = live.buildDocument(local, { rows: null })
+  const lostSweep = live.buildDocument(local, { rows: null, at: '' })
   equal(lostSweep.fleet.open_prs, 0, 'a failed sweep knows of no PRs')
   ok(lostSweep.degraded.some((d) => d.source === 'pull_requests' && d.panel === 'prs'),
     'a failed sweep is recorded against the panel that lost it')
 
-  const emptySweep = live.buildDocument(local, { rows: [] })
+  const emptySweep = live.buildDocument(local, { rows: [], at: '2026-01-01T00:00:00Z' })
   equal(emptySweep.degraded.length, 0, 'a sweep that read zero PRs is not a degradation')
   ok(lostSweep.degraded.length !== emptySweep.degraded.length,
     '"no open PRs" and "could not read the PRs" must not produce the same document')
@@ -224,10 +236,11 @@ async function checkDegradationCarriesTokensNotProse() {
       `'${source}' must land on a panel the needs-you view reads`)
   }
   const doc = live.buildDocument(
-    { degraded: [{ source: 'backlog', panel: 'backlog', subject: '' }], repos: [], work: [], reviews: [],
+    { at: '2026-01-01T00:00:00Z', degraded: [{ source: 'backlog', panel: 'backlog', subject: '' }],
+      repos: [], work: [], reviews: [],
       backlog: { in_flight: [], queued: [], done: [] }, decisions: { open: [], resolved: [] },
       health: { verdict: '', checks: [], cleanup: [] } },
-    { rows: [] },
+    { rows: [], at: '2026-01-01T00:00:00Z' },
   )
   for (const row of doc.degraded) {
     ok(!('error' in row), 'a degradation carries no free text - stderr is not for the operator')
@@ -303,7 +316,7 @@ async function checkFixtureIsNeutral() {
 }
 
 function checkShapeRefusesAHalfDocument() {
-  const good = { source: 'live', fleet: { needs_you: 0 }, needs_you: [], work: [], prs: [], repos: [], reviews: [], degraded: [], backlog: {}, decisions: {}, health: {} }
+  const good = { source: 'live', generated_at: '2026-01-01T00:00:00Z', prs_read_at: '', fleet: { needs_you: 0 }, needs_you: [], work: [], prs: [], repos: [], reviews: [], degraded: [], backlog: {}, decisions: {}, health: {} }
   const refuses = (doc, why) => {
     let threw = false
     try { state.assertShape(doc, 'test') } catch { threw = true }

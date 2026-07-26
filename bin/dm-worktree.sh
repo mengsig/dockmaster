@@ -35,7 +35,12 @@
 #                                    both force paths, including the one that
 #                                    prunes a vanished worktree's admin record.
 #   list [--json]                   list task worktrees
-#   tangle <repo>                   is the primary clone tangled onto a feature branch?
+#   tangle <repo> [--json]          is the primary clone tangled onto a feature branch?
+#                                    Human form: prints a TANGLE: line and exits 1
+#                                    when it is. --json ALWAYS exits 0 when the
+#                                    clone could be read, and answers in the
+#                                    object - a reader cannot otherwise tell
+#                                    "on a side branch" from "the script failed".
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -261,6 +266,25 @@ tangle_check() {
   return 0
 }
 
+# tangle_json <repo> - the same question, as one object, exiting 0 whenever the
+# clone COULD be read. The human form's "exit 1 = tangled" is a fine shell
+# contract and a trap for a machine reader, which cannot distinguish it from the
+# script failing; and the prose it prints names a path and a git command, which
+# is not for an operator-facing surface. Only a genuine read failure exits
+# nonzero here.
+tangle_json() {
+  local repo="$1" dir def cur
+  dm_need jq
+  dir="$(dm_repo_dir "$repo")"
+  def="$(dm_default_branch "$dir")"
+  cur="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  cur="$(dm_first_line "$cur")"
+  [ -n "$cur" ] \
+    || dm_die "tangle: cannot read the current branch of '$repo' at $dir; the clone is unreadable as a git repository"
+  jq -nc --arg repo "$repo" --arg on "$cur" --arg expected "$def" \
+    '{repo:$repo, on:$on, expected:$expected, tangled: ($on != $expected and $on != "HEAD")}'
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   create)
@@ -364,8 +388,16 @@ case "$cmd" in
     ;;
 
   tangle)
-    repo="${1:-}"; [ -n "$repo" ] || dm_die "usage: dm-worktree.sh tangle <repo>"
-    tangle_check "$repo"
+    repo="${1:-}"; shift 2>/dev/null || true
+    [ -n "$repo" ] || dm_die "usage: dm-worktree.sh tangle <repo> [--json]"
+    want_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) want_json=1; shift ;;
+        *) dm_die "usage: dm-worktree.sh tangle <repo> [--json]" ;;
+      esac
+    done
+    if [ "$want_json" -eq 1 ]; then tangle_json "$repo"; else tangle_check "$repo"; fi
     ;;
 
   landed)

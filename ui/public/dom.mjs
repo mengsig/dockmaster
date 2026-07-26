@@ -176,6 +176,14 @@ export const CHECK_STATUS = {
   fail: ['port', 'Broken'],
 };
 
+// What the tests gate recorded. `skip` is a real, registered outcome - the repo
+// has no test command - not a failure and not a pass.
+export const TESTS_RESULT = {
+  pass: 'Tests passed',
+  fail: 'Tests failed',
+  skip: 'No tests registered',
+};
+
 // The pipeline track, in the operator's nouns. A key with no entry here would
 // print raw, so every key trackKeys() can emit has one.
 export const STAGE_LABEL = {

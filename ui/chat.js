@@ -113,6 +113,11 @@ function pendingCount(dmHome) {
 // claimOldest(dmHome) -> the oldest undelivered operator message, or null.
 // The rename IS the claim: two concurrent pollers cannot both win it, because
 // only one rename off a given name succeeds.
+//
+// An entry that will not parse is QUARANTINED, not thrown: the rename has
+// already taken it out of the inbox, so it cannot be retried and cannot loop -
+// and throwing here killed the poller, which is the dockmaster's whole wake
+// mechanism. It is reported loudly and the next message is delivered.
 function claimOldest(dmHome) {
   const dir = ensureDirs(dmHome);
   for (const name of inboxNames(dmHome)) {
@@ -124,13 +129,25 @@ function claimOldest(dmHome) {
       if (err.code === 'ENOENT') continue; // another poller took it; try the next
       throw err;
     }
-    const message = JSON.parse(fs.readFileSync(to, 'utf8'));
-    if (typeof message.text !== 'string' || message.from !== 'operator') {
-      throw new Error(`chat: claimed message ${name} is not an operator message`);
-    }
-    return message;
+    const message = readClaimed(to);
+    if (message) return message;
+    process.stderr.write(`console: chat: ${to} is not a readable operator message; it was set aside\n`);
   }
   return null;
+}
+
+function readClaimed(file) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    if (err instanceof SyntaxError) return null;
+    throw err;
+  }
+  if (parsed === null || typeof parsed !== 'object') return null;
+  if (typeof parsed.text !== 'string' || parsed.from !== 'operator') return null;
+  return parsed;
 }
 
 module.exports = { uiDir, ensureDirs, append, read, pendingCount, claimOldest };

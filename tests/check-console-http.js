@@ -148,14 +148,26 @@ async function checkCrossSiteWritesAreRefused(port, home) {
     { origin: 'https://evil.example', 'access-control-request-method': 'POST' })
   ok(!preflight.headers['access-control-allow-origin'], 'a cross-origin preflight is not granted')
 
-  // A forced refresh drives a fleet-wide PR sweep that records what it finds
-  // and takes the task lock. It is a GET, so an <img src> reaches it - and must
-  // not, or a hostile page can run the sweep in a loop.
-  const forced = await request(port, 'GET', '/api/state?refresh=1', { 'sec-fetch-site': 'cross-site' })
-  equal(forced.status, 403, 'a cross-site forced refresh is refused')
-  const plain = await request(port, 'GET', '/api/state', { 'sec-fetch-site': 'cross-site' })
-  equal(plain.status, 200, 'an ordinary cached read is still served')
-  console.log(`ok   ${attempts.length} cross-site write shapes refused, none reached the queue`)
+  // Reading the fleet RECORDS what it reads: the collection behind either form
+  // of /api/state writes each PR's state and takes the task lock. So BOTH are
+  // state-changing GETs. The un-forced one is the dangerous one - it needs no
+  // query string and no legacy browser, just <img src="/api/state"> on a timer.
+  const reads = [
+    ['/api/state?refresh=1', { 'sec-fetch-site': 'cross-site' }, 'a forced refresh'],
+    ['/api/state', { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': 'image' }, 'an <img src> read'],
+    ['/api/state', { 'sec-fetch-site': 'same-site' }, 'a read from another port of 127.0.0.1'],
+    ['/api/state', { origin: 'https://evil.example' }, 'a read carrying a hostile Origin'],
+  ]
+  for (const [urlPath, headers, what] of reads) {
+    const res = await request(port, 'GET', urlPath, headers)
+    equal(res.status, 403, `${what} must be refused`)
+  }
+  // The page's own read, and a local tool's, still work.
+  equal((await request(port, 'GET', '/api/state', { 'sec-fetch-site': 'same-origin' })).status, 200,
+    'the console page may read the fleet')
+  equal((await request(port, 'GET', '/api/state')).status, 200,
+    'a local client with no browser headers may read the fleet')
+  console.log(`ok   ${attempts.length} cross-site write shapes and ${reads.length} cross-site reads refused`)
 }
 
 async function checkThePageItselfStillWorks(port, home) {
@@ -234,6 +246,27 @@ async function checkBadRequestsAreRefusedNotCrashed(port) {
   console.log(`ok   ${cases.length + 2} bad requests refused with a status, not a crash`)
 }
 
+// A /review/ address is a same-tab navigation: whatever comes back IS the page.
+// There is no script layer to word a failure, so the failure has to arrive
+// already worded - not as the script name, argv and stderr behind it.
+async function checkReviewFailuresAreWorded(port, home) {
+  const internal = /dm-[a-z]+\.sh|--json|exit \d|ENOENT|ENOTDIR|EACCES|\/tmp\/|jq/
+  const cases = [
+    [`/review/nothing-here/`, 404, 'an unknown review page'],
+    [`/review/%zz/`, 400, 'a malformed address'],
+    [`/review/demo-review/change.html/deeper.png`, 404, 'a segment appended to a real file (ENOTDIR)'],
+  ]
+  for (const [urlPath, status, what] of cases) {
+    const res = await request(port, 'GET', urlPath)
+    equal(res.status, status, `${what} -> ${status}`)
+    ok(/^text\/html/.test(res.headers['content-type'] || ''),
+      `${what} renders as a page, not a JSON blob in the tab`)
+    ok(!internal.test(res.text), `${what} shows no script name, errno or path: ${res.text.slice(0, 160)}`)
+    ok(!res.text.includes(home), `${what} does not print the state directory`)
+  }
+  console.log(`ok   ${cases.length} review-page failures render worded, with nothing internal in the body`)
+}
+
 // --- 3. a review page can serve the screenshots it ships with ----------------
 
 // A review page references its assets relatively and puts them in
@@ -249,8 +282,17 @@ async function checkReviewAssetsAtAnyDepth(port, home) {
 
   const page = await request(port, 'GET', `/review/${id}/`)
   equal(page.status, 200, 'the review page itself is served')
-  ok(page.headers['content-security-policy'].includes("connect-src 'none'"),
-    'an archived review may reach neither this server nor the network')
+  const csp = page.headers['content-security-policy']
+  ok(csp.includes("connect-src 'none'"), 'an archived review may not reach the network')
+  // A review page is SAME-ORIGIN, so the cross-site refusal cannot stop it
+  // firing GET /api/state through an <img>, a <link rel=stylesheet> or an
+  // @font-face. Every fetch directive is scoped to /review/ instead of 'self'.
+  for (const directive of ['script-src', 'style-src', 'img-src', 'font-src']) {
+    const clause = csp.split(';').map((c) => c.trim()).find((c) => c.startsWith(`${directive} `))
+    ok(clause !== undefined, `${directive} is declared`)
+    ok(!/'self'/.test(clause), `${directive} is not the whole origin - that would reach /api/`)
+    ok(clause.includes(`http://127.0.0.1:${port}/review/`), `${directive} is scoped to the review archive`)
+  }
   const bare = await request(port, 'GET', `/review/${id}`)
   equal(bare.status, 302, 'the form without a trailing slash redirects to the one assets resolve from')
 
@@ -291,6 +333,7 @@ async function main() {
     await checkATornTranscriptLineDoesNotKillIt(port, home)
     await checkBadRequestsAreRefusedNotCrashed(port)
     await checkReviewAssetsAtAnyDepth(port, home)
+    await checkReviewFailuresAreWorded(port, home)
 
     // Every case above ran against ONE process. Had any of them killed it the
     // later ones would have failed; this states the property outright.

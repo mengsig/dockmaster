@@ -34,13 +34,6 @@ const ROUTES = {
 };
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
   + "connect-src 'self'; base-uri 'none'; form-action 'none'";
-// A review page is HTML this distro's crewmates wrote, with its styles and
-// scripts inline, so it needs 'unsafe-inline' to render at all. `connect-src
-// 'none'` + `form-action 'none'` are what make that safe: a script inside an
-// archived review can reach neither this server's API nor the network.
-const REVIEW_CSP = "default-src 'none'; script-src 'self' 'unsafe-inline'; "
-  + "style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; "
-  + "connect-src 'none'; base-uri 'none'; form-action 'none'";
 const MAX_BODY_BYTES = 64 * 1024;
 const LONG_POLL_MS = 25000;
 // A review page ships beside its screenshots. One path segment, no slashes and
@@ -88,15 +81,57 @@ const sendJson = (res, status, value) => send(res, status, 'application/json; ch
 
 // A local tool that fails must say so in the surface the operator is looking at,
 // never render a blank panel that reads as "all clear".
-function fail(res, status, message) {
-  process.stderr.write(`console: ${message}\n`);
+//
+// `detail` is the raw reason - a script name, its argv, its stderr, a path. It
+// goes to this process's log ONLY. `message` is what the caller is willing to
+// show, and for a /review/ navigation the browser renders it as the page.
+function fail(res, status, message, detail) {
+  process.stderr.write(`console: ${message}${detail ? ` — ${detail}` : ''}\n`);
   sendJson(res, status, { error: message });
 }
+
+// A /review/ address is a same-tab NAVIGATION: there is no page script to word
+// a failure, so the browser renders whatever comes back as the body. It gets a
+// worded page rather than a JSON blob.
+function failReview(res, status, message, detail) {
+  process.stderr.write(`console: review: ${message}${detail ? ` — ${detail}` : ''}\n`);
+  const body = `<!doctype html><html lang="en"><head><meta charset="utf-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+    + `<meta name="color-scheme" content="dark light"><title>dockmaster</title>`
+    + `<style>body{margin:0;display:grid;place-items:center;min-height:100vh;`
+    + `background:#0a1014;color:#e6edf1;font:16px/1.6 system-ui,sans-serif}`
+    + `div{max-width:32rem;padding:2rem;border-left:2px solid #c8a15c}`
+    + `p{margin:.5rem 0;color:#93a6b1}b{color:#e6edf1;font-weight:600}`
+    + `@media(prefers-color-scheme:light){body{background:#fff;color:#0a1014}p{color:#46585f}b{color:#0a1014}}`
+    + `</style></head><body><div><p><b>This review page could not be opened.</b></p>`
+    + `<p>${escapeHtml(message)}</p>`
+    + `<p>Ask the dockmaster to look into it.</p></div></body></html>`;
+  send(res, status, 'text/html; charset=utf-8', body);
+}
+
+const escapeHtml = (text) => String(text).replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const localHosts = (port) => [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`];
 
 function hostIsLocal(req, port) {
   return localHosts(port).includes(req.headers.host || '');
+}
+
+// A review page is HTML this distro's crewmates wrote, with its styles and
+// scripts inline, so it needs 'unsafe-inline' to render at all. Every subresource
+// it may load is then scoped to /review/ ITSELF - not `'self'`, which is the
+// whole origin and would let an inline script fire GET /api/state?refresh=1 in a
+// loop through an <img>, a <link rel=stylesheet> or an @font-face. That request
+// drives a fleet-wide sweep which writes and takes the task lock, and the
+// cross-site refusal cannot stop it because a review page IS same-origin.
+// Together with connect-src 'none' and form-action 'none', the API is
+// unreachable from an archived review by any means.
+function reviewCsp(port) {
+  const own = localHosts(port).map((host) => `http://${host}/review/`).join(' ');
+  return `default-src 'none'; script-src ${own} 'unsafe-inline'; style-src ${own} 'unsafe-inline'; `
+    + `img-src ${own} data:; font-src ${own} data:; `
+    + "connect-src 'none'; base-uri 'none'; form-action 'none'";
 }
 
 // A header value is only ever echoed back bounded: it is attacker-controlled,
@@ -183,10 +218,10 @@ async function serveReview(res, cfg, pathname) {
     parts = pathname.split('/').slice(2).map(decodeURIComponent);
   } catch (err) {
     // A malformed percent-escape is bad input, not a server fault.
-    return fail(res, 400, `review: that address cannot be read (${err.message})`);
+    return failReview(res, 400, 'That address is not a review page.', err.message);
   }
   const id = parts[0];
-  if (!id) return fail(res, 400, `review: '${pathname}' is not a review page`);
+  if (!id) return failReview(res, 400, 'That address is not a review page.', pathname);
   if (parts.length === 1) {
     res.writeHead(302, { location: `/review/${encodeURIComponent(id)}/`, 'content-length': 0, 'cache-control': 'no-store' });
     return res.end();
@@ -198,19 +233,22 @@ async function serveReview(res, cfg, pathname) {
   const rest = parts.slice(1);
   const isIndex = rest.length === 1 && rest[0] === '';
   if (!isIndex && !rest.every((segment) => ASSET_NAME.test(segment))) {
-    return fail(res, 400, `review: '${pathname}' is not a review page`);
+    return failReview(res, 400, 'That address is not a review page.', pathname);
   }
   const found = await live.reviewDir(cfg.bin, id);
-  if (!found) return fail(res, 404, 'review: no review page for that work');
+  if (!found) return failReview(res, 404, 'There is no review page for that work.');
   const file = isIndex ? found.file : path.join(found.dir, ...rest);
   let body;
   try {
     body = fs.readFileSync(file);
   } catch (err) {
-    return fail(res, 404, `review: ${err.code === 'ENOENT' ? 'that file is not in the review page' : err.message}`);
+    // Every arm is worded. The old fallback printed err.message, which carries
+    // the errno and the absolute path of the review directory - reachable by
+    // appending a segment to any real file (ENOTDIR).
+    return failReview(res, 404, 'That file is not part of this review page.', err.message);
   }
   const type = ASSET_TYPES[String(file).split('.').pop().toLowerCase()] || 'application/octet-stream';
-  send(res, 200, type, body, { 'content-security-policy': REVIEW_CSP });
+  send(res, 200, type, body, { 'content-security-policy': reviewCsp(cfg.port) });
 }
 
 // settle(watchers, waiter, force) - answer one waiter and retire it, containing
@@ -301,17 +339,19 @@ function handle(req, res, cfg, watchers) {
     return serveStatic(res, url.pathname);
   }
   if (req.method === 'GET' && url.pathname === '/api/state') {
-    // `refresh=1` bypasses the cache and drives a fleet-wide PR sweep, which
-    // burns GitHub calls, takes the task lock and RECORDS what it finds. That
-    // makes it a state-changing GET, so it takes the cross-site refusal too -
-    // an <img src> on a hostile page must not be able to run it in a loop.
-    const forced = url.searchParams.get('refresh') === '1';
-    const refusal = forced ? crossSiteRefusal(req, cfg.port) : null;
+    // THE WHOLE ROUTE, not just `refresh=1`. Either form runs the collection
+    // whenever its cache tier has lapsed (20s local, 150s sweep), and that
+    // collection RECORDS each PR's state through dm_meta_set, which takes the
+    // same lock live crew work uses. So an <img src="/api/state"> on a hostile
+    // page contends for that lock every 20s and drives a full GitHub sweep
+    // every 150s, forever - no forced refresh and no legacy browser needed.
+    // A state-changing GET is still a state-changing request.
+    const refusal = crossSiteRefusal(req, cfg.port);
     if (refusal) return fail(res, refusal.status, refusal.message);
     // A failed collection is reported as a failure, never as an empty fleet.
     // The page words the failure from `source`; the raw reason is already on
     // stderr, because a script name and its stderr are not for the operator.
-    return state.collect(cfg.source, cfg.bin, forced)
+    return state.collect(cfg.source, cfg.bin, url.searchParams.get('refresh') === '1')
       .then((doc) => sendJson(res, 200, doc))
       .catch((err) => {
         process.stderr.write(`console: /api/state: ${err.message}\n`);
@@ -319,7 +359,8 @@ function handle(req, res, cfg, watchers) {
       });
   }
   if (req.method === 'GET' && url.pathname.startsWith('/review/')) {
-    return serveReview(res, cfg, url.pathname).catch((err) => fail(res, 500, `review: ${err.message}`));
+    return serveReview(res, cfg, url.pathname)
+      .catch((err) => failReview(res, 500, 'The review archive could not be read.', err.message));
   }
   if (req.method === 'GET' && url.pathname === '/api/chat') return serveChat(res, cfg, url, watchers);
   if (req.method === 'POST' && url.pathname === '/api/chat') {

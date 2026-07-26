@@ -9,7 +9,10 @@
 // to keep in sync, and it would drift.
 //
 // Document shape (every field required unless marked optional):
-//   generated_at  ISO timestamp
+//   generated_at  when the LOCAL half was collected, not when it was served -
+//                 the two halves are cached separately and a served document is
+//                 up to a TTL old
+//   prs_read_at   when the sweep last read GitHub ('' if it never did)
 //   source        "fixture" | "live"  - the page STATES which; a demo fleet the
 //                 operator cannot tell from their own is the point of failure
 //   degraded[]    { source, panel, subject } - what could NOT be read, as tokens
@@ -43,7 +46,8 @@ const live = require('./live');
 const FIXTURE = path.join(__dirname, 'fixtures', 'console.json');
 
 const REQUIRED_KEYS = [
-  'source', 'fleet', 'needs_you', 'work', 'prs', 'repos', 'backlog', 'decisions', 'reviews', 'health', 'degraded',
+  'source', 'generated_at', 'prs_read_at',
+  'fleet', 'needs_you', 'work', 'prs', 'repos', 'backlog', 'decisions', 'reviews', 'health', 'degraded',
 ];
 const SOURCES = ['fixture', 'live'];
 
@@ -104,6 +108,7 @@ function fromFixture() {
   // live, whatever the committed JSON says.
   doc.source = 'fixture';
   doc.generated_at = new Date().toISOString();
+  doc.prs_read_at = doc.generated_at;
   return assertShape(doc, FIXTURE);
 }
 
@@ -148,9 +153,9 @@ async function collect(source, bin, force) {
   // say so, rather than emptying the whole console. `rows: null` IS that signal.
   const [local, sweep] = await Promise.all([
     fresh(tiers.local, bin, force),
-    fresh(tiers.prs, bin, force).then((rows) => ({ rows }), (err) => {
+    fresh(tiers.prs, bin, force).then((sweep_) => sweep_, (err) => {
       process.stderr.write(`console: pull_requests: ${err.message}\n`);
-      return { rows: null };
+      return { rows: null, at: '' };
     }),
   ]);
   return assertShape(live.buildDocument(local, sweep), 'live');
