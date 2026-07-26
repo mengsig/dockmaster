@@ -3,7 +3,7 @@
   "base_commit": "#177",
   "shared_agents_bytes": 13126,
   "claude_settings_bytes": 1579,
-  "claude_skill_bytes": 101563,
+  "claude_skill_bytes": 102988,
   "claude_skill_description_bytes": 5264,
   "claude_files_sha256": {
     ".claude/agents/crew-high.md": "6ba9373cd62f942dfeae79ca3b7c1e26f29d71b51362862860b5943131f77001",
@@ -22,14 +22,14 @@
     ".claude/skills/memory-routing/SKILL.md": "a27ddcbc312125f1b3d6d94c91346c7db8b7d4208f90990d067a798ebf04cc9c",
     ".claude/skills/merge-conflict/SKILL.md": "9fd025b13a754bb561176c86d3f825861896ea384f03cd2ee2d96496dee96b13",
     ".claude/skills/post-pr-review/SKILL.md": "6c7f6a16205561d0301610b86a56b5e9c71dfa3373bfed5257078f1ca7c603b4",
-    ".claude/skills/pr-workflow/SKILL.md": "fb2e0bf5f99ca8b20787eee57a57346673c42788788b2852b5248327d73f721b",
+    ".claude/skills/pr-workflow/SKILL.md": "51d62d52faea15fc87a5bca3f0c57ef61c3d8702e385d58136700d0c44aa1b22",
     ".claude/skills/project-management/SKILL.md": "7bc3f66ab7229ddc4cfd2f022ac179db06c3d544f5dee2d5e1a98fc8caa92cfe",
     ".claude/skills/repo-sync/SKILL.md": "a8dac0bdae8d3ee31b0631940aeaf8239ada0aebd2008ad3232a521503bce638",
     ".claude/skills/rollback/SKILL.md": "6b6f4b1b4289362b5c50a5b195b19ca4ad01a24e0dd361eef99bd94682ddd284",
     ".claude/skills/secondmate/SKILL.md": "de070f494e3c27d54bcd4f8b6dccbf3a13dccf6e7a599bf793dfc5e8457d32d4",
     ".claude/skills/stuck-worker/SKILL.md": "a0713e0d518cbfb288ca456ebafd3e4f65344c9f79437823c10986e4b446c193",
     ".claude/skills/supervision/SKILL.md": "77288dd8aa1423ce769583be33f736af0361cb0b90509f3b3c681663960c3105",
-    ".claude/skills/task-lifecycle/SKILL.md": "e6dc73fb167529fbc04dc2850ea0a4d6a3ca0617982fd74f921f6745d8709ef3",
+    ".claude/skills/task-lifecycle/SKILL.md": "5cc4fb29a71c3f3a00a1e975d1a92f4785e749096a794059d3f5c8b414ad1fe2",
     ".claude/skills/testing-policy/SKILL.md": "99fb92f05eb91c57beeb221c9e2b3277d8eaf66d3ccb644e37be9c4d9d3db7a6"
   },
   "limits": {

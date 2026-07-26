@@ -1278,6 +1278,55 @@ dm_recommended_effort() {
   printf '%s\n' "${pair##* }"
 }
 
+# --- upsize-above-recommendation: the reason has to be named, not just paid ---
+# The recommendation is the DEFAULT dispatch; going above it on either dial is
+# allowed but must be a named decision, never a reflex ("size up when unsure"
+# bought opus/high on straight, well-specified work). Downsizing never needs a
+# reason — trading a slower/cheaper spawn for a faster one you'll retry costs
+# nobody but the dispatcher.
+#
+# Ranked subset of model tiers. `fable` is deliberately NOT in it, same reason
+# `dm_recommended_dispatch` never validates model against a list elsewhere:
+# rank is only for THIS upsize check, and an unranked tier must read as
+# "cannot prove an upsize" rather than silently sorting before/after opus.
+DM_MODEL_TIERS='haiku sonnet opus'
+
+# dm_model_rank <tier>  -> index in DM_MODEL_TIERS, or non-zero if unranked.
+dm_model_rank() {
+  local value="${1:-}" tier i=0
+  for tier in $DM_MODEL_TIERS; do
+    [ "$value" = "$tier" ] && { printf '%d\n' "$i"; return 0; }
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# dm_effort_rank <level>  -> index in DM_EFFORT_LEVELS, or non-zero if invalid.
+dm_effort_rank() {
+  local value="${1:-}" level i=0
+  for level in $DM_EFFORT_LEVELS; do
+    [ "$value" = "$level" ] && { printf '%d\n' "$i"; return 0; }
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# dm_dispatch_is_upsized <model> <effort> <rec_model> <rec_effort>  -> 0 if
+# either dial recorded is STRICTLY above its recommendation, 1 otherwise
+# (including "cannot compare" — a missing recommendation or an unranked model
+# is not evidence of an upsize, so it never forces a reason).
+dm_dispatch_is_upsized() {
+  local model="${1:-}" effort="${2:-}" rec_model="${3:-}" rec_effort="${4:-}"
+  local mr rmr er rer
+  if mr="$(dm_model_rank "$model")" && rmr="$(dm_model_rank "$rec_model")"; then
+    [ "$mr" -gt "$rmr" ] && return 0
+  fi
+  if er="$(dm_effort_rank "$effort")" && rer="$(dm_effort_rank "$rec_effort")"; then
+    [ "$er" -gt "$rer" ] && return 0
+  fi
+  return 1
+}
+
 # dm_transcript_model <file>  -> the model id a subagent ACTUALLY ran as, read
 # from the first `"model":"..."` in its transcript; non-zero when the file is
 # absent or carries none. Task meta and the transcript are independent sources,

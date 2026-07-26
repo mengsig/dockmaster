@@ -29,10 +29,11 @@
 #                         kind, measured diff) — a recommendation, not a record
 #   sizing [--transcripts <dir>]
 #                         the dispatch distribution over every task record:
-#                         counts by model, by effort, and how many are unsized.
-#                         With --transcripts, also cross-checks each record
-#                         against what its crewmate actually ran (exit 3 on a
-#                         mismatch)
+#                         counts by model, by effort, and how many are unsized
+#                         (split: predates the recommender, not yet dispatched,
+#                         or a real gate bypass). With --transcripts, also
+#                         cross-checks each record against what its crewmate
+#                         actually ran (exit 3 on a mismatch)
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -255,10 +256,21 @@ case "$cmd" in
         # A RECORD gate, not a spawn gate: the agent is already running, and
         # nothing checks the recorded effort against the subagent_type actually
         # passed. It forces the choice to be written down, it does not verify it.
-        [ -n "$(dm_meta_get "$id" model)" ] || dm_die "REFUSED: $id has no model recorded, so its dispatch was never sized. Choose a model tier for THIS task and record it (dm-task.sh set $id model <tier>), then record the owner."
+        dispatch_model="$(dm_meta_get "$id" model)"
+        [ -n "$dispatch_model" ] || dm_die "REFUSED: $id has no model recorded, so its dispatch was never sized. Choose a model tier for THIS task and record it (dm-task.sh set $id model <tier>), then record the owner."
         dispatch_effort="$(dm_meta_get "$id" effort)"
         [ -n "$dispatch_effort" ] || dm_die "REFUSED: $id has no reasoning effort recorded, so its dispatch was never sized. Choose a level for THIS task ($DM_EFFORT_LEVELS), record it (dm-task.sh set $id effort <level>), and spawn with the matching subagent_type crew-<level>."
         dm_effort_is_valid "$dispatch_effort" || dm_die "REFUSED: $id records effort '$dispatch_effort', which is not a valid level. Re-record one of: $DM_EFFORT_LEVELS."
+        # The computed recommendation is the DEFAULT dispatch (#166 calibration).
+        # Going above it on either dial is allowed but must be a NAMED decision —
+        # a missing or unranked recommendation cannot prove an upsize, so it never
+        # forces a reason. Downsizing below the recommendation needs none.
+        rec_model="$(dm_meta_get "$id" model_recommended)"
+        rec_effort="$(dm_meta_get "$id" effort_recommended)"
+        if dm_dispatch_is_upsized "$dispatch_model" "$dispatch_effort" "$rec_model" "$rec_effort"; then
+          [ -n "$(dm_meta_get "$id" sizing_reason)" ] \
+            || dm_die "REFUSED: $id dispatches above its computed recommendation (recommended ${rec_model:-?}/${rec_effort:-?}, recording $dispatch_model/$dispatch_effort) with no reason. Name it: dm-task.sh set $id sizing_reason \"<why this needs more>\", then record the owner. Downsizing never needs a reason."
+        fi
         ;;
     esac
     dm_meta_set "$id" "$key" "$value"
@@ -527,6 +539,7 @@ case "$cmd" in
     done
     [ -z "$transcripts" ] || [ -d "$transcripts" ] || dm_die "no such transcript directory: $transcripts"
     models=""; efforts=""; total=0; unsized=0
+    unsized_predates=0; unsized_pending=0; unsized_gate=0
     matched=0; unproven=0; mismatched=0; mismatches=""
     # Runs in THIS shell (the loop below reads a process substitution), so the
     # counters it updates are the ones printed.
@@ -548,7 +561,24 @@ case "$cmd" in
       m="$(dm_meta_get "$tid" model)"; e="$(dm_meta_get "$tid" effort)"
       [ -n "$m" ] && models="$models$m"$'\n'
       [ -n "$e" ] && efforts="$efforts$e"$'\n'
-      if [ -z "$m" ] || [ -z "$e" ]; then unsized=$((unsized + 1)); fi
+      if [ -z "$m" ] || [ -z "$e" ]; then
+        unsized=$((unsized + 1))
+        # A record with no model_recommended predates the recommender entirely
+        # (dm-brief.sh has stamped it on every ship task since #177) — nothing
+        # was skipped, there was nothing to choose from yet. One WITH a
+        # recommendation but no agent_id is just not dispatched yet. Only a
+        # recommendation plus an agent_id with no dial recorded is a real gate
+        # bypass: `set agent_id` refuses that shape, so seeing it here means the
+        # record was written some other way (a hand-edit, or code predating the
+        # guard) — worth naming differently from ordinary pending debt.
+        if [ -z "$(dm_meta_get "$tid" model_recommended)" ]; then
+          unsized_predates=$((unsized_predates + 1))
+        elif [ -z "$(dm_meta_get "$tid" agent_id)" ]; then
+          unsized_pending=$((unsized_pending + 1))
+        else
+          unsized_gate=$((unsized_gate + 1))
+        fi
+      fi
       if [ -n "$transcripts" ] && [ -n "$m" ]; then cross_check "$tid" "$m"; fi
     done < <(dm_all_task_ids)
     [ "$total" -gt 0 ] || { dm_info "(no tasks)"; exit 0; }
@@ -560,6 +590,9 @@ case "$cmd" in
     }
     out="$( tally model "$models"; tally effort "$efforts"
             printf 'unsized\tno model or no effort\t%s\n' "$unsized"
+            printf 'unsized\tpredates sizing (no recommendation recorded)\t%s\n' "$unsized_predates"
+            printf 'unsized\tnot yet dispatched (recommended, no agent_id)\t%s\n' "$unsized_pending"
+            printf 'unsized\tdispatched with no dial recorded (gate bypass)\t%s\n' "$unsized_gate"
             printf 'total\ttask records\t%s\n' "$total"
             if [ -n "$transcripts" ]; then
               printf 'verified\tran as recorded\t%s\n' "$matched"

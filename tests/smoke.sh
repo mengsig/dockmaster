@@ -4383,11 +4383,41 @@ W6BADEFF="$(b dm-task.sh set w6gate-1 effort max 2>&1 || true)"
 check "an invalid effort is refused, not stored"       '! b dm-task.sh set w6gate-1 effort max >/dev/null 2>&1 && [ -z "$(b dm-task.sh get w6gate-1 effort)" ]'
 check "the refusal names the valid set"                'grep -q "low medium high xhigh" <<<"$W6BADEFF"'
 b dm-task.sh set w6gate-1 effort xhigh >/dev/null
-check "both dials chosen admits the dispatch"          'b dm-task.sh set w6gate-1 agent_id agent-1 >/dev/null 2>&1'
+# effort xhigh ranks ABOVE the recommended medium (model haiku still ranks
+# below the recommended sonnet), so this is an UPSIZE on the effort axis and
+# needs a named reason before agent_id will record.
+W6NOREASON="$(b dm-task.sh set w6gate-1 agent_id agent-1 2>&1 || true)"
+check "both dials chosen but an unnamed upsize still refuses"  '! b dm-task.sh set w6gate-1 agent_id agent-1 >/dev/null 2>&1'
+check "the refusal names the recommendation and sizing_reason" \
+  'grep -q "above its computed recommendation" <<<"$W6NOREASON" && grep -q "sizing_reason" <<<"$W6NOREASON"'
+b dm-task.sh set w6gate-1 sizing_reason "ambiguous requirements need deeper reasoning" >/dev/null
+check "both dials chosen plus a named upsize reason admits the dispatch" \
+  'b dm-task.sh set w6gate-1 agent_id agent-1 >/dev/null 2>&1'
 # The gate forces a CHOICE, never the RECOMMENDED value: haiku+xhigh is neither
-# anchor, and overriding both is the intended workflow.
+# anchor, and overriding both (with a reason for the upsized axis) is the
+# intended workflow.
 check "the recorded choice may differ from both anchors" \
   '[ "$(b dm-task.sh get w6gate-1 model)" = haiku ] && [ "$(b dm-task.sh get w6gate-1 effort)" = xhigh ]'
+
+echo "== dispatch right-sizing: the recommendation is the default, upsizing is named =="
+w8mrank() { ( . "$ROOT/bin/dm-lib.sh"; dm_model_rank "$@" ); }
+w8erank() { ( . "$ROOT/bin/dm-lib.sh"; dm_effort_rank "$@" ); }
+w8up()    { ( . "$ROOT/bin/dm-lib.sh"; dm_dispatch_is_upsized "$@" ); }
+check "model tiers rank haiku < sonnet < opus" \
+  '[ "$(w8mrank haiku)" -lt "$(w8mrank sonnet)" ] && [ "$(w8mrank sonnet)" -lt "$(w8mrank opus)" ]'
+check "an unranked model (fable, or anything unknown) refuses to rank" \
+  '! w8mrank fable && ! w8mrank claude-future-9'
+check "effort levels rank low < medium < high < xhigh" \
+  '[ "$(w8erank low)" -lt "$(w8erank medium)" ] && [ "$(w8erank medium)" -lt "$(w8erank high)" ] \
+   && [ "$(w8erank high)" -lt "$(w8erank xhigh)" ]'
+check "matching the recommendation exactly is never an upsize" '! w8up sonnet medium sonnet medium'
+check "downsizing on both dials is never an upsize"            '! w8up haiku low opus xhigh'
+check "an upsized model alone is an upsize"                    'w8up opus medium sonnet medium'
+check "an upsized effort alone is an upsize"                   'w8up sonnet high sonnet medium'
+check "a downsized model cannot mask an upsized effort"        'w8up haiku xhigh sonnet medium'
+check "a missing recommendation cannot prove an upsize"        '! w8up opus xhigh "" ""'
+check "an unranked recommended model cannot prove a model upsize (effort still can)" \
+  '! w8up opus medium fable medium && w8up opus high fable medium'
 
 echo "== dispatch tier: per-pass sizing is one command (#177) =="
 # w7size carries a real 1-file/3-line diff, so the same branch must size a
@@ -4416,10 +4446,31 @@ check "sizing counts the efforts actually dispatched" 'grep -qE "^effort[[:space
 check "sizing counts the unsized dispatches"         'grep -qE "^unsized[[:space:]]+no model or no effort[[:space:]]+[0-9]+" <<<"$W7SIZING"'
 check "sizing totals every task record"              'grep -qE "^total[[:space:]]+task records[[:space:]]+[0-9]+" <<<"$W7SIZING"'
 # The unsized count must be REAL: w7size records neither dial, so it is in it.
+# `unsized` now has ONE aggregate row plus a three-way breakdown (predates /
+# pending / gate bypass) below it — grep the aggregate row by name, not the
+# bare "^unsized" prefix, or multiple matching lines collapse into one
+# multi-line string and break the numeric comparison.
 check "a task with neither dial is counted unsized" \
-  '[ "$(grep -E "^unsized" <<<"$W7SIZING" | awk "{print \$NF}")" -ge 1 ]'
+  '[ "$(grep -E "^unsized[[:space:]]+no model or no effort" <<<"$W7SIZING" | awk "{print \$NF}")" -ge 1 ]'
 check "sizing on an empty home says so rather than printing nothing" \
   '[ "$(DM_HOME="$TMP/sizing-empty" b dm-task.sh sizing)" = "(no tasks)" ]'
+
+echo "== dispatch tier: sizing distinguishes WHY a dispatch has no dial =="
+# w7size never had dm-brief.sh run on it, so it holds no model_recommended at
+# all: nothing was skipped, there was nothing to choose from yet.
+check "a task with no recommendation ever computed predates sizing" \
+  '[ "$(b dm-task.sh sizing | grep "predates sizing" | awk "{print \$NF}")" -ge 1 ]'
+b dm-task.sh new w8pending --kind ship --repo demo --title "not dispatched yet" >/dev/null
+b dm-worktree.sh create w8pending demo >/dev/null
+b dm-brief.sh w8pending >/dev/null
+check "a recommended-but-undispatched task reads as 'not yet dispatched'" \
+  '[ "$(b dm-task.sh sizing | grep "not yet dispatched" | awk "{print \$NF}")" -ge 1 ]'
+# The CLI itself refuses to create agent_id-with-no-dial (`set agent_id`'s
+# guard) — this shape only exists via a hand-edit or code that predates the
+# guard, so it must be named differently from ordinary pending debt.
+printf 'agent_id=hand-edited\n' >> "$DM_HOME/state/tasks/w8pending.meta"
+check "a recommendation plus an agent_id with no dial reads as a gate bypass" \
+  '[ "$(b dm-task.sh sizing | grep "gate bypass" | awk "{print \$NF}")" -ge 1 ]'
 
 echo "== dispatch tier: the record is cross-checked against what actually ran (#177) =="
 # `set agent_id` is a RECORD gate: it forces the choice to be written down and
@@ -4433,6 +4484,9 @@ w7sized() {   # <id> <model> <effort> <agent-id> -- a fully recorded dispatch
     && mv "$TMP/w7brief" "$DM_HOME/data/$1/brief.md"
   b dm-task.sh set "$1" model "$2" >/dev/null
   b dm-task.sh set "$1" effort "$3" >/dev/null
+  # Harmless when the dial lands at or below the recommendation; required when
+  # it does not (opus/high over an unmeasured, sonnet/medium-recommended diff).
+  b dm-task.sh set "$1" sizing_reason "test fixture dispatch" >/dev/null
   b dm-task.sh set "$1" agent_id "$4" >/dev/null
 }
 W7TX="$TMP/transcripts"; mkdir -p "$W7TX"

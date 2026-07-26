@@ -117,32 +117,46 @@ The table is **asymmetric on purpose**: a `review` never drops below
 `high` + opus (under-powering a review is how bad code lands), while a `build`
 pass over a small mechanical diff (≤2 files, ≤50 lines) does recommend
 `low` + haiku. With no measurable diff it falls back to sonnet / medium rather
-than guessing — a task with nothing built yet is not a small task. `dm-brief.sh`
-runs the build-pass recommendation at brief time and records
-`model_recommended` / `effort_recommended`. It stays a recommendation: you hold
-the context, and overriding either dial is one word.
+than guessing — a task with nothing built yet is not a small task, but that
+fallback is a floor, not a license to buy the ceiling every time nothing has
+been measured yet. `dm-brief.sh` runs the build-pass recommendation at brief
+time and records `model_recommended` / `effort_recommended`.
 
-**Choosing is mandatory.** `dm-task.sh set agent_id` REFUSES until the task
-records both `model` and `effort`, and refuses an effort outside the valid set.
-Record your actual choice, not the recommendation:
+**The recommendation is the dispatch default.** Spawn at what it says unless
+you have a specific reason not to. A straight task against a precise brief runs
+fine at `low` effort even on a capable model — effort buys deliberation for
+ambiguity and adversarial reading, not insurance against a plain diff. Going
+**above** the recommendation on either dial is allowed, but it is a decision,
+not a reflex: name it.
 
 ```
 dm-task.sh set <id> model <tier>
-dm-task.sh set <id> effort <level>     # must match the crew-<level> you spawned
+dm-task.sh set <id> effort <level>       # must match the crew-<level> you spawned
+dm-task.sh set <id> sizing_reason "<why this needs more than recommended>"
+                                          # only when EITHER dial is above the
+                                          # recommendation — downsizing needs none
 dm-task.sh set <id> agent_id <id>
 ```
 
-This is a **record gate, not a spawn gate.** The crewmate is already running by
-the time `set agent_id` executes, and nothing compares the recorded effort
-against the `subagent_type` you actually passed — same shape as the `{TASK}`
-brief guard. It guarantees the choice was made and written down; it does NOT
-verify what was spawned. Record what you really passed, or the meta lies.
+**Choosing is mandatory, and an unnamed upsize is refused.** `dm-task.sh set
+agent_id` REFUSES until the task records both `model` and `effort` (an effort
+outside the valid set is refused too), AND — if either recorded dial ranks
+above its recommendation — until `sizing_reason` is also recorded. A dial equal
+to or below the recommendation needs no reason. This is a **record gate, not a
+spawn gate**: the crewmate is already running by the time `set agent_id`
+executes, and nothing compares the recorded effort against the `subagent_type`
+you actually passed — same shape as the `{TASK}` brief guard. It guarantees the
+choice was made, and any upsize named, and written down; it does NOT verify
+what was spawned. Record what you really passed, or the meta lies.
 
 `dm-status` flags a live task missing either dial as UNSIZED, and
 `dm-task.sh sizing` prints the fleet's distribution — counts by model, by
-effort, and how many dispatches never chose. Read it when you want to know
+effort, and how many dispatches never chose (split into predates-the-recommender,
+not-yet-dispatched, and a real gate bypass). Read it when you want to know
 whether the spend was proportionate; a bottom tier that never appears is the
-defect it was added to expose (#177).
+defect it was added to expose (#177), and a wall of `sizing_reason`-less upsizes
+would be the same defect showing up a different way — except this one no
+longer records without a reason.
 
 `sizing --transcripts <dir>` goes further and checks each record against what
 the crewmate ACTUALLY ran, reading the model out of its transcript (one
@@ -153,8 +167,10 @@ unproven, never a pass; a contradiction is a MISMATCH and exits non-zero.
 
 The same judgment applies to **every** sub-unit you spawn downstream — review
 passes, verification, fix rounds, merge-gate reasoning (see `pr-workflow`) — not
-just the implementing crewmate; `recommend <role> <id>` sizes those too. Never
-trade correctness for tokens: where being wrong is expensive, size up.
+just the implementing crewmate; `recommend <role> <id>` sizes those too. The
+default is proportionate, not maximal: reach above it only when the work
+actually needs debugging, adversarial reading, or a large cross-cutting diff —
+and say so.
 
 For work that mutates files where a plain subagent would collide with siblings,
 prefer `isolation: "worktree"`; here the crew already has a dedicated worktree
