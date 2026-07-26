@@ -6015,16 +6015,29 @@ check "watch leaves that pid file alone"             '[ -f "$DM_HOME/state/ui/wa
 check "and this shell was not killed"                'kill -0 $$'
 rm -f "$DM_HOME/state/ui/watch.pid"
 
+# The watcher is its OWN process - a console that dies on its own (a crash, a
+# killed session, anything short of `stop`) does not necessarily take the
+# watcher with it. `status` must say so: a surviving watcher after the console
+# is gone is neither "armed" (nothing can reach it) nor silence (it still IS
+# running) - it must be named, or exactly the console-death gap this closes
+# stays open one level down.
+"$ROOT/bin/dm-ui.sh" watch >"$UI_WATCH_LOG" 2>&1 &
+UI_WATCH_PID=$!
+check "watcher armed with no console running is confirmed armed" 'wait_for_file "$DM_HOME/state/ui/watch.pid" 10'
+UI_ORPHAN_STATUS="$(b dm-ui.sh status 2>&1 || true)"
+check "status still says the console is not running" 'grep -q "console: not running" <<<"$UI_ORPHAN_STATUS"'
+check "status ALSO names the orphaned watcher, not silence" \
+  'grep -q "watcher is still armed with no console running" <<<"$UI_ORPHAN_STATUS"'
+
 # Stopping the console disarms its watcher too - the watcher exists to
 # deliver into an open console, so it is not left polling forever for a page
 # nobody can type into once the console itself is stopped.
-"$ROOT/bin/dm-ui.sh" watch >"$UI_WATCH_LOG" 2>&1 &
-UI_WATCH_PID=$!
-check "watcher is confirmed armed before stop" 'wait_for_file "$DM_HOME/state/ui/watch.pid" 10'
 b dm-ui.sh stop >/dev/null 2>&1
 sleep 0.3
 check "stop disarms the watcher along with the console" '! kill -0 "$UI_WATCH_PID" 2>/dev/null'
 check "and its pid file is gone"                        '[ ! -f "$DM_HOME/state/ui/watch.pid" ]'
+check "status is quiet about the watcher once it is gone" \
+  '! b dm-ui.sh status 2>&1 | grep -q "watcher is still armed"'
 
 # Every --json emitter: valid JSON, and the human output it sits beside is
 # untouched. A second parser in the page is what these exist to prevent.

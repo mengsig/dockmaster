@@ -22,6 +22,15 @@ have, and arm it before doing anything else. `status` reports the same line at
 any later check-in. `stop` disarms the watcher along with the server, so the two
 share one lifecycle: stopping the console is the only thing that disarms it.
 
+The watcher is its own process, though, so a console that dies on its own — a
+crash, a killed session, anything short of `stop` — does not necessarily take
+the watcher with it. `status` says so explicitly when it happens: "not running"
+plus a named, still-armed watcher, never silence. Restarting the console after
+that is safe either way — a surviving watcher is still valid (it just watches
+`state/ui/inbox`, unrelated to which server process is up) and `start` reports
+it already armed; a watcher that died with the console gets the normal "not
+armed, arm it now" reminder.
+
 Defaults to `--source live`, the real fleet. `--source fixture` serves the
 committed demo fleet — for design work on the page, never to show the operator
 "their" fleet. Starting on a different source than the running server replaces

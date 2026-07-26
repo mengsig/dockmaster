@@ -328,7 +328,18 @@ case "$cmd" in
     case "$rc" in
       0) dm_info "console: running (pid $pid, source $(running_source)) $URL"; announce_watch ;;
       2) die_not_ours "$PID_FILE" "$pid" "this console" ;;
-      *) dm_info "console: not running"; exit 1 ;;
+      # The watcher is its own process (see watch_cmd), so a console that died
+      # on its own - a crash, a killed session, anything short of `stop` -
+      # does not necessarily take the watcher with it. Report it here too, or
+      # a surviving watcher is invisible: neither "armed" (no console to
+      # reach) nor "not running" (it still is) covers it, so name it plainly.
+      *)
+        dm_info "console: not running"
+        if watch_armed; then
+          dm_info "console: watcher is still armed with no console running - it keeps watching state/ui/inbox, but nothing can reach it without the server up. Run 'stop' to clear it, or 'start'/'open' to bring the console back."
+        fi
+        exit 1
+        ;;
     esac
     ;;
   stop) stop_server ;;
