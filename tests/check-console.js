@@ -140,11 +140,6 @@ function checkGatesAreAPlanNotProgress() {
 
 // --- 2. nothing internal reaches the screen ----------------------------------
 
-// note_kind values the page (ui/public/views.mjs NOTE table) actually knows how
-// to render. Anything outside this set prints as '' - a blank that reads as
-// calm - so every kind progressNote can emit must live in it.
-const RENDERABLE_NOTE_KINDS = ['reported', 'undeterminable', 'not_started', 'unlanded']
-
 function checkReconcileProseNeverCrosses() {
   // The FIXED prose dm-task.sh wraps a real event in ('reported ready but not
   // yet landed: ', 'lavish artifact ready for the operator: ') must never reach
@@ -177,15 +172,14 @@ function checkReconcileProseNeverCrosses() {
 
   // An event WAS posted ('discarded') but this specific reconcile branch
   // discards it in favour of synthetic prose - the note is genuinely
-  // unrecoverable here, and that must read as honest, not as calm silence.
+  // unrecoverable here. That is a distinct, honest TOKEN ('unreadable'), never
+  // the synthetic sentence relayed as if it were the crewmate's own words.
   const unrecoverable = live.progressNote(task({
     state: 'in_progress', last_event: 'discarded',
     state_detail: 'discard recorded but local copy still present',
   }))
-  equal(unrecoverable.kind, 'reported', 'an unrecoverable note still says something, never nothing')
-  ok(unrecoverable.text.length > 0, 'an unrecoverable note is not blank')
-  ok(!unrecoverable.text.includes('discard recorded but local copy still present'),
-    'the synthetic sentence itself does not leak as if it were the crewmate\'s note')
+  equal(unrecoverable.kind, 'unreadable', 'a note that exists but cannot be located becomes its own token')
+  equal(unrecoverable.text, '', 'no prose is invented in its place - the page words the token')
 
   const blocked = live.progressNote(task({
     state: 'blocked', last_event: 'blocked',
@@ -195,6 +189,29 @@ function checkReconcileProseNeverCrosses() {
   equal(blocked.text, 'the runner host needs its build user in the docker group',
     'the verb prefix is stripped, the operator-facing half survives')
   console.log('ok   reconcile prose becomes a token; only the crewmate\'s own words cross as text')
+}
+
+// A cleanly landed task (a merged PR, or a scout's report.md) reconciles
+// through an early exit in `dm-task.sh state` that never reaches the
+// crewmate's status log - `state_detail` is landing evidence, not a status
+// line, and `last_event` is whatever the crewmate last posted regardless (it
+// need not even say "done"). Forced this against real shapes measured on the
+// live fleet: neither must ever read as a failed read.
+function checkTerminalEvidenceNeverClaimsUnreadable() {
+  const merged = live.progressNote(task({
+    state: 'done', last_event: 'merged',
+    state_detail: 'https://github.com/example-org/demo/pull/9 merged',
+  }))
+  equal(merged.kind, '', 'a merged PR is landing evidence, not a status line - it says nothing, never a claimed read failure')
+  equal(merged.text, '', 'no prose invented for a cleanly landed task')
+
+  const reported = live.progressNote(task({
+    state: 'done', kind: 'scout', last_event: 'working',
+    state_detail: 'data/demo/report.md',
+  }))
+  equal(reported.kind, '', 'a scout report is landing evidence too, regardless of what its last event verb was')
+  equal(reported.text, '', 'no prose invented for a finished scout')
+  console.log('ok   a cleanly finished task never claims its status log could not be read')
 }
 
 // The gate the brief asked for: a task with a REAL status note must never
@@ -218,50 +235,67 @@ function checkRealNoteSurfacesForInProgressWork() {
   console.log('ok   a task with a real status note never renders an empty one')
 }
 
-// The other half of the same gate: a task with NO note must SAY so, never
-// render something a reader takes as calm progress. Force the detector against
-// a task with genuinely nothing recorded and confirm it does not go quiet.
+// The other half of the same gate: a task with NO note must SAY so (a distinct
+// TOKEN the page words), never render something a reader takes as calm
+// progress. Force the detector against a task with genuinely nothing recorded
+// and a task whose note exists but could not be located, and confirm neither
+// goes quiet nor gets confused with the other.
 function checkNoSignalNeverReadsAsCalm() {
   const neverReported = live.progressNote(task({
     state: 'in_progress', last_event: '', state_detail: '',
     created: '2026-01-01T00:00:00Z', last_event_at: '',
   }))
-  equal(neverReported.kind, 'reported', 'silence is still worded, not a blank token')
-  ok(neverReported.text.length > 0, 'a task with no signal renders SOMETHING, never a blank that reads as calm')
-  ok(neverReported.text.toLowerCase().includes('nothing reported'),
-    `the honest sentence names the absence: got "${neverReported.text}"`)
-  ok(neverReported.text.includes('2026-01-01T00:00:00Z'), 'the absence is dated, so staleness is visible')
+  equal(neverReported.kind, 'silent', 'silence is its own token, not a blank')
+  equal(neverReported.text, '', 'the page words the token - no server-composed sentence, no raw timestamp')
 
   // A real event exists (verb is known) but this collector could not locate it
-  // in the reconciled sentence - must read as "could not read", not "nothing
-  // to report", because a note may genuinely exist and only the parse failed.
+  // in the reconciled sentence - a distinct token from "nothing to report",
+  // because a note may genuinely exist and only the parse failed.
   const unreadable = live.progressNote(task({
     state: 'in_progress', last_event: 'working', state_detail: 'some future dm-task.sh sentence shape',
   }))
-  ok(unreadable.text.length > 0, 'an unreadable log says so, never renders blank')
-  ok(!unreadable.text.toLowerCase().includes('nothing reported'),
-    'an unreadable log is a distinct claim from "nothing was ever reported"')
+  equal(unreadable.kind, 'unreadable', 'an unreadable log is its own token')
+  ok(unreadable.kind !== neverReported.kind, 'an unreadable log is a distinct claim from "nothing was ever reported"')
   console.log('ok   a task with no note says so, and is never confused with an unreadable one')
 }
 
-// Every kind progressNote can hand back must be one the page actually knows how
-// to word - an unmapped kind renders '' in ui/public/views.mjs's NOTE table,
-// which is the exact "confident-looking blank" this task exists to remove.
-function checkEveryNoteKindIsRenderable() {
+// Every kind progressNote can hand back must be one the page's REAL NOTE table
+// (ui/public/views.mjs) renders as non-empty text - imported, not hand-copied,
+// so this cannot pass against a NOTE table missing an entry the way a
+// hand-transcribed list can. Covers every branch, including both terminal-done
+// shapes, so the HIGH finding that slipped through has a permanent regression test.
+async function checkEveryNoteKindIsRenderable() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
   const cases = [
-    { last_event: 'working', state_detail: 'working: on it' },
-    { last_event: '', state_detail: 'not yet dispatched' },
-    { last_event: '', state_detail: 'committed work not yet landed' },
-    { last_event: '', state_detail: 'could not determine whether its work landed (repo unresolvable)' },
-    { last_event: '', state_detail: '' },
-    { last_event: 'blocked', state_detail: 'blocked: waiting on a decision' },
+    task({ state: 'in_progress', last_event: 'working', state_detail: 'working: on it' }),
+    task({ state: 'queued', last_event: '', state_detail: 'not yet dispatched' }),
+    task({ state: 'in_progress', last_event: '', state_detail: 'committed work not yet landed' }),
+    task({ state: 'in_progress', last_event: '',
+      state_detail: 'could not determine whether its work landed (repo unresolvable)' }),
+    task({ state: 'in_progress', last_event: '', state_detail: '' }),
+    task({ state: 'blocked', last_event: 'blocked', state_detail: 'blocked: waiting on a decision' }),
+    task({ state: 'in_progress', last_event: 'working', state_detail: 'some future dm-task.sh sentence shape' }),
+    task({ state: 'done', last_event: 'merged', state_detail: 'https://github.com/example-org/demo/pull/9 merged' }),
+    task({ state: 'done', kind: 'scout', last_event: '', state_detail: 'data/demo/report.md' }),
   ]
-  for (const fields of cases) {
-    const note = live.progressNote(task(Object.assign({ state: 'in_progress' }, fields)))
-    ok(RENDERABLE_NOTE_KINDS.includes(note.kind),
-      `progressNote emitted an unrenderable kind '${note.kind}' for ${JSON.stringify(fields)}`)
+  const seenKinds = new Set()
+  for (const t of cases) {
+    const note = live.progressNote(t)
+    seenKinds.add(note.kind)
+    if (t.state === 'done') {
+      equal(note.kind, '', 'terminal evidence renders nothing, the one deliberate exception to "never blank"')
+      continue
+    }
+    ok(note.kind in views.NOTE,
+      `progressNote emitted kind '${note.kind}' that ui/public/views.mjs's NOTE table cannot render`)
+    const rendered = views.NOTE[note.kind](note.text)
+    ok(typeof rendered === 'string' && rendered.length > 0,
+      `NOTE.${note.kind} rendered "${rendered}" - a task the page must never show as blank`)
   }
-  console.log(`ok   every note_kind progressNote can emit is one of: ${RENDERABLE_NOTE_KINDS.join(', ')}`)
+  for (const must of ['reported', 'unlanded', 'not_started', 'undeterminable', 'unreadable', 'silent', '']) {
+    ok(seenKinds.has(must), `no case above exercised the '${must}' kind - coverage gap`)
+  }
+  console.log(`ok   every note_kind progressNote can emit is one the real NOTE table renders as non-empty text`)
 }
 
 function checkMemoryFramingIsNotShown() {
@@ -437,9 +471,10 @@ async function main() {
   checkUndeterminableIsNotNotStarted()
   checkGatesAreAPlanNotProgress()
   checkReconcileProseNeverCrosses()
+  checkTerminalEvidenceNeverClaimsUnreadable()
   checkRealNoteSurfacesForInProgressWork()
   checkNoSignalNeverReadsAsCalm()
-  checkEveryNoteKindIsRenderable()
+  await checkEveryNoteKindIsRenderable()
   checkMemoryFramingIsNotShown()
   checkAFailedSweepIsNeverAnEmptyFleet()
   await checkDegradationCarriesTokensNotProse()

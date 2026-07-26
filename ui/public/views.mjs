@@ -99,13 +99,17 @@ function gateStrip(gates) {
 }
 
 // The document carries a token for where a piece of work stands; the sentence is
-// chosen here. Free text crosses only as `reported` - a blocker a worker was
-// asked to name, which is written for the operator to act on.
-const NOTE = {
+// chosen here. Free text crosses only as `reported` - a worker's own words,
+// written for the operator to read. Exported so a test can prove every kind the
+// collector emits actually has a word here, instead of a second hand-copied list
+// silently drifting out of sync with this one.
+export const NOTE = {
   reported: (text) => text,
   undeterminable: () => 'Could not tell how far this got — its repo could not be read.',
   not_started: () => 'Not started yet.',
   unlanded: () => 'Committed, but not landed yet.',
+  unreadable: () => 'Something was reported, but its note could not be read.',
+  silent: () => 'Nothing has been reported yet.',
 };
 
 function noteText(item) {

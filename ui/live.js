@@ -361,23 +361,45 @@ async function collectPipelines(bin, repoNames, degraded) {
 
 // --- assembling the panels ---------------------------------------------------
 
+// The exact prefixes `bin/dm-task.sh state` can wrap around the raw
+// "verb: note" status line (keep in sync with that script). Anchoring on these
+// - rather than a free substring search for "verb: " anywhere in the sentence -
+// is what keeps this correct if a crewmate's own note ever repeats "verb: ", or
+// a wrapping sentence happens to contain it ahead of the real one.
+const RECONCILE_WRAPPERS = [
+  '',
+  'lavish artifact ready for the operator: ',
+  'reported ready but not yet landed: ',
+];
+
+// extractReportedNote(detail, verb) -> the crewmate's own words, '' if an event
+// was posted with none, or null if there is no verb or no anchor matched (the
+// note may exist but this could not locate it).
+function extractReportedNote(detail, verb) {
+  if (!verb) return null;
+  const marker = `${verb}: `;
+  for (const wrapper of RECONCILE_WRAPPERS) {
+    const anchor = wrapper + marker;
+    if (detail.startsWith(anchor)) return detail.slice(anchor.length).trim();
+  }
+  return null;
+}
+
 // The reconcile detail dm-task.sh prints is written FOR the dockmaster; it
-// reaches the page only as a TOKEN, except the crewmate's own words. `last_event`
-// is that crewmate's status-line VERB (dm-task.sh's own tail -n1 parse); it
-// locates that same "verb: note" line inside `state_detail`, raw or nested in
-// reconcile prose depending on which branch produced it - never parses the
-// prose itself. Old code only checked 4 of 9 states and only a note at
-// position 0, so `review-ready` and ordinary "working" progress never surfaced.
+// reaches the page only as a TOKEN, except the crewmate's own words, located by
+// `last_event` (dm-task.sh's own tail -n1 parse of its status log).
 function progressNote(task) {
+  // Terminal evidence (a merged PR, or a scout's report.md) comes from an early
+  // exit in `dm-task.sh state` that never reaches the crewmate's own last
+  // event - it is not a status line, so there is nothing to read or fail
+  // reading. Say nothing, exactly as the page did before this task touched it.
+  if (task.state === 'done') return { kind: '', text: '' };
+
   const detail = String(task.state_detail || '');
   const verb = String(task.last_event || '');
-  if (verb) {
-    const marker = `${verb}: `;
-    const at = detail.indexOf(marker);
-    if (at >= 0) {
-      const text = detail.slice(at + marker.length).trim();
-      return { kind: 'reported', text: text || `reported "${verb}" with no detail` };
-    }
+  const extracted = extractReportedNote(detail, verb);
+  if (extracted !== null) {
+    return extracted ? { kind: 'reported', text: extracted } : { kind: 'silent', text: '' };
   }
   // Purely synthetic reconcile prose - dm-task.sh's own words, no event note
   // behind them at all. These stay tokens; the page already has wording for them.
@@ -386,12 +408,10 @@ function progressNote(task) {
   if (/not yet landed/i.test(detail)) return { kind: 'unlanded', text: '' };
   // A verb IS on record but this branch overrode it with synthetic prose (e.g.
   // a 'discarded' event whose worktree is still present) - the note may exist,
-  // this collector just could not find it, so say that, never nothing.
-  if (verb) return { kind: 'reported', text: `could not read the last status note (last reported "${verb}")` };
-  // No event was ever posted; silence is itself the information, so date it
-  // rather than render an unremarkable blank.
-  const since = task.last_event_at || task.created;
-  return { kind: 'reported', text: `nothing reported since ${since}` };
+  // this collector just could not locate it.
+  if (verb) return { kind: 'unreadable', text: '' };
+  // No event was ever posted for this task.
+  return { kind: 'silent', text: '' };
 }
 
 function toWork(tasks, pipelines) {
