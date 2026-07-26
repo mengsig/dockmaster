@@ -4532,8 +4532,8 @@ check "the skill names the crew-<level> subagent types" \
   'grep -q "crew-low" "$W6TLSKILL" && grep -q "crew-xhigh" "$W6TLSKILL"'
 check "the skill says choosing both dials is mandatory" \
   'grep -q "REFUSES until the task" "$W6TLSKILL"'
-check "the skill records that the dials are independent" \
-  'grep -qi "independent" "$W6TLSKILL"'
+check "the skill states the model default is a pin, not a coupling" \
+  'grep -q "parameter still overrides" "$W6TLSKILL"'
 # Anchored on a phrase that lives on ONE line: grep is line-based, and the
 # earlier "haiku.*silently ignored" spanned a wrap, so it could never match and
 # the check collapsed to "the word `ignored` appears somewhere".

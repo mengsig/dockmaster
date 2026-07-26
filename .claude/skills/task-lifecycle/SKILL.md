@@ -86,8 +86,7 @@ sets both:
   `crew-high` | `crew-xhigh`. How long it must THINK first. (No `max` tier: a
   deliberate cost ceiling.)
 
-Think of them as **one ladder**, not two independent knobs to eyeball
-separately:
+Think of them as **one ladder**, not two knobs to eyeball separately:
 
 ```
 haiku < sonnet·low < sonnet·medium < sonnet·high
@@ -105,9 +104,9 @@ exception, not the rule for everything else.
 
 Each `crew-<level>` pins a **default model** — `crew-low` haiku, `crew-medium`
 sonnet, `crew-high` / `crew-xhigh` opus — so an omitted `model` parameter lands
-on a considered tier instead of inheriting your own; the parameter still
-overrides it when the ladder calls for a different pairing (sonnet at low
-effort is an ordinary rung, not a mismatch to avoid).
+on a considered tier instead of inheriting your own. The parameter still overrides
+that pin when the ladder calls for a different pairing (sonnet at low effort is
+an ordinary rung, not a mismatch to avoid).
 
 **A model that does not support a level ignores it silently** rather than
 failing, so a dial can be inert without ever saying so. `haiku` ignores effort
@@ -135,7 +134,7 @@ Record what you really passed, or the meta lies.
 
 `dm-status` flags a live task missing either dial as UNSIZED, and
 `dm-task.sh sizing` prints the fleet's recorded distribution — counts by
-model, by effort, and how many dispatches recorded neither.
+model, by effort, and how many are missing either dial.
 
 `sizing --transcripts <dir>` goes further and checks each record against what
 the crewmate ACTUALLY ran, reading the model out of its transcript (one

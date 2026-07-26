@@ -1,1 +1,0 @@
-- **[decision]** Removed the computed dispatch-recommendation machinery (`dm_recommended_dispatch`, `dm-task.sh recommend`, `model_recommended`/`effort_recommended` meta) per operator direction: no default to defer to, sizing is the dockmaster's judgment call. See `.dm-knowledge/lifecycle.md` for the durable version of this fact.  _(2026-07-27T00:00:00Z)_

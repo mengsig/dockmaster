@@ -27,7 +27,7 @@
 #   list [--json]
 #   sizing [--transcripts <dir>]
 #                         the recorded dispatch distribution: counts by model,
-#                         by effort, and how many tasks recorded neither. With
+#                         by effort, and how many are missing either dial. With
 #                         --transcripts, also cross-checks each record against
 #                         what its crewmate actually ran (exit 3 on a mismatch)
 
