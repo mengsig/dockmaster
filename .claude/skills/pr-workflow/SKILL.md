@@ -21,26 +21,15 @@ Scale review rigor to stakes. The tier is a **per-task** choice (not a per-repo
 default); when in doubt, use `default`.
 
 **Right-size each pass, not just the tier.** Beyond picking the tier, set BOTH
-dials on every reviewer, verifier, and fix agent you spawn to fit the diff's
-difficulty — `model=<tier>` and `subagent_type=crew-<level>`, the same two
-independent dials as a crewmate dispatch (`task-lifecycle` §3 Dispatch has the
-levels and the haiku caveat). Ask for the pass's recommendation instead of
-eyeballing it — it measures the branch's real diff:
-
-```
-bin/dm-task.sh recommend review <id>     # or: verify | build (a fix round)
-```
-
-A review never comes back below `high` + opus, and a large diff takes it to
-`crew-xhigh` — that floor is deliberate, not a default to imitate elsewhere.
-A fix round over a small mechanical diff can legitimately come back at `low` +
-haiku, and should: the recommendation is the default for a fix/build pass same
-as an initial dispatch (`task-lifecycle` §3), not a starting point to round up
-from. The dials do not imply each other — a strong model reading a tiny diff
-still wants low effort. These passes are spawns, not tasks, so no dispatch
-record gates them (no `sizing_reason` to check) — the proportionate sizing, and
-naming it when you go above the recommendation, is yours to get right without
-that backstop.
+dials on every reviewer, verifier, and fix agent you spawn — `model=<tier>` and
+`subagent_type=crew-<level>`, the same ladder as a crewmate dispatch
+(`task-lifecycle` §3 has it: `haiku·low` up through `opus·xhigh`, judged from
+the diff's clarity and stakes, not computed). A `review` never comes back
+below `opus`·`high` — that floor is deliberate, the one exception to picking
+from judgment. A fix round over a small mechanical diff can legitimately land
+at `haiku`·`low`. These passes are spawns, not tasks, so no dispatch record
+gates them — sizing each one right is yours to get, every time, not a default
+to fall back on.
 
 - **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial** changes
   only (see `change-review` for the criteria): one review pass instead of two,

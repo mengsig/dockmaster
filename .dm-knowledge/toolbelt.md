@@ -8,7 +8,7 @@ these are the constraints that are not obvious from the code you are editing.
   lists them). Roles: `dm-session-start` startup digest; `dm-doctor` readiness +
   scaffold; `dm-status` read-only snapshot; `dm-repo` registry+memory;
   `dm-worktree` isolation; `dm-task` meta + on-demand state reconcile +
-  dispatch sizing (`recommend <role> <id>`, `sizing`);
+  dispatch distribution (`sizing`);
   `dm-brief`; `dm-branch-name`; `dm-pr` open/check/merge; `dm-merge` FF local
   land + rebase; `dm-sync` FF clone refresh; `dm-backlog`; `dm-lavish` review
   artifact; `dm-test` tests gate; `dm-verify` verify gate (per-task app boot +

@@ -1131,7 +1131,7 @@ dm_brief_unready_reason() {
   printf 'placeholder\n'
 }
 
-# --- dispatch right-sizing: two independent, enforceable dials ----------------
+# --- dispatch right-sizing: two independent dials, chosen by judgment --------
 # Model tier and reasoning effort are SEPARATE axes and both bind at spawn:
 # `model` is an Agent-tool parameter, and effort comes from the `crew-<level>`
 # subagent definitions under `.claude/agents/`, selected with `subagent_type`.
@@ -1139,193 +1139,15 @@ dm_brief_unready_reason() {
 # lands on a considered tier instead of inheriting the session's — the parameter
 # still wins, so every model x effort pair stays a one-liner.
 #
+# There is deliberately no computed recommendation here: the dockmaster reads
+# the brief and the diff and picks a rung on the model x effort ladder itself
+# (task-lifecycle has the ladder). A table trying to do that from a role/kind/
+# diff-size signal (#166-#187) under- and over-fired in practice and was
+# removed rather than recalibrated again.
+#
 # The levels a dispatch may record. `max` exists in the runtime but is
 # deliberately excluded: a cost ceiling, not a missing case. Do not add it back.
 DM_EFFORT_LEVELS='low medium high xhigh'
-
-# The pass a spawn is running. STRUCTURAL, never inferred: the caller
-# (task-lifecycle, pr-workflow) already knows which pass it is dispatching.
-DM_DISPATCH_ROLES='build review verify'
-
-# Diff-size boundaries. They encode #177's baseline table — mechanical edit /
-# ordinary fix / multi-file feature — as numbers, not prose.
-DM_DIFF_SMALL_FILES=2
-DM_DIFF_SMALL_LINES=50
-DM_DIFF_LARGE_FILES=6
-DM_DIFF_LARGE_LINES=300
-
-# True when <value> is EXACTLY one dispatch role.
-dm_role_is_valid() {
-  local value="${1:-}" role
-  for role in $DM_DISPATCH_ROLES; do
-    [ "$value" = "$role" ] && return 0
-  done
-  return 1
-}
-
-# True when <value> is a non-empty run of digits.
-dm_is_count() {
-  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
-  return 0
-}
-
-# dm_worktree_diff_size <worktree> <base-ref>  -> "<files> <lines>"
-# Hard numbers off a real branch, never an estimate. Returns non-zero printing
-# NOTHING when there is no directory, no git, or no such base — the caller then
-# has no size signal, which is a different thing from a measured zero.
-# It measures the BRANCH (base...HEAD), so uncommitted work is outside it: a
-# tiny commit over a large dirty tree reads small. Known limit, pinned by test.
-dm_worktree_diff_size() {
-  local wt="${1:-}" base="${2:-}" ref numstat
-  [ -n "$wt" ] && [ -n "$base" ] || return 2
-  [ -d "$wt" ] || return 2
-  git -C "$wt" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 2
-  # A worktree shares its clone's refs, so a bare branch name resolves; a base
-  # that only exists on the remote is still measurable via origin/.
-  ref="$base"
-  if ! git -C "$wt" rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1; then
-    ref="origin/$base"
-    git -C "$wt" rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || return 2
-  fi
-  numstat="$(git -C "$wt" diff --numstat "$ref...HEAD" 2>/dev/null)" || return 2
-  # A binary file reports "-" for both counts: it still counts as a file, and
-  # contributes no lines.
-  printf '%s\n' "$numstat" | awk '
-    NF == 0 { next }
-    { files++; lines += ($1 == "-" ? 0 : $1) + ($2 == "-" ? 0 : $2) }
-    END { printf "%d %d\n", files + 0, lines + 0 }'
-}
-
-# dm_task_diff_size <id>  -> "<files> <lines>" for the task's branch, or
-# non-zero. Single owner of "which base does this task's diff run against":
-# the recorded parent ref for a stacked child, else the repo's default branch.
-dm_task_diff_size() {
-  local id="${1:-}" wt repo dir base
-  [ -n "$id" ] || return 2
-  wt="$(dm_meta_get "$id" worktree)"
-  repo="$(dm_meta_get "$id" repo)"
-  [ -n "$wt" ] && [ -n "$repo" ] || return 2
-  dir="$(dm_repo_dir_or_none "$repo")" || return $?
-  base="$(dm_pr_base_for "$id" "" "$dir")" || return 2
-  dm_worktree_diff_size "$wt" "$base"
-}
-
-# dm_diff_size_class <files> <lines>  -> small|medium|large|unknown
-# ZERO files is UNKNOWN, never small: an unbuilt branch has an empty diff, which
-# says nothing about the size of the work still to do.
-dm_diff_size_class() {
-  local files="${1:-}" lines="${2:-}"
-  dm_is_count "$files" && dm_is_count "$lines" || { printf 'unknown\n'; return 0; }
-  [ "$files" -eq 0 ] && { printf 'unknown\n'; return 0; }
-  if [ "$files" -le "$DM_DIFF_SMALL_FILES" ] && [ "$lines" -le "$DM_DIFF_SMALL_LINES" ]; then
-    printf 'small\n'
-  elif [ "$files" -ge "$DM_DIFF_LARGE_FILES" ] || [ "$lines" -ge "$DM_DIFF_LARGE_LINES" ]; then
-    printf 'large\n'
-  else
-    printf 'medium\n'
-  fi
-}
-
-# dm_recommended_dispatch <role> [<kind>] [<files>] [<lines>]  -> "<model> <effort>"
-#
-# The recommendation, computed from signals that exist AT DISPATCH: the
-# structural role, the task kind, and a real diff when there is one. Never from
-# the task title — a regex over prose steered real spend and over-fired (`auth`
-# matched author/authority), and it is not coming back.
-#
-# The table is deliberately ASYMMETRIC. An under-powered review lands bad code
-# (#159 took six adversarial rounds and the sixth still found a HIGH); an
-# under-powered builder costs a retry. So review never drops below high+opus,
-# while a small mechanical build diff does reach the bottom tier.
-#
-# It stays a RECOMMENDATION: the orchestrator records its own choice, and
-# overriding either dial is a one-liner.
-dm_recommended_dispatch() {
-  local role="${1:-}" kind="${2:-}" size
-  dm_role_is_valid "$role" \
-    || { dm_warn "dispatch role '$role' is not one of: $DM_DISPATCH_ROLES"; return 2; }
-  size="$(dm_diff_size_class "${3:-}" "${4:-}")"
-  # A scout has no branch, so nothing can show it mechanical; it never sizes
-  # below the anchor on an absent or tiny diff.
-  [ "$kind" = "scout" ] && [ "$size" = "small" ] && size="medium"
-  case "$role" in
-    review) case "$size" in large) printf 'opus xhigh\n' ;; *) printf 'opus high\n' ;; esac ;;
-    verify) case "$size" in large) printf 'opus high\n' ;;  *) printf 'sonnet medium\n' ;; esac ;;
-    build)  case "$size" in
-              small) printf 'haiku low\n' ;;
-              large) printf 'opus high\n' ;;
-              *)     printf 'sonnet medium\n' ;;
-            esac ;;
-    # A role in the set with no row here would print nothing and look like a
-    # successful recommendation. Refuse instead.
-    *) dm_warn "dispatch role '$role' has no row in the sizing table"; return 2 ;;
-  esac
-}
-
-# Model tier of the recommendation. Same args as dm_recommended_dispatch.
-dm_recommended_model() {
-  local pair rc=0
-  pair="$(dm_recommended_dispatch "$@")" || rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
-  printf '%s\n' "${pair%% *}"
-}
-
-# Reasoning effort of the recommendation. Same args as dm_recommended_dispatch.
-dm_recommended_effort() {
-  local pair rc=0
-  pair="$(dm_recommended_dispatch "$@")" || rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
-  printf '%s\n' "${pair##* }"
-}
-
-# --- upsize-above-recommendation: the reason has to be named, not just paid ---
-# The recommendation is the DEFAULT dispatch; going above it on either dial is
-# allowed but must be a named decision, never a reflex ("size up when unsure"
-# bought opus/high on straight, well-specified work). Downsizing never needs a
-# reason — trading a slower/cheaper spawn for a faster one you'll retry costs
-# nobody but the dispatcher.
-#
-# Ranked subset of model tiers. `fable` is deliberately NOT in it, same reason
-# `dm_recommended_dispatch` never validates model against a list elsewhere:
-# rank is only for THIS upsize check, and an unranked tier must read as
-# "cannot prove an upsize" rather than silently sorting before/after opus.
-DM_MODEL_TIERS='haiku sonnet opus'
-
-# dm_model_rank <tier>  -> index in DM_MODEL_TIERS, or non-zero if unranked.
-dm_model_rank() {
-  local value="${1:-}" tier i=0
-  for tier in $DM_MODEL_TIERS; do
-    [ "$value" = "$tier" ] && { printf '%d\n' "$i"; return 0; }
-    i=$((i + 1))
-  done
-  return 1
-}
-
-# dm_effort_rank <level>  -> index in DM_EFFORT_LEVELS, or non-zero if invalid.
-dm_effort_rank() {
-  local value="${1:-}" level i=0
-  for level in $DM_EFFORT_LEVELS; do
-    [ "$value" = "$level" ] && { printf '%d\n' "$i"; return 0; }
-    i=$((i + 1))
-  done
-  return 1
-}
-
-# dm_dispatch_is_upsized <model> <effort> <rec_model> <rec_effort>  -> 0 if
-# either dial recorded is STRICTLY above its recommendation, 1 otherwise
-# (including "cannot compare" — a missing recommendation or an unranked model
-# is not evidence of an upsize, so it never forces a reason).
-dm_dispatch_is_upsized() {
-  local model="${1:-}" effort="${2:-}" rec_model="${3:-}" rec_effort="${4:-}"
-  local mr rmr er rer
-  if mr="$(dm_model_rank "$model")" && rmr="$(dm_model_rank "$rec_model")"; then
-    [ "$mr" -gt "$rmr" ] && return 0
-  fi
-  if er="$(dm_effort_rank "$effort")" && rer="$(dm_effort_rank "$rec_effort")"; then
-    [ "$er" -gt "$rer" ] && return 0
-  fi
-  return 1
-}
 
 # dm_transcript_model <file>  -> the model id a subagent ACTUALLY ran as, read
 # from the first `"model":"..."` in its transcript; non-zero when the file is

@@ -74,9 +74,11 @@ recorded dispatch; `dm-status` flags a live task on an unfilled brief as
 UNFILLED. Every other section of a brief looks complete on a skim, so nothing
 else would catch an empty task section.
 
-**Right-size the dispatch — two dials, both yours, both enforced.** The
-dockmaster runs on a capable model precisely so it can judge how much each unit
-of work needs. Do NOT inherit your own tier. Every spawn sets both:
+**Right-size the dispatch — two dials, both yours, both chosen by judgment.**
+The dockmaster runs on the strongest model precisely so it can size everything
+else down from there. There is no computed recommendation to defer to; you
+read the brief and pick. Do NOT inherit your own tier by default. Every spawn
+sets both:
 
 - **Model** — the Agent `model` parameter: `haiku` | `sonnet` | `opus` | `fable`.
   What the crewmate must be able to DO.
@@ -84,14 +86,28 @@ of work needs. Do NOT inherit your own tier. Every spawn sets both:
   `crew-high` | `crew-xhigh`. How long it must THINK first. (No `max` tier: a
   deliberate cost ceiling.)
 
+Think of them as **one ladder**, not two independent knobs to eyeball
+separately:
+
+```
+haiku·low < haiku·medium < sonnet·low < sonnet·medium < sonnet·high
+         < opus·low < opus·medium < opus·high < opus·xhigh
+```
+
+Pick a rung from what the brief actually asks for: how precise and
+unambiguous the instructions are, how trivial the work is, and how expensive
+being wrong would be. Clear instructions on a small, mechanical change land
+near the bottom. Anything ambiguous, adversarial, or risky to get wrong —
+debugging, security, a large cross-cutting diff — climbs toward the top.
+A `review` pass never drops below `opus`·`high` (under-powering a review is
+how bad code lands, see `pr-workflow`); that floor is the one deliberate
+exception, not the rule for everything else.
+
 Each `crew-<level>` pins a **default model** — `crew-low` haiku, `crew-medium`
 sonnet, `crew-high` / `crew-xhigh` opus — so an omitted `model` parameter lands
-on a considered tier instead of inheriting your own. The dials stay
-**independent**: the parameter overrides the pin, so sonnet at low effort and
-haiku at high effort are still one-line, ordinary choices. Small, well-specified
-work against clear instructions does not need a high level even on a strong
-model; work that needs debugging or adversarial reading probably does, whatever
-the model.
+on a considered tier instead of inheriting your own; the parameter still
+overrides it when the ladder calls for a different pairing (sonnet at low
+effort, haiku at high effort — both ordinary rungs, not a mismatch to avoid).
 
 **A model that does not support a level ignores it silently** rather than
 failing, so a dial can be inert without ever saying so. `haiku` ignores effort
@@ -101,62 +117,25 @@ honored all four levels when this was measured, but support is per-build and
 `xhigh` is the level most likely to be unavailable, so treat the top of the
 range as best-effort rather than guaranteed.
 
-**The recommendation is computed, not a constant.** Ask for one per pass:
-
-```
-dm-task.sh recommend <build|review|verify> <id>
-# -> model=, effort=, subagent_type=, and the signals it used
-```
-
-It reads three things and nothing else: the **role** you declare (which pass
-this is), the task **kind**, and the branch's **real diff** measured against its
-base. Never the task title — a regex over prose steered real spend and
-over-fired (`auth` matched author/authority); it is not coming back.
-
-The table is **asymmetric on purpose**: a `review` never drops below
-`high` + opus (under-powering a review is how bad code lands), while a `build`
-pass over a small mechanical diff (≤2 files, ≤50 lines) does recommend
-`low` + haiku. With no measurable diff it falls back to sonnet / medium rather
-than guessing — a task with nothing built yet is not a small task, but that
-fallback is a floor, not a license to buy the ceiling every time nothing has
-been measured yet. `dm-brief.sh` runs the build-pass recommendation at brief
-time and records `model_recommended` / `effort_recommended`.
-
-**The recommendation is the dispatch default.** Spawn at what it says unless
-you have a specific reason not to. A straight task against a precise brief runs
-fine at `low` effort even on a capable model — effort buys deliberation for
-ambiguity and adversarial reading, not insurance against a plain diff. Going
-**above** the recommendation on either dial is allowed, but it is a decision,
-not a reflex: name it.
+Record the choice once the crewmate is spawned:
 
 ```
 dm-task.sh set <id> model <tier>
 dm-task.sh set <id> effort <level>       # must match the crew-<level> you spawned
-dm-task.sh set <id> sizing_reason "<why this needs more than recommended>"
-                                          # only when EITHER dial is above the
-                                          # recommendation — downsizing needs none
-dm-task.sh set <id> agent_id <id>
+dm-task.sh set <id> agent_id <returned-agent-id>
 ```
 
-**Choosing is mandatory, and an unnamed upsize is refused.** `dm-task.sh set
-agent_id` REFUSES until the task records both `model` and `effort` (an effort
-outside the valid set is refused too), AND — if either recorded dial ranks
-above its recommendation — until `sizing_reason` is also recorded. A dial equal
-to or below the recommendation needs no reason. This is a **record gate, not a
-spawn gate**: the crewmate is already running by the time `set agent_id`
-executes, and nothing compares the recorded effort against the `subagent_type`
-you actually passed — same shape as the `{TASK}` brief guard. It guarantees the
-choice was made, and any upsize named, and written down; it does NOT verify
-what was spawned. Record what you really passed, or the meta lies.
+`dm-task.sh set agent_id` REFUSES until the task records both `model` and
+`effort` (an effort outside the valid set is refused too) — it forces the
+choice to be made and written down, not any particular value. This is a
+**record gate, not a spawn gate**: the crewmate is already running by the time
+it executes, and nothing compares the recorded effort against the
+`subagent_type` you actually passed — same shape as the `{TASK}` brief guard.
+Record what you really passed, or the meta lies.
 
 `dm-status` flags a live task missing either dial as UNSIZED, and
-`dm-task.sh sizing` prints the fleet's distribution — counts by model, by
-effort, and how many dispatches never chose (split into predates-the-recommender,
-not-yet-dispatched, and a real gate bypass). Read it when you want to know
-whether the spend was proportionate; a bottom tier that never appears is the
-defect it was added to expose (#177), and a wall of `sizing_reason`-less upsizes
-would be the same defect showing up a different way — except this one no
-longer records without a reason.
+`dm-task.sh sizing` prints the fleet's recorded distribution — counts by
+model, by effort, and how many dispatches recorded neither.
 
 `sizing --transcripts <dir>` goes further and checks each record against what
 the crewmate ACTUALLY ran, reading the model out of its transcript (one
@@ -166,11 +145,9 @@ records a choice and cannot verify the spawn. A missing transcript is reported
 unproven, never a pass; a contradiction is a MISMATCH and exits non-zero.
 
 The same judgment applies to **every** sub-unit you spawn downstream — review
-passes, verification, fix rounds, merge-gate reasoning (see `pr-workflow`) — not
-just the implementing crewmate; `recommend <role> <id>` sizes those too. The
-default is proportionate, not maximal: reach above it only when the work
-actually needs debugging, adversarial reading, or a large cross-cutting diff —
-and say so.
+passes, verification, fix rounds, merge-gate reasoning (see `pr-workflow`) —
+not just the implementing crewmate. Pick the rung the pass earns; don't reach
+for the top by reflex.
 
 For work that mutates files where a plain subagent would collide with siblings,
 prefer `isolation: "worktree"`; here the crew already has a dedicated worktree
