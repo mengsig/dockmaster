@@ -140,30 +140,128 @@ function checkGatesAreAPlanNotProgress() {
 
 // --- 2. nothing internal reaches the screen ----------------------------------
 
+// note_kind values the page (ui/public/views.mjs NOTE table) actually knows how
+// to render. Anything outside this set prints as '' - a blank that reads as
+// calm - so every kind progressNote can emit must live in it.
+const RENDERABLE_NOTE_KINDS = ['reported', 'undeterminable', 'not_started', 'unlanded']
+
 function checkReconcileProseNeverCrosses() {
-  // dm-task.sh's detail names status lines and review artifacts. Only a blocker
-  // a worker was asked to name is meant for the operator.
-  const internal = [
-    'reported ready but not yet landed: done: PR https://example.test/pull/9',
-    'lavish artifact ready for the operator: review-ready: rendered',
-    'committed work not yet landed',
-    'not yet dispatched',
-    'discard recorded but local copy still present',
+  // The FIXED prose dm-task.sh wraps a real event in ('reported ready but not
+  // yet landed: ', 'lavish artifact ready for the operator: ') must never reach
+  // the operator - only the crewmate's own words, after the verb marker, may.
+  const wrapped = [
+    { last_event: 'done', state_detail: 'reported ready but not yet landed: done: PR https://example.test/pull/9',
+      wrapper: 'reported ready but not yet landed', want: 'PR https://example.test/pull/9' },
+    { last_event: 'review-ready', state_detail: 'lavish artifact ready for the operator: review-ready: rendered',
+      wrapper: 'lavish artifact ready for the operator', want: 'rendered' },
   ]
-  for (const detail of internal) {
-    const note = live.progressNote(task({ state: 'in_progress', state_detail: detail }))
-    equal(note.text, '', `no prose crosses for: ${detail}`)
-    ok(note.kind === '' || ['unlanded', 'not_started', 'undeterminable'].includes(note.kind),
-      `an internal detail becomes a token, not text: ${detail}`)
+  for (const { last_event, state_detail, wrapper, want } of wrapped) {
+    const note = live.progressNote(task({ state: 'in_progress', last_event, state_detail }))
+    equal(note.kind, 'reported', `a real event behind reconcile prose still surfaces: ${state_detail}`)
+    equal(note.text, want, `only the crewmate's own words survive: ${state_detail}`)
+    ok(!note.text.includes(wrapper), `dockmaster's own wrapping prose does not leak: ${state_detail}`)
   }
+
+  // Purely synthetic details - dm-task.sh's own words, no event behind them -
+  // stay tokens, never text.
+  const synthetic = [
+    { last_event: '', state_detail: 'committed work not yet landed', kind: 'unlanded' },
+    { last_event: '', state_detail: 'not yet dispatched', kind: 'not_started' },
+    { last_event: '', state_detail: 'could not determine whether its work landed (repo unresolvable)', kind: 'undeterminable' },
+  ]
+  for (const { last_event, state_detail, kind } of synthetic) {
+    const note = live.progressNote(task({ state: 'in_progress', last_event, state_detail }))
+    equal(note.kind, kind, `a synthetic detail becomes its token: ${state_detail}`)
+    equal(note.text, '', `a synthetic detail carries no text: ${state_detail}`)
+  }
+
+  // An event WAS posted ('discarded') but this specific reconcile branch
+  // discards it in favour of synthetic prose - the note is genuinely
+  // unrecoverable here, and that must read as honest, not as calm silence.
+  const unrecoverable = live.progressNote(task({
+    state: 'in_progress', last_event: 'discarded',
+    state_detail: 'discard recorded but local copy still present',
+  }))
+  equal(unrecoverable.kind, 'reported', 'an unrecoverable note still says something, never nothing')
+  ok(unrecoverable.text.length > 0, 'an unrecoverable note is not blank')
+  ok(!unrecoverable.text.includes('discard recorded but local copy still present'),
+    'the synthetic sentence itself does not leak as if it were the crewmate\'s note')
+
   const blocked = live.progressNote(task({
-    state: 'blocked',
+    state: 'blocked', last_event: 'blocked',
     state_detail: 'blocked: the runner host needs its build user in the docker group',
   }))
   equal(blocked.kind, 'reported', 'a stopped task reports its blocker')
   equal(blocked.text, 'the runner host needs its build user in the docker group',
     'the verb prefix is stripped, the operator-facing half survives')
-  console.log('ok   reconcile prose becomes a token; only a named blocker crosses as text')
+  console.log('ok   reconcile prose becomes a token; only the crewmate\'s own words cross as text')
+}
+
+// The gate the brief asked for: a task with a REAL status note must never
+// render an empty one. Pin the exact text, not just non-emptiness - a
+// regression back to the old "note_kind derived from reconciled prose alone"
+// bug returns '' here, which is exactly what this must catch.
+function checkRealNoteSurfacesForInProgressWork() {
+  const working = live.progressNote(task({
+    state: 'in_progress', last_event: 'working',
+    state_detail: 'working: rebuilding the migration after the collision report',
+  }))
+  equal(working.kind, 'reported', 'a real progress note is reported, not a synthetic token')
+  equal(working.text, 'rebuilding the migration after the collision report',
+    'the exact text the crewmate wrote survives - an empty string here is the bug this task fixes')
+
+  const awaitingReview = live.progressNote(task({
+    state: 'ready_for_review', last_event: 'review-ready',
+    state_detail: 'lavish artifact ready for the operator: review-ready: change.html is up',
+  }))
+  equal(awaitingReview.text, 'change.html is up', 'a review-ready note also survives, not just blocked/failed/paused')
+  console.log('ok   a task with a real status note never renders an empty one')
+}
+
+// The other half of the same gate: a task with NO note must SAY so, never
+// render something a reader takes as calm progress. Force the detector against
+// a task with genuinely nothing recorded and confirm it does not go quiet.
+function checkNoSignalNeverReadsAsCalm() {
+  const neverReported = live.progressNote(task({
+    state: 'in_progress', last_event: '', state_detail: '',
+    created: '2026-01-01T00:00:00Z', last_event_at: '',
+  }))
+  equal(neverReported.kind, 'reported', 'silence is still worded, not a blank token')
+  ok(neverReported.text.length > 0, 'a task with no signal renders SOMETHING, never a blank that reads as calm')
+  ok(neverReported.text.toLowerCase().includes('nothing reported'),
+    `the honest sentence names the absence: got "${neverReported.text}"`)
+  ok(neverReported.text.includes('2026-01-01T00:00:00Z'), 'the absence is dated, so staleness is visible')
+
+  // A real event exists (verb is known) but this collector could not locate it
+  // in the reconciled sentence - must read as "could not read", not "nothing
+  // to report", because a note may genuinely exist and only the parse failed.
+  const unreadable = live.progressNote(task({
+    state: 'in_progress', last_event: 'working', state_detail: 'some future dm-task.sh sentence shape',
+  }))
+  ok(unreadable.text.length > 0, 'an unreadable log says so, never renders blank')
+  ok(!unreadable.text.toLowerCase().includes('nothing reported'),
+    'an unreadable log is a distinct claim from "nothing was ever reported"')
+  console.log('ok   a task with no note says so, and is never confused with an unreadable one')
+}
+
+// Every kind progressNote can hand back must be one the page actually knows how
+// to word - an unmapped kind renders '' in ui/public/views.mjs's NOTE table,
+// which is the exact "confident-looking blank" this task exists to remove.
+function checkEveryNoteKindIsRenderable() {
+  const cases = [
+    { last_event: 'working', state_detail: 'working: on it' },
+    { last_event: '', state_detail: 'not yet dispatched' },
+    { last_event: '', state_detail: 'committed work not yet landed' },
+    { last_event: '', state_detail: 'could not determine whether its work landed (repo unresolvable)' },
+    { last_event: '', state_detail: '' },
+    { last_event: 'blocked', state_detail: 'blocked: waiting on a decision' },
+  ]
+  for (const fields of cases) {
+    const note = live.progressNote(task(Object.assign({ state: 'in_progress' }, fields)))
+    ok(RENDERABLE_NOTE_KINDS.includes(note.kind),
+      `progressNote emitted an unrenderable kind '${note.kind}' for ${JSON.stringify(fields)}`)
+  }
+  console.log(`ok   every note_kind progressNote can emit is one of: ${RENDERABLE_NOTE_KINDS.join(', ')}`)
 }
 
 function checkMemoryFramingIsNotShown() {
@@ -339,6 +437,9 @@ async function main() {
   checkUndeterminableIsNotNotStarted()
   checkGatesAreAPlanNotProgress()
   checkReconcileProseNeverCrosses()
+  checkRealNoteSurfacesForInProgressWork()
+  checkNoSignalNeverReadsAsCalm()
+  checkEveryNoteKindIsRenderable()
   checkMemoryFramingIsNotShown()
   checkAFailedSweepIsNeverAnEmptyFleet()
   await checkDegradationCarriesTokensNotProse()

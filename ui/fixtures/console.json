@@ -94,14 +94,15 @@
   ],
   "work": [
     {
+      "id": "wk-quota-windows",
       "title": "Quota windows roll at the tenant timezone, not UTC",
       "repo": "tidebook",
       "kind": "ship",
       "state": "in_progress",
       "since": "2026-01-15T04:00:00.000Z",
       "last_signal_at": "2026-01-15T08:36:00.000Z",
-      "note_kind": "",
-      "note": "",
+      "note_kind": "reported",
+      "note": "switching the window boundary calc to the tenant's stored offset; rewriting the boundary tests next",
       "review_href": "",
       "track": {
         "mode": "pipeline",
@@ -142,6 +143,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-proxy-cookie",
       "title": "Session cookie is rejected behind the new proxy",
       "repo": "harbourmaster",
       "kind": "ship",
@@ -239,14 +241,15 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-rate-limit-headers",
       "title": "Rate-limit headers on every public endpoint",
       "repo": "beacon",
       "kind": "ship",
       "state": "in_progress",
       "since": "2026-01-15T07:00:00.000Z",
       "last_signal_at": "2026-01-15T07:54:00.000Z",
-      "note_kind": "",
-      "note": "",
+      "note_kind": "reported",
+      "note": "headers land on every 4xx/5xx response now too; wiring up the retry-after value",
       "review_href": "",
       "track": {
         "mode": "direct-pr",
@@ -286,14 +289,15 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-nightly-export-scout",
       "title": "Where does the nightly export lose 3% of rows?",
       "repo": "tidebook",
       "kind": "scout",
       "state": "in_progress",
       "since": "2026-01-15T06:00:00.000Z",
       "last_signal_at": "2026-01-15T06:24:00.000Z",
-      "note_kind": "",
-      "note": "",
+      "note_kind": "reported",
+      "note": "narrowed it to the CSV export step; comparing row counts before and after the writer",
       "review_href": "",
       "track": {
         "mode": "scout",
@@ -319,6 +323,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-legacy-importer",
       "title": "Retire the legacy importer",
       "repo": "harbourmaster",
       "kind": "ship",
@@ -367,14 +372,15 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-empty-states",
       "title": "Empty states across the settings screens",
       "repo": "harbourmaster",
       "kind": "ship",
       "state": "ready_for_review",
       "since": "2026-01-14T05:00:00.000Z",
       "last_signal_at": "2026-01-15T06:00:00.000Z",
-      "note_kind": "",
-      "note": "",
+      "note_kind": "reported",
+      "note": "review page is up, covers all seven empty-state screens",
       "review_href": "/review/demo-empty-states",
       "track": {
         "mode": "pipeline",
@@ -419,14 +425,15 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-contributor-guide",
       "title": "Contributor guide rewrite",
       "repo": "lantern",
       "kind": "ship",
       "state": "ready_for_review",
       "since": "2026-01-14T13:00:00.000Z",
       "last_signal_at": "2026-01-15T03:00:00.000Z",
-      "note_kind": "",
-      "note": "",
+      "note_kind": "reported",
+      "note": "review page is up; still wants a maintainer's pass on the release section",
       "review_href": "/review/demo-contributor-guide",
       "track": {
         "mode": "local-only",
@@ -461,14 +468,15 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-search-tombstones",
       "title": "Search returns deleted records for a minute after deletion",
       "repo": "tidebook",
       "kind": "ship",
       "state": "ready_for_review",
       "since": "2026-01-13T12:00:00.000Z",
       "last_signal_at": "2026-01-14T22:00:00.000Z",
-      "note_kind": "",
-      "note": "",
+      "note_kind": "reported",
+      "note": "review page is up; the fix keeps the tombstone for 90s to cover replica lag",
       "review_href": "/review/demo-search-tombstones",
       "track": {
         "mode": "pipeline",
@@ -513,6 +521,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-nightly-image-build",
       "title": "Nightly image build on the self-hosted runner",
       "repo": "beacon",
       "kind": "ship",
@@ -556,6 +565,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-billing-provider",
       "title": "Move billing off the legacy provider",
       "repo": "harbourmaster",
       "kind": "ship",
@@ -604,6 +614,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-chart-library-upgrade",
       "title": "Upgrade the chart library past its breaking change",
       "repo": "harbourmaster",
       "kind": "ship",
@@ -652,6 +663,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-offline-mode",
       "title": "Offline mode for the field app",
       "repo": "beacon",
       "kind": "ship",
@@ -695,6 +707,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-audit-log-retention",
       "title": "Audit log retention policy",
       "repo": "tidebook",
       "kind": "ship",
@@ -743,6 +756,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-tenant-feature-flags",
       "title": "Per-tenant feature flags",
       "repo": "harbourmaster",
       "kind": "ship",
@@ -791,6 +805,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-digest-emails",
       "title": "Timezone-aware digest emails",
       "repo": "tidebook",
       "kind": "ship",
@@ -804,6 +819,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-analytics-bundle-drop",
       "title": "Drop the unused analytics bundle",
       "repo": "harbourmaster",
       "kind": "ship",
@@ -817,6 +833,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-dark-theme-contrast",
       "title": "Colour contrast pass on the dark theme",
       "repo": "harbourmaster",
       "kind": "ship",
@@ -830,6 +847,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-structured-logs",
       "title": "Structured logs on every worker",
       "repo": "beacon",
       "kind": "ship",
@@ -843,6 +861,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-getting-started-rewrite",
       "title": "Getting-started page rewrite",
       "repo": "lantern",
       "kind": "ship",
@@ -856,6 +875,7 @@
       "quiet_after_hours": 4
     },
     {
+      "id": "wk-queue-rewrite-2",
       "title": "Rewrite the queue in a second language",
       "repo": "beacon",
       "kind": "ship",

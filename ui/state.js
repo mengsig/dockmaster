@@ -20,8 +20,10 @@
 //   fleet         { repos, in_flight, open_prs, needs_you }   headline counts
 //   needs_you[]   { lamp, kind, ... }  the operator's queue; `kind` selects how
 //                 the page words it, so no prose crosses this seam
-//   work[]        { title, repo, kind, state, since, last_signal_at,
-//                   quiet_after_hours, blocker, review_href, track }
+//   work[]        { id, title, repo, kind, state, since, last_signal_at,
+//                   quiet_after_hours, note_kind, note, review_href, track }
+//                 `id` is stable for the life of the task - the row key a
+//                 client should use instead of repo+title, which collides.
 //   track         { mode, stages[{key,state,evidence}], gates[] } | null
 //   prs[]         { title, repo, url, checks, review, state, authority,
 //                   opened_at, cached, error }
