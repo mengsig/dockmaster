@@ -335,6 +335,7 @@ defaults are the supported configuration.
 | `DM_VERIFY_BROWSER_SHARED` | unset | `1` forces the degraded shared-browser path (exclusive lease instead of a per-task browser). Used by the tests; set it only to reproduce that path. |
 | `DM_RUNTIME_STARTUP_SAMPLE` | unset | `1` enables the opt-in CLI startup timing diagnostic in `tests/runtime-performance.sh`. |
 | `DM_UI_PORT` | `4877` | Loopback port `bin/dm-ui.sh` serves the console on. Chosen clear of lavish (4387), chrome-devtools (9224) and the verify gate's app/bridge/CDP ranges; change it only if something else already holds 4877. |
+| `DM_UI_WATCH_TIMEOUT` | `300` | Seconds `bin/dm-ui.sh watch` blocks per idle poll slice before looping again. Bounds how long any one underlying poll process runs unproven-alive; lower it (a test does) to make the idle-timeout path fast to exercise. |
 
 ## License
 
