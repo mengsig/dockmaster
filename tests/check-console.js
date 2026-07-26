@@ -195,8 +195,9 @@ function checkReconcileProseNeverCrosses() {
 // through an early exit in `dm-task.sh state` that never reaches the
 // crewmate's status log - `state_detail` is landing evidence, not a status
 // line, and `last_event` is whatever the crewmate last posted regardless (it
-// need not even say "done"). Forced this against real shapes measured on the
-// live fleet: neither must ever read as a failed read.
+// need not even say "done"). All three of dm-task.sh's early-exit "done"
+// branches (bin/dm-task.sh:313, :317, :327) forced here against their real
+// shapes: none may ever read as a failed read.
 function checkTerminalEvidenceNeverClaimsUnreadable() {
   const merged = live.progressNote(task({
     state: 'done', last_event: 'merged',
@@ -211,6 +212,12 @@ function checkTerminalEvidenceNeverClaimsUnreadable() {
   }))
   equal(reported.kind, '', 'a scout report is landing evidence too, regardless of what its last event verb was')
   equal(reported.text, '', 'no prose invented for a finished scout')
+
+  const landedViaLog = live.progressNote(task({
+    state: 'done', last_event: 'merged', state_detail: 'landed',
+  }))
+  equal(landedViaLog.kind, '', 'the third done branch (a "merged:" status-log grep, not the pr/report fields) is landing evidence too')
+  equal(landedViaLog.text, '', 'no prose invented here either')
   console.log('ok   a cleanly finished task never claims its status log could not be read')
 }
 
@@ -277,6 +284,7 @@ async function checkEveryNoteKindIsRenderable() {
     task({ state: 'in_progress', last_event: 'working', state_detail: 'some future dm-task.sh sentence shape' }),
     task({ state: 'done', last_event: 'merged', state_detail: 'https://github.com/example-org/demo/pull/9 merged' }),
     task({ state: 'done', kind: 'scout', last_event: '', state_detail: 'data/demo/report.md' }),
+    task({ state: 'done', last_event: 'merged', state_detail: 'landed' }),
   ]
   const seenKinds = new Set()
   for (const t of cases) {
