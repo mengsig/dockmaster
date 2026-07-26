@@ -12,7 +12,11 @@
 # its tooling check here so "what the toolbelt needs" lives in exactly one place.
 #
 # Usage:
-#   dm-doctor.sh [check]
+#   dm-doctor.sh [check] [--json]
+#
+# --json (check only) emits the same readiness in one compact document —
+# {verdict, pr_delivery, checks:[{name,tier,status,note}]} — with the SAME exit
+# code the human check returns for the same fleet.
 #
 # Exit 0 = required tools present. Exit 1 = a required tool is missing. A missing
 # PR-flow or optional tool warns but never fails the check: local-only delivery
@@ -36,7 +40,7 @@ set -euo pipefail
 # Only REQUIRED tools gate the verdict; the other two tiers only warn — but a
 # missing/unauthenticated gh does qualify the VERDICT (see report_pr_delivery).
 REQUIRED_TOOLS=(
-  "git" "clone, worktree, and all git operations"
+  "git" "cloning, branching, and every git operation"
   "jq"  "registry and backlog JSON (single-owner parsers)"
 )
 PRFLOW_TOOLS=(
@@ -85,33 +89,57 @@ claude_runtime_status() {
   if [ "$status" -eq 0 ]; then printf 'ready\n'; else printf 'unauthenticated\n'; fi
 }
 
+# runtime_note <probe-status> - the text describing that probe. Pure, and shared
+# by the printed line and the --json row so the two cannot describe one probe
+# differently. An unrecognized status is rejected by the CALLER (a die here
+# would be swallowed by the command substitution that reads this).
+runtime_note() {
+  case "$1" in
+    ready) printf 'installed and authenticated' ;;
+    absent) printf 'CLI absent' ;;
+    unauthenticated) printf 'authentication unavailable' ;;
+    *) printf 'unrecognized probe result' ;;
+  esac
+}
+
 # One probe per run: the printed line and the readiness verdict must come from
 # the same snapshot, or a second probe could disagree with what was reported.
 report_runtime() {
   local status
   status="$(claude_runtime_status)"
   case "$status" in
-    ready) printf '  ok       %-13s %s\n' "claude-runtime" "installed and authenticated"; return 0 ;;
-    absent) printf '  MISSING  %-13s %s\n' "claude-runtime" "CLI absent" ;;
-    unauthenticated) printf '  MISSING  %-13s %s\n' "claude-runtime" "authentication unavailable" ;;
+    ready) printf '  ok       %-13s %s\n' "claude-runtime" "$(runtime_note "$status")"; return 0 ;;
+    absent|unauthenticated) printf '  MISSING  %-13s %s\n' "claude-runtime" "$(runtime_note "$status")" ;;
     *) dm_die "invalid Claude probe result: '$status'" ;;
   esac
   return 1
 }
 
-report_node() {
+# node_probe -> "<ok|missing><TAB><note>". Single owner of the >=14 rule and its
+# wording, read by both the printed line and the --json row.
+node_probe() {
   local version major
   if ! command -v node >/dev/null 2>&1; then
-    printf '  warn     %-13s %s\n' node 'development/runtime validation unavailable (requires Node >=14)'
+    printf 'missing\tdevelopment/runtime validation unavailable (requires Node >=14)\n'
     return 0
   fi
   version="$(node -p 'process.versions.node' 2>/dev/null || true)"
   major="${version%%.*}"
   case "$major" in ''|*[!0-9]*) major=0 ;; esac
   if [ "$major" -ge 14 ]; then
-    printf '  ok       %-13s %s\n' node "development/runtime validation (${version})"
+    printf 'ok\tdevelopment/runtime validation (%s)\n' "$version"
   else
-    printf '  warn     %-13s %s\n' node "${version:-unknown}; development checks require >=14"
+    printf 'missing\t%s; development checks require >=14\n' "${version:-unknown}"
+  fi
+}
+
+report_node() {
+  local probe
+  probe="$(node_probe)"
+  if [ "${probe%%$'\t'*}" = ok ]; then
+    printf '  ok       %-13s %s\n' node "${probe#*$'\t'}"
+  else
+    printf '  warn     %-13s %s\n' node "${probe#*$'\t'}"
   fi
 }
 
@@ -120,18 +148,27 @@ report_node() {
 # mutations, so no axi wrapper can enable or block the path. Sets PR_DELIVERY,
 # which the verdict reads — the reason doctor's first signal is true.
 PR_DELIVERY="unknown"
-report_pr_delivery() {
+probe_pr_delivery() {
   local present=0 authed=0
   if command -v gh >/dev/null 2>&1; then
     present=1
     if gh auth status >/dev/null 2>&1; then authed=1; fi
   fi
   PR_DELIVERY="$(dm_pr_delivery_gate "$present" "$authed")"
+}
+pr_delivery_note() {
+  case "$1" in
+    ready)   printf 'gh authenticated; PRs can be opened and merged' ;;
+    no-cli)  printf 'UNAVAILABLE: gh is not installed; only local-only landing works' ;;
+    no-auth) printf 'UNAVAILABLE: gh is not authenticated (gh auth login); only local-only landing works' ;;
+    *)       printf 'UNAVAILABLE: status could not be resolved' ;;
+  esac
+}
+report_pr_delivery() {
+  probe_pr_delivery
   case "$PR_DELIVERY" in
-    ready)   printf '  ok       %-13s %s\n' "pr-delivery" "gh authenticated; PRs can be opened and merged" ;;
-    no-cli)  printf '  warn     %-13s %s\n' "pr-delivery" "UNAVAILABLE: gh is not installed; only local-only landing works" ;;
-    no-auth) printf '  warn     %-13s %s\n' "pr-delivery" "UNAVAILABLE: gh is not authenticated (gh auth login); only local-only landing works" ;;
-    *)       printf '  warn     %-13s %s\n' "pr-delivery" "UNAVAILABLE: status could not be resolved" ;;
+    ready) printf '  ok       %-13s %s\n' "pr-delivery" "$(pr_delivery_note "$PR_DELIVERY")" ;;
+    *)     printf '  warn     %-13s %s\n' "pr-delivery" "$(pr_delivery_note "$PR_DELIVERY")" ;;
   esac
 }
 
@@ -156,6 +193,69 @@ report_tools() {
   miss=$((miss + runtime_miss))
   report_pr_delivery
   return "$miss"
+}
+
+# --- machine-readable readiness (check --json) -------------------------------
+# One row per line the human check prints, from the SAME arrays and probes, so
+# the two views cannot disagree about what is installed. Rows accumulate in a
+# global rather than through a command substitution: a probe's dm_die has to
+# abort the run, and it cannot escape `$( )`.
+JSON_ROWS=""; JSON_MISS=0
+json_row() {
+  JSON_ROWS="$JSON_ROWS$(jq -c -n --arg name "$1" --arg tier "$2" --arg status "$3" --arg note "$4" \
+    '{name:$name,tier:$tier,status:$status,note:$note}')"$'\n'
+}
+
+# json_tool_tier <tier> <name> <purpose> [...] - one row per tool in a tier.
+# Only the `required` tier feeds JSON_MISS, exactly as report_tools gates.
+json_tool_tier() {
+  local tier="$1"; shift
+  local name purpose
+  while [ "$#" -gt 0 ]; do
+    name="$1"; purpose="$2"; shift 2
+    if command -v "$name" >/dev/null 2>&1; then
+      json_row "$name" "$tier" ok "$purpose"
+    else
+      json_row "$name" "$tier" missing "$purpose"
+      [ "$tier" != required ] || JSON_MISS=$((JSON_MISS + 1))
+    fi
+  done
+}
+
+collect_json_rows() {
+  local probe status
+  JSON_ROWS=""; JSON_MISS=0
+  json_tool_tier required "${REQUIRED_TOOLS[@]}"
+  json_tool_tier pr-flow "${PRFLOW_TOOLS[@]}"
+  json_tool_tier optional "${OPTIONAL_TOOLS[@]}"
+  probe="$(node_probe)"
+  json_row node optional "${probe%%$'\t'*}" "${probe#*$'\t'}"
+  # claude-runtime counts toward readiness like a required tool (report_tools
+  # folds report_runtime's failure into the same miss count).
+  status="$(claude_runtime_status)"
+  case "$status" in
+    ready) json_row claude-runtime required ok "$(runtime_note "$status")" ;;
+    absent|unauthenticated)
+      json_row claude-runtime required missing "$(runtime_note "$status")"
+      JSON_MISS=$((JSON_MISS + 1)) ;;
+    *) dm_die "invalid Claude probe result: '$status'" ;;
+  esac
+  probe_pr_delivery
+  if [ "$PR_DELIVERY" = ready ]; then
+    json_row pr-delivery pr-flow ok "$(pr_delivery_note "$PR_DELIVERY")"
+  else
+    json_row pr-delivery pr-flow missing "$(pr_delivery_note "$PR_DELIVERY")"
+  fi
+}
+
+# The same verdict wording the full report prints, from the same three inputs.
+json_verdict() {
+  if [ "$1" -gt 0 ] || [ "$2" -gt 0 ]; then printf 'NOT READY\n'; return 0; fi
+  case "$PR_DELIVERY" in
+    ready)          printf 'READY\n' ;;
+    no-cli|no-auth) printf 'READY (LOCAL-ONLY)\n' ;;
+    *)              printf 'NOT READY\n' ;;
+  esac
 }
 
 section() { printf '\n=== %s ===\n' "$1"; }
@@ -210,15 +310,32 @@ probe_state_json() {
   return "$bad"
 }
 
-mode="full"
+mode="full"; json=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     check|full) mode="$1"; shift ;;
-    *) dm_die "usage: dm-doctor.sh [check]" ;;
+    --json) json=1; shift ;;
+    *) dm_die "usage: dm-doctor.sh [check] [--json]" ;;
   esac
 done
+# `full` scaffolds and prints sections; there is no document to emit for it.
+[ "$json" -eq 0 ] || [ "$mode" = check ] || dm_die "--json applies to 'check' only: dm-doctor.sh check --json"
 case "$mode" in
   check)
+    if [ "$json" -eq 1 ]; then
+      dm_need jq
+      collect_json_rows
+      # The FAIL hints go to the human path only; here the corrupt state shows up
+      # as the verdict and the exit code, which must both match `check` exactly.
+      badjson=0; probe_state_json >/dev/null || badjson=$?
+      printf '%s' "$JSON_ROWS" | jq -c -s \
+        --arg verdict "$(json_verdict "$JSON_MISS" "$badjson")" \
+        --argjson pr_delivery "$([ "$PR_DELIVERY" = ready ] && echo true || echo false)" \
+        '{verdict:$verdict, pr_delivery:$pr_delivery, checks:.}'
+      if [ "$JSON_MISS" -gt 0 ]; then exit "$JSON_MISS"; fi
+      if [ "$badjson" -gt 0 ]; then exit 1; fi
+      exit 0
+    fi
     # Compact readiness probe for dm-session-start; no scaffold, no headings.
     # Tooling first, then state-JSON integrity so a corrupt registry surfaces its
     # recovery hint here (session-start runs `check` before its repo/backlog

@@ -118,6 +118,16 @@ jobs:
       - name: Check skill/trigger coverage
         run: node tests/check-skill-triggers.js
 
+      # The console's two promises: a stage never claims more than was recorded,
+      # and the committed demo fleet carries no real repo, org or user.
+      - name: Check the console's honesty and vocabulary
+        run: node tests/check-console.js
+
+      # The console server's refusals over real HTTP: a cross-site page cannot
+      # post an operator instruction, and bad input cannot kill the process.
+      - name: Check the console server's refusals
+        run: node tests/check-console-http.js
+
       - name: Check runtime context-performance guardrails
         run: bash tests/runtime-performance.sh
 
@@ -130,6 +140,8 @@ jobs:
           node --check tests/check-skill-triggers.js
           node --check tests/check-pr-runner.js
           node --check tests/check-ci-graph.js
+          node --check tests/check-console.js
+          node --check tests/check-console-http.js
           node --check tests/runtime-performance.js
 
   # The suite as a contributor runs it: bash 5, GNU userland.
@@ -269,6 +281,8 @@ jobs:
           node tests/check-pr-runner.js
           node tests/check-ci-graph.js
           node tests/check-skill-triggers.js
+          node tests/check-console.js
+          node tests/check-console-http.js
           node tests/runtime-performance.js >/dev/null
 
   # The single required status for branch protection. `if: always()` so it runs

@@ -89,6 +89,10 @@ flowchart TD
   produced it; operator and fleet-wide facts stay in global memory.
 - **Scout reports** — investigations end in a written report, never an
   unauthorized change.
+- **A local console** — `/dockmaster` opens one page on 127.0.0.1 carrying the
+  conversation plus what needs you, where each change actually stands, every open
+  PR, repos, backlog, decisions and the review archive. Node stdlib only: no build
+  step, no dependency, works offline. It reads state solely through the toolbelt.
 - **Portable state** — the registry, task history, backlog, and memory export to
   one checksummed archive and restore into a fresh checkout (see
   [Backup and recovery](#backup-and-recovery)).
@@ -145,6 +149,7 @@ bin/                 the toolbelt; run `bin/dm help` for the full list (`bin/dm 
 .dm-knowledge/       this repo's own committed shared-memory notes
 workflows/           optional deterministic PR-pipeline runner
 config/              PR-pipeline defaults and per-repo overrides
+ui/                  the local console served by `bin/dm-ui.sh` (no build step)
 tests/               lifecycle, runtime, and performance checks
 .github/             CI workflow (smoke + syntax on ubuntu + macos)
 CONTRIBUTING.md      how to test, portability rules, branch/commit style
@@ -332,6 +337,7 @@ defaults are the supported configuration.
 | `DM_VERIFY_BROWSER_BIN` | unset | Chrome/Chromium `dm-verify.sh session` launches for a task. Unset searches `PATH`, then the newest Playwright-managed Chromium. |
 | `DM_VERIFY_BROWSER_SHARED` | unset | `1` forces the degraded shared-browser path (exclusive lease instead of a per-task browser). Used by the tests; set it only to reproduce that path. |
 | `DM_RUNTIME_STARTUP_SAMPLE` | unset | `1` enables the opt-in CLI startup timing diagnostic in `tests/runtime-performance.sh`. |
+| `DM_UI_PORT` | `4877` | Loopback port `bin/dm-ui.sh` serves the console on. Chosen clear of lavish (4387), chrome-devtools (9224) and the verify gate's app/bridge/CDP ranges; change it only if something else already holds 4877. |
 
 ## License
 

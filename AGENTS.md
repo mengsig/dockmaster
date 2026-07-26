@@ -113,6 +113,9 @@ Do not dispatch until required tools are present and GitHub auth is good. Plain
   unaccounted-for work.
 - **secondmate** — before creating, addressing, or retiring a persistent domain
   supervisor.
+- **dockmaster** — on `/dockmaster`, a request for the console, or to reach the
+  operator through the page instead of the terminal: one local page for the
+  conversation plus the whole fleet surface, and the poll/say loop behind it.
 - **coding-guidelines** — before you edit this distro's own code. The skill is
   the single canonical copy of the commandments: load it, do not restate it.
   `bin/dm-brief.sh` bakes the same file verbatim into every crewmate brief, so

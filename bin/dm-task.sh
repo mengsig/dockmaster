@@ -24,7 +24,7 @@
 #                         answer was "do not build it"), recording why
 #   archive <id>          move a terminal (done/discarded) task's records +
 #                         artifacts to state/archive/ (fails closed otherwise)
-#   list
+#   list [--json]
 #   recommend <role> <id> size a spawn for this task from real signals (role,
 #                         kind, measured diff) — a recommendation, not a record
 #   sizing [--transcripts <dir>]
@@ -40,6 +40,80 @@ dm_ensure_dirs
 # `new` inherits a task's mode from the repo registry; a corrupt registry must
 # not silently record an empty mode.
 dm_registry_require_valid
+
+# --- `list --json` row parts -------------------------------------------------
+# Both helpers publish into globals instead of printing a delimited record: a
+# state detail or a status note may itself contain any delimiter we could pick.
+
+# split_state_line <line> - the three ` · ` parts of a `state <id>` line, with
+# their `state: ` / `source: ` labels stripped. Everything after the SECOND
+# separator is the detail (it may contain more of them). Missing parts are "".
+STATE_ST=""; STATE_SRC=""; STATE_DETAIL=""
+split_state_line() {
+  local line="$1" rest
+  STATE_ST="$line"; STATE_SRC=""; STATE_DETAIL=""
+  case "$line" in
+    *' · '*)
+      STATE_ST="${line%%' · '*}"; rest="${line#*' · '}"
+      case "$rest" in
+        *' · '*) STATE_SRC="${rest%%' · '*}"; STATE_DETAIL="${rest#*' · '}" ;;
+        *) STATE_SRC="$rest" ;;
+      esac ;;
+  esac
+  STATE_ST="${STATE_ST#state: }"; STATE_SRC="${STATE_SRC#source: }"
+}
+
+# parse_last_event <status-log-line> - a status line is "TIMESTAMP verb: note",
+# and the timestamp has no spaces. A line missing either part yields "", so a
+# malformed log never reports a note fragment as the event verb.
+LAST_EVENT=""; LAST_EVENT_AT=""
+parse_last_event() {
+  local line="$1" rest
+  LAST_EVENT=""; LAST_EVENT_AT=""
+  case "$line" in
+    *' '*) LAST_EVENT_AT="${line%% *}"; rest="${line#* }" ;;
+    *) return 0 ;;
+  esac
+  case "$rest" in *:*) LAST_EVENT="${rest%%:*}" ;; esac
+}
+
+# task_list_json - one compact JSON array over every task record. Reconciles each
+# row OFFLINE (DM_NO_FETCH=1), exactly as the human `list` does: a live PR refresh
+# per task would make this N sequential GitHub round-trips. The worktree PATH is
+# deliberately not emitted — only whether one is present.
+task_list_json() {
+  local id wt has_wt rows
+  rows="$(while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    split_state_line "$(DM_NO_FETCH=1 "$0" state "$id")"
+    parse_last_event "$(tail -n1 "$(dm_status_path "$id")" 2>/dev/null || true)"
+    wt="$(dm_meta_get "$id" worktree)"
+    if [ -n "$wt" ] && [ -d "$wt" ]; then has_wt=true; else has_wt=false; fi
+    jq -c -n \
+      --arg id "$id" \
+      --arg kind "$(dm_meta_get "$id" kind)" \
+      --arg repo "$(dm_meta_get "$id" repo)" \
+      --arg title "$(dm_meta_get "$id" title)" \
+      --arg mode "$(dm_meta_get "$id" mode)" \
+      --arg created "$(dm_meta_get "$id" created)" \
+      --arg state "$STATE_ST" --arg state_source "$STATE_SRC" --arg state_detail "$STATE_DETAIL" \
+      --arg last_event "$LAST_EVENT" --arg last_event_at "$LAST_EVENT_AT" \
+      --arg pr "$(dm_meta_get "$id" pr)" \
+      --arg pr_state "$(dm_meta_get "$id" pr_state)" \
+      --arg checks "$(dm_meta_get "$id" checks)" \
+      --arg tests "$(dm_meta_get "$id" tests)" \
+      --arg tests_cmd "$(dm_meta_get "$id" tests_cmd)" \
+      --arg verify "$(dm_meta_get "$id" verify)" \
+      --arg branch "$(dm_meta_get "$id" branch)" \
+      --argjson has_worktree "$has_wt" \
+      '{id:$id,kind:$kind,repo:$repo,title:$title,mode:$mode,created:$created,
+        state:$state,state_source:$state_source,state_detail:$state_detail,
+        last_event:$last_event,last_event_at:$last_event_at,
+        pr:$pr,pr_state:$pr_state,checks:$checks,tests:$tests,tests_cmd:$tests_cmd,
+        verify:$verify,branch:$branch,has_worktree:$has_worktree}'
+  done < <(dm_all_task_ids))"
+  printf '%s' "$rows" | jq -c -s '.'
+}
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
@@ -382,6 +456,14 @@ case "$cmd" in
     ;;
 
   list)
+    json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) json=1; shift ;;
+        *) dm_die "unknown flag: $1 (usage: dm-task.sh list [--json])" ;;
+      esac
+    done
+    if [ "$json" -eq 1 ]; then dm_need jq; task_list_json; exit 0; fi
     # `| column ... || cat` bound `||` to the whole pipeline: a missing column
     # fell back to `cat` on the SCRIPT's stdin (consumed -> empty; a tty -> hangs).
     out="$(printf 'ID\tKIND\tREPO\tSTATE\n'

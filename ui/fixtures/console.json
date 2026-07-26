@@ -1,0 +1,1298 @@
+{
+  "anchor": "2026-01-15T09:00:00Z",
+  "generated_at": "2026-01-15T09:00:00Z",
+  "source": "fixture",
+  "degraded": [],
+  "fleet": {
+    "repos": 4,
+    "in_flight": 12,
+    "open_prs": 5,
+    "needs_you": 9
+  },
+  "needs_you": [
+    {
+      "lamp": "brass",
+      "kind": "review",
+      "count": 3,
+      "repos": [
+        "harbourmaster",
+        "lantern",
+        "tidebook"
+      ],
+      "href": "#flight",
+      "at": "2026-01-14T22:00:00.000Z"
+    },
+    {
+      "lamp": "brass",
+      "kind": "decision",
+      "question": "Billing provider for harbourmaster — the choice changes the stored data model, so it cannot be deferred past the schema.",
+      "options": [
+        "keep the legacy provider and wrap it",
+        "move to the metered provider",
+        "build the ledger in-house"
+      ],
+      "at": "2026-01-14T14:00:00.000Z"
+    },
+    {
+      "lamp": "brass",
+      "kind": "decision",
+      "question": "Should tidebook managers see every project in the workspace, or only the ones they are a member of?",
+      "options": [
+        "membership only (least privilege)",
+        "workspace-wide, and amend the docs"
+      ],
+      "at": "2026-01-13T13:00:00.000Z"
+    },
+    {
+      "lamp": "port",
+      "kind": "pr_red",
+      "title": "Quota windows roll at the tenant timezone",
+      "repo": "tidebook",
+      "href": "https://github.com/example-org/tidebook/pull/207",
+      "at": "2026-01-14T15:00:00.000Z"
+    },
+    {
+      "lamp": "brass",
+      "kind": "pr_changes",
+      "title": "Deduplicate the export writer",
+      "repo": "tidebook",
+      "href": "https://github.com/example-org/tidebook/pull/205",
+      "at": "2026-01-13T05:00:00.000Z"
+    },
+    {
+      "lamp": "starboard",
+      "kind": "pr_yours",
+      "title": "Session cookie survives the proxy rewrite",
+      "repo": "harbourmaster",
+      "href": "https://github.com/example-org/harbourmaster/pull/1184",
+      "at": "2026-01-14T03:00:00.000Z"
+    },
+    {
+      "lamp": "brass",
+      "kind": "blocked",
+      "title": "Nightly image build on the self-hosted runner",
+      "repo": "beacon",
+      "detail": "the runner host needs its build user added to the docker group; nobody but you can do that",
+      "at": "2026-01-14T19:00:00.000Z"
+    },
+    {
+      "lamp": "brass",
+      "kind": "needs_decision",
+      "title": "Move billing off the legacy provider",
+      "repo": "harbourmaster",
+      "detail": "two providers both fit; the choice changes the data model, so it is yours to make",
+      "at": "2026-01-14T14:00:00.000Z"
+    },
+    {
+      "lamp": "port",
+      "kind": "failed",
+      "title": "Upgrade the chart library past its breaking change",
+      "repo": "harbourmaster",
+      "detail": "the new version drops the axis API every screen uses; this needs a plan, not a bump",
+      "at": "2026-01-13T19:00:00.000Z"
+    }
+  ],
+  "work": [
+    {
+      "title": "Quota windows roll at the tenant timezone, not UTC",
+      "repo": "tidebook",
+      "kind": "ship",
+      "state": "in_progress",
+      "since": "2026-01-15T04:00:00.000Z",
+      "last_signal_at": "2026-01-15T08:36:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "",
+      "track": {
+        "mode": "pipeline",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "active",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "gates",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Session cookie is rejected behind the new proxy",
+      "repo": "harbourmaster",
+      "kind": "ship",
+      "state": "in_progress",
+      "since": "2026-01-14T02:00:00.000Z",
+      "last_signal_at": "2026-01-15T00:00:00.000Z",
+      "note_kind": "unlanded",
+      "note": "",
+      "review_href": "",
+      "track": {
+        "mode": "pipeline",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "done",
+            "evidence": {
+              "kind": "artifact",
+              "value": "ready",
+              "detail": ""
+            }
+          },
+          {
+            "key": "gates",
+            "state": "active",
+            "evidence": {
+              "kind": "tests",
+              "value": "pass",
+              "detail": "npm test -- --run"
+            }
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": [
+          {
+            "note": "fresh independent read of the diff against base",
+            "optional": false,
+            "state": "unrecorded"
+          },
+          {
+            "note": "apply the review findings on the same branch",
+            "optional": false,
+            "state": "unrecorded"
+          },
+          {
+            "note": "must pass after the fixes",
+            "optional": false,
+            "state": "pass"
+          },
+          {
+            "note": "second independent review of the fixed tree; the merge gate",
+            "optional": false,
+            "state": "unrecorded"
+          },
+          {
+            "note": "apply the review findings on the same branch",
+            "optional": false,
+            "state": "unrecorded"
+          },
+          {
+            "note": "must pass after the fixes",
+            "optional": false,
+            "state": "unrecorded"
+          },
+          {
+            "note": "run only when the change has a security surface",
+            "optional": true,
+            "state": "unrecorded"
+          },
+          {
+            "note": "open the pull request with a short human description",
+            "optional": false,
+            "state": "unrecorded"
+          }
+        ]
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Rate-limit headers on every public endpoint",
+      "repo": "beacon",
+      "kind": "ship",
+      "state": "in_progress",
+      "since": "2026-01-15T07:00:00.000Z",
+      "last_signal_at": "2026-01-15T07:54:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "",
+      "track": {
+        "mode": "direct-pr",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "active",
+            "evidence": {
+              "kind": "checks",
+              "value": "pending",
+              "detail": ""
+            }
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Where does the nightly export lose 3% of rows?",
+      "repo": "tidebook",
+      "kind": "scout",
+      "state": "in_progress",
+      "since": "2026-01-15T06:00:00.000Z",
+      "last_signal_at": "2026-01-15T06:24:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "",
+      "track": {
+        "mode": "scout",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "investigating",
+            "state": "active",
+            "evidence": null
+          },
+          {
+            "key": "report",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Retire the legacy importer",
+      "repo": "harbourmaster",
+      "kind": "ship",
+      "state": "in_progress",
+      "since": "2026-01-11T09:00:00.000Z",
+      "last_signal_at": "2026-01-13T05:00:00.000Z",
+      "note_kind": "undeterminable",
+      "note": "",
+      "review_href": "",
+      "track": {
+        "mode": "pipeline",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "unknown",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "unknown",
+            "evidence": null
+          },
+          {
+            "key": "gates",
+            "state": "unknown",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "unknown",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "unknown",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Empty states across the settings screens",
+      "repo": "harbourmaster",
+      "kind": "ship",
+      "state": "ready_for_review",
+      "since": "2026-01-14T05:00:00.000Z",
+      "last_signal_at": "2026-01-15T06:00:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "/review/demo-empty-states",
+      "track": {
+        "mode": "pipeline",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "active",
+            "evidence": {
+              "kind": "artifact",
+              "value": "ready",
+              "detail": ""
+            }
+          },
+          {
+            "key": "gates",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Contributor guide rewrite",
+      "repo": "lantern",
+      "kind": "ship",
+      "state": "ready_for_review",
+      "since": "2026-01-14T13:00:00.000Z",
+      "last_signal_at": "2026-01-15T03:00:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "/review/demo-contributor-guide",
+      "track": {
+        "mode": "local-only",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "active",
+            "evidence": {
+              "kind": "artifact",
+              "value": "ready",
+              "detail": ""
+            }
+          },
+          {
+            "key": "landed",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Search returns deleted records for a minute after deletion",
+      "repo": "tidebook",
+      "kind": "ship",
+      "state": "ready_for_review",
+      "since": "2026-01-13T12:00:00.000Z",
+      "last_signal_at": "2026-01-14T22:00:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "/review/demo-search-tombstones",
+      "track": {
+        "mode": "pipeline",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "active",
+            "evidence": {
+              "kind": "artifact",
+              "value": "ready",
+              "detail": ""
+            }
+          },
+          {
+            "key": "gates",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Nightly image build on the self-hosted runner",
+      "repo": "beacon",
+      "kind": "ship",
+      "state": "blocked",
+      "since": "2026-01-12T21:00:00.000Z",
+      "last_signal_at": "2026-01-14T19:00:00.000Z",
+      "note_kind": "reported",
+      "note": "the runner host needs its build user added to the docker group; nobody but you can do that",
+      "review_href": "",
+      "track": {
+        "mode": "direct-pr",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "active",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Move billing off the legacy provider",
+      "repo": "harbourmaster",
+      "kind": "ship",
+      "state": "needs_decision",
+      "since": "2026-01-12T11:00:00.000Z",
+      "last_signal_at": "2026-01-14T14:00:00.000Z",
+      "note_kind": "reported",
+      "note": "two providers both fit; the choice changes the data model, so it is yours to make",
+      "review_href": "",
+      "track": {
+        "mode": "pipeline",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "active",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "gates",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Upgrade the chart library past its breaking change",
+      "repo": "harbourmaster",
+      "kind": "ship",
+      "state": "failed",
+      "since": "2026-01-10T09:00:00.000Z",
+      "last_signal_at": "2026-01-13T19:00:00.000Z",
+      "note_kind": "reported",
+      "note": "the new version drops the axis API every screen uses; this needs a plan, not a bump",
+      "review_href": "",
+      "track": {
+        "mode": "pipeline",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "active",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "gates",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Offline mode for the field app",
+      "repo": "beacon",
+      "kind": "ship",
+      "state": "paused",
+      "since": "2026-01-07T01:00:00.000Z",
+      "last_signal_at": "2026-01-12T09:00:00.000Z",
+      "note_kind": "reported",
+      "note": "waiting on the sync protocol to settle upstream",
+      "review_href": "",
+      "track": {
+        "mode": "direct-pr",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "done",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "active",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Audit log retention policy",
+      "repo": "tidebook",
+      "kind": "ship",
+      "state": "queued",
+      "since": "2026-01-15T01:00:00.000Z",
+      "last_signal_at": "2026-01-15T01:00:00.000Z",
+      "note_kind": "not_started",
+      "note": "",
+      "review_href": "",
+      "track": {
+        "mode": "pipeline",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "active",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "gates",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Per-tenant feature flags",
+      "repo": "harbourmaster",
+      "kind": "ship",
+      "state": "queued",
+      "since": "2026-01-14T21:00:00.000Z",
+      "last_signal_at": "2026-01-14T21:00:00.000Z",
+      "note_kind": "not_started",
+      "note": "",
+      "review_href": "",
+      "track": {
+        "mode": "pipeline",
+        "stages": [
+          {
+            "key": "dispatched",
+            "state": "active",
+            "evidence": null
+          },
+          {
+            "key": "building",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "review",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "gates",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "pr",
+            "state": "ahead",
+            "evidence": null
+          },
+          {
+            "key": "merged",
+            "state": "ahead",
+            "evidence": null
+          }
+        ],
+        "gates": []
+      },
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Timezone-aware digest emails",
+      "repo": "tidebook",
+      "kind": "ship",
+      "state": "done",
+      "since": "2026-01-13T11:00:00.000Z",
+      "last_signal_at": "2026-01-14T07:00:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "",
+      "track": null,
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Drop the unused analytics bundle",
+      "repo": "harbourmaster",
+      "kind": "ship",
+      "state": "done",
+      "since": "2026-01-12T21:00:00.000Z",
+      "last_signal_at": "2026-01-13T17:00:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "",
+      "track": null,
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Colour contrast pass on the dark theme",
+      "repo": "harbourmaster",
+      "kind": "ship",
+      "state": "done",
+      "since": "2026-01-11T21:00:00.000Z",
+      "last_signal_at": "2026-01-12T17:00:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "",
+      "track": null,
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Structured logs on every worker",
+      "repo": "beacon",
+      "kind": "ship",
+      "state": "done",
+      "since": "2026-01-10T21:00:00.000Z",
+      "last_signal_at": "2026-01-11T17:00:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "",
+      "track": null,
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Getting-started page rewrite",
+      "repo": "lantern",
+      "kind": "ship",
+      "state": "done",
+      "since": "2026-01-09T23:00:00.000Z",
+      "last_signal_at": "2026-01-10T19:00:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "",
+      "track": null,
+      "quiet_after_hours": 4
+    },
+    {
+      "title": "Rewrite the queue in a second language",
+      "repo": "beacon",
+      "kind": "ship",
+      "state": "dropped",
+      "since": "2026-01-02T21:00:00.000Z",
+      "last_signal_at": "2026-01-05T09:00:00.000Z",
+      "note_kind": "",
+      "note": "",
+      "review_href": "",
+      "track": null,
+      "quiet_after_hours": 4
+    }
+  ],
+  "prs": [
+    {
+      "title": "Rate-limit headers on every public endpoint",
+      "repo": "beacon",
+      "url": "https://github.com/example-org/beacon/pull/312",
+      "checks": "pending",
+      "review": "clean",
+      "state": "OPEN",
+      "authority": "yolo",
+      "opened_at": "2026-01-15T07:00:00.000Z",
+      "cached": false,
+      "unreadable": null
+    },
+    {
+      "title": "Session cookie survives the proxy rewrite",
+      "repo": "harbourmaster",
+      "url": "https://github.com/example-org/harbourmaster/pull/1184",
+      "checks": "passing",
+      "review": "clean",
+      "state": "OPEN",
+      "authority": "never",
+      "opened_at": "2026-01-14T03:00:00.000Z",
+      "cached": false,
+      "unreadable": null
+    },
+    {
+      "title": "Quota windows roll at the tenant timezone",
+      "repo": "tidebook",
+      "url": "https://github.com/example-org/tidebook/pull/207",
+      "checks": "failing",
+      "review": "clean",
+      "state": "OPEN",
+      "authority": "ask",
+      "opened_at": "2026-01-14T15:00:00.000Z",
+      "cached": false,
+      "unreadable": null
+    },
+    {
+      "title": "Deduplicate the export writer",
+      "repo": "tidebook",
+      "url": "https://github.com/example-org/tidebook/pull/205",
+      "checks": "passing",
+      "review": "changes-requested",
+      "state": "OPEN",
+      "authority": "ask",
+      "opened_at": "2026-01-13T05:00:00.000Z",
+      "cached": false,
+      "unreadable": null
+    },
+    {
+      "title": "Retry the flaky upload step",
+      "repo": "beacon",
+      "url": "https://github.com/example-org/beacon/pull/309",
+      "checks": "unknown",
+      "review": "unknown",
+      "state": "OPEN",
+      "authority": "yolo",
+      "opened_at": "",
+      "cached": true,
+      "unreadable": null
+    },
+    {
+      "title": "",
+      "repo": "harbourmaster",
+      "url": "https://github.com/example-org/harbourmaster/pull/1179",
+      "checks": "unknown",
+      "review": "unknown",
+      "state": "unknown",
+      "authority": "never",
+      "opened_at": "",
+      "cached": false,
+      "unreadable": "github_unreadable"
+    }
+  ],
+  "repos": [
+    {
+      "name": "harbourmaster",
+      "authority": "never",
+      "mode": "pipeline",
+      "branch": "main",
+      "remote": "git@github.com:example-org/harbourmaster.git",
+      "test_cmd": "npm test -- --run",
+      "tangled": false,
+      "notes": [
+        {
+          "kind": "invariant",
+          "text": "Every route guard reads the session from the request, never from module state - a cached principal leaked between two operators once.",
+          "at": "2026-01-04"
+        },
+        {
+          "kind": "pitfall",
+          "text": "The dev compose stack uses fixed container names, so two tasks cannot run it in parallel. Treat it as a shared resource: check it is down before starting, restore it after.",
+          "at": "2026-01-08"
+        },
+        {
+          "kind": "convention",
+          "text": "Migrations use random revision ids. Two branches cut from the same parent must not both add one without checking the other first.",
+          "at": "2026-01-11"
+        }
+      ],
+      "notes_hidden": 0,
+      "branch_read": true,
+      "on_branch": "main"
+    },
+    {
+      "name": "tidebook",
+      "authority": "ask",
+      "mode": "pipeline",
+      "branch": "main",
+      "remote": "git@github.com:example-org/tidebook.git",
+      "test_cmd": "uv run --frozen pytest -q",
+      "tangled": true,
+      "notes": [
+        {
+          "kind": "pitfall",
+          "text": "Running pytest from the repo root resolves the package through the shared virtualenv and tests the clone, not this copy. Run it from backend/ with PYTHONPATH set, and check the import path before trusting a green run.",
+          "at": "2026-01-09"
+        }
+      ],
+      "notes_hidden": 4,
+      "branch_read": true,
+      "on_branch": "feat/quota-window"
+    },
+    {
+      "name": "beacon",
+      "authority": "yolo",
+      "mode": "direct-pr",
+      "branch": "main",
+      "remote": "git@github.com:example-org/beacon.git",
+      "test_cmd": "cargo test --all",
+      "tangled": false,
+      "notes": [],
+      "notes_hidden": 0,
+      "branch_read": true,
+      "on_branch": "main"
+    },
+    {
+      "name": "lantern",
+      "authority": "ask",
+      "mode": "local-only",
+      "branch": "trunk",
+      "remote": "git@github.com:example-org/lantern.git",
+      "test_cmd": "",
+      "tangled": false,
+      "notes": [
+        {
+          "kind": "routing",
+          "text": "Docs only. Screenshots live in assets/ and are regenerated by the build, so never hand-edit one.",
+          "at": "2026-01-02"
+        }
+      ],
+      "notes_hidden": 0,
+      "branch_read": true,
+      "on_branch": "trunk"
+    }
+  ],
+  "backlog": {
+    "in_flight": [
+      {
+        "title": "Quota windows roll at the tenant timezone",
+        "repo": "tidebook",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Session cookie is rejected behind the new proxy",
+        "repo": "harbourmaster",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Rate-limit headers on every public endpoint",
+        "repo": "beacon",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Nightly export loses rows",
+        "repo": "tidebook",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Contributor guide rewrite",
+        "repo": "lantern",
+        "blocked_by": "",
+        "note": ""
+      }
+    ],
+    "queued": [
+      {
+        "title": "Audit log retention policy",
+        "repo": "tidebook",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Per-tenant feature flags",
+        "repo": "harbourmaster",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Billing migration",
+        "repo": "harbourmaster",
+        "blocked_by": "the provider decision",
+        "note": ""
+      },
+      {
+        "title": "Offline mode for the field app",
+        "repo": "beacon",
+        "blocked_by": "the upstream sync protocol",
+        "note": ""
+      },
+      {
+        "title": "Nightly image build",
+        "repo": "beacon",
+        "blocked_by": "docker permission on the runner host",
+        "note": ""
+      },
+      {
+        "title": "Search relevance tuning",
+        "repo": "tidebook",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Screenshot regeneration in CI",
+        "repo": "lantern",
+        "blocked_by": "",
+        "note": ""
+      }
+    ],
+    "done": [
+      {
+        "title": "Timezone-aware digest emails",
+        "repo": "tidebook",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Drop the unused analytics bundle",
+        "repo": "harbourmaster",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Colour contrast pass on the dark theme",
+        "repo": "harbourmaster",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Structured logs on every worker",
+        "repo": "beacon",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Getting-started page rewrite",
+        "repo": "lantern",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Importer rewrite",
+        "repo": "harbourmaster",
+        "blocked_by": "",
+        "note": ""
+      },
+      {
+        "title": "Drop Node 18 support",
+        "repo": "beacon",
+        "blocked_by": "",
+        "note": ""
+      }
+    ]
+  },
+  "decisions": {
+    "open": [
+      {
+        "question": "Billing provider for harbourmaster — the choice changes the stored data model, so it cannot be deferred past the schema.",
+        "options": [
+          "keep the legacy provider and wrap it",
+          "move to the metered provider",
+          "build the ledger in-house"
+        ],
+        "answer": "",
+        "at": "2026-01-14T14:00:00.000Z"
+      },
+      {
+        "question": "Should tidebook managers see every project in the workspace, or only the ones they are a member of?",
+        "options": [
+          "membership only (least privilege)",
+          "workspace-wide, and amend the docs"
+        ],
+        "answer": "",
+        "at": "2026-01-13T13:00:00.000Z"
+      }
+    ],
+    "resolved": [
+      {
+        "question": "Land the importer rewrite as one change or split it per adapter?",
+        "options": [],
+        "answer": "one change, after an integration smoke run",
+        "at": "2026-01-09T03:00:00.000Z"
+      },
+      {
+        "question": "Drop Node 18 support in beacon?",
+        "options": [],
+        "answer": "yes — it is out of upstream support",
+        "at": "2026-01-06T05:00:00.000Z"
+      },
+      {
+        "question": "Keep the legacy /v1 endpoints after the migration?",
+        "options": [],
+        "answer": "keep for two releases, then remove with a deprecation notice",
+        "at": "2025-12-29T17:00:00.000Z"
+      }
+    ]
+  },
+  "reviews": [
+    {
+      "title": "Empty states across the settings screens",
+      "repo": "harbourmaster",
+      "state": "awaiting",
+      "at": "2026-01-15T06:00:00.000Z",
+      "href": "/review/demo-empty-states"
+    },
+    {
+      "title": "Contributor guide rewrite",
+      "repo": "lantern",
+      "state": "awaiting",
+      "at": "2026-01-15T03:00:00.000Z",
+      "href": "/review/demo-contributor-guide"
+    },
+    {
+      "title": "Search returns deleted records after deletion",
+      "repo": "tidebook",
+      "state": "awaiting",
+      "at": "2026-01-14T22:00:00.000Z",
+      "href": "/review/demo-search-tombstones"
+    },
+    {
+      "title": "Timezone-aware digest emails",
+      "repo": "tidebook",
+      "state": "archived",
+      "at": "2026-01-14T07:00:00.000Z",
+      "href": "/review/demo-digest-emails"
+    },
+    {
+      "title": "Drop the unused analytics bundle",
+      "repo": "harbourmaster",
+      "state": "archived",
+      "at": "2026-01-13T17:00:00.000Z",
+      "href": "/review/demo-analytics-bundle"
+    },
+    {
+      "title": "Colour contrast pass on the dark theme",
+      "repo": "harbourmaster",
+      "state": "archived",
+      "at": "2026-01-12T17:00:00.000Z",
+      "href": "/review/demo-contrast-pass"
+    },
+    {
+      "title": "Structured logs on every worker",
+      "repo": "beacon",
+      "state": "archived",
+      "at": "2026-01-11T17:00:00.000Z",
+      "href": "/review/demo-structured-logs"
+    },
+    {
+      "title": "Getting-started page rewrite",
+      "repo": "lantern",
+      "state": "archived",
+      "at": "2026-01-10T19:00:00.000Z",
+      "href": "/review/demo-getting-started"
+    }
+  ],
+  "health": {
+    "verdict": "READY",
+    "checks": [
+      {
+        "name": "git",
+        "tier": "required",
+        "status": "ok",
+        "note": "clone, worktree, and all git operations"
+      },
+      {
+        "name": "jq",
+        "tier": "required",
+        "status": "ok",
+        "note": "registry and backlog JSON (single-owner parsers)"
+      },
+      {
+        "name": "gh",
+        "tier": "pr-flow",
+        "status": "ok",
+        "note": "GitHub auth + API for the whole PR flow"
+      },
+      {
+        "name": "lavish-axi",
+        "tier": "optional",
+        "status": "missing",
+        "note": "the interactive review surface; the page itself still renders"
+      },
+      {
+        "name": "node",
+        "tier": "required",
+        "status": "ok",
+        "note": "this console and the pipeline runner"
+      }
+    ],
+    "cleanup": [
+      {
+        "label": "Local copies of finished work",
+        "count": 6,
+        "note": "Safe to clear."
+      },
+      {
+        "label": "Local copies with no work behind them",
+        "count": 2,
+        "note": "Left over; nothing depends on them."
+      }
+    ]
+  }
+}
