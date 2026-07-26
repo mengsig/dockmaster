@@ -40,15 +40,30 @@ completion wake you (see `supervision`). Do not busy-loop it.
 
 ## What it will not do
 
-Nothing on the page is destructive — no merge, no cleanup, no teardown control.
-It reports, and it talks. Every action stays in this session under the usual
-gates, so the merge authority in `AGENTS.md` §3 is untouched by anything the
-operator clicks. A decision answered from the page arrives as an ordinary
-message; record the resolution with `decision-hold` exactly as before.
+No control on the page is destructive — no merge, no cleanup, no teardown. Every
+action stays in this session under the usual gates, so the merge authority in
+`AGENTS.md` §3 is untouched by anything the operator clicks. A decision answered
+from the page arrives as an ordinary message; record the resolution with
+`decision-hold` exactly as before.
+
+It is not read-only, though. Refreshing runs `dm-pr.sh sweep`, which RECORDS
+each PR's state and checks on the work it sweeps and takes the task lock to do
+it — the same write the fleet snapshot has always made. So an open tab is a
+periodic writer: it refreshes every 30s while visible, skips entirely while the
+tab is hidden, and the sweep itself is behind a much longer cache. Expect
+`pr_state`/`checks` to move without you asking, and do not leave a console
+running against a home you are debugging locks in.
 
 ## When a panel says it could not read something
 
-The page names the source it lost rather than rendering an empty panel, and
-`--source live` fails loudly instead of falling back to fixtures. Treat a named
-degradation as a real toolbelt failure and investigate the script it names — a
-plausible-looking wrong fleet is the one outcome this must never produce.
+The page names, on the panel that lost it, what could not be read — never an
+empty panel, and never "all clear" over a source it never reached. `--source
+live` fails loudly instead of falling back to fixtures, and a demo fleet says so
+in a banner and in the tab title. Treat a named degradation as a real toolbelt
+failure and investigate: the console's own log has the script, argv and stderr
+behind it (the page deliberately shows none of that). A plausible-looking wrong
+fleet is the one outcome this must never produce.
+
+The repo panel shows what `dm-memory.sh recall --crew` returns — the shared and
+private stores, the same view a crewmate gets. The dockmaster-only store is
+excluded by design; it never leaves this session.

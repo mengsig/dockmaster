@@ -5715,6 +5715,22 @@ check "poll claims it, so it is delivered once" \
 check "a claimed message is kept, not deleted" \
   '[ -n "$(find "$DM_HOME/state/ui/claimed" -name "*.json")" ]'
 
+# A pid file naming a LIVE process that is not the console must never be deleted
+# or killed. Deleting it orphans whatever holds the port, and the next `start`
+# then fails with a bare address-in-use naming no cause. $$ is this shell: alive,
+# and demonstrably not the server.
+printf '%s\n' "$$" > "$DM_HOME/state/ui/server.pid"
+check "stop refuses a pid file that is not the console" '! b dm-ui.sh stop >/dev/null 2>&1'
+check "stop leaves that pid file alone"        '[ -f "$DM_HOME/state/ui/server.pid" ]'
+check "status refuses it too, rather than reporting not-running" \
+  '! b dm-ui.sh status >/dev/null 2>&1'
+check "start refuses to race it"               '! b dm-ui.sh start >/dev/null 2>&1'
+check "and this shell was not killed"          'kill -0 $$'
+# A pid file naming a DEAD process is ordinary staleness: cleared, not refused.
+printf '%s\n' "999999999" > "$DM_HOME/state/ui/server.pid"
+check "stop clears a pid file naming a dead process" 'b dm-ui.sh stop >/dev/null 2>&1'
+check "and the stale file is gone"             '[ ! -f "$DM_HOME/state/ui/server.pid" ]'
+
 # Every --json emitter: valid JSON, and the human output it sits beside is
 # untouched. A second parser in the page is what these exist to prevent.
 UI_HUMAN_REPOS="$(b dm-repo.sh list)"
@@ -5737,9 +5753,34 @@ check "the gate track has a human form too" \
 check "a traversing repo name is refused"      '! b dm-pr.sh pipeline ../../etc >/dev/null 2>&1'
 check "the offline sweep emits json"           'DM_NO_FETCH=1 b dm-pr.sh sweep --json | jq -e "type==\"array\"" >/dev/null'
 check "an unexpected sweep argument is refused" '! b dm-pr.sh sweep --wat >/dev/null 2>&1'
+# A PR the sweep could not read stays in the list with a TOKEN the console
+# words. A sentence here would put "clone missing" on the operator's screen.
+check "an unreadable swept PR carries a token, not a sentence" \
+  'DM_NO_FETCH=1 b dm-pr.sh sweep --json | jq -e "all(.[]; .unreadable == null or (.unreadable | test(\"^[a-z_]+$\")))" >/dev/null'
 
-# The page's own promises, pinned separately (track honesty + vocabulary).
-check "console checks pass" 'node "$ROOT/tests/check-console.js" >/dev/null 2>&1'
+# The whole live collector, once, against this fixture home - the only place the
+# real shell-out path is exercised end to end. It reads memory the way a
+# CREWMATE does (recall --crew), so the dockmaster-only store, which exists
+# precisely never to be relayed, must not reach the page either. DMONLY-crew-
+# must-not-see was recorded in the memory-context block far above.
+UI_COLLECTED="$(DM_UI_ROOT="$ROOT" node -e '
+  const live = require(process.env.DM_UI_ROOT + "/ui/live.js")
+  live.collectLocal(process.env.DM_UI_ROOT + "/bin")
+    .then((d) => { console.log(JSON.stringify(d)) }, (e) => { console.error(e.message); process.exit(1) })
+' 2>/dev/null)" || UI_COLLECTED=""
+check "the live collector runs against a real home" \
+  '[ -n "$UI_COLLECTED" ] && jq -e "has(\"repos\") and has(\"work\") and has(\"degraded\")" <<<"$UI_COLLECTED" >/dev/null'
+check "the dockmaster-only store never reaches the page" \
+  '! grep -q "DMONLY-crew-must-not-see" <<<"$UI_COLLECTED"'
+# A degradation carries a source TOKEN and the panel that lost it - never a
+# script name, its argv, or its stderr.
+check "a degradation carries tokens, not script output" \
+  'jq -e "all(.degraded[]; (has(\"error\")|not) and (.source|test(\"^[a-z_]+$\")) and (.panel|length > 0))" <<<"$UI_COLLECTED" >/dev/null'
+
+# The page's own promises, pinned separately (track honesty + vocabulary), and
+# the server's refusals over real HTTP (cross-site writes, bad input, traversal).
+check "console checks pass"      'node "$ROOT/tests/check-console.js" >/dev/null 2>&1'
+check "console http checks pass" 'node "$ROOT/tests/check-console-http.js" >/dev/null 2>&1'
 
 echo
 echo "smoke: $pass passed, $fail failed"

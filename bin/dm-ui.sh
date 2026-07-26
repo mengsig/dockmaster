@@ -50,27 +50,44 @@ BOOT_TIMEOUT_SPINS=100   # 100 x 0.1s
 
 usage() { sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
-# Print the running server's pid, or nothing. A pid file naming a dead process
-# is stale; one naming a RECYCLED pid belongs to somebody else, so the command
-# line is checked before we ever report it as ours - `stop` kills this pid.
+# running_pid - print the pid the file names, and return WHICH of three states
+# it is in. Callers must distinguish all three:
+#
+#   0  our server is running on that pid
+#   1  nothing is running: no pid file, or it names a dead process
+#   2  that pid is ALIVE but is not this console - a recycled pid, or a console
+#      started from another checkout
+#
+# 2 is never "not running". Deleting that file orphans whatever holds the port,
+# and the next `start` then fails with a bare address-in-use naming no cause.
 running_pid() {
   local pid
   [ -f "$PID_FILE" ] || return 1
-  pid="$(cat "$PID_FILE")"
+  pid="$(cat "$PID_FILE" 2>/dev/null)" || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   kill -0 "$pid" 2>/dev/null || return 1
-  ps -p "$pid" -o args= 2>/dev/null | grep -q "$UI_DIR/server.js" || return 1
   printf '%s\n' "$pid"
+  # -F: the path is a literal. Unquoted it is a regex, where every `.` matches
+  # anything and a path with a metacharacter matches the wrong process.
+  ps -p "$pid" -o args= 2>/dev/null | grep -qF -- "$UI_DIR/server.js" || return 2
+}
+
+# A live pid that is not ours: refuse, and touch neither the process nor the
+# file. The operator is the only one who knows what that process is.
+die_not_ours() {
+  dm_die "console: $PID_FILE names live process $1, which is not this console - leaving both alone. Find out what it is, then remove that file."
 }
 
 running_source() { cat "$SOURCE_FILE" 2>/dev/null; }
 
 start_server() {
-  local source="$1" pid spins was
+  local source="$1" pid spins was rc=0
+  pid="$(running_pid)" || rc=$?
+  [ "$rc" -ne 2 ] || die_not_ours "$pid"
   # An already-running server on the OTHER source is the one failure this must
   # never wave through: `start --source live` would otherwise print a URL and
   # keep serving the demo fleet. Replace it, and say so.
-  if running_pid >/dev/null; then
+  if [ "$rc" -eq 0 ]; then
     was="$(running_source)"
     if [ "$was" = "$source" ]; then dm_info "$URL"; return 0; fi
     dm_warn "console: was serving '${was:-unknown}', restarting on '$source'"
@@ -103,8 +120,14 @@ start_server() {
 }
 
 stop_server() {
-  local pid
-  pid="$(running_pid)" || { dm_info "console: not running"; rm -f "$PID_FILE" "$SOURCE_FILE"; return 0; }
+  local pid rc=0
+  pid="$(running_pid)" || rc=$?
+  [ "$rc" -ne 2 ] || die_not_ours "$pid"
+  if [ "$rc" -ne 0 ]; then
+    dm_info "console: not running"
+    rm -f "$PID_FILE" "$SOURCE_FILE"
+    return 0
+  fi
   kill "$pid" 2>/dev/null || true
   rm -f "$PID_FILE" "$SOURCE_FILE"
   dm_info "console: stopped"
@@ -142,8 +165,12 @@ case "$cmd" in
   open)  read_source "$@" || exit $?; start_server "$DM_UI_ARG_SOURCE"; open_browser ;;
   url)   dm_info "$URL" ;;
   status)
-    if pid="$(running_pid)"; then dm_info "console: running (pid $pid, source $(running_source)) $URL"
-    else dm_info "console: not running"; exit 1; fi
+    rc=0; pid="$(running_pid)" || rc=$?
+    case "$rc" in
+      0) dm_info "console: running (pid $pid, source $(running_source)) $URL" ;;
+      2) die_not_ours "$pid" ;;
+      *) dm_info "console: not running"; exit 1 ;;
+    esac
     ;;
   stop) stop_server ;;
   poll)

@@ -58,24 +58,43 @@ function append(dmHome, from, text) {
   return message;
 }
 
-// read(dmHome) -> every message, oldest first. A malformed line is an error, not
-// a skipped record: silently dropping transcript is worse than refusing to render.
+// read(dmHome) -> { messages, unreadable }, oldest first.
+//
+// A line that will not parse is COUNTED, never silently dropped and never
+// fatal. Two processes append to this file, so one torn write is a real
+// possibility - and it must not take the conversation, or the server, down with
+// it. The count crosses to the page, which says how much it could not read;
+// dropping a line without saying so is the outcome this avoids.
 function read(dmHome) {
   const file = path.join(uiDir(dmHome), 'chat.jsonl');
   let raw;
   try {
     raw = fs.readFileSync(file, 'utf8');
   } catch (err) {
-    if (err.code === 'ENOENT') return [];
+    if (err.code === 'ENOENT') return { messages: [], unreadable: 0 };
     throw err;
   }
-  return raw.split('\n').filter((l) => l.trim().length > 0).map((line, i) => {
+  const messages = [];
+  let unreadable = 0;
+  for (const line of raw.split('\n')) {
+    if (line.trim().length === 0) continue;
+    let parsed;
     try {
-      return JSON.parse(line);
+      parsed = JSON.parse(line);
     } catch (err) {
-      throw new Error(`chat: ${file} line ${i + 1} is not valid JSON: ${err.message}`);
+      unreadable += 1;
+      process.stderr.write(`console: chat: a line of ${file} is not valid JSON: ${err.message}\n`);
+      continue;
     }
-  });
+    if (parsed === null || typeof parsed !== 'object' || typeof parsed.text !== 'string'
+      || !SENDERS.includes(parsed.from)) {
+      unreadable += 1;
+      process.stderr.write(`console: chat: a line of ${file} is not a message\n`);
+      continue;
+    }
+    messages.push(parsed);
+  }
+  return { messages, unreadable };
 }
 
 function inboxNames(dmHome) {

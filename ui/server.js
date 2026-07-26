@@ -6,6 +6,10 @@
 // domain to 127.0.0.1 (DNS rebinding); the CSP header pins every asset to this
 // origin, which is also what keeps the page honest about working offline.
 //
+// Reading is not the whole threat. A message POSTed here becomes an operator
+// INSTRUCTION the dockmaster acts on, so the write path takes its own
+// cross-site refusals - see writeRefusal(). Loopback is not an authenticator.
+//
 // Started by bin/dm-ui.sh; run it directly only for debugging.
 
 'use strict';
@@ -89,9 +93,58 @@ function fail(res, status, message) {
   sendJson(res, status, { error: message });
 }
 
+const localHosts = (port) => [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`];
+
 function hostIsLocal(req, port) {
-  const host = req.headers.host || '';
-  return host === `127.0.0.1:${port}` || host === `localhost:${port}` || host === `[::1]:${port}`;
+  return localHosts(port).includes(req.headers.host || '');
+}
+
+// A header value is only ever echoed back bounded: it is attacker-controlled,
+// and it also lands in this process's log.
+const shown = (value) => String(value).slice(0, 40).replace(/[^\x20-\x7e]/g, '?');
+
+// crossSiteRefusal(req, port) -> {status, message}, or null to allow.
+//
+// The Host check above defeats DNS rebinding, which is a cross-origin READ
+// attack. It does nothing about a cross-site request that CHANGES something: a
+// hostile page can aim one straight at this literal loopback URL, and the
+// browser sets the Host header itself, so it arrives looking local.
+//
+//   Sec-Fetch-Site  the browser sets it and page script cannot forge it (it is
+//                   a forbidden header name); anything but same-origin/none is
+//                   another site asking. Note a page on another PORT of
+//                   127.0.0.1 sends `same-site`, which is not same-origin and
+//                   is refused here - that is the case a real attack uses.
+//   Origin          present on every browser POST; it must be one of ours.
+//
+// A non-browser client (curl, the tests) sends neither and is allowed - it is
+// already running as the operator by the time it can reach this port.
+function crossSiteRefusal(req, port) {
+  const site = req.headers['sec-fetch-site'];
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') {
+    return { status: 403, message: `refused a request from another site (sec-fetch-site: ${shown(site)})` };
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined && !localHosts(port).some((h) => origin === `http://${h}`)) {
+    return { status: 403, message: 'refused a request from another origin' };
+  }
+  return null;
+}
+
+// A posted message becomes an operator INSTRUCTION the dockmaster acts on, so
+// the write path adds a third, independent refusal on top of the two above:
+// application/json is NOT a CORS-simple content type, so a cross-origin attempt
+// must preflight first and the preflight gets no CORS headers back. That is
+// what stops the text/plain fetch and the HTML form - the two shapes that need
+// no preflight at all and so are never blocked by the browser.
+function writeRefusal(req, port) {
+  const refusal = crossSiteRefusal(req, port);
+  if (refusal) return refusal;
+  const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (type !== 'application/json') {
+    return { status: 415, message: `this takes application/json, not '${shown(type) || 'nothing'}'` };
+  }
+  return null;
 }
 
 function readBody(req) {
@@ -125,19 +178,31 @@ function serveStatic(res, route) {
 // segment up, where they are not. The bare form redirects rather than 404s, so
 // a link written either way still works.
 async function serveReview(res, cfg, pathname) {
-  const parts = pathname.split('/').slice(2).map(decodeURIComponent);
-  const id = parts[0];
-  const asset = parts.length === 2 && parts[1] !== '' ? parts[1] : undefined;
-  if (!id || parts.length > 2 || (asset !== undefined && !ASSET_NAME.test(asset))) {
-    return fail(res, 400, `review: '${pathname}' is not a review page`);
+  let parts;
+  try {
+    parts = pathname.split('/').slice(2).map(decodeURIComponent);
+  } catch (err) {
+    // A malformed percent-escape is bad input, not a server fault.
+    return fail(res, 400, `review: that address cannot be read (${err.message})`);
   }
+  const id = parts[0];
+  if (!id) return fail(res, 400, `review: '${pathname}' is not a review page`);
   if (parts.length === 1) {
     res.writeHead(302, { location: `/review/${encodeURIComponent(id)}/`, 'content-length': 0, 'cache-control': 'no-store' });
     return res.end();
   }
+  // One trailing empty segment is the directory itself. Anything else names an
+  // asset, and EVERY segment of it must be a plain name - so `..` and dotfiles
+  // stay unrepresentable at any depth rather than being filtered out. A review
+  // page ships its screenshots in subdirectories, so depth is not optional.
+  const rest = parts.slice(1);
+  const isIndex = rest.length === 1 && rest[0] === '';
+  if (!isIndex && !rest.every((segment) => ASSET_NAME.test(segment))) {
+    return fail(res, 400, `review: '${pathname}' is not a review page`);
+  }
   const found = await live.reviewDir(cfg.bin, id);
   if (!found) return fail(res, 404, 'review: no review page for that work');
-  const file = asset === undefined ? found.file : path.join(found.dir, asset);
+  const file = isIndex ? found.file : path.join(found.dir, ...rest);
   let body;
   try {
     body = fs.readFileSync(file);
@@ -148,6 +213,25 @@ async function serveReview(res, cfg, pathname) {
   send(res, 200, type, body, { 'content-security-policy': REVIEW_CSP });
 }
 
+// settle(watchers, waiter, force) - answer one waiter and retire it, containing
+// any failure. Both callers that matter run OUTSIDE a request handler (a
+// filesystem watch and a timer), where a throw is unhandled and exits the
+// process - one torn line in the transcript used to be enough to do that.
+function settle(watchers, waiter, force) {
+  try {
+    if (!waiter.answer(force)) return false;
+  } catch (err) {
+    if (waiter.res.headersSent || waiter.res.writableEnded) {
+      process.stderr.write(`console: chat: ${err.message} (the page had already gone)\n`);
+    } else {
+      fail(waiter.res, 500, `chat: ${err.message}`);
+    }
+  }
+  clearTimeout(waiter.timer);
+  watchers.delete(waiter);
+  return true;
+}
+
 // GET /api/chat?since=N - returns messages after index N. With wait=1 it holds
 // the request open until one arrives (or LONG_POLL_MS), so the page stays live
 // without a busy loop.
@@ -156,35 +240,41 @@ function serveChat(res, cfg, url, watchers) {
   if (!Number.isInteger(since) || since < 0) {
     return fail(res, 400, `chat: 'since' must be a non-negative integer`);
   }
-  const reply = () => {
-    const messages = chat.read(cfg.dmHome);
-    if (messages.length <= since && url.searchParams.get('wait') === '1') return false;
-    sendJson(res, 200, {
-      total: messages.length,
-      pending: chat.pendingCount(cfg.dmHome),
-      messages: messages.slice(since),
-    });
-    return true;
+  const waiter = {
+    res,
+    timer: null,
+    // force=true answers whatever there is; otherwise it holds out for
+    // something new. `unreadable` crosses so the page can say what it lost.
+    answer(force) {
+      const { messages, unreadable } = chat.read(cfg.dmHome);
+      if (!force && messages.length <= since) return false;
+      sendJson(res, 200, {
+        total: messages.length,
+        unreadable,
+        pending: chat.pendingCount(cfg.dmHome),
+        messages: messages.slice(since),
+      });
+      return true;
+    },
   };
-  if (reply()) return;
 
-  const waiter = { reply, timer: null };
+  if (settle(watchers, waiter, url.searchParams.get('wait') !== '1')) return;
   watchers.add(waiter);
-  waiter.timer = setTimeout(() => {
-    watchers.delete(waiter);
-    sendJson(res, 200, { total: chat.read(cfg.dmHome).length, pending: chat.pendingCount(cfg.dmHome), messages: [] });
-  }, LONG_POLL_MS);
+  waiter.timer = setTimeout(() => settle(watchers, waiter, true), LONG_POLL_MS);
   res.on('close', () => { clearTimeout(waiter.timer); watchers.delete(waiter); });
 }
 
 function wake(watchers) {
-  for (const waiter of Array.from(watchers)) {
-    if (waiter.reply()) { clearTimeout(waiter.timer); watchers.delete(waiter); }
-  }
+  for (const waiter of Array.from(watchers)) settle(watchers, waiter, false);
 }
 
 async function postChat(req, res, cfg, watchers) {
-  const body = await readBody(req);
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (err) {
+    return fail(res, err instanceof RangeError ? 413 : 400, `chat: ${err.message}`);
+  }
   let parsed;
   try {
     parsed = JSON.parse(body);
@@ -193,9 +283,11 @@ async function postChat(req, res, cfg, watchers) {
   }
   let message;
   try {
+    // chat.append's errors already name their own subject; re-prefixing here is
+    // what produced "chat: chat: refusing an empty message".
     message = chat.append(cfg.dmHome, 'operator', parsed && parsed.text);
   } catch (err) {
-    return fail(res, 400, `chat: ${err.message}`);
+    return fail(res, 400, err.message);
   }
   sendJson(res, 201, message);
   wake(watchers);
@@ -209,16 +301,30 @@ function handle(req, res, cfg, watchers) {
     return serveStatic(res, url.pathname);
   }
   if (req.method === 'GET' && url.pathname === '/api/state') {
+    // `refresh=1` bypasses the cache and drives a fleet-wide PR sweep, which
+    // burns GitHub calls, takes the task lock and RECORDS what it finds. That
+    // makes it a state-changing GET, so it takes the cross-site refusal too -
+    // an <img src> on a hostile page must not be able to run it in a loop.
+    const forced = url.searchParams.get('refresh') === '1';
+    const refusal = forced ? crossSiteRefusal(req, cfg.port) : null;
+    if (refusal) return fail(res, refusal.status, refusal.message);
     // A failed collection is reported as a failure, never as an empty fleet.
-    return state.collect(cfg.source, cfg.bin, url.searchParams.get('refresh') === '1')
+    // The page words the failure from `source`; the raw reason is already on
+    // stderr, because a script name and its stderr are not for the operator.
+    return state.collect(cfg.source, cfg.bin, forced)
       .then((doc) => sendJson(res, 200, doc))
-      .catch((err) => fail(res, 503, err.message));
+      .catch((err) => {
+        process.stderr.write(`console: /api/state: ${err.message}\n`);
+        sendJson(res, 503, { error: err.message, source: err.source || '' });
+      });
   }
   if (req.method === 'GET' && url.pathname.startsWith('/review/')) {
     return serveReview(res, cfg, url.pathname).catch((err) => fail(res, 500, `review: ${err.message}`));
   }
   if (req.method === 'GET' && url.pathname === '/api/chat') return serveChat(res, cfg, url, watchers);
   if (req.method === 'POST' && url.pathname === '/api/chat') {
+    const refusal = writeRefusal(req, cfg.port);
+    if (refusal) return fail(res, refusal.status, refusal.message);
     return postChat(req, res, cfg, watchers).catch((err) => fail(res, 500, `chat: ${err.message}`));
   }
   return fail(res, 404, `no route for ${req.method} ${url.pathname}`);
@@ -246,7 +352,12 @@ function main() {
     process.stdout.write(`http://127.0.0.1:${cfg.port}/ (${cfg.source})\n`);
   });
   server.on('error', (err) => {
-    process.stderr.write(`console: cannot listen on 127.0.0.1:${cfg.port}: ${err.message}\n`);
+    // Name the usual cause: an orphaned console still holding the port reads as
+    // a bare EADDRINUSE, which says nothing about what to do next.
+    const why = err.code === 'EADDRINUSE'
+      ? `something is already listening there - stop it with 'bin/dm-ui.sh stop', or set DM_UI_PORT`
+      : err.message;
+    process.stderr.write(`console: cannot listen on 127.0.0.1:${cfg.port}: ${why}\n`);
     process.exit(1);
   });
 }

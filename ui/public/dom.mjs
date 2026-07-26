@@ -88,7 +88,13 @@ export function empty(headline, note) {
 }
 
 export const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-export const lookup = (map, key) => map[key] || ['neutral', key];
+
+// A token with no word is a GAP IN THIS FILE, not something to print raw: the
+// internal name is exactly what must not reach the screen, and the failure
+// paths are where an unmapped token is most likely to turn up.
+// tests/check-console.js pins that every token the collector can emit is here.
+export const word = (map, token) => map[token] || 'Not known';
+export const lookup = (map, key) => map[key] || ['neutral', 'Not known'];
 
 // --- time --------------------------------------------------------------------
 
@@ -191,4 +197,28 @@ export const STAGE_STATE = {
   active: 'now',
   ahead: 'not yet',
   unknown: 'not known',
+};
+
+// What the console lost, in the operator's nouns. The document names a source
+// with a token; the script behind it, its arguments and its stderr never cross,
+// because a failure path is exactly where internal phrasing surfaces.
+export const SOURCE_WORD = {
+  repos: 'the managed repos',
+  work: 'what the crew is working on',
+  gate_track: 'the checks a change still has to clear',
+  pull_requests: 'the pull requests',
+  decisions: 'the open decisions',
+  backlog: 'the backlog',
+  review_pages: 'the review archive',
+  clone_branch: 'which branch a repo is sitting on',
+  memory: 'what the dockmaster remembers',
+  local_copies: 'the local copies',
+  health: 'the health check',
+};
+
+// A pull request that came back from the sweep unreadable. Kept in the list on
+// purpose - one that vanished would read as a fleet with one less problem.
+export const PR_UNREADABLE = {
+  repo_missing: 'This repo is not set up on this machine, so nothing about it could be read.',
+  github_unreadable: 'GitHub could not be read for this one.',
 };

@@ -418,19 +418,23 @@ read_sweep_snapshot() {
 }
 
 # sweep_row <id> <repo> <url> <state> <checks> <review> <title> <created_at>
-#           <offline> <error>  -> one JSON object for `sweep --json`.
+#           <offline> <unreadable>  -> one JSON object for `sweep --json`.
 # jq --arg, never string assembly: a PR title is free text. EVERY swept PR gets
-# a row, unreadable ones included with `error` set — a PR that drops out of the
-# list reads as a fleet with fewer problems than it has.
+# a row, unreadable ones included with `unreadable` set — a PR that drops out of
+# the list reads as a fleet with fewer problems than it has.
+#
+# `unreadable` is a TOKEN (repo_missing | github_unreadable), not a sentence: the
+# console words it for the operator, and this script's own phrasing —
+# "clone missing", "check failed" — is the crew's vocabulary, not theirs.
 sweep_row() {
   jq -nc --arg id "$1" --arg repo "$2" --arg url "$3" --arg state "$4" \
     --arg checks "$5" --arg review "$6" --arg title "$7" --arg created_at "$8" \
-    --arg offline "$9" --arg error "${10}" \
+    --arg offline "$9" --arg unreadable "${10}" \
     --arg authority "$(dm_merge_authority "$2")" '
     { id: $id, repo: $repo, url: $url, state: $state, checks: $checks,
       review: $review, title: $title, created_at: $created_at,
       authority: $authority, offline: ($offline == "1"),
-      error: (if $error == "" then null else $error end) }'
+      unreadable: (if $unreadable == "" then null else $unreadable end) }'
 }
 
 check_runs_rollup() {
@@ -1067,7 +1071,7 @@ case "$cmd" in
       if [ "$rdrc" -ne 0 ] || [ ! -d "$dir/.git" ]; then
         missing=$((missing + 1))
         if [ "$json" -eq 1 ]; then
-          rows="$rows$(sweep_row "$id" "$repo" "$url" "" "" "" "" "" 0 "repo unregistered or clone missing")"$'\n'
+          rows="$rows$(sweep_row "$id" "$repo" "$url" "" "" "" "" "" 0 repo_missing)"$'\n'
         else
           printf '  %s  (repo unregistered or clone missing: %s — skipped)  %s\n' "$id" "${repo:-?}" "$url"
         fi
@@ -1112,7 +1116,7 @@ case "$cmd" in
           consecutive_exhausted=0
         fi
         if [ "$json" -eq 1 ]; then
-          rows="$rows$(sweep_row "$id" "$repo" "$url" "" "" "" "" "" 0 "could not read the PR from GitHub")"$'\n'
+          rows="$rows$(sweep_row "$id" "$repo" "$url" "" "" "" "" "" 0 github_unreadable)"$'\n'
         else
           printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
         fi
@@ -1125,7 +1129,7 @@ case "$cmd" in
       if [ "$state" = "MERGED" ]; then
         if ! "$0" check "$id" >/dev/null 2>&1; then
           if [ "$json" -eq 1 ]; then
-            rows="$rows$(sweep_row "$id" "$repo" "$url" "" "" "" "" "" 0 "could not read the PR from GitHub")"$'\n'
+            rows="$rows$(sweep_row "$id" "$repo" "$url" "" "" "" "" "" 0 github_unreadable)"$'\n'
           else
             printf '  %s  (could not read PR — check failed)  %s\n' "$id" "$url"
           fi

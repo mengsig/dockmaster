@@ -6,10 +6,15 @@
  */
 'use strict';
 
-import { el, add, lamp, plural, clockTime } from './dom.mjs';
+import { el, add, lamp, plural, clockTime, word, SOURCE_WORD } from './dom.mjs';
 import { VIEWS } from './views.mjs';
 
-const shell = { state: null, current: location.hash.replace('#', '') || 'needs', refreshing: false };
+const shell = {
+  state: null,
+  current: location.hash.replace('#', '') || 'needs',
+  refreshing: false,
+  readAt: 0,
+};
 
 // --- chrome ------------------------------------------------------------------
 
@@ -36,21 +41,40 @@ function renderRail() {
   }
 }
 
+// The one-line summary. "all clear" is a claim about EVERYTHING, so it may only
+// be made when everything was actually read - the same rule the Needs-you panel
+// follows, in the line the operator glances at first.
 function renderPulse() {
   const s = shell.state;
   const pulse = byId('pulse');
   pulse.textContent = '';
   const urgent = s.needs_you.length;
-  add(pulse, lamp(urgent > 0 ? 'brass' : 'starboard'));
-  add(pulse, el('span', null, urgent > 0 ? plural(urgent, 'thing needs you', 'things need you') : 'all clear'));
+  const partial = s.degraded.length > 0;
+  let headline = 'all clear';
+  if (urgent > 0) headline = plural(urgent, 'thing needs you', 'things need you');
+  else if (partial) headline = 'nothing else needs you';
+  add(pulse, lamp(urgent > 0 || partial ? 'brass' : 'starboard'));
+  add(pulse, el('span', null, headline));
   const parts = [
     plural(s.fleet.in_flight, 'change under way', 'changes under way'),
-    plural(s.fleet.open_prs, 'open pull request', 'open pull requests'),
+    // A count over a source that was never read is not a count. "0 open pull
+    // requests" beside "2 things could not be read" is still the reassuring lie.
+    s.degraded.some((d) => d.panel === 'prs')
+      ? 'pull requests not read'
+      : plural(s.fleet.open_prs, 'open pull request', 'open pull requests'),
     `as of ${clockTime(s.generated_at)}`,
   ];
   // Losing a source is never silent: it is stated beside the counts it affects.
-  if (s.degraded.length) parts.push(`${plural(s.degraded.length, 'source', 'sources')} unreadable`);
+  if (partial) parts.push(`${plural(s.degraded.length, 'thing', 'things')} could not be read`);
   for (const part of parts) add(pulse, el('span', 'sep', '·'), el('span', null, part));
+}
+
+// A demo fleet the operator cannot tell from their own is the worst thing this
+// page can be. It says so on screen, and in the tab title for a window left open.
+function renderSource(source) {
+  const demo = source === 'fixture';
+  byId('demo-bar').hidden = !demo;
+  document.title = demo ? 'dockmaster — demo fleet' : 'dockmaster';
 }
 
 function show(id, keepScroll) {
@@ -66,13 +90,21 @@ function show(id, keepScroll) {
   renderRail();
 }
 
-function showFailure(message) {
+// The failure is worded HERE from the source token the server sent; the script
+// that failed, its arguments and its stderr stay in the console's own log.
+function failureReason(err) {
+  if (err.source) return `Could not read ${word(SOURCE_WORD, err.source)}.`;
+  if (err.offline) return 'The page could not reach the console.';
+  return 'The reason is in the console’s log; ask the dockmaster to look.';
+}
+
+function showFailure(err) {
   const main = byId('view');
   main.textContent = '';
   const box = el('div', 'failure');
   add(box,
     el('p', 'failure-head', 'The console could not read the fleet.'),
-    el('p', 'failure-body', message),
+    el('p', 'failure-body', failureReason(err)),
     el('p', 'failure-body',
       'Nothing here is a statement about your work — it is this page failing to load it.'));
   add(main, box);
@@ -85,11 +117,37 @@ function showFailure(message) {
 // than local state, and `Refresh` is what forces both.
 const REFRESH_MS = 30000;
 
+// A re-read that FAILED is announced in its own banner, not in the chat row: the
+// chat poll writes that row every few seconds and would erase the warning while
+// the page went on showing stale numbers as if they were current.
+function setStale(err) {
+  const bar = byId('stale');
+  if (!err) { bar.hidden = true; return; }
+  const at = shell.state ? clockTime(shell.state.generated_at) : '';
+  bar.hidden = false;
+  byId('stale-text').textContent = shell.state
+    ? `Not re-read. ${failureReason(err)} Still showing ${at}.`
+    : `Not read. ${failureReason(err)}`;
+}
+
 async function loadState(keepScroll, force) {
-  const response = await fetch(`/api/state${force ? '?refresh=1' : ''}`);
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error || `the server answered ${response.status}`);
+  let response;
+  try {
+    response = await fetch(`/api/state${force ? '?refresh=1' : ''}`);
+  } catch (err) {
+    throw Object.assign(new Error(err.message), { offline: true });
+  }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    // `source` is a token this page words. The server's own `error` string is
+    // written for the log - it names scripts and paths - so it is never shown.
+    throw Object.assign(new Error(`the console answered ${response.status}`),
+      { source: body.source || '' });
+  }
   shell.state = body;
+  shell.readAt = Date.now();
+  setStale(null);
+  renderSource(body.source);
   renderPulse();
   show(shell.current, keepScroll);
 }
@@ -103,7 +161,8 @@ async function refreshNow() {
   try {
     await loadState(true, true);
   } catch (err) {
-    showFailure(err.message);
+    if (shell.state) setStale(err);
+    else showFailure(err);
   } finally {
     shell.refreshing = false;
     button.classList.remove('is-busy');
@@ -123,18 +182,30 @@ function renderMessage(message, animate) {
   return node;
 }
 
-function renderPending(count) {
+// The pending row is the LIVE state of the conversation - how many messages are
+// unpicked-up, or that the connection is down. Both are transient and correctly
+// overwritten by the next poll.
+function renderPending(count, unreadable) {
   const row = byId('chat-pending');
-  row.hidden = count === 0;
-  byId('chat-pending-text').textContent = count === 0
-    ? ''
-    : `${plural(count, 'message', 'messages')} waiting for the dockmaster to pick up.`;
+  const parts = [];
+  if (count > 0) parts.push(`${plural(count, 'message', 'messages')} waiting for the dockmaster to pick up.`);
+  if (unreadable > 0) parts.push(`${plural(unreadable, 'earlier line', 'earlier lines')} of this conversation could not be read.`);
+  row.hidden = parts.length === 0;
+  byId('chat-pending-text').textContent = parts.join(' ');
 }
 
 function renderPendingError(message) {
   const row = byId('chat-pending');
   row.hidden = false;
   byId('chat-pending-text').textContent = `Not connected: ${message}. Retrying.`;
+}
+
+// A refused send is NOT transient - the message is back in the composer waiting
+// on the operator - so it gets a row the poll loop never touches.
+function setSendError(message) {
+  const row = byId('chat-error');
+  row.hidden = !message;
+  row.textContent = message || '';
 }
 
 // One long-poll, forever: the request stays open until a message lands, so the
@@ -152,7 +223,8 @@ async function pumpChat() {
       // the request open and leave the panel blank for the whole poll window.
       const response = await fetch(`/api/chat?since=${since}${first ? '' : '&wait=1'}`);
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error || `the server answered ${response.status}`);
+      // The server's message names files and scripts; the status does not.
+      if (!response.ok) throw new Error(`the console answered ${response.status}`);
       if (body.messages.length) {
         byId('chat-empty').hidden = true;
         const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
@@ -161,7 +233,7 @@ async function pumpChat() {
       }
       since = body.total;
       first = false;
-      renderPending(body.pending);
+      renderPending(body.pending, body.unreadable || 0);
       backoff = 1000;
     } catch (err) {
       // Losing the server is a state the operator must see, not a silent stall.
@@ -180,6 +252,17 @@ function compose(text) {
   growComposer();
 }
 
+// Why a message was refused, worded here. The server's own text names files and
+// scripts, so the status is what crosses - 403/415 mean the request did not
+// come from this page at all, which the operator cannot cause and cannot fix.
+const SEND_REFUSAL = {
+  400: 'the console would not accept it. If it is very long, try a shorter one.',
+  413: 'it is too long to send.',
+  403: 'the console refused it — that request did not come from this page.',
+  415: 'the console refused it — that request did not come from this page.',
+  500: 'the console could not store it. Ask the dockmaster to look into it.',
+};
+
 async function sendMessage(event) {
   event.preventDefault();
   const input = byId('chat-input');
@@ -187,17 +270,29 @@ async function sendMessage(event) {
   if (!text) return;
   input.value = '';
   growComposer();
-  const response = await fetch('/api/chat', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ text }),
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
+  // The message goes back into the composer on any failure, so nothing the
+  // operator typed is lost to a refusal or a dropped connection.
+  const restore = (reason) => {
     input.value = text;
     growComposer();
-    renderPendingError(body.error || `the server answered ${response.status}`);
+    setSendError(`Not sent: ${reason}`);
+  };
+  let response;
+  try {
+    response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+  } catch (err) {
+    return restore(`the console could not be reached (${err.message}).`);
   }
+  // An unmapped status falls back to the number, which is honest and is not
+  // internal vocabulary - never to the server's own sentence.
+  if (!response.ok) {
+    return restore(SEND_REFUSAL[response.status] || `the console answered ${response.status}.`);
+  }
+  setSendError('');
 }
 
 // The composer grows with the message instead of making the operator write a
@@ -252,21 +347,36 @@ function wire() {
   byId('chat-close').addEventListener('click', () => setChatOpen(false));
   byId('scrim').addEventListener('click', () => setChatOpen(false));
   byId('chat-form').addEventListener('submit', sendMessage);
-  byId('chat-input').addEventListener('input', growComposer);
+  byId('chat-input').addEventListener('input', () => { setSendError(''); growComposer(); });
   byId('chat-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(e); }
   });
   window.addEventListener('hashchange', () => show(location.hash.replace('#', '') || 'needs'));
 }
 
+// A background read is never silent about failing, but it must not blow away a
+// page that is already rendered - it marks it stale instead.
+function reload() {
+  loadState(true, false).catch((err) => {
+    if (shell.state) setStale(err);
+    else showFailure(err);
+  });
+}
+
 wire();
-loadState(false, false).catch((err) => showFailure(err.message));
-setInterval(() => {
-  loadState(true, false).catch((err) => renderPendingError(err.message));
-}, REFRESH_MS);
+loadState(false, false).catch((err) => showFailure(err));
+
+// Re-reading the fleet runs the toolbelt and sweeps every open pull request -
+// which WRITES what it learns and takes the same lock the crew does. A tab left
+// open behind another window must not drive that all day, so a hidden page does
+// not refresh; it catches up the moment it is looked at again.
+setInterval(() => { if (!document.hidden) reload(); }, REFRESH_MS);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && Date.now() - shell.readAt >= REFRESH_MS) reload();
+});
 pumpChat();
 
 // Relative ages ("3d ago", "quiet 6h") are computed at render time, so a page
 // left open all afternoon would keep showing this morning's numbers without a
 // re-render. Cheap, and it keeps the one thing that silently rots honest.
-setInterval(() => { if (shell.state) show(shell.current, true); }, 60000);
+setInterval(() => { if (shell.state && !document.hidden) show(shell.current, true); }, 60000);

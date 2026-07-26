@@ -9,6 +9,10 @@
 //      can emit has a word in the page's vocabulary, and the committed demo
 //      fleet carries no real repo, org or user.
 //
+// Failure paths get the same treatment as the happy ones, because a failed
+// source is both where a wrong-but-reassuring panel comes from and where
+// internal phrasing actually surfaces.
+//
 // Pure functions and the committed fixture only - no server, no toolbelt, no
 // network, so this runs anywhere the rest of the suite does.
 
@@ -173,6 +177,64 @@ function checkMemoryFramingIsNotShown() {
   console.log('ok   recalled memory shows its notes, not the file around them')
 }
 
+// --- 2b. a source that failed is named on the panel that lost it -------------
+
+function checkAFailedSweepIsNeverAnEmptyFleet() {
+  const local = {
+    degraded: [], repos: [], work: [], reviews: [],
+    backlog: { in_flight: [], queued: [], done: [] },
+    decisions: { open: [], resolved: [] },
+    health: { verdict: 'Ready', checks: [], cleanup: [] },
+  }
+  // The whole point: sabotaging the sweep used to produce open_prs: 0,
+  // needs_you: [] and "Nothing is waiting to land" - a red PR, a
+  // changes-requested PR and a merge-ready PR all vanishing into "All clear".
+  const lostSweep = live.buildDocument(local, { rows: null })
+  equal(lostSweep.fleet.open_prs, 0, 'a failed sweep knows of no PRs')
+  ok(lostSweep.degraded.some((d) => d.source === 'pull_requests' && d.panel === 'prs'),
+    'a failed sweep is recorded against the panel that lost it')
+
+  const emptySweep = live.buildDocument(local, { rows: [] })
+  equal(emptySweep.degraded.length, 0, 'a sweep that read zero PRs is not a degradation')
+  ok(lostSweep.degraded.length !== emptySweep.degraded.length,
+    '"no open PRs" and "could not read the PRs" must not produce the same document')
+
+  // Only those two are representable. Anything else would quietly become an
+  // empty pull-request list, which is what the null signal exists to prevent.
+  for (const bad of [{}, { rows: undefined }, null, { rows: 'none' }]) {
+    let threw = false
+    try { live.buildDocument(local, bad) } catch { threw = true }
+    ok(threw, `a sweep reported as ${JSON.stringify(bad)} must fail, not read as an empty fleet`)
+  }
+  console.log('ok   a source that failed is a degradation, never an empty panel')
+}
+
+async function checkDegradationCarriesTokensNotProse() {
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const panels = new Set(views.VIEWS.map((v) => v.id))
+  for (const [source, panel] of Object.entries(live.SOURCES)) {
+    ok(source in dom.SOURCE_WORD, `source '${source}' has no word on the page`)
+    ok(panels.has(panel), `source '${source}' points at panel '${panel}', which is not a view`)
+  }
+  // The needs-you queue is assembled from these two, so both must be able to
+  // reach it - that is what makes an incomplete queue visible where it matters.
+  for (const source of ['pull_requests', 'decisions']) {
+    ok(['prs', 'decisions'].includes(live.SOURCES[source]),
+      `'${source}' must land on a panel the needs-you view reads`)
+  }
+  const doc = live.buildDocument(
+    { degraded: [{ source: 'backlog', panel: 'backlog', subject: '' }], repos: [], work: [], reviews: [],
+      backlog: { in_flight: [], queued: [], done: [] }, decisions: { open: [], resolved: [] },
+      health: { verdict: '', checks: [], cleanup: [] } },
+    { rows: [] },
+  )
+  for (const row of doc.degraded) {
+    ok(!('error' in row), 'a degradation carries no free text - stderr is not for the operator')
+  }
+  console.log(`ok   ${Object.keys(live.SOURCES).length} losable sources have a word and a panel`)
+}
+
 async function checkEveryTokenHasAWord() {
   const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
   for (const token of Object.values(live.STATE_WORDS).concat(['unknown'])) {
@@ -190,6 +252,13 @@ async function checkEveryTokenHasAWord() {
   }
   ok(dom.STAGE_STATE.ahead !== dom.STAGE_STATE.unknown,
     '"not reached" and "not known" must not read as the same thing')
+  // dm-pr.sh emits these two; a sentence from the sweep would be crew phrasing.
+  for (const token of ['repo_missing', 'github_unreadable']) {
+    ok(token in dom.PR_UNREADABLE, `unreadable pull request '${token}' has no word`)
+  }
+  // An unmapped token must NOT print itself - that is the whole seam.
+  equal(dom.word(dom.WORK_STATE, 'some_new_state'), 'Not known', 'an unmapped token is not printed raw')
+  equal(dom.lookup(dom.CHECKS, 'some_new_rollup')[1], 'Not known', 'an unmapped lamp label is not printed raw')
   console.log(`ok   ${everyStage.size} track stages and every work state have a word`)
 }
 
@@ -220,8 +289,11 @@ async function checkFixtureIsNeutral() {
   for (const s of ['in_progress', 'ready_for_review', 'blocked', 'failed', 'paused', 'queued', 'done']) {
     ok(workStates.has(s), `the demo fleet has no '${s}' work`)
   }
-  ok(doc.degraded.length > 0, 'the demo fleet must show a degraded source - the page has to render one')
-  ok(doc.prs.some((p) => p.error), 'the demo fleet must include a PR that could not be read')
+  // A demo fleet may not claim it could not read something: the badge would be
+  // the one thing on screen that was invented, and it shows permanently.
+  equal(doc.degraded.length, 0, 'the demo fleet must not claim an unreadable source')
+  ok(doc.prs.some((p) => p.unreadable === 'github_unreadable'),
+    'the demo fleet must include a PR the sweep could not read')
   ok(doc.work.some((w) => w.track && w.track.gates.length > 0), 'the demo fleet must show the gate list')
 
   // Re-anchored onto now, so design work never happens against a year-old fleet.
@@ -231,15 +303,21 @@ async function checkFixtureIsNeutral() {
 }
 
 function checkShapeRefusesAHalfDocument() {
-  const good = { fleet: { needs_you: 0 }, needs_you: [], work: [], prs: [], repos: [], reviews: [], degraded: [], backlog: {}, decisions: {}, health: {} }
+  const good = { source: 'live', fleet: { needs_you: 0 }, needs_you: [], work: [], prs: [], repos: [], reviews: [], degraded: [], backlog: {}, decisions: {}, health: {} }
+  const refuses = (doc, why) => {
+    let threw = false
+    try { state.assertShape(doc, 'test') } catch { threw = true }
+    ok(threw, why)
+  }
   state.assertShape(good, 'test')
-  let threw = false
-  try { state.assertShape(Object.assign({}, good, { needs_you: [{}] }), 'test') } catch { threw = true }
-  ok(threw, 'a count that disagrees with its list must fail, not render as "nothing needs you"')
-  threw = false
-  try { state.assertShape({ fleet: {} }, 'test') } catch { threw = true }
-  ok(threw, 'a document missing panels must fail loudly')
-  console.log('ok   a half-shaped document is refused at the seam')
+  refuses(Object.assign({}, good, { needs_you: [{}] }),
+    'a count that disagrees with its list must fail, not render as "nothing needs you"')
+  refuses({ fleet: {} }, 'a document missing panels must fail loudly')
+  // The page words the demo banner off `source`; a document that does not
+  // declare one would render a demo fleet as the operator's own.
+  refuses(Object.assign({}, good, { source: '' }), 'a document with no source must fail')
+  refuses(Object.assign({}, good, { source: 'demo' }), 'a document with an unknown source must fail')
+  console.log('ok   a half-shaped or unattributed document is refused at the seam')
 }
 
 async function main() {
@@ -249,6 +327,8 @@ async function main() {
   checkGatesAreAPlanNotProgress()
   checkReconcileProseNeverCrosses()
   checkMemoryFramingIsNotShown()
+  checkAFailedSweepIsNeverAnEmptyFleet()
+  await checkDegradationCarriesTokensNotProse()
   await checkEveryTokenHasAWord()
   await checkFixtureIsNeutral()
   checkShapeRefusesAHalfDocument()

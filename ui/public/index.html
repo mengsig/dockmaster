@@ -22,6 +22,15 @@
   </div>
 </header>
 
+<p class="banner banner-demo" id="demo-bar" hidden>
+  <span class="lamp lamp-brass" aria-hidden="true"></span>
+  <span>Demo fleet — invented work, invented repos. Nothing here is yours.</span>
+</p>
+<p class="banner banner-stale" id="stale" hidden>
+  <span class="lamp lamp-brass" aria-hidden="true"></span>
+  <span id="stale-text"></span>
+</p>
+
 <div class="deck">
   <nav class="rail" id="rail" aria-label="Console sections"></nav>
 
@@ -44,6 +53,9 @@
       <span class="lamp lamp-brass lamp-pulse" aria-hidden="true"></span>
       <span id="chat-pending-text"></span>
     </p>
+    <!-- Its own row: a send that failed must not be erased by the next
+         successful poll a few seconds later. -->
+    <p class="chat-error" id="chat-error" role="alert" hidden></p>
     <form class="chat-form" id="chat-form">
       <label class="sr-only" for="chat-input">Message the dockmaster</label>
       <textarea id="chat-input" rows="2" placeholder="Ask for work, or answer a question…"></textarea>

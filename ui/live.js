@@ -8,14 +8,19 @@
 //
 // Two honesty rules shape the whole file:
 //
-//   1. A source that FAILS is never an empty panel. `repos` and `tasks` are
+//   1. A source that FAILS is never an empty panel. `repos` and `work` are
 //      load-bearing, so losing either fails the whole collection - a console
 //      that renders a confident, wrong fleet is worse than one that says it
-//      could not read the fleet. Every other source degrades into `degraded[]`,
-//      which the page shows.
+//      could not read the fleet. Every other source degrades into `degraded[]`
+//      carrying the PANEL that lost it, so the failure is stated where the
+//      operator is looking rather than on a screen they are not on.
 //   2. Nothing is inferred past its evidence. A pipeline stage the work has not
 //      reached is `ahead` (not "0% done"), and a stage whose state cannot be
 //      determined is `unknown` - never quietly rendered as not-started.
+//
+// Nothing that crosses to the page is free text from a script. A failure
+// crosses as a SOURCE TOKEN; the script name, its argv and its stderr go to
+// this process's log, which is where they are actually diagnosed.
 
 'use strict';
 
@@ -83,14 +88,57 @@ async function runJson(bin, script, args, timeoutMs) {
   }
 }
 
-// attempt(...) -> the value, or null with the reason recorded. For sources the
-// console can survive without; the page names every one it lost.
-async function attempt(degraded, source, fn) {
+// Every source the console can lose, and the PANEL that depends on it. The page
+// words both from these tokens, so a panel whose source failed says so itself
+// instead of rendering as empty with the explanation on another screen.
+const SOURCES = {
+  repos: 'repos',
+  work: 'flight',
+  gate_track: 'flight',
+  pull_requests: 'prs',
+  decisions: 'decisions',
+  backlog: 'backlog',
+  review_pages: 'reviews',
+  clone_branch: 'repos',
+  memory: 'repos',
+  local_copies: 'health',
+  health: 'health',
+};
+
+// The real reason - the script, its argv, its stderr - goes to this process's
+// log and nowhere else. Only the token crosses to the page.
+//
+// Logged BEFORE the token is validated: an unknown token is a bug here, and
+// throwing first would throw away the failure that was actually being reported.
+function logLost(source, err, subject) {
+  process.stderr.write(`console: ${source}${subject ? ` (${subject})` : ''}: ${err.message}\n`);
+  if (!(source in SOURCES)) throw new RangeError(`console: '${source}' is not a known source`);
+}
+
+// attempt(...) -> the value, or null with the source recorded. For sources the
+// console can survive without; the page names every one it lost. `subject` is a
+// repo name where a source is read per repo - a repo name is the operator's own
+// vocabulary and is the only free text that crosses here.
+async function attempt(degraded, source, fn, subject) {
   try {
     return await fn();
   } catch (err) {
-    degraded.push({ source, error: err.message });
+    logLost(source, err, subject);
+    degraded.push({ source, panel: SOURCES[source], subject: subject || '' });
     return null;
+  }
+}
+
+// A source the whole document is built on. Losing it fails the collection
+// rather than rendering a fleet with a silent hole in it.
+async function mustRead(source, fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    logLost(source, err);
+    const wrapped = new Error(`the console could not read ${source}`);
+    wrapped.source = source;
+    throw wrapped;
   }
 }
 
@@ -198,15 +246,22 @@ function memoryNotes(text) {
 }
 
 async function collectRepos(bin, degraded) {
-  const repos = await runJson(bin, 'dm-repo.sh', ['list', '--json']);
-  if (!Array.isArray(repos)) throw new TypeError('dm-repo.sh list --json did not emit an array');
+  const repos = await mustRead('repos', async () => {
+    const rows = await runJson(bin, 'dm-repo.sh', ['list', '--json']);
+    if (!Array.isArray(rows)) throw new TypeError('dm-repo.sh list --json did not emit an array');
+    return rows;
+  });
   return Promise.all(repos.map(async (repo) => {
     // Both are per-repo shell-outs over a handful of repos, and both are the
     // owning script's answer - never a re-read of the clone from here.
-    const branch = await attempt(degraded, `clone branch (${repo.name})`,
-      async () => (await run(bin, 'dm-worktree.sh', ['tangle', repo.name])).trim());
-    const memory = await attempt(degraded, `memory (${repo.name})`,
-      () => run(bin, 'dm-memory.sh', ['recall', repo.name]));
+    const branch = await attempt(degraded, 'clone_branch',
+      async () => (await run(bin, 'dm-worktree.sh', ['tangle', repo.name])).trim(), repo.name);
+    // --crew: the same view a worker is given. The dockmaster-only store is
+    // deliberately left out - it exists to be excluded from anything relayed,
+    // and this page is served over a socket the operator is not the only thing
+    // that can reach. The repos panel says so on screen.
+    const memory = await attempt(degraded, 'memory',
+      () => run(bin, 'dm-memory.sh', ['recall', repo.name, '--crew']), repo.name);
     const lines = memoryNotes(memory);
     return {
       name: repo.name,
@@ -225,9 +280,11 @@ async function collectRepos(bin, degraded) {
 }
 
 async function collectTasks(bin) {
-  const tasks = await runJson(bin, 'dm-task.sh', ['list', '--json']);
-  if (!Array.isArray(tasks)) throw new TypeError('dm-task.sh list --json did not emit an array');
-  return tasks.map((task) => Object.assign({}, task, { state: STATE_WORDS[task.state] || 'unknown' }));
+  return mustRead('work', async () => {
+    const tasks = await runJson(bin, 'dm-task.sh', ['list', '--json']);
+    if (!Array.isArray(tasks)) throw new TypeError('dm-task.sh list --json did not emit an array');
+    return tasks.map((task) => Object.assign({}, task, { state: STATE_WORDS[task.state] || 'unknown' }));
+  });
 }
 
 function withArtifacts(tasks, rendered) {
@@ -240,9 +297,14 @@ function withArtifacts(tasks, rendered) {
 
 async function collectPipelines(bin, repoNames, degraded) {
   const entries = await Promise.all(repoNames.map(async (name) => {
-    const doc = await attempt(degraded, `gate track (${name})`,
-      () => runJson(bin, 'dm-pr.sh', ['pipeline', name, '--json']));
-    return doc && Array.isArray(doc.gates) ? [name, doc.gates] : null;
+    const doc = await attempt(degraded, 'gate_track', async () => {
+      const found = await runJson(bin, 'dm-pr.sh', ['pipeline', name, '--json']);
+      if (!found || !Array.isArray(found.gates)) {
+        throw new TypeError('dm-pr.sh pipeline --json did not emit a gates array');
+      }
+      return found;
+    }, name);
+    return doc ? [name, doc.gates] : null;
   }));
   return new Map(entries.filter(Boolean));
 }
@@ -293,7 +355,7 @@ function toWork(tasks, pipelines) {
 function toPullRequests(rows, repos) {
   const authorityOf = new Map(repos.map((r) => [r.name, r.authority]));
   return rows.map((row) => ({
-    title: row.title || '(title not read)',
+    title: row.title || '',
     repo: row.repo,
     url: row.url,
     checks: row.checks || 'unknown',
@@ -304,11 +366,15 @@ function toPullRequests(rows, repos) {
     authority: row.authority || authorityOf.get(row.repo) || 'invalid',
     opened_at: row.created_at || '',
     cached: Boolean(row.offline),
-    error: row.error || '',
+    // A token from dm-pr.sh, worded by the page: a swept PR that could not be
+    // read stays in the list, because one that drops out reads as a fleet with
+    // fewer problems than it has.
+    unreadable: row.unreadable || '',
   }));
 }
 
 function toDecisions(rows) {
+  if (!Array.isArray(rows)) throw new TypeError('dm-backlog.sh decisions --json did not emit an array');
   const open = [];
   const resolved = [];
   for (const row of rows) {
@@ -328,7 +394,13 @@ function toDecisions(rows) {
 }
 
 function toBacklog(doc) {
-  const bucket = (status) => (doc.items || [])
+  // Every sibling collector asserts its shape; without this one a backlog
+  // document with no `items` yields three empty buckets and no degraded row -
+  // an empty backlog and an unread one would look identical.
+  if (!doc || !Array.isArray(doc.items)) {
+    throw new TypeError('dm-backlog.sh list --json did not emit an items array');
+  }
+  const bucket = (status) => doc.items
     .filter((item) => item.status === status)
     .map((item) => ({
       title: item.title,
@@ -344,7 +416,10 @@ function toReviews(rendered, tasks) {
   const titleOf = new Map(tasks.map((t) => [t.id, t.title]));
   const repoOf = new Map(tasks.map((t) => [t.id, t.repo]));
   return rendered.map((item) => ({
-    title: titleOf.get(item.id) || item.id,
+    // A review page outlives the record behind it. When that record is gone the
+    // title is EMPTY and the page says so - falling back to the id would print
+    // the one thing this seam exists to keep off the screen.
+    title: titleOf.get(item.id) || '',
     repo: repoOf.get(item.id) || '',
     state: awaiting.has(item.id) ? 'awaiting' : 'archived',
     at: item.rendered_at || '',
@@ -437,13 +512,23 @@ function toNeedsYou(work, prs, decisions) {
 // task, so doing it beside the others rather than after them is most of the wait.
 async function collectLocal(bin) {
   const degraded = [];
-  const [rendered, repos, rawTasks, backlog, decisionRows, worktrees, doctor] = await Promise.all([
-    attempt(degraded, 'review pages', () => runJson(bin, 'dm-lavish.sh', ['list', '--json'])),
+  const [rendered, repos, rawTasks, backlog, decisions, worktrees, doctor] = await Promise.all([
+    attempt(degraded, 'review_pages', async () => {
+      const rows = await runJson(bin, 'dm-lavish.sh', ['list', '--json']);
+      if (!Array.isArray(rows)) throw new TypeError('dm-lavish.sh list --json did not emit an array');
+      return rows;
+    }),
     collectRepos(bin, degraded),
     collectTasks(bin),
-    attempt(degraded, 'backlog', () => runJson(bin, 'dm-backlog.sh', ['list', '--json'])),
-    attempt(degraded, 'decisions', () => runJson(bin, 'dm-backlog.sh', ['decisions', '--json'])),
-    attempt(degraded, 'local copies', () => runJson(bin, 'dm-worktree.sh', ['list', '--json'])),
+    // Each shape check sits INSIDE its attempt, so a malformed answer degrades
+    // exactly like an unreadable one instead of throwing past the collector.
+    attempt(degraded, 'backlog', async () => toBacklog(await runJson(bin, 'dm-backlog.sh', ['list', '--json']))),
+    attempt(degraded, 'decisions', async () => toDecisions(await runJson(bin, 'dm-backlog.sh', ['decisions', '--json']))),
+    attempt(degraded, 'local_copies', async () => {
+      const rows = await runJson(bin, 'dm-worktree.sh', ['list', '--json']);
+      if (!Array.isArray(rows)) throw new TypeError('dm-worktree.sh list --json did not emit an array');
+      return rows;
+    }),
     // dm-doctor exits nonzero when a required tool is missing - that is its
     // REPORT, not a failure to read it, so the verdict it printed still shows.
     attempt(degraded, 'health', async () => {
@@ -467,30 +552,43 @@ async function collectLocal(bin) {
     degraded,
     repos,
     work: toWork(tasks, pipelines),
-    backlog: backlog ? toBacklog(backlog) : { in_flight: [], queued: [], done: [] },
-    decisions: toDecisions(decisionRows || []),
+    backlog: backlog || { in_flight: [], queued: [], done: [] },
+    decisions: decisions || { open: [], resolved: [] },
     reviews: toReviews(rendered || [], tasks),
     health: toHealth(doctor, tasks, worktrees),
   };
 }
 
-// The expensive half: one GitHub round trip per open PR. Its own cache tier.
+// The expensive half: one GitHub round trip per open PR. Its own cache tier, and
+// it REJECTS rather than resolving empty - a resolved failure would be cached
+// for the whole TTL and read as "no open pull requests" for that long.
 async function collectPullRequests(bin) {
-  const degraded = [];
-  const rows = await attempt(degraded, 'pull requests',
-    () => runJson(bin, 'dm-pr.sh', ['sweep', '--json'], SWEEP_TIMEOUT_MS));
-  return { rows: rows || [], degraded, reachable: rows !== null };
+  const rows = await runJson(bin, 'dm-pr.sh', ['sweep', '--json'], SWEEP_TIMEOUT_MS);
+  if (!Array.isArray(rows)) throw new TypeError('dm-pr.sh sweep --json did not emit an array');
+  return rows;
 }
 
+// buildDocument(local, sweep) - `sweep.rows === null` means the sweep could not
+// be read. That is a DEGRADATION named on the pull-request and needs-you
+// panels, never an empty list: "nothing is waiting to land" is exactly the
+// reassuring lie this console must not tell.
 function buildDocument(local, sweep) {
-  const prs = toPullRequests(sweep.rows, local.repos);
+  // `null` and an array are the only two things this may be told. Anything else
+  // - an absent field, an undefined - would quietly become an empty PR list,
+  // which is the exact failure the null signal exists to prevent.
+  if (!sweep || (sweep.rows !== null && !Array.isArray(sweep.rows))) {
+    throw new TypeError('console: the sweep must report an array of pull requests, or null for unreadable');
+  }
+  const degraded = local.degraded.slice();
+  if (sweep.rows === null) degraded.push({ source: 'pull_requests', panel: SOURCES.pull_requests, subject: '' });
+  const prs = toPullRequests(sweep.rows || [], local.repos);
   const decisions = local.decisions;
   const needs = toNeedsYou(local.work, prs, decisions);
   const inFlight = local.work.filter((w) => OPEN_STATES.includes(w.state) && w.state !== 'queued').length;
   return {
     generated_at: new Date().toISOString(),
     source: 'live',
-    degraded: local.degraded.concat(sweep.degraded),
+    degraded,
     fleet: {
       repos: local.repos.length,
       in_flight: inFlight,
@@ -529,6 +627,7 @@ module.exports = {
   progressNote,
   memoryNotes,
   reviewDir,
+  SOURCES,
   STATE_WORDS,
   QUIET_AFTER_HOURS,
 };

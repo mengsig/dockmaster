@@ -10,8 +10,10 @@
 //
 // Document shape (every field required unless marked optional):
 //   generated_at  ISO timestamp
-//   source        "fixture" | "live"
-//   degraded[]    { source, error }  - what could NOT be read, named on screen
+//   source        "fixture" | "live"  - the page STATES which; a demo fleet the
+//                 operator cannot tell from their own is the point of failure
+//   degraded[]    { source, panel, subject } - what could NOT be read, as tokens
+//                 the page words, named on the panel that lost it
 //   fleet         { repos, in_flight, open_prs, needs_you }   headline counts
 //   needs_you[]   { lamp, kind, ... }  the operator's queue; `kind` selects how
 //                 the page words it, so no prose crosses this seam
@@ -41,8 +43,9 @@ const live = require('./live');
 const FIXTURE = path.join(__dirname, 'fixtures', 'console.json');
 
 const REQUIRED_KEYS = [
-  'fleet', 'needs_you', 'work', 'prs', 'repos', 'backlog', 'decisions', 'reviews', 'health', 'degraded',
+  'source', 'fleet', 'needs_you', 'work', 'prs', 'repos', 'backlog', 'decisions', 'reviews', 'health', 'degraded',
 ];
+const SOURCES = ['fixture', 'live'];
 
 // Collecting live state runs the toolbelt; the local half walks every task and
 // the PR half costs a GitHub round trip per open PR. So each is a SNAPSHOT with
@@ -62,6 +65,11 @@ function assertShape(doc, origin) {
   }
   for (const key of ['needs_you', 'work', 'prs', 'repos', 'reviews', 'degraded']) {
     if (!Array.isArray(doc[key])) throw new TypeError(`${origin}: '${key}' must be an array`);
+  }
+  // The page has to be able to say which fleet this is; an unset or unknown
+  // source would render a demo fleet indistinguishable from the operator's own.
+  if (!SOURCES.includes(doc.source)) {
+    throw new Error(`${origin}: source must be one of ${SOURCES.join('|')}, got '${doc.source}'`);
   }
   const counted = doc.needs_you.length;
   if (doc.fleet.needs_you !== counted) {
@@ -91,10 +99,12 @@ function fromFixture() {
   const parsed = JSON.parse(raw);
   const anchor = Date.parse(parsed.anchor || '');
   if (Number.isNaN(anchor)) throw new Error(`${FIXTURE}: needs an 'anchor' ISO timestamp to age from`);
-  const doc = assertShape(reanchor(parsed, Date.now() - anchor), FIXTURE);
+  const doc = reanchor(parsed, Date.now() - anchor);
+  // Stamped here, not read from the file: the demo fleet cannot declare itself
+  // live, whatever the committed JSON says.
   doc.source = 'fixture';
   doc.generated_at = new Date().toISOString();
-  return doc;
+  return assertShape(doc, FIXTURE);
 }
 
 // One tier of the live cache. A FAILED collection is never stored, so the next
@@ -133,11 +143,17 @@ async function collect(source, bin, force) {
   if (typeof bin !== 'string' || bin.length === 0) {
     throw new Error('console: the live source needs the toolbelt path (DM_BIN) - start via bin/dm-ui.sh');
   }
-  const [local, prs] = await Promise.all([
+  // The local half is load-bearing, so its failure fails the request. The sweep
+  // is not: losing GitHub degrades the pull-request and needs-you panels, which
+  // say so, rather than emptying the whole console. `rows: null` IS that signal.
+  const [local, sweep] = await Promise.all([
     fresh(tiers.local, bin, force),
-    fresh(tiers.prs, bin, force),
+    fresh(tiers.prs, bin, force).then((rows) => ({ rows }), (err) => {
+      process.stderr.write(`console: pull_requests: ${err.message}\n`);
+      return { rows: null };
+    }),
   ]);
-  return assertShape(live.buildDocument(local, prs), 'live');
+  return assertShape(live.buildDocument(local, sweep), 'live');
 }
 
 module.exports = { collect, assertShape, FIXTURE, LOCAL_TTL_MS, PR_TTL_MS };

@@ -2,12 +2,7 @@
   "anchor": "2026-01-15T09:00:00Z",
   "generated_at": "2026-01-15T09:00:00Z",
   "source": "fixture",
-  "degraded": [
-    {
-      "source": "memory (beacon)",
-      "error": "dm-memory.sh recall beacon failed (exit 1): no memory store for 'beacon'"
-    }
-  ],
+  "degraded": [],
   "fleet": {
     "repos": 4,
     "in_flight": 12,
@@ -893,7 +888,7 @@
       "authority": "yolo",
       "opened_at": "2026-01-15T07:00:00.000Z",
       "cached": false,
-      "error": ""
+      "unreadable": null
     },
     {
       "title": "Session cookie survives the proxy rewrite",
@@ -905,7 +900,7 @@
       "authority": "never",
       "opened_at": "2026-01-14T03:00:00.000Z",
       "cached": false,
-      "error": ""
+      "unreadable": null
     },
     {
       "title": "Quota windows roll at the tenant timezone",
@@ -917,7 +912,7 @@
       "authority": "ask",
       "opened_at": "2026-01-14T15:00:00.000Z",
       "cached": false,
-      "error": ""
+      "unreadable": null
     },
     {
       "title": "Deduplicate the export writer",
@@ -929,7 +924,7 @@
       "authority": "ask",
       "opened_at": "2026-01-13T05:00:00.000Z",
       "cached": false,
-      "error": ""
+      "unreadable": null
     },
     {
       "title": "Retry the flaky upload step",
@@ -941,10 +936,10 @@
       "authority": "yolo",
       "opened_at": "",
       "cached": true,
-      "error": ""
+      "unreadable": null
     },
     {
-      "title": "(title not read)",
+      "title": "",
       "repo": "harbourmaster",
       "url": "https://github.com/example-org/harbourmaster/pull/1179",
       "checks": "unknown",
@@ -953,7 +948,7 @@
       "authority": "never",
       "opened_at": "",
       "cached": false,
-      "error": "could not read the PR from GitHub"
+      "unreadable": "github_unreadable"
     }
   ],
   "repos": [

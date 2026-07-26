@@ -84,6 +84,10 @@
 html, body { height: 100%; }
 body {
   margin: 0;
+  /* A column, not a fixed 3.5rem offset on the deck: a banner between the top
+   * bar and the deck has to take its own height off the deck, and there can be
+   * more than one. */
+  display: flex; flex-direction: column;
   overflow: hidden;
   background: var(--hull);
   color: var(--fg);
@@ -124,10 +128,23 @@ a:hover { text-decoration: underline; }
 
 .topbar {
   display: flex; align-items: center; gap: var(--gutter);
-  height: 3.5rem; padding: 0 1.25rem;
+  flex: 0 0 auto; height: 3.5rem; padding: 0 1.25rem;
   border-bottom: 1px solid var(--line);
   background: var(--deck);
 }
+
+/* Full-width and unmissable, because both things it says invalidate everything
+ * below it: this is a demo fleet, or these numbers are not current. Brass, not
+ * red - neither is a failure of the operator's work. */
+.banner {
+  display: flex; align-items: center; gap: 0.625rem;
+  flex: 0 0 auto; margin: 0; padding: 0.5rem 1.25rem;
+  border-bottom: 1px solid var(--brass);
+  background: var(--halo-brass); color: var(--fg);
+  font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.02em;
+}
+.banner[hidden] { display: none; }
+.banner-demo { animation: settle 200ms ease-out; }
 
 .wordmark {
   display: flex; align-items: center; gap: 0.625rem;
@@ -174,7 +191,7 @@ a:hover { text-decoration: underline; }
 .deck {
   display: grid;
   grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--chat-w);
-  height: calc(100vh - 3.5rem);
+  flex: 1 1 auto; min-height: 0;
   transition: grid-template-columns var(--sweep);
 }
 .deck > * { min-width: 0; }
@@ -482,9 +499,17 @@ td:last-child, th:last-child { padding-right: 0; }
   border-top: 1px solid var(--line-soft);
   font-size: 0.8125rem; color: var(--fg-dim);
 }
+/* A refused send stays put until the operator does something about it, so it
+ * reads louder than the pending row and is never overwritten by the poll. */
+.chat-error {
+  margin: 0; padding: 0.625rem 1.5rem;
+  border-top: 1px solid var(--port);
+  background: var(--halo-port); color: var(--fg);
+  font-size: 0.8125rem;
+}
 /* An author `display` beats the UA's `[hidden]` rule outright, so anything
  * toggled by that attribute has to opt back out here or it never hides. */
-.chat-pending[hidden], .chat-empty[hidden], .scrim[hidden] { display: none; }
+.chat-pending[hidden], .chat-empty[hidden], .chat-error[hidden], .scrim[hidden] { display: none; }
 .chat-form { display: flex; gap: 0.625rem; padding: 1rem 1.5rem 1.25rem; border-top: 1px solid var(--line); }
 .chat-form textarea {
   flex: 1 1 auto; min-width: 0; resize: none; overflow-y: auto;
@@ -519,7 +544,9 @@ td:last-child, th:last-child { padding-right: 0; }
 
 @media (max-width: 55rem) {
   :root { --gutter: 1.25rem; }
-  body { overflow: auto; }
+  /* Ordinary page scrolling: a fixed shell costs more than it gives here, so
+   * the column layout is dropped rather than fought with. */
+  body { display: block; height: auto; min-height: 100%; overflow: auto; }
   .deck, body.is-focused .deck { grid-template-columns: minmax(0, 1fr); height: auto; }
   .view { height: auto; overflow: visible; }
   .wordmark { min-width: 0; }
