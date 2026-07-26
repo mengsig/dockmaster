@@ -12,7 +12,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 function defaultResponse(label) {
   if (label.startsWith('state:')) return { head: 'a'.repeat(40), porcelain: '' }
   if (label.startsWith('review:')) return { findings: [] }
-  if (label === 'verify') return { gateExit: 0, reportExit: 0, passed: true, summary: 'verified' }
+  if (label === 'verify') return { gateDecision: 'required', reportExit: 0, passed: true, summary: 'verified' }
   if (label.startsWith('tests:')) return { passed: true, summary: 'passed' }
   if (label === 'security') return { surface: false, findings: [], summary: 'no surface' }
   if (label === 'pr') return { url: 'https://github.com/o/r/pull/12' }
@@ -132,7 +132,7 @@ async function checkFailures() {
   const finding = { severity: 'high', file: 'auth.js', summary: 'auth bypass' }
   const cases = [
     [{ gates: [{ gate: 'tests' }] }, { 'tests:gate': { passed: false, summary: 'red' } }, 'tests'],
-    [{ gates: [{ gate: 'verify' }] }, { verify: { gateExit: 0, reportExit: 1, passed: false, summary: 'broken' } }, 'verify'],
+    [{ gates: [{ gate: 'verify' }] }, { verify: { gateDecision: 'required', reportExit: 1, passed: false, summary: 'broken' } }, 'verify'],
     [{ gates: [{ gate: 'security' }] }, { security: { surface: true, findings: [finding], summary: 'unsafe' } }, 'security'],
     [{ gates: [{ gate: 'pr' }] }, { pr: { url: 'not-a-pr' } }, 'pr'],
     [{ gates: [{ gate: 'unknown' }] }, {}, 'config'],
@@ -205,21 +205,42 @@ async function checkCompatibilityEdges() {
 
   const verifySkip = await run({ gates: [{ gate: 'verify', optional: true }], noRuntimeSurface: true }, {})
   assert.deepEqual(verifySkip.calls, [])
-  // A bare `passed: true` is not enough: the agent must report exit codes the
-  // runner can hold it against, or a forged boolean would pass the gate.
+  // A bare `passed: true` is not enough: the agent must report the gate's own
+  // decision and report's exit code, or a forged boolean would pass the gate.
   const forged = await run({ gates: [{ gate: 'verify' }] }, {
-    verify: { gateExit: 0, reportExit: 1, passed: true, summary: 'looked fine' },
+    verify: { gateDecision: 'required', reportExit: 1, passed: true, summary: 'looked fine' },
   })
   assert.equal(forged.result.ok, false, 'a claimed pass over a red report must fail the gate')
   assert.equal(forged.result.stage, 'verify')
   const unavailable = await run({ gates: [{ gate: 'verify' }] }, {
-    verify: { gateExit: 3, reportExit: 3, passed: true, summary: 'no app config' },
+    verify: { gateDecision: 'unavailable', reportExit: 3, passed: true, summary: 'no app config' },
   })
   assert.equal(unavailable.result.ok, false, 'an unavailable gate must never pass')
+  const undetermined = await run({ gates: [{ gate: 'verify' }] }, {
+    verify: { gateDecision: 'undetermined', reportExit: 0, passed: true, summary: 'could not decide' },
+  })
+  assert.equal(undetermined.result.ok, false, 'an undecided gate must never pass')
+  // The gate reads a decision STRING now, so anything it does not recognize —
+  // a stale "1", a typo, an invented value — must fail closed, not fall through.
+  const garbled = await run({ gates: [{ gate: 'verify' }] }, {
+    verify: { gateDecision: '1', reportExit: 0, passed: true, summary: 'stale exit-code answer' },
+  })
+  assert.equal(garbled.result.ok, false, 'an unrecognized gate decision must fail the gate')
   const noSurface = await run({ gates: [{ gate: 'verify' }] }, {
-    verify: { gateExit: 1, reportExit: 0, passed: true, summary: 'no runtime surface moved' },
+    verify: { gateDecision: 'not-applicable', reportExit: 0, passed: true, summary: 'no runtime surface moved' },
   })
   assert.equal(noSurface.result.ok, true, 'a mechanical no-surface decision passes')
+
+  // The payoff of #196 at the call sites: the runner asks for the machine-readable
+  // form and stops narrating exit codes. A prompt that drops --json would put the
+  // agent back on the exit code it cannot distinguish from a crash.
+  const prompts = noSurface.prompts.find(({ label }) => label === 'verify')
+  assert(prompts.prompt.includes('dm-verify.sh gate runner-test --json'), 'verify gate must be asked for --json')
+  assert(!/exit code as gateExit/.test(prompts.prompt), 'verify prompt must not narrate gate exit codes')
+  const sec = await run({ gates: [{ gate: 'security', method: 'auto' }] }, {})
+  const secPrompt = sec.prompts.find(({ label }) => label === 'security')
+  assert(secPrompt.prompt.includes('dm-pr.sh security-scan runner-test --json'), 'security scan must be asked for --json')
+  assert(!/exits 1/.test(secPrompt.prompt), 'security prompt must not narrate scan exit codes')
 
   const untrackedPR = await run({ gates: [{ gate: 'pr' }] }, {
     'state:before-pr': { head: 'b'.repeat(40), porcelain: '?? review-output.json' },

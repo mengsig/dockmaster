@@ -459,6 +459,13 @@ check "state working post-commit" 'OUT="$(b dm-task.sh state demo-1)"; grep -q w
 # DM_NO_FETCH (used by dm-status) must reconcile from local refs only and still
 # report the committed-but-unlanded case correctly.
 check "no-fetch landed: reports unlanded" '! DM_NO_FETCH=1 b dm-worktree.sh landed demo-1 >/dev/null 2>&1'
+# The same answer, machine-readable: exit 0 because "not landed" is an ANSWER,
+# and a consumer that reads the bare form's exit 1 as failure loses it (#196).
+LANDEDJ_UNLANDED="$(DM_NO_FETCH=1 b dm-worktree.sh landed demo-1 --json)"
+check "landed --json exits 0 for unlanded work" 'DM_NO_FETCH=1 b dm-worktree.sh landed demo-1 --json >/dev/null'
+check "landed --json state is unlanded"         '[ "$(jq -r ".state" <<<"$LANDEDJ_UNLANDED")" = "unlanded" ]'
+check "landed --json carries the reason"        '[ -n "$(jq -r ".detail" <<<"$LANDEDJ_UNLANDED")" ]'
+check "landed --json refuses an unknown flag"   '! b dm-worktree.sh landed demo-1 --wat >/dev/null 2>&1'
 
 echo "== state reconcile: 'merged:' in a note must not fake done (anchored verb) =="
 b dm-task.sh new fix1 --kind ship --repo demo >/dev/null
@@ -519,6 +526,17 @@ check "security-scan names the signals"             'grep -qi "signals present" 
 # demo-1's diff is a pure arithmetic helper: no security surface -> exit non-zero.
 check "security-scan clears a benign diff"          '! b dm-pr.sh security-scan demo-1 >/dev/null 2>&1'
 check "security-scan requires an id"                '! b dm-pr.sh security-scan >/dev/null 2>&1'
+# --json exits 0 for BOTH answers. The bare form's exit 1 for "no signals" is
+# good news reported as failure, which a strict consumer reads as a broken scan.
+SCANJ="$(b dm-pr.sh security-scan sec-scan --json)"
+BENIGNJ="$(b dm-pr.sh security-scan demo-1 --json)"
+check "security-scan --json exits 0 on a security surface" 'b dm-pr.sh security-scan sec-scan --json >/dev/null'
+check "security-scan --json reports surface true"   '[ "$(jq -r ".surface" <<<"$SCANJ")" = "true" ]'
+check "security-scan --json lists the signals"      '[ "$(jq -r ".signals | length" <<<"$SCANJ")" -gt 0 ]'
+check "security-scan --json exits 0 with no signals" 'b dm-pr.sh security-scan demo-1 --json >/dev/null'
+check "security-scan --json reports surface false"  '[ "$(jq -r ".surface" <<<"$BENIGNJ")" = "false" ]'
+check "security-scan --json lists no signals"       '[ "$(jq -r ".signals | length" <<<"$BENIGNJ")" = 0 ]'
+check "security-scan --json refuses an unknown flag" '! b dm-pr.sh security-scan sec-scan --wat >/dev/null 2>&1'
 b dm-worktree.sh remove sec-scan --force >/dev/null 2>&1
 # `open` on a local-only task must refuse (its path is dm-merge.sh local). The
 # guard fires before any GitHub tool or push, so it is exercisable offline.
@@ -949,6 +967,8 @@ check "gitignore ignores settings.local.json" 'git -C "$ROOT" check-ignore .clau
 echo "== guarded land + teardown =="
 check "local land ff"    'b dm-merge.sh local demo-1 >/dev/null'
 check "no-fetch landed: reports landed" 'DM_NO_FETCH=1 b dm-worktree.sh landed demo-1 >/dev/null 2>&1'
+LANDEDJ_LANDED="$(DM_NO_FETCH=1 b dm-worktree.sh landed demo-1 --json)"
+check "landed --json state is landed"   '[ "$(jq -r ".state" <<<"$LANDEDJ_LANDED")" = "landed" ]'
 check "state done"       'OUT="$(b dm-task.sh state demo-1)"; grep -q done <<<"$OUT"'
 # demo-1's task state is now `done` (landed above). Even with the backlog moved
 # back to inflight (NOT done), `ready` unblocks demo-2 from the reconciled task
@@ -1083,6 +1103,8 @@ check "tangle --json carries no path or command" '! grep -qE "/|checkout" <<<"$T
 git -C "$DM_HOME/repos/demo" checkout -q main
 git -C "$DM_HOME/repos/demo" branch -q -D sidebranch
 check "tangle: clears after return to default" 'b dm-worktree.sh tangle demo >/dev/null 2>&1'
+check "tangle --json says tangled false on the default branch" \
+  '[ "$(b dm-worktree.sh tangle demo --json | jq -r ".tangled")" = "false" ]'
 
 echo "== scout lifecycle =="
 b dm-task.sh new sc-1 --kind scout --repo demo >/dev/null
@@ -2397,6 +2419,13 @@ check "landed exits 2 (undetermined) when the repo cannot resolve" \
   'b dm-worktree.sh landed vanish-1 >/dev/null 2>&1; [ "$?" = 2 ]'
 check "landed says undetermined, never 'unlanded'" \
   'grep -q "^undetermined" <<<"$VLANDED" && ! grep -q "^unlanded" <<<"$VLANDED"'
+# The third answer, machine-readable. The object carries `state` and NO derived
+# boolean on purpose: a `landed:false` field would let "undetermined" be read as
+# "not landed", which is the exact confusion exit 2 exists to prevent.
+VLANDEDJ="$(b dm-worktree.sh landed vanish-1 --json)"
+check "landed --json exits 0 when it cannot determine" 'b dm-worktree.sh landed vanish-1 --json >/dev/null'
+check "landed --json state is undetermined"     '[ "$(jq -r ".state" <<<"$VLANDEDJ")" = "undetermined" ]'
+check "landed --json exposes no landed boolean" '[ "$(jq -r "has(\"landed\")" <<<"$VLANDEDJ")" = "false" ]'
 VREMOVE="$(b dm-worktree.sh remove vanish-1 2>&1 || true)"
 check "teardown refuses without claiming the work is unlanded" \
   'grep -qi "cannot determine" <<<"$VREMOVE" && ! grep -q "has unlanded work" <<<"$VREMOVE"'
@@ -4928,11 +4957,22 @@ GATE_UNAVAIL="$("$V" gate vrf1 2>&1 || true)"; GATE_UNAVAIL_RC=0
 check "no app config exits 3, not 0"        '[ "$GATE_UNAVAIL_RC" = 3 ]'
 check "the unavailable refusal says so"     'grep -q "UNAVAILABLE" <<<"$GATE_UNAVAIL"'
 check "it names the missing app_start_cmd"  'grep -q "app_start_cmd" <<<"$GATE_UNAVAIL"'
+# All four gate decisions are ANSWERS; --json exits 0 for every one of them, so a
+# machine caller reads `decision` instead of narrating exit codes (#196).
+GATE_UNAVAIL_J="$("$V" gate vrf1 --json)"
+check "gate --json exits 0 with no app config" '"$V" gate vrf1 --json >/dev/null'
+check "gate --json decision is unavailable"    '[ "$(jq -r ".decision" <<<"$GATE_UNAVAIL_J")" = "unavailable" ]'
+check "gate --json still names the surface"    '[ "$(jq -r ".files | length" <<<"$GATE_UNAVAIL_J")" -gt 0 ]'
+check "gate --json refuses an unknown flag"    '! "$V" gate vrf1 --wat >/dev/null 2>&1'
 # "could not determine" must never be reported as "nothing to verify": a task
 # whose worktree is gone exits 2, distinct from the no-surface 1.
 b dm-task.sh new vrfx --kind ship --repo demo --title "no worktree" >/dev/null
 GATE_ERR_RC=0; "$V" gate vrfx >/dev/null 2>&1 || GATE_ERR_RC=$?
 check "an unresolvable worktree exits 2, not 1" '[ "$GATE_ERR_RC" = 2 ]'
+GATE_ERR_J="$("$V" gate vrfx --json)"
+check "gate --json exits 0 when it cannot decide" '"$V" gate vrfx --json >/dev/null'
+check "gate --json decision is undetermined"      '[ "$(jq -r ".decision" <<<"$GATE_ERR_J")" = "undetermined" ]'
+check "gate --json never calls that no surface"   '[ "$(jq -r ".decision" <<<"$GATE_ERR_J")" != "not-applicable" ]'
 
 # A fake app that really LISTENS, so the port, readiness and ownership checks are
 # exercised end to end without a network or a container.
@@ -4960,6 +5000,9 @@ vapp_register() {
 vapp_register || true
 check "a touched surface with app config is required" '"$V" gate vrf1 >/dev/null 2>&1'
 check "the required line names the changed file"      'GOUT="$("$V" gate vrf1 2>&1)"; grep -q "frontend/app.js" <<<"$GOUT"'
+GATE_REQ_J="$("$V" gate vrf1 --json)"
+check "gate --json decision is required"              '[ "$(jq -r ".decision" <<<"$GATE_REQ_J")" = "required" ]'
+check "gate --json lists the changed surface"         '[ "$(jq -r ".files[0]" <<<"$GATE_REQ_J")" = "frontend/app.js" ]'
 # UNDER-FIRING is the failure mode this gate cannot afford, so with no registered
 # verify_surfaces every non-doc path counts - including the layouts a hand-written
 # glob list missed (a page component, a template, a top-level entrypoint).
@@ -4972,6 +5015,10 @@ done
 mkdir -p "$VWT/docs"; printf 'x\n' > "$VWT/docs/notes.md"; printf 'x\n' > "$VWT/README.md"
 GATE_NA_RC=0; "$V" gate vrf1 >/dev/null 2>&1 || GATE_NA_RC=$?
 check "a docs-only diff exits 1 (no surface)"  '[ "$GATE_NA_RC" = 1 ]'
+GATE_NA_J="$("$V" gate vrf1 --json)"
+check "gate --json exits 0 on a docs-only diff" '"$V" gate vrf1 --json >/dev/null'
+check "gate --json decision is not-applicable"  '[ "$(jq -r ".decision" <<<"$GATE_NA_J")" = "not-applicable" ]'
+check "gate --json lists no surface files"      '[ "$(jq -r ".files | length" <<<"$GATE_NA_J")" = 0 ]'
 # verify_surfaces NARROWS the default, it does not widen it.
 printf 'x\n' > "$VWT/app.py"
 b dm-repo.sh set demo verify_surfaces 'frontend/**' >/dev/null

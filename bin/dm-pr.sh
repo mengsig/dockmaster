@@ -49,7 +49,9 @@
 #                                 changes (offline under DM_NO_FETCH: cached only)
 #   pipeline <repo> [--json]      the gate track a PR in <repo> must clear, from
 #                                 config/pr-pipeline.<repo>.json or the default
-#   security-scan <id>            grep the diff for security-surface signals
+#   security-scan <id> [--json]   grep the diff for security-surface signals.
+#                                 Bare: exit 0 = signals, 1 = none. --json ALWAYS
+#                                 exits 0 and answers in `surface`.
 #   url   <id>                    print recorded PR url
 
 set -euo pipefail
@@ -987,7 +989,19 @@ case "$cmd" in
     # Exit code follows grep's sense: 0 = signals found (review recommended),
     # 1 = none found (skip is defensible); a real error (no worktree) dies via
     # dm_die. Local-only: no GitHub tools required.
-    id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-pr.sh security-scan <id>"
+    #
+    # --json ALWAYS exits 0 once the diff was read, answering in `surface`: "no
+    # signals" is good news, and a consumer that reads the bare form's exit 1 as
+    # a failure loses it and falls back to whatever its default happens to be.
+    id="${1:-}"; shift 2>/dev/null || true
+    [ -n "$id" ] || dm_die "usage: dm-pr.sh security-scan <id> [--json]"
+    want_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) want_json=1; shift ;;
+        *) dm_die "usage: dm-pr.sh security-scan <id> [--json]" ;;
+      esac
+    done
     dm_require_id "$id"
     wt="$(dm_require_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
     # Same nesting hazard: an unresolvable repo left $base empty, and the scan
@@ -1011,6 +1025,11 @@ case "$cmd" in
     grep -iEq -- 'parse|deserial|unmarshal|unpickle|yaml\.load|json\.load|eval\(|exec\(|subprocess|os\.system|shell=true|system\(' <<<"$diff" && hits="$hits input-parsing" || true
     grep -iEq -- 'https?://|fetch\(|socket|urlopen|requests\.|\bcurl\b|\bsql\b|execute\(|redirect|open\(' <<<"$diff" && hits="$hits external-io" || true
     hits="${hits# }"
+    if [ "$want_json" -eq 1 ]; then
+      jq -nc --arg id "$id" --arg hits "$hits" \
+        '{id:$id, surface: ($hits != ""), signals: ($hits | split(" ") | map(select(length > 0)))}'
+      exit 0
+    fi
     if [ -n "$hits" ]; then
       dm_info "security-scan: signals present ($hits) — run security-review on this diff before merge"
       exit 0

@@ -21,8 +21,11 @@
 #                                    exemption, for its own PR path (#119).
 #   assert <path> <repo>            verify <path> is a real worktree root distinct
 #                                    from the primary clone (isolation invariant)
-#   landed <id>                     is the worktree's committed work landed?
+#   landed <id> [--json]            is the worktree's committed work landed?
 #                                    (exit 0 landed, 1 unlanded, 2 undeterminable)
+#                                    --json ALWAYS exits 0 when the question was
+#                                    answered and carries `state` in the object:
+#                                    landed|unlanded|undetermined.
 #   remove <id> [--force]           remove worktree; refuses on a missing scout
 #                                    report, unlanded work, an undeterminable
 #                                    git state, or untracked files. --force
@@ -285,6 +288,30 @@ tangle_json() {
     '{repo:$repo, on:$on, expected:$expected, tangled: ($on != $expected and $on != "HEAD")}'
 }
 
+# landed_answer <want_json> <id> <state> [<detail>] -- emit the `landed` answer in
+# the requested form and exit. The bare form keeps its exit code (0 landed /
+# 1 unlanded / 2 undeterminable); --json always exits 0, because those codes are
+# ANSWERS and a machine reader cannot tell them from the script having failed.
+# The object carries `state` and no derived boolean: a `landed:false` field would
+# let "undetermined" be read as "not landed", the very confusion exit 2 exists to
+# prevent. Call it from the MAIN shell only — inside $( ) its exit is swallowed.
+landed_answer() {
+  local want_json="$1" id="$2" state="$3" detail="${4:-}" rc
+  case "$state" in
+    landed) rc=0 ;;
+    unlanded) rc=1 ;;
+    undetermined) rc=2 ;;
+    *) dm_die "internal: landed_answer got an unknown state '$state'" ;;
+  esac
+  if [ "$want_json" -eq 1 ]; then
+    jq -nc --arg id "$id" --arg state "$state" --arg detail "$detail" \
+      '{id:$id, state:$state, detail:$detail}'
+    exit 0
+  fi
+  if [ -n "$detail" ]; then echo "$state: $detail"; else echo "$state"; fi
+  exit "$rc"
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   create)
@@ -401,7 +428,16 @@ case "$cmd" in
     ;;
 
   landed)
-    id="${1:-}"; [ -n "$id" ] || dm_die "usage: dm-worktree.sh landed <id>"
+    id="${1:-}"; shift 2>/dev/null || true
+    [ -n "$id" ] || dm_die "usage: dm-worktree.sh landed <id> [--json]"
+    want_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) want_json=1; shift ;;
+        *) dm_die "usage: dm-worktree.sh landed <id> [--json]" ;;
+      esac
+    done
+    [ "$want_json" -eq 0 ] || dm_need jq
     wt="$(dm_require_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
     # Refresh pr_state so an out-of-band merge is reflected in the pr_state
     # fallback below. Best-effort. No-op offline (DM_NO_FETCH) or with no/
@@ -412,16 +448,17 @@ case "$cmd" in
     # Uncommitted tracked changes => not committed => not landed. (Untracked
     # files are handled at teardown.) Exit 2 keeps a git failure out of that.
     if ! tracked_state="$(dm_tracked_state "$wt")"; then
-      echo "undetermined: cannot inspect tracked files: $tracked_state"; exit 2
+      landed_answer "$want_json" "$id" undetermined "cannot inspect tracked files: $tracked_state"
     fi
-    [ "$tracked_state" = clean ] || { echo "unlanded: uncommitted changes to tracked files"; exit 1; }
+    [ "$tracked_state" = clean ] \
+      || landed_answer "$want_json" "$id" unlanded "uncommitted changes to tracked files"
     # Exit 2 = COULD NOT DETERMINE, distinct from exit 1 = not landed. `remove`,
     # `dm-task.sh state`, and `dm-status.sh` drift rely on the difference:
     # reporting a failed lookup as "unlanded work" misstates the reason (#84/#119).
     dir="$(dm_repo_dir_or_none "$repo")" \
-      || { echo "undetermined: cannot resolve repo '$repo' (unregistered, or the registry is unreadable)"; exit 2; }
+      || landed_answer "$want_json" "$id" undetermined "cannot resolve repo '$repo' (unregistered, or the registry is unreadable)"
     [ -d "$dir/.git" ] \
-      || { echo "undetermined: no clone for repo '$repo' (expected $dir)"; exit 2; }
+      || landed_answer "$want_json" "$id" undetermined "no clone for repo '$repo' (expected $dir)"
     def="$(dm_default_branch "$dir")"
     # DM_NO_FETCH=1 reconciles from local refs only (dm-status.sh sets it so its
     # read-only snapshot performs no network). Session-start leaves it unset and
@@ -434,7 +471,7 @@ case "$cmd" in
     # commits ahead of the base at all (nothing to land).
     if git -C "$dir" merge-base --is-ancestor "$head" "origin/$def" 2>/dev/null \
        || git -C "$dir" merge-base --is-ancestor "$head" "$def" 2>/dev/null; then
-      echo "landed"; exit 0
+      landed_answer "$want_json" "$id" landed
     fi
     # Squash-merge rewrites SHAs, so ancestry above cannot see a merged PR. But
     # "a PR merged" is not "THIS head merged": compare against pr_head (#120).
@@ -442,15 +479,15 @@ case "$cmd" in
     if [ "$pr_state" = "MERGED" ]; then
       merged_head="$(dm_meta_get "$id" pr_head)"
       [ -n "$merged_head" ] \
-        || { echo "undetermined: PR recorded MERGED but no pr_head recorded; cannot prove HEAD is in the merged result"; exit 2; }
+        || landed_answer "$want_json" "$id" undetermined "PR recorded MERGED but no pr_head recorded; cannot prove HEAD is in the merged result"
       git -C "$wt" rev-parse --verify --quiet "$merged_head^{commit}" >/dev/null 2>&1 \
-        || { echo "undetermined: merged PR head $merged_head is not present in this worktree; cannot compare"; exit 2; }
+        || landed_answer "$want_json" "$id" undetermined "merged PR head $merged_head is not present in this worktree; cannot compare"
       if [ "$head" = "$merged_head" ] || git -C "$wt" merge-base --is-ancestor "$head" "$merged_head" 2>/dev/null; then
-        echo "landed: PR merged"; exit 0
+        landed_answer "$want_json" "$id" landed "PR merged"
       fi
-      echo "unlanded: HEAD $head is not contained in the merged PR head $merged_head (commits added after the merge)"; exit 1
+      landed_answer "$want_json" "$id" unlanded "HEAD $head is not contained in the merged PR head $merged_head (commits added after the merge)"
     fi
-    echo "unlanded: commits not in $def and no merged PR recorded"; exit 1
+    landed_answer "$want_json" "$id" unlanded "commits not in $def and no merged PR recorded"
     ;;
 
   remove)

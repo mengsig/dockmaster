@@ -74,10 +74,11 @@ The rigorous gate order is
 `review (dimension-parallel) → verify-findings → fix → tests → verify → security
 → pr`. The behavioral `verify` gate drives the changed behavior
 end to end (via the `e2e-verification` skill) and reports what was actually exercised — not
-just that tests pass. `bin/dm-verify.sh gate <id>` decides from the diff: exit 0
-runs it, 1 is an explicit no-surface skip, 2 could not decide, 3 means a surface
-moved but the repo has no app config — reported **unavailable**, never a pass.
-It is rigorous-only until every managed repo has app config. `security` is auto-triggered (`bin/dm-pr.sh security-scan`,
+just that tests pass. `bin/dm-verify.sh gate <id> --json` decides from the diff and
+answers in `decision`: `required` runs it, `not-applicable` is an explicit no-surface
+skip, `undetermined` could not decide, `unavailable` means a surface moved but the
+repo has no app config — never a pass. (The bare form answers in its exit code.)
+It is rigorous-only until every managed repo has app config. `security` is auto-triggered (`bin/dm-pr.sh security-scan --json`,
 then `security-review` only on a hit, else an explicit skip), and `pr` opens the
 PR. Waiting for CI is **not** a pipeline gate — it runs in the operator-mediated
 merge tail after the PR opens (see "Merge authority" below). The never-merge-red
@@ -126,9 +127,9 @@ worktree/branch from meta, communicates only through the task record, and
 - **fix / tests** — resolve any merge-gate findings and re-confirm green.
 - **security** — optional. Run `security-review` on the diff only when the change
   touches auth, input handling, secrets, crypto, or external I/O. To make the
-  skip deliberate rather than silent, `bin/dm-pr.sh security-scan <id>` greps the
-  task's diff for those signals and prints whether a review is warranted (exit 0
-  = signals found, 1 = none); it is advisory only and never blocks. Skip
+  skip deliberate rather than silent, `bin/dm-pr.sh security-scan <id> --json` greps
+  the task's diff for those signals and answers in `surface` (the bare form uses
+  exit 0 = signals, 1 = none); it is advisory only and never blocks. Skip
   explicitly when there is no security surface; do not stack it as a reflex.
 - **pr** — open the PR (below).
 

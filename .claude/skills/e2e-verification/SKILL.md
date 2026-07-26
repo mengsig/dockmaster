@@ -39,6 +39,11 @@ not a promise you are asked to keep:
   `app_start_cmd`, so nothing can be booted. **Report it as unavailable.** It is
   not a pass, and not a skip you may stay quiet about.
 
+Anything machine-readable should use `gate <id> --json` instead: it exits `0`
+for all four and names the same answer in `decision`
+(`required|not-applicable|undetermined|unavailable`). Reading these as exit codes
+is how a "no surface" answer becomes an invisible skip.
+
 With no `verify_surfaces` registered, everything except documentation counts —
 a gate that under-fires is indistinguishable from one that always passes.
 `verify_surfaces` **narrows** that for a repo whose runtime surface is smaller.

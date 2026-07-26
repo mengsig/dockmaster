@@ -110,3 +110,15 @@ these are the constraints that are not obvious from the code you are editing.
   drift. A `! cmd` test folds 2 onto 1 and silently reasserts the false claim, so
   capture the rc. A refusal that misstates its reason is what trains reflexive
   `--force` (the #84 lesson).
+- **[convention]** ANSWER-CARRYING subcommands — ones whose nonzero exit is an
+  *answer*, not a failure — each carry an additive `--json` form that exits `0`
+  whenever the question could be answered, reserving nonzero for genuine failure
+  (unreadable repo, missing task, bad usage). Today: `dm-worktree.sh tangle`,
+  `dm-worktree.sh landed`, `dm-pr.sh security-scan`, `dm-verify.sh gate`. The
+  bare exit codes are unchanged for shell/`set -e` callers; every MACHINE caller
+  reads the object. The answer is a single enum field with no derived boolean —
+  a `landed:false` would let `undetermined` be read as "not landed", the exact
+  confusion exit 2 exists to prevent. `tests/check-answer-forms.js` pins the
+  registry and refuses any `bin/` header that documents an exit-code meaning
+  without classifying it: answer-carrying (must offer `--json`) or
+  failure-carrying (needs a written reason).
