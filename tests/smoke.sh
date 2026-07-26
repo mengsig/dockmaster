@@ -14,7 +14,53 @@ set -euo pipefail
 export GIT_AUTHOR_NAME="dockmaster smoke" GIT_AUTHOR_EMAIL="smoke@dockmaster.test"
 export GIT_COMMITTER_NAME="dockmaster smoke" GIT_COMMITTER_EMAIL="smoke@dockmaster.test"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SELF="${BASH_SOURCE[0]}"
+# SMOKE_ROOT is set only by the slicer below, whose sliced copy lives outside the
+# repo and so cannot derive the repo root from its own path.
+ROOT="${SMOKE_ROOT:-$(cd "$(dirname "$SELF")/.." && pwd)}"
+
+# --- shards -------------------------------------------------------------------
+# The suite is one linear script over one $DM_HOME: later sections assert on
+# state earlier ones built. So a shard is a CONTIGUOUS group of sections,
+# delimited by the `# shard:split` marker lines further down, and `--shard k/N`
+# SLICES the file rather than skipping at runtime — a check's body is where the
+# subprocess spawns are, so skipping the assertion alone buys almost nothing.
+# Sections marked `# shard:bootstrap` build fixtures LATER groups need: they run
+# again in every shard after their own, but only the shard that owns them counts
+# their checks, so the shards' pass counts sum to the sequential total.
+# Adding a section needs no bookkeeping — it joins whichever group encloses it.
+if [ "${1:-}" = "--shards" ] || [ "${1:-}" = "--shard" ]; then
+  SHARD_TOTAL=$(grep -c '^# shard:split$' "$SELF" || true)
+  SHARD_TOTAL=$((SHARD_TOTAL + 1))
+fi
+if [ "${1:-}" = "--shards" ]; then printf '%s\n' "$SHARD_TOTAL"; exit 0; fi
+if [ "${1:-}" = "--shard" ]; then
+  SHARD_SPEC="${2:-}"
+  SHARD_K="${SHARD_SPEC%%/*}"; SHARD_N="${SHARD_SPEC##*/}"
+  case "$SHARD_SPEC" in */*) ;; *) echo "usage: smoke.sh --shard <k>/<n>" >&2; exit 2 ;; esac
+  case "$SHARD_K$SHARD_N" in ''|*[!0-9]*) echo "usage: smoke.sh --shard <k>/<n>" >&2; exit 2 ;; esac
+  # The split count is a property of the FILE, so a stale caller (a CI matrix
+  # that was not updated with the markers) must fail loudly, not silently run
+  # the wrong slice or drop sections on the floor.
+  [ "$SHARD_N" = "$SHARD_TOTAL" ] || { echo "smoke.sh: this suite has $SHARD_TOTAL shards, not $SHARD_N" >&2; exit 2; }
+  [ "$SHARD_K" -ge 1 ] && [ "$SHARD_K" -le "$SHARD_TOTAL" ] || { echo "smoke.sh: shard $SHARD_K is outside 1..$SHARD_TOTAL" >&2; exit 2; }
+  SMOKE_SLICE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dm-smoke-slice.XXXXXX")"
+  awk -v K="$SHARD_K" '
+    /^# shard:epilogue$/ { epi = 1 }
+    epi { print; next }
+    /^# shard:split$/ { group++; next }
+    /^# shard:bootstrap$/ { boot = 1; next }
+    /^echo "== / {
+      insec = 1; keep = (group == K || (boot && K > group)); own = (group == K); boot = 0
+      if (keep) printf "_shard_sec %d\n", own
+    }
+    { if (!insec || keep) print }
+    BEGIN { group = 1 }
+  ' "$SELF" > "$SMOKE_SLICE_DIR/smoke.sh"
+  export SMOKE_ROOT="$ROOT" SMOKE_SLICE_DIR SMOKE_SHARD="$SHARD_K/$SHARD_TOTAL"
+  exec bash "$SMOKE_SLICE_DIR/smoke.sh"
+fi
+
 # Canonicalize the temp root so DM_HOME and every path derived from it are
 # PHYSICAL. dm-lib canonicalizes DM_HOME (pwd -P) and git records worktree paths
 # physically, so a symlinked TMPDIR (macOS /var -> /private/var) would make
@@ -22,13 +68,40 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # is the "already-canonical temp dir" the dm-100-cleanup-safety note prescribes;
 # scout-cleanup.sh keeps its OWN symlinked root to exercise the canonicalization.
 TMP="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/dm-smoke.XXXXXX")" && pwd -P)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" ${SMOKE_SLICE_DIR:+"$SMOKE_SLICE_DIR"}' EXIT
 export DM_HOME="$TMP/home"
 pass=0; fail=0
-ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
+# A shard runs the bootstrap sections it does not own for their side effects
+# only: their passes belong to the owning shard's count, but a FAILURE there is
+# real and is reported by whichever shard hits it.
+shard_owned=1; shard_sections=0
+_shard_sec() { shard_owned="$1"; [ "$1" = 0 ] || shard_sections=$((shard_sections + 1)); }
+ok()   { [ "$shard_owned" = 1 ] || return 0; pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+REG="$DM_HOME/state/repos.json"
+
+# --- shared fixtures ---------------------------------------------------------
+# Named forms in, one refusal named on failure. Used by every section that
+# asserts on the command guard, which is why they live here and not beside the
+# first one.
+all_blocked() {
+  local c
+  for c in "$@"; do
+    if "$ROOT/bin/dm-command-guard.sh" check "$c" >/dev/null 2>&1; then
+      printf '       still allowed: %s\n' "$c" >&2; return 1
+    fi
+  done
+}
+all_allowed() {
+  local c
+  for c in "$@"; do
+    if ! "$ROOT/bin/dm-command-guard.sh" check "$c" >/dev/null 2>&1; then
+      printf '       wrongly blocked: %s\n' "$c" >&2; return 1
+    fi
+  done
+}
 
 # Hermetic authenticated runtime snapshot. Production doctor still probes real
 # auth; smoke must not inherit developer login state or hosted-CI anonymity.
@@ -37,6 +110,93 @@ mkdir -p "$RUNTIME_OK"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$RUNTIME_OK/claude"
 chmod +x "$RUNTIME_OK/claude"
 export PATH="$RUNTIME_OK:$PATH"
+
+# A "plain gh only" run must be deterministic on an operator machine that HAS
+# the wrapper installed, so drop every PATH entry providing gh-axi. Prepending a
+# stub cannot do this — command -v would still find the real wrapper.
+path_without_ghaxi() {
+  local out="" d tool real shim="$TMP/noaxi-shims"
+  mkdir -p "$shim"
+  while IFS= read -r d; do
+    if [ -n "$d" ] && [ ! -x "$d/gh-axi" ]; then out="$out:$d"; fi
+  done <<<"$(printf '%s' "$PATH" | tr ':' '\n')"
+  out="${out#:}"
+  # Dropping a directory takes its unrelated tools with it — gh-axi ships in an
+  # nvm bin that also holds node and claude. Re-provide anything that vanished so
+  # the filter removes exactly the wrapper, even on a nvm-only machine.
+  for tool in git jq node claude; do
+    real="$(command -v "$tool" 2>/dev/null)" || continue
+    if ! ( PATH="$out"; command -v "$tool" >/dev/null 2>&1 ); then ln -sf "$real" "$shim/$tool"; fi
+  done
+  printf '%s\n' "$shim:$out"
+}
+NOAXI_PATH="$(path_without_ghaxi)"
+
+# dm-pr.sh is a script with a dispatch `case` at the bottom, not a pure library
+# like dm-lib.sh, so sourcing it runs that case. An empty $1 falls to the usage
+# branch and exits before any function below could be called. `url` with a
+# harmless task id resolves through dm_meta_get, which returns cleanly (empty)
+# for a nonexistent task and never exits, so sourcing completes and the
+# functions become callable in the same subshell.
+prfn() { ( . "$ROOT/bin/dm-pr.sh" url _smoke_helper_probe_ >/dev/null 2>&1; "$@" ); }
+
+# --- host-port fixtures (#199) ------------------------------------------------
+# The verify gate derives its starting port from $DM_HOME and the task id, so two
+# suites on one host no longer aim at the same port. This mirrors that formula
+# (dm-verify.sh always dispatches, so there is nothing to source) — $DM_HOME
+# comes from dm-lib so the CANONICALIZED value is hashed, and the base/span are
+# pinned by the "port is in the per-task range" check below.
+derived_app_port() { ( . "$ROOT/bin/dm-lib.sh"; printf '%s\n%s' "$DM_HOME" "$1" | cksum | awk '{print 8600 + ($1 % 400)}' ); }
+# squat_port <port> <hold-secs> [delay-secs] -- take <port> from a background
+# node that touches $SQUAT_MARK once the bind actually succeeds. Every caller
+# asserts that premise with squat_bound: a listener that lost the bind used to
+# leave the assertion below it judging a world that was never set up (#199).
+export SQUAT_MARK="$TMP/squat-bound"
+squat_port() {
+  rm -f "$SQUAT_MARK"
+  node -e "setTimeout(function(){require('net').createServer().listen($1,'127.0.0.1',function(){require('fs').writeFileSync(process.env.SQUAT_MARK,'');setTimeout(function(){process.exit(0)},${2}000)})},${3:-0}000)" &
+  SQUAT_PID=$!
+}
+squat_bound() {
+  local waited=0
+  while [ "$waited" -lt 100 ]; do
+    [ ! -f "$SQUAT_MARK" ] || return 0
+    waited=$((waited + 1)); sleep 0.1
+  done
+  return 1
+}
+
+# Stub gh so the live-base read is deterministic and offline: PR-detail calls
+# answer with pr.json (or pr2.json after the first read when "retarget" is
+# armed, simulating a mid-merge base/head change), check-runs/status/ref calls
+# answer with their matching fixture, and a "fail" marker makes gh exit non-zero.
+# gh-axi records the attempted atomic mutation, then fails loudly, so reaching
+# (or not reaching) the mutation is observable.
+GHSTUB="$TMP/ghstub"; mkdir -p "$GHSTUB"
+cat > "$GHSTUB/gh" <<STUB
+#!/bin/sh
+D="$GHSTUB"
+printf '%s\n' "\$*" >> "\$D/gh-calls"
+case "\$*" in
+  *check-runs*) cat "\$D/runs.json"; exit 0 ;;
+  *commits*status*) cat "\$D/status.json"; exit 0 ;;
+  *git/ref/heads/*)
+    [ -f "\$D/ref-fail" ] && exit 1
+    [ -f "\$D/ref-invalid" ] && { printf 'not json\n'; exit 0; }
+    cat "\$D/ref.json"; exit 0 ;;
+esac
+[ -f "\$D/fail" ] && exit 1
+if [ -f "\$D/retarget" ]; then
+  if [ -f "\$D/seen" ]; then cat "\$D/pr2.json"; exit 0; fi
+  : > "\$D/seen"
+fi
+cat "\$D/pr.json"
+STUB
+printf '#!/bin/sh\n: > "%s/ghaxi-called"\nexit 1\n' "$GHSTUB" > "$GHSTUB/gh-axi"
+chmod +x "$GHSTUB/gh" "$GHSTUB/gh-axi"
+printf '{"total_count":0,"check_runs":[]}\n' > "$GHSTUB/runs.json"
+printf '{"total_count":0}\n' > "$GHSTUB/status.json"
+printf '{"object":{"sha":"abc123"}}\n' > "$GHSTUB/ref.json"
 
 # --- fixtures ----------------------------------------------------------------
 git init -q --bare -b main "$TMP/origin.git"
@@ -88,22 +248,6 @@ check "guard ignores uninvoked harmless alias text" 'b dm-command-guard.sh check
 # Every form in the "blocks" checks below was ALLOWED before the inversion; the
 # "permits" checks pin what is deliberately left through so a later reader can
 # tell a decision from an oversight. Names the forms, unlike the old block.
-all_blocked() {
-  local c
-  for c in "$@"; do
-    if "$ROOT/bin/dm-command-guard.sh" check "$c" >/dev/null 2>&1; then
-      printf '       still allowed: %s\n' "$c" >&2; return 1
-    fi
-  done
-}
-all_allowed() {
-  local c
-  for c in "$@"; do
-    if ! "$ROOT/bin/dm-command-guard.sh" check "$c" >/dev/null 2>&1; then
-      printf '       wrongly blocked: %s\n' "$c" >&2; return 1
-    fi
-  done
-}
 ALIAS_SHADOW='git -c alias.status="!git reset --hard" status'
 CONFIG_ALIAS='git config alias.status "!git reset --hard"'
 check "guard blocks force/delete/prune push (#105)" \
@@ -346,6 +490,7 @@ wait
 SHARED_AGENT_COUNT="$(jq '[.secondmates[].agent_id | select(. == "agent-shared")] | length' "$DM_HOME/state/secondmates.json")"
 check "concurrent cross-record attach preserves unique agent ids" '[ "$SHARED_AGENT_COUNT" = 1 ]'
 
+# shard:bootstrap
 echo "== registry =="
 b dm-repo.sh add demo "$TMP/origin.git" --mode local-only --test-cmd "test -f src/calc.py" >/dev/null 2>&1
 check "repo registered" '[ "$(b dm-repo.sh get demo mode)" = "local-only" ]'
@@ -376,6 +521,7 @@ STATEFUL_OUT="$(STATEFUL_COUNT="$STATEFUL_COUNT" PATH="$STATEFUL_RUNTIME:$PATH" 
 check "doctor probes the runtime exactly once" '[ "$(cat "$STATEFUL_COUNT")" = 1 ]'
 check "doctor reports and exits from the same immutable snapshot" 'grep -qE "ok +claude-runtime" <<<"$STATEFUL_OUT" && ! grep -q "MISSING.*claude-runtime" <<<"$STATEFUL_OUT"'
 
+# shard:bootstrap
 echo "== create (new repo from an empty remote) =="
 git init -q --bare -b main "$TMP/new.git"   # an empty remote the operator "made"
 b dm-repo.sh create fresh "$TMP/new.git" --mode local-only --test-cmd "true" --no-memory >/dev/null
@@ -389,6 +535,7 @@ b dm-task.sh new fresh-wt --kind ship --repo fresh >/dev/null
 check "create yields a workable base" 'b dm-worktree.sh create fresh-wt fresh >/dev/null 2>&1'
 check "create refuses populated remote" '! b dm-repo.sh create taken "$TMP/origin.git" --no-memory >/dev/null 2>&1'
 
+# shard:bootstrap
 echo "== task + worktree + brief =="
 b dm-task.sh new demo-1 --kind ship --repo demo --title "add multiply" >/dev/null
 WT="$(b dm-worktree.sh create demo-1 demo | tail -n1)"
@@ -451,6 +598,7 @@ check "lavish poll degrades (exit 0, tool absent)" 'lav poll demo-1 >/dev/null 2
 OPENOUT="$(lav open demo-1 2>&1)"
 check "lavish open names the artifact path"        'grep -qF "$ART" <<<"$OPENOUT"'
 
+# shard:bootstrap
 echo "== state reconciliation =="
 check "state pending pre-work" 'OUT="$(b dm-task.sh state demo-1)"; grep -q pending <<<"$OUT"'
 git -C "$WT" checkout -q -b feat/x/add-multiply
@@ -483,10 +631,12 @@ check "note text 'merged:' does not reconcile to done" 'OUT="$(b dm-task.sh stat
 ( . "$ROOT/bin/dm-lib.sh"; dm_status_append fix1 merged "landed via local ff" ) >/dev/null
 check "a real merge event reconciles to done"          'OUT="$(b dm-task.sh state fix1)"; grep -q done <<<"$OUT"'
 
+# shard:bootstrap
 echo "== test gate =="
 check "tests pass (registered cmd)" 'b dm-test.sh demo-1 >/dev/null'
 check "tests recorded pass"         '[ "$(b dm-task.sh get demo-1 tests)" = "pass" ]'
 
+# shard:bootstrap
 echo "== backlog (dependency completion from real task state) =="
 b dm-backlog.sh add demo-1 "add multiply" --repo demo --status inflight >/dev/null
 b dm-backlog.sh add demo-2 "docs" --status queued --blocked-by demo-1 >/dev/null
@@ -606,26 +756,6 @@ check "dm_pr_delivery_gate: unauthenticated gh is no-auth"         '[ "$(prgate 
 check "dm_pr_delivery_gate: neither is no-cli"                     '[ "$(prgate 0 0)" = "no-cli" ]'
 check "dm_pr_delivery_gate fails closed on a garbage probe"        '[ "$(prgate yes yes)" = "no-cli" ]'
 
-# A "plain gh only" run must be deterministic on an operator machine that HAS
-# the wrapper installed, so drop every PATH entry providing gh-axi. Prepending a
-# stub cannot do this — command -v would still find the real wrapper.
-path_without_ghaxi() {
-  local out="" d tool real shim="$TMP/noaxi-shims"
-  mkdir -p "$shim"
-  while IFS= read -r d; do
-    if [ -n "$d" ] && [ ! -x "$d/gh-axi" ]; then out="$out:$d"; fi
-  done <<<"$(printf '%s' "$PATH" | tr ':' '\n')"
-  out="${out#:}"
-  # Dropping a directory takes its unrelated tools with it — gh-axi ships in an
-  # nvm bin that also holds node and claude. Re-provide anything that vanished so
-  # the filter removes exactly the wrapper, even on a nvm-only machine.
-  for tool in git jq node claude; do
-    real="$(command -v "$tool" 2>/dev/null)" || continue
-    if ! ( PATH="$out"; command -v "$tool" >/dev/null 2>&1 ); then ln -sf "$real" "$shim/$tool"; fi
-  done
-  printf '%s\n' "$shim:$out"
-}
-NOAXI_PATH="$(path_without_ghaxi)"
 check "the no-wrapper PATH really resolves no gh-axi" '( PATH="$NOAXI_PATH"; ! command -v gh-axi >/dev/null 2>&1 )'
 check "the no-wrapper PATH keeps every tool the filter is not aiming at" \
   '( PATH="$NOAXI_PATH"; for t in git jq node; do command -v "$t" >/dev/null 2>&1 || exit 1; done )'
@@ -970,6 +1100,7 @@ check "all 20 concurrent keys survived" '[ "$missing" -eq 0 ]'
 echo "== gitignore =="
 check "gitignore ignores settings.local.json" 'git -C "$ROOT" check-ignore .claude/settings.local.json >/dev/null'
 
+# shard:bootstrap
 echo "== guarded land + teardown =="
 check "local land ff"    'b dm-merge.sh local demo-1 >/dev/null'
 check "no-fetch landed: reports landed" 'DM_NO_FETCH=1 b dm-worktree.sh landed demo-1 >/dev/null 2>&1'
@@ -984,6 +1115,7 @@ check "ready unblocks from real task state, not backlog status" 'OUT="$(b dm-bac
 check "teardown ok"      'b dm-worktree.sh remove demo-1 >/dev/null'
 check "origin has commit" 'OUT="$(git -C "$DM_HOME/repos/demo" log --oneline)"; grep -q "add multiply" <<<"$OUT"'
 
+# shard:bootstrap
 echo "== archive (prune a landed, torn-down task) =="
 # fail closed: a task that has not reached terminal done cannot be archived.
 b dm-task.sh new arch-wip --kind ship --repo demo >/dev/null
@@ -1070,6 +1202,7 @@ SESSION_BAD="$(b dm-session-start.sh --no-sync 2>&1 || true)"
 check "session start fails malformed supervisor section" '! b dm-session-start.sh --no-sync >/dev/null 2>&1 && grep -q "DOMAIN SUPERVISORS" <<<"$SESSION_BAD" && grep -q "FAIL supervisor state" <<<"$SESSION_BAD" && grep -q "NOT READY" <<<"$SESSION_BAD"'
 cp "$TMP/secondmates.bak" "$DM_HOME/state/secondmates.json"
 
+# shard:split
 echo "== branch name =="
 # Pure function (no DM_HOME): type/issue validation, slug kebab-collapsing, cap.
 check "branch name maps issue+slug"        '[ "$(b dm-branch-name.sh fix 412 "flaky login test")" = "fix/412/flaky-login-test" ]'
@@ -1237,6 +1370,7 @@ check "stacked rebase lands onto the parent's newer commit, not just its v1" \
 check "stacked rebase keeps the child feature"               '[ -f "$SRWT/child.txt" ]'
 check "stacked rebase stays on its branch"                   '[ "$(git -C "$SRWT" rev-parse --abbrev-ref HEAD)" = "feat/x/stack-child" ]'
 
+# shard:bootstrap
 echo "== dm-memory (native plain-markdown context) =="
 # seed scaffolds only the git-excluded private store; it never touches the clone's
 # AGENTS.md, so the clone stays pristine (landable and fast-forward-syncable).
@@ -1786,14 +1920,6 @@ check "set refuses hand-writing base" '! b dm-task.sh set sub-child base evil-br
 check "set base recorded by --base is untouched by the guard" '[ "$(b dm-task.sh get sub-child base)" = "parent-feature" ]'
 
 echo "== never-merge-red: pure-function coverage for dm-pr.sh's url/rollup helpers (#53) =="
-# dm-pr.sh is a script with a dispatch `case` at the bottom, not a pure library
-# like dm-lib.sh, so sourcing it runs that case. An empty $1 falls to the usage
-# branch and exits before any function below could be called. `url` with a
-# harmless task id resolves through dm_meta_get, which returns cleanly (empty)
-# for a nonexistent task and never exits, so sourcing completes and the
-# functions become callable in the same subshell — same technique as `gate()`
-# above, adapted because dm-pr.sh (unlike dm-lib.sh) always dispatches.
-prfn() { ( . "$ROOT/bin/dm-pr.sh" url _smoke_helper_probe_ >/dev/null 2>&1; "$@" ); }
 
 check "owner_repo parses an scp-style ssh remote"      '[ "$(prfn owner_repo "git@github.com:owner/repo.git")" = "owner/repo" ]'
 check "owner_repo parses an https remote with .git"    '[ "$(prfn owner_repo "https://github.com/owner/repo.git")" = "owner/repo" ]'
@@ -1850,6 +1976,7 @@ check "worst_rollup: none can never mask a failing rollup"    \
 check "worst_rollup: passing can never mask a failing rollup" \
   '[ "$(prfn worst_rollup passing failing)" = failing ] && [ "$(prfn worst_rollup failing passing)" = failing ]'
 
+# shard:bootstrap
 echo "== merge-authority: pure gate, field validation, legacy yolo mapping =="
 # The gate is a pure function (like dm_merge_gate): never is an absolute refusal,
 # ask/yolo allow the mechanics, and an unrecognized authority fails closed.
@@ -1885,7 +2012,6 @@ check "yolo alias rejects a non-bool value"          '! b dm-repo.sh set mauth y
 # false/absent->ask. Simulate one by rewriting the throwaway registry directly.
 # The list AUTH column must show the DERIVED authority for such an entry, not
 # just after an explicit set (the display path goes through the same resolver).
-REG="$DM_HOME/state/repos.json"
 jq '.repos["mauth"] |= (del(.merge_authority) + {yolo:true})'  "$REG" > "$REG.tmp" && mv "$REG.tmp" "$REG"
 check "legacy yolo:true reads as yolo"       '[ "$(mauthr mauth)" = "yolo" ]'
 check "list shows legacy yolo:true as yolo"  'grep -E "mauth +yolo" <<<"$(b dm-repo.sh list)" >/dev/null'
@@ -2032,47 +2158,17 @@ mv "$REG.bak" "$REG"
 check "an empty value clears the field entirely" 'b dm-repo.sh set mauth merge_allowed_bases "" >/dev/null 2>&1 && jq -e ".repos[\"mauth\"] | has(\"merge_allowed_bases\") | not" "$REG" >/dev/null'
 check "reader prints nothing after the clear"    '[ -z "$(mbread mauth)" ]'
 
+# shard:bootstrap
 echo "== merge-base exception: dm-pr.sh merge honors the LIVE PR base on a never repo =="
 # Give this local fixture a GitHub-shaped, still-local origin: repo_slug resolves
 # to o/r while fetches remain hermetic for post-merge sync.
 mkdir -p "$DM_HOME/repos/mauth/o"
 ln -s "$TMP/origin.git" "$DM_HOME/repos/mauth/o/r.git"
 git -C "$DM_HOME/repos/mauth" remote set-url origin o/r.git
-# Stub gh so the live-base read is deterministic and offline: PR-detail calls
-# answer with pr.json (or pr2.json after the first read when "retarget" is
-# armed, simulating a mid-merge base/head change), check-runs/status/ref calls
-# answer with their matching fixture, and a "fail" marker makes gh exit non-zero.
-# gh-axi records the attempted atomic mutation, then fails loudly, so reaching
-# (or not reaching) the mutation is observable.
 b dm-repo.sh set mauth merge_authority never >/dev/null
 b dm-repo.sh set mauth merge_allowed_bases "integration" >/dev/null
 b dm-task.sh new mauth-exc --kind ship --repo mauth >/dev/null
 ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set mauth-exc pr "https://github.com/o/r/pull/9" ) >/dev/null 2>&1
-GHSTUB="$TMP/ghstub"; mkdir -p "$GHSTUB"
-cat > "$GHSTUB/gh" <<STUB
-#!/bin/sh
-D="$GHSTUB"
-printf '%s\n' "\$*" >> "\$D/gh-calls"
-case "\$*" in
-  *check-runs*) cat "\$D/runs.json"; exit 0 ;;
-  *commits*status*) cat "\$D/status.json"; exit 0 ;;
-  *git/ref/heads/*)
-    [ -f "\$D/ref-fail" ] && exit 1
-    [ -f "\$D/ref-invalid" ] && { printf 'not json\n'; exit 0; }
-    cat "\$D/ref.json"; exit 0 ;;
-esac
-[ -f "\$D/fail" ] && exit 1
-if [ -f "\$D/retarget" ]; then
-  if [ -f "\$D/seen" ]; then cat "\$D/pr2.json"; exit 0; fi
-  : > "\$D/seen"
-fi
-cat "\$D/pr.json"
-STUB
-printf '#!/bin/sh\n: > "%s/ghaxi-called"\nexit 1\n' "$GHSTUB" > "$GHSTUB/gh-axi"
-chmod +x "$GHSTUB/gh" "$GHSTUB/gh-axi"
-printf '{"total_count":0,"check_runs":[]}\n' > "$GHSTUB/runs.json"
-printf '{"total_count":0}\n' > "$GHSTUB/status.json"
-printf '{"object":{"sha":"abc123"}}\n' > "$GHSTUB/ref.json"
 printf '{"state":"open","merged":false,"base":{"ref":"integration","repo":{"default_branch":"main"}},"mergeable_state":"unknown"}\n' > "$GHSTUB/pr.json"
 EXCOUT="$(PATH="$GHSTUB:$PATH" b dm-pr.sh merge mauth-exc 2>&1 || true)"
 check "a listed live base passes the authority gate"        'grep -q "operator-granted merge base" <<<"$EXCOUT"'
@@ -2369,6 +2465,7 @@ check "that refusal names the distro, not the reserved name"  'grep -q "dockmast
 check "no worktree was cut off the distro"                    '[ ! -e "$DISTRO_HOME/state/worktrees/hand-1" ]'
 check "the distro head survived the class-guard sequence"     '[ "$(git -C "$DISTRO_HOME" rev-parse main)" = "$DISTRO_HEAD" ]'
 
+# shard:split
 echo "== teardown honesty: 'could not determine' is not 'unlanded' (#119) =="
 # A failed landed-check used to read as "not landed", so teardown refused with a
 # statement about the operator's WORK that was simply false. Distinguish them:
@@ -4377,6 +4474,7 @@ check "an absent transcript file is refused, printing nothing" \
 check "a transcript with no model field is refused" '! w7tm "$W7TX/agent-tx-blank.output"'
 check "a real transcript line yields the model id"  '[ "$(w7tm "$W7TX/agent-tx-ok.output")" = claude-opus-5 ]'
 
+# shard:split
 echo "== brief: sizing is the dockmaster's call, not a computed anchor (#166, reverted) =="
 b dm-task.sh new w6eff-1 --kind ship --repo demo --title "add a multiply endpoint" >/dev/null
 b dm-worktree.sh create w6eff-1 demo >/dev/null
@@ -4830,6 +4928,7 @@ check "CI parses bin/*.sh with the macOS system bash 3.2 (#164)" \
 check "that step stays behind the system-bash-is-v3 assertion (#164)" \
   '[ "$(grep -n "no longer version 3" "$CI_YML" | cut -d: -f1)" -lt "$(grep -n "/bin/bash -n" "$CI_YML" | cut -d: -f1)" ]'
 
+# shard:split
 echo "== verify gate: registry fields =="
 V="$ROOT/bin/dm-verify.sh"
 # Bounded readiness for every boot in this section: the 300s default can outlive
@@ -4958,13 +5057,13 @@ check "a start that binds nothing fails the gate" '! DM_VERIFY_READY_TIMEOUT=2 "
 # The TOCTOU that the port-silence check alone cannot close: something else binds
 # the port DURING the readiness window. Without the ownership proof the gate
 # adopted it; the proof is what makes the foreign listener unverifiable.
-VSQUAT_PORT="$(printf '%s' vrf1 | cksum | awk '{print 8600 + ($1 % 400)}')"
-node -e "setTimeout(function(){require('net').createServer().listen($VSQUAT_PORT,'127.0.0.1')},2000);setTimeout(function(){process.exit(0)},25000)" &
-VSQUAT=$!
+VSQUAT_PORT="$(derived_app_port vrf1)"
+squat_port "$VSQUAT_PORT" 25 2
 VADOPT_RC=0; DM_VERIFY_READY_TIMEOUT=12 "$V" up vrf1 >/dev/null 2>&1 || VADOPT_RC=$?
+check "the foreign listener really took the port"      'squat_bound'
 check "a foreign listener is never adopted as the app" '[ "$VADOPT_RC" != 0 ]'
 check "no app state is recorded for it"                '[ "$(b dm-task.sh get vrf1 verify_app_state)" != "up" ]'
-kill "$VSQUAT" 2>/dev/null || true
+kill "$SQUAT_PID" 2>/dev/null || true
 vapp_register || true
 # A repo whose probe never proves ownership cannot verify anything.
 b dm-repo.sh set demo app_ready_cmd 'true' >/dev/null
@@ -5021,15 +5120,14 @@ vapp_register || true
 echo "== verify gate: the operator's own instance is never adopted =="
 # The derived port is occupied by something that is NOT this task's app. The gate
 # must move to a free one; attaching to whatever answers would be a fabricated pass.
-DERIVED="$(printf '%s' vrf1 | cksum | awk '{print 8600 + ($1 % 400)}')"
-node -e "require('net').createServer().listen($DERIVED,'127.0.0.1',function(){setTimeout(function(){process.exit(0)},25000)})" &
-SQUATTER=$!
-sleep 1
+DERIVED="$(derived_app_port vrf1)"
+squat_port "$DERIVED" 25
+check "the derived port really is occupied"     'squat_bound'
 vup vrf1 >/dev/null 2>&1 || true
 BUSY_PORT="$(b dm-task.sh get vrf1 verify_port)"
 check "the occupied derived port is not reused" '[ "$BUSY_PORT" != "$DERIVED" ]'
 check "the app still booted on a free port"     '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "up" ]'
-kill "$SQUATTER" 2>/dev/null || true
+kill "$SQUAT_PID" 2>/dev/null || true
 "$V" down vrf1 >/dev/null 2>&1
 
 echo "== verify gate: a pass needs evidence, not an assertion =="
@@ -5360,13 +5458,12 @@ VCLRWAIT=0
 while [ "$VCLRWAIT" -lt 10 ] && node -e "require('net').connect($VCLRPORT,'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})" 2>/dev/null; do
   VCLRWAIT=$((VCLRWAIT+1)); sleep 1
 done
-node -e "require('net').createServer().listen($VCLRPORT,'127.0.0.1',function(){setTimeout(function(){process.exit(0)},20000)})" &
-VFOREIGN=$!
-sleep 1
+squat_port "$VCLRPORT" 20
+check "the foreign listener really took the port" 'squat_bound'
 VCLR_RC=0; VCLR="$("$V" report vrf1 2>&1)" || VCLR_RC=$?
 check "a foreign listener is not the app"       '[ "$VCLR_RC" = 2 ]'
 check "the refusal names the ownership proof"   'grep -q "no longer proves it is the instance" <<<"$VCLR"'
-kill "$VFOREIGN" 2>/dev/null || true
+kill "$SQUAT_PID" 2>/dev/null || true
 vapp_register
 # Restore the canonical state the next section reads: a live app and a valid run.
 "$V" down vrf1 >/dev/null 2>&1 || true
@@ -5443,6 +5540,7 @@ check "the task records it as stopped"     '[ "$(b dm-task.sh get vrf2 verify_ap
 
 fi
 
+# shard:split
 echo "== gate evidence: a PR carries what its gates saw (#175) =="
 # The defect class this exists for is a check that APPEARS to run and does not,
 # so the negatives matter more than the happy path: no test command registered,
@@ -5780,6 +5878,14 @@ check "a degradation carries tokens, not script output" \
 check "console checks pass"      'node "$ROOT/tests/check-console.js" >/dev/null 2>&1'
 check "console http checks pass" 'node "$ROOT/tests/check-console-http.js" >/dev/null 2>&1'
 
+# shard:epilogue
 echo
-echo "smoke: $pass passed, $fail failed"
+if [ -n "${SMOKE_SHARD:-}" ]; then
+  # The section count is the shard's own proof it ran to the end: a shard that
+  # dies in top-level setup prints a truncated pass count, which reads exactly
+  # like success. tests/smoke-parallel.sh checks the counts sum.
+  echo "smoke[$SMOKE_SHARD]: $pass passed, $fail failed, $shard_sections sections"
+else
+  echo "smoke: $pass passed, $fail failed"
+fi
 [ "$fail" -eq 0 ]

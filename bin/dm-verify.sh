@@ -117,10 +117,12 @@ app_field() { dm_registry_get "$1" "$2"; }
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
 
 # derive_port <id> <base> <span> -- a stable per-task starting port, so repeated
-# runs of one task reuse a port instead of walking the range.
+# runs of one task reuse a port instead of walking the range. $DM_HOME is part of
+# the hash: two installs (or two test runs) on one host share the range, and a
+# task id alone made them start on the SAME port and fight over it (#199).
 derive_port() {
   local sum
-  sum="$(printf '%s' "$1" | cksum | awk '{print $1}')"
+  sum="$(printf '%s\n%s' "$DM_HOME" "$1" | cksum | awk '{print $1}')"
   case "$sum" in ''|*[!0-9]*) dm_die "cksum produced no usable checksum for '$1'" ;; esac
   printf '%s\n' "$(( $2 + sum % $3 ))"
 }

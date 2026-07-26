@@ -22,7 +22,15 @@ const path = require('path')
 
 const ROOT = process.env.DM_CHECK_ROOT || path.join(__dirname, '..')
 const WORKFLOW = path.join(ROOT, '.github', 'workflows', 'ci.yml')
+const SMOKE = path.join(ROOT, 'tests', 'smoke.sh')
 const MAX_TIMEOUT_MINUTES = 30
+
+// The legs that run tests/smoke.sh in slices. The shard count is owned by
+// smoke.sh (its `# shard:split` markers), so the matrix and the `--shard k/n`
+// argument are both derived from it here rather than pinned to a literal: a
+// marker added without touching the workflow would otherwise leave a whole
+// group of sections unrun, and no test would notice.
+const SHARDED_LEGS = ['smoke-linux', 'smoke-bash32']
 
 // The heavy legs, and the `changes` output that decides whether each runs.
 // ci-gate must read the SAME output rather than trusting the job's own result.
@@ -220,6 +228,35 @@ function checkLegGuards(jobs, gateText, fail) {
   }
 }
 
+// The matrix must cover exactly 1..n of smoke.sh's own shard count, and the
+// invocation must pass that same n. smoke.sh refuses a mismatched n at runtime,
+// so a drifted denominator is loud -- but a matrix that is merely SHORT (fewer
+// legs than shards) runs green while silently dropping sections, which is the
+// case this pin exists for.
+function checkShardMatrix(jobs, fail) {
+  const shards = fs.readFileSync(SMOKE, 'utf8').split('\n')
+    .filter((line) => line === '# shard:split').length + 1
+  const wantList = Array.from({ length: shards }, (unused, i) => i + 1).join(', ')
+  for (const leg of SHARDED_LEGS) {
+    if (!jobs[leg]) { fail(`job ${leg} is gone; it is what runs the smoke suite`); continue }
+    const matrix = /^ {8}shard: \[([^\]]*)\]\s*$/m.exec(jobs[leg])
+    if (!matrix) {
+      fail(`${leg} must declare its shards inline as \`shard: [1, 2, ...]\` (tests/smoke.sh has ${shards})`)
+    } else if (matrix[1].trim() !== wantList) {
+      fail(`${leg}'s matrix is [${matrix[1].trim()}] but tests/smoke.sh has ${shards} shards; expected [${wantList}]`)
+    }
+    if (!/^ {6}fail-fast: false\s*$/m.test(jobs[leg])) {
+      fail(`${leg} must set \`fail-fast: false\`, or one red shard cancels the others and their failures go unreported`)
+    }
+    const invocations = jobs[leg].match(/--shard \$\{\{ matrix\.shard \}\}\/(\d+)/g) || []
+    if (invocations.length !== 1) {
+      fail(`${leg} must run the suite exactly once as \`--shard \${{ matrix.shard }}/${shards}\` (found ${invocations.length})`)
+    } else if (invocations[0] !== `--shard \${{ matrix.shard }}/${shards}`) {
+      fail(`${leg} runs \`${invocations[0]}\` but tests/smoke.sh has ${shards} shards`)
+    }
+  }
+}
+
 function checkUnconditionalJobs(jobs, fail) {
   for (const name of UNCONDITIONAL_JOBS) {
     if (!jobs[name]) { fail(`job ${name} is gone; ci-gate hard-requires it`); continue }
@@ -261,6 +298,7 @@ function main() {
   checkGateWiring(jobs, fail)
   checkPathFilter(jobs.changes, fail)
   checkLegGuards(jobs, jobs['ci-gate'], fail)
+  checkShardMatrix(jobs, fail)
   checkUnconditionalJobs(jobs, fail)
   checkSelfIsInvoked(jobs, fail)
 
