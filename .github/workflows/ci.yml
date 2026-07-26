@@ -111,7 +111,10 @@ jobs:
         run: node tests/check-pr-runner.js
 
       # A subcommand whose nonzero exit is an ANSWER must offer --json, or a
-      # strict consumer reads the answer as a failure and quietly defaults.
+      # strict consumer reads the answer as a failure and quietly defaults. This
+      # one BUILDS A FIXTURE and runs the real bin/ scripts, so it needs bash,
+      # git and jq (all present on every runner image used here); a missing tool
+      # is a hard error, never a silent skip.
       - name: Check answer-carrying subcommands offer a machine-readable form
         run: node tests/check-answer-forms.js
 

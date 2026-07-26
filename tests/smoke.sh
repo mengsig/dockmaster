@@ -466,6 +466,10 @@ check "landed --json exits 0 for unlanded work" 'DM_NO_FETCH=1 b dm-worktree.sh 
 check "landed --json state is unlanded"         '[ "$(jq -r ".state" <<<"$LANDEDJ_UNLANDED")" = "unlanded" ]'
 check "landed --json carries the reason"        '[ -n "$(jq -r ".detail" <<<"$LANDEDJ_UNLANDED")" ]'
 check "landed --json refuses an unknown flag"   '! b dm-worktree.sh landed demo-1 --wat >/dev/null 2>&1'
+# Deliberate TIGHTENING, not additive: the flag loop rejects stray positional
+# args the old single-argument form silently ignored. It fails closed, and no
+# in-tree caller passes a second argument.
+check "landed refuses a stray positional arg"  '! b dm-worktree.sh landed demo-1 EXTRA >/dev/null 2>&1'
 
 echo "== state reconcile: 'merged:' in a note must not fake done (anchored verb) =="
 b dm-task.sh new fix1 --kind ship --repo demo >/dev/null
@@ -537,6 +541,7 @@ check "security-scan --json exits 0 with no signals" 'b dm-pr.sh security-scan d
 check "security-scan --json reports surface false"  '[ "$(jq -r ".surface" <<<"$BENIGNJ")" = "false" ]'
 check "security-scan --json lists no signals"       '[ "$(jq -r ".signals | length" <<<"$BENIGNJ")" = 0 ]'
 check "security-scan --json refuses an unknown flag" '! b dm-pr.sh security-scan sec-scan --wat >/dev/null 2>&1'
+check "security-scan refuses a stray positional arg" '! b dm-pr.sh security-scan sec-scan EXTRA >/dev/null 2>&1'
 b dm-worktree.sh remove sec-scan --force >/dev/null 2>&1
 # `open` on a local-only task must refuse (its path is dm-merge.sh local). The
 # guard fires before any GitHub tool or push, so it is exercisable offline.
@@ -4964,6 +4969,13 @@ check "gate --json exits 0 with no app config" '"$V" gate vrf1 --json >/dev/null
 check "gate --json decision is unavailable"    '[ "$(jq -r ".decision" <<<"$GATE_UNAVAIL_J")" = "unavailable" ]'
 check "gate --json still names the surface"    '[ "$(jq -r ".files | length" <<<"$GATE_UNAVAIL_J")" -gt 0 ]'
 check "gate --json refuses an unknown flag"    '! "$V" gate vrf1 --wat >/dev/null 2>&1'
+check "gate refuses a stray positional arg"   '! "$V" gate vrf1 EXTRA >/dev/null 2>&1'
+# The UNAVAILABLE sentence has ONE owner: a machine reader must not get a
+# shortened paraphrase that drops how to fix it.
+check "gate --json keeps the remediation hint" \
+  '"$V" gate vrf1 --json | jq -e ".detail | contains(\"Register one: dm-repo.sh set demo app_start_cmd\")" >/dev/null'
+check "gate --json keeps the bare wording"     \
+  '"$V" gate vrf1 --json | jq -e ".detail | contains(\"NOTHING was verified\")" >/dev/null'
 # "could not determine" must never be reported as "nothing to verify": a task
 # whose worktree is gone exits 2, distinct from the no-surface 1.
 b dm-task.sh new vrfx --kind ship --repo demo --title "no worktree" >/dev/null

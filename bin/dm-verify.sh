@@ -698,6 +698,14 @@ gate_decision() {
   return 0
 }
 
+# gate_unavailable_msg <count> <repo> -- the UNAVAILABLE sentence, including the
+# remediation hint. ONE owner, because the human form and the JSON `detail` must
+# say the same thing: a machine reader that got a shortened paraphrase would
+# relay a weaker claim than the operator is shown, and lose the way to fix it.
+gate_unavailable_msg() {
+  printf '%s changed file(s) touch a user-facing surface, but '"'"'%s'"'"' has no app_start_cmd registered, so the app cannot be booted and NOTHING was verified. Report this as unavailable, never as a pass. Register one: dm-repo.sh set %s app_start_cmd '"'"'<cmd honoring $DM_VERIFY_PORT>'"'"'\n' "$1" "$2" "$2"
+}
+
 # gate_json <id> <repo> <rc> <hits> <count> -- gate_decision's answer as one
 # object, exiting 0 for ALL FOUR decisions. 1/2/3 are answers, not failures, and
 # a machine reader that treats nonzero as failure loses them — the worst of those
@@ -713,7 +721,7 @@ gate_json() {
     2) decision=undetermined
        detail="could not determine what '$id' changed, so the verify gate cannot decide" ;;
     3) decision=unavailable
-       detail="$n changed file(s) touch a user-facing surface, but '$repo' has no app_start_cmd registered, so the app cannot be booted and NOTHING can be verified" ;;
+       detail="$(gate_unavailable_msg "$n" "$repo")" ;;
     *) dm_die "the verify gate returned an unrecognized decision ($rc) for '$id'" ;;
   esac
   jq -nc --arg id "$id" --arg repo "$repo" --arg decision "$decision" \
@@ -888,7 +896,7 @@ case "$cmd" in
       2) echo "error: could not determine what '$id' changed, so the verify gate cannot decide" >&2; exit 2 ;;
       1) echo "not-applicable: the diff touches no user-facing surface for $repo"; exit 1 ;;
       3)
-        echo "UNAVAILABLE: $n changed file(s) touch a user-facing surface, but '$repo' has no app_start_cmd registered, so the app cannot be booted and NOTHING was verified. Report this as unavailable, never as a pass. Register one: dm-repo.sh set $repo app_start_cmd '<cmd honoring \$DM_VERIFY_PORT>'" >&2
+        echo "UNAVAILABLE: $(gate_unavailable_msg "$n" "$repo")" >&2
         printf '%s\n' "$hits" >&2
         exit 3 ;;
       0)
