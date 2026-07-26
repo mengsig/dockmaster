@@ -128,7 +128,7 @@ if [ -n "$tasks" ]; then
       [ -n "$(dm_meta_get "$tid" model)" ]  || missing="model"
       [ -n "$(dm_meta_get "$tid" effort)" ] || missing="${missing:+$missing and }effort"
       if [ -n "$missing" ]; then
-        unsized+="  UNSIZED: task $tid is working with no $missing recorded (dm-task.sh set $tid model|effort <value>)"$'\n'
+        unsized+="  UNSIZED: task $tid is working with no $missing recorded (record both: dm-task.sh set $tid model <tier>; dm-task.sh set $tid effort <level>)"$'\n'
       fi
     fi
     # A live task working against a brief that was never dispatch-ready (#115).

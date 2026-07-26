@@ -23,12 +23,12 @@ default); when in doubt, use `default`.
 **Right-size each pass, not just the tier.** Beyond picking the tier, set BOTH
 dials on every reviewer, verifier, and fix agent you spawn — `model=<tier>` and
 `subagent_type=crew-<level>`, the same ladder as a crewmate dispatch
-(`task-lifecycle` §3 has it: `haiku·low` up through `opus·xhigh`, judged from
+(`task-lifecycle` §3 has it: `haiku` up through `opus·xhigh`, judged from
 the diff's clarity and stakes, not computed). A `review` never comes back
 below `opus`·`high` — that floor is deliberate, the one exception to picking
 from judgment. A fix round over a small mechanical diff can legitimately land
-at `haiku`·`low`. These passes are spawns, not tasks, so no dispatch record
-gates them — sizing each one right is yours to get, every time, not a default
+at plain `haiku`. These passes are spawns, not tasks, so no dispatch record
+gates them — getting each one right is yours, every time; there is no default
 to fall back on.
 
 - **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial** changes

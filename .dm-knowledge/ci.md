@@ -125,11 +125,14 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   If that is ever done, the shard runner must assert the shard counts SUM to the
   expected total: a shard that dies in top-level setup prints a truncated pass
   count and no FAIL summary, which reads exactly like success.
-- **[measured]** Where the time actually goes (219 s local run, 131 sections):
-  `brief: unfilled {TASK}` 38.7 s, `dm-state export/import` 25.3 s, `toolbelt
-  input guards` 11.8 s, `brief: both recommendations` 11.7 s, `dispatch
-  right-sizing` 10.4 s, `worktree cleanup safety matrix` 10.3 s (that one is
-  `tests/scout-cleanup.sh`). Top 10 sections are 60% of the run. The cost is
-  subprocess spawns — `dm-worktree.sh create`, `dm-status.sh`, and the jq
-  passes every `bin/` invocation pays to validate the registry — not sleeps:
-  deliberate synchronization sleeps total ~5 s, 2% of the run.
+- **[measured]** Where the time actually goes (219 s local run, 131 sections;
+  table predates the sizing-calibration change that renamed/removed some of
+  these sections — do not re-measure off it, it is a shape-of-the-cost
+  illustration, not a current index): `brief: unfilled {TASK}` 38.7 s,
+  `dm-state export/import` 25.3 s, `toolbelt input guards` 11.8 s, `brief: both
+  recommendations` 11.7 s, `dispatch right-sizing` 10.4 s, `worktree cleanup
+  safety matrix` 10.3 s (that one is `tests/scout-cleanup.sh`). Top 10 sections
+  are 60% of the run. The cost is subprocess spawns — `dm-worktree.sh create`,
+  `dm-status.sh`, and the jq passes every `bin/` invocation pays to validate the
+  registry — not sleeps: deliberate synchronization sleeps total ~5 s, 2% of
+  the run.

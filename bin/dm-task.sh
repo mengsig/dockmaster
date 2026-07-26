@@ -247,8 +247,8 @@ case "$cmd" in
           esac
         fi
         # Both sizing dials must be a deliberate CHOICE before a dispatch counts.
-        # Not the RECOMMENDED value — overriding the anchor is the point — but
-        # neither may be left unset, or one axis silently defaults forever.
+        # Not any particular value — the gate forces a choice, not a default —
+        # but neither may be left unset, or one axis silently defaults forever.
         # A RECORD gate, not a spawn gate: the agent is already running, and
         # nothing checks the recorded effort against the subagent_type actually
         # passed. It forces the choice to be written down, it does not verify it.

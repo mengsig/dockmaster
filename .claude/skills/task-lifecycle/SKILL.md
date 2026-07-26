@@ -90,8 +90,8 @@ Think of them as **one ladder**, not two independent knobs to eyeball
 separately:
 
 ```
-haiku·low < haiku·medium < sonnet·low < sonnet·medium < sonnet·high
-         < opus·low < opus·medium < opus·high < opus·xhigh
+haiku < sonnet·low < sonnet·medium < sonnet·high
+      < opus·low < opus·medium < opus·high < opus·xhigh
 ```
 
 Pick a rung from what the brief actually asks for: how precise and
@@ -107,7 +107,7 @@ Each `crew-<level>` pins a **default model** — `crew-low` haiku, `crew-medium`
 sonnet, `crew-high` / `crew-xhigh` opus — so an omitted `model` parameter lands
 on a considered tier instead of inheriting your own; the parameter still
 overrides it when the ladder calls for a different pairing (sonnet at low
-effort, haiku at high effort — both ordinary rungs, not a mismatch to avoid).
+effort is an ordinary rung, not a mismatch to avoid).
 
 **A model that does not support a level ignores it silently** rather than
 failing, so a dial can be inert without ever saying so. `haiku` ignores effort

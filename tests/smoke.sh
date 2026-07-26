@@ -1542,12 +1542,12 @@ check "gate waits on pending and unknown"               '[ "$(awgate pending cle
 
 echo "== dispatch right-sizing: dm-status flags an unsized dispatch (#77, #166) =="
 # A live `working` task missing EITHER dial is an unsized dispatch; the hint
-# names the anchors and clears only once both are recorded.
+# names how to fix it and clears only once both are recorded.
 b dm-task.sh new unsized-1 --kind ship --repo demo --title "add a widget" >/dev/null
 b dm-task.sh event unsized-1 working "started" >/dev/null
 UNSIZED_STATUS="$(b dm-status.sh)"   # capture once (grep -q + pipefail)
 check "status flags a working task with no model as UNSIZED" 'grep -q "UNSIZED.*unsized-1" <<<"$UNSIZED_STATUS"'
-check "UNSIZED hint names how to fix it"                     'grep -q "UNSIZED.*unsized-1.*dm-task.sh set unsized-1 model|effort" <<<"$UNSIZED_STATUS"'
+check "UNSIZED hint names how to fix it"                     'grep -q "UNSIZED.*unsized-1.*record both: dm-task.sh set unsized-1 model <tier>; dm-task.sh set unsized-1 effort <level>" <<<"$UNSIZED_STATUS"'
 b dm-task.sh set unsized-1 model sonnet >/dev/null
 HALF_SIZED_STATUS="$(b dm-status.sh)"
 check "a model alone does NOT clear UNSIZED"                 'grep -q "UNSIZED.*unsized-1.*no effort recorded" <<<"$HALF_SIZED_STATUS"'
@@ -4527,7 +4527,7 @@ check "and does not tell you to regenerate over a partial fill" \
 echo "== dispatch docs: the skill teaches both dials and the mandatory gate (#166) =="
 W6TLSKILL="$ROOT/.claude/skills/task-lifecycle/SKILL.md"
 check "the skill states the combined ladder, not a computed recommendation" \
-  'grep -q "haiku·low" "$W6TLSKILL" && ! grep -qE "model_recommended|effort_recommended" "$W6TLSKILL"'
+  'grep -q "sonnet·low" "$W6TLSKILL" && ! grep -qE "model_recommended|effort_recommended" "$W6TLSKILL"'
 check "the skill names the crew-<level> subagent types" \
   'grep -q "crew-low" "$W6TLSKILL" && grep -q "crew-xhigh" "$W6TLSKILL"'
 check "the skill says choosing both dials is mandatory" \
