@@ -275,6 +275,86 @@ async function checkEveryTokenHasAWord() {
   console.log(`ok   ${everyStage.size} track stages and every work state have a word`)
 }
 
+// --- 2c. what the page asks for, and where a link goes -----------------------
+
+// dom.mjs builds every element through document.createElement, so pinning the
+// link rule needs just enough of a document to build one. Worth doing: the rule
+// has to be inherited by a future panel, not remembered at each call site.
+function withStubDocument(fn) {
+  const had = 'document' in global
+  const previous = global.document
+  global.document = {
+    createElement: (tag) => ({ tag, className: '', textContent: '', setAttribute() {}, appendChild() {} }),
+  }
+  try {
+    return fn()
+  } finally {
+    if (had) global.document = previous
+    else delete global.document
+  }
+}
+
+async function checkEveryOutboundLinkOpensAway() {
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  withStubDocument(() => {
+    // A pull request, an archived review page, and the console's own origin. All
+    // three LEAVE the panel the operator was reading, so none of them may take
+    // the console's tab with it.
+    for (const href of [
+      'https://github.com/example-org/demo/pull/1',
+      '/review/some-task/',
+      'http://127.0.0.1:4877/review/some-task/',
+    ]) {
+      const node = dom.link(href, 'Open')
+      equal(node.target, '_blank', `${href} opens in its own tab`)
+      ok(/\bnoopener\b/.test(node.rel), `${href} carries noopener`)
+      ok(/\bnoreferrer\b/.test(node.rel), `${href} carries noreferrer`)
+    }
+    // An in-page jump is navigation WITHIN the console; a tab per panel jump
+    // would be the bug, not the convenience.
+    const anchor = dom.link('#flight', 'See what is waiting')
+    ok(!anchor.target, 'an in-page jump stays in this tab')
+    ok(!anchor.rel, 'and needs no rel')
+  })
+  console.log('ok   every link that leaves the console opens in its own tab')
+}
+
+// A cleanup control ENQUEUES a request as an ordinary operator message, so the
+// sentence is the operator's own words and the page owns it. A kind with no
+// sentence would render a control that cannot say what it would ask for.
+async function checkEveryCleanupKindHasARequest() {
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  for (const kind of live.CLEANUP_KINDS) {
+    ok(typeof dom.CLEANUP_REQUEST[kind] === 'function', `cleanup kind '${kind}' has no request sentence`)
+    const text = dom.CLEANUP_REQUEST[kind](3)
+    ok(text.includes('3'), `the request for '${kind}' says how many`)
+    ok(!/worktree|task id|\bmeta\b|dm-[a-z]+\.sh/i.test(text),
+      `the request for '${kind}' uses the operator's words, not the crew's: ${text}`)
+  }
+  // The trash request names the work the way the operator sees it. A task id is
+  // the one thing this seam exists to keep off the page, so it cannot be in here
+  // either - the request goes into the transcript, which is on screen.
+  const trash = dom.TRASH_REQUEST('Fix the login redirect', 'harbourmaster', 'In progress')
+  ok(trash.includes('Fix the login redirect') && trash.includes('harbourmaster'),
+    'a trash request names the work and its repo')
+  ok(/authorize/i.test(trash), 'and carries the operator authorising it')
+  console.log(`ok   ${live.CLEANUP_KINDS.length} cleanup kinds and the trash request are worded on the page`)
+}
+
+// The document deliberately carries NO task id, which is why the trash request
+// names work by title and repo. If an id is ever added here it must be a decision,
+// not a field that slipped through into a page the operator reads.
+async function checkTheDocumentCarriesNoTaskId() {
+  const doc = await state.collect('fixture')
+  for (const item of doc.work) {
+    ok(!('id' in item), 'a work row carries no task id')
+  }
+  for (const item of doc.needs_you) {
+    ok(!('id' in item), 'a needs-you row carries no task id')
+  }
+  console.log('ok   no task id crosses to the page')
+}
+
 // --- 3. the committed demo fleet is a demo fleet ------------------------------
 
 async function checkFixtureIsNeutral() {
@@ -343,6 +423,9 @@ async function main() {
   checkAFailedSweepIsNeverAnEmptyFleet()
   await checkDegradationCarriesTokensNotProse()
   await checkEveryTokenHasAWord()
+  await checkEveryOutboundLinkOpensAway()
+  await checkEveryCleanupKindHasARequest()
+  await checkTheDocumentCarriesNoTaskId()
   await checkFixtureIsNeutral()
   checkShapeRefusesAHalfDocument()
   console.log(`\nconsole checks passed (${checks} assertions)`)

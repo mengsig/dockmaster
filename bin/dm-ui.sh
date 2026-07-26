@@ -20,10 +20,13 @@
 #   url                            print the URL
 #   status                         is it running, and on which source?
 #   stop                           stop the server this script started
-#   poll [--timeout <seconds>]     BLOCK until the operator sends a message,
-#                                  print it, exit 0. Exit 3 on timeout. Claiming
-#                                  is a rename, so a killed poll loses nothing -
-#                                  re-run it and the message is still queued.
+#   poll [--timeout <seconds>]     BLOCK until the operator sends something, then
+#                                  print EVERYTHING queued - oldest first, each
+#                                  record numbered and stamped - and exit 0. Exit
+#                                  3 on timeout. Each claim is an atomic rename
+#                                  acknowledged only once the text is written, so
+#                                  a killed poll (mid-drain included) loses
+#                                  nothing: re-run it and it arrives again.
 #   say "<text>" | say --file <p>  post the dockmaster's reply into the page
 #
 # Port: 4877 by default (DM_UI_PORT overrides). Chosen clear of lavish (4387),
@@ -48,7 +51,7 @@ PORT="${DM_UI_PORT:-4877}"
 URL="http://127.0.0.1:$PORT/"
 BOOT_TIMEOUT_SPINS=100   # 100 x 0.1s
 
-usage() { sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # running_pid - print the pid the file names, and return WHICH of three states
 # it is in. Callers must distinguish all three:

@@ -25,26 +25,50 @@ it and says so. Port via `DM_UI_PORT`.
 The page cannot BE this session, so it uses the same shape as `lavish-axi poll`:
 
     bin/dm-ui.sh poll [--timeout <seconds>]   # BLOCKS at zero idle cost until the
-                                              # operator sends something, prints it,
-                                              # exits 0. Exit 3 = timed out, nothing
-                                              # queued.
+                                              # operator sends something, prints
+                                              # EVERYTHING queued, exits 0. Exit 3
+                                              # = timed out, nothing queued.
     bin/dm-ui.sh say "<reply>"                # posts your reply; the open page shows
     bin/dm-ui.sh say --file <path>            # it without a refresh
 
-Claiming a message is a **rename**, so a killed or timed-out poll loses nothing —
-re-run it and anything queued is still there. Answer with `say` before polling
-again; the page shows the operator how many messages are still unpicked-up.
+One read **drains the queue**: it prints a count line, then each message as
+`[n/total] <stamp> operator:` followed by its text, oldest first. Bounded at 50 —
+past that it says how many are still queued, so poll again. Answer them all
+before polling again; the page shows how many are still unpicked-up.
+
+Claiming a message is a **rename**, and it is only marked delivered once the text
+is written out — so a poll killed at any point, mid-drain included, loses nothing:
+the next poll offers the same messages again. The one thing to expect is the
+mirror image, rarely: a message delivered twice, if the poller died between
+printing and recording it.
 
 Poll it the way you already wait on work: run it in the background and let the
 completion wake you (see `supervision`). Do not busy-loop it.
 
+A one-line `say` renders as a log row rather than a message, and the Updates panel
+is every line you have posted, newest first. That surface is for terse, timestamped
+status — write it that way.
+
 ## What it will not do
 
-No control on the page is destructive — no merge, no cleanup, no teardown. Every
-action stays in this session under the usual gates, so the merge authority in
-`AGENTS.md` §3 is untouched by anything the operator clicks. A decision answered
-from the page arrives as an ordinary message; record the resolution with
-`decision-hold` exactly as before.
+No control on the page carries anything out. The cleanup and trash controls
+**enqueue a request**: it arrives as an ordinary operator message on the same
+queue as the composer, opening `Cleanup request:` or `Trash request:`, and you run
+it here under the usual gates. So the merge authority in `AGENTS.md` §3 is
+untouched by anything the operator clicks — and a trash request is a request, not
+a waiver: directive 4 still holds, so a local copy with unlanded work in it still
+refuses and comes back to the operator.
+
+A request names work by **title and repo**, never a task id — the document behind
+the page deliberately carries none. Resolve it yourself, and ask if two pieces of
+work would answer to the same description.
+
+Filters and folded groups are page-side only, stored in the operator's browser.
+They hide nothing from you and nothing from the fleet, so "I tidied that away" on
+the page is not a request to clean anything up.
+
+A decision answered from the page arrives as an ordinary message; record the
+resolution with `decision-hold` exactly as before.
 
 It is not read-only, though. Refreshing runs `dm-pr.sh sweep`, which RECORDS
 each PR's state and checks on the work it sweeps and takes the task lock to do

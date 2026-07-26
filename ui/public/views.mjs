@@ -8,10 +8,30 @@
 
 import {
   el, add, lamp, stateCell, meta, link, table, cell, section, head, empty,
-  plural, lookup, word, ago, hoursSince,
+  foldable, segmented, askControl,
+  plural, lookup, word, ago, clockTime, hoursSince,
   WORK_STATE, CHECKS, REVIEW_VERDICT, AUTHORITY, KIND, CHECK_STATUS, MODE,
   STAGE_LABEL, STAGE_STATE, SOURCE_WORD, PR_UNREADABLE, TESTS_RESULT,
+  CLEANUP_REQUEST, TRASH_REQUEST,
 } from './dom.mjs';
+
+// A group of finished work folds itself away: the count stays on screen, the rows
+// stop crowding the page. `ctx.fold` remembers what the operator opened.
+function foldedSection(ctx, view, label, count, openByDefault) {
+  const key = `${view}:${label}`;
+  const { node, body } = foldable(label, count, ctx.fold(key, openByDefault),
+    (open) => ctx.setFold(key, open));
+  node.classList.add('section');
+  return { node, body };
+}
+
+// Every group that holds work which is over. These are the ones "fold the
+// finished groups away" on the Tidy panel acts on, so the control and the
+// defaults cannot drift apart.
+export const FINISHED_GROUPS = [
+  'flight:Recently finished', 'flight:Dropped',
+  'backlog:Landed', 'decisions:Answered', 'reviews:Reviewed',
+];
 
 // --- what this panel could not read ------------------------------------------
 
@@ -113,22 +133,61 @@ function noteText(item) {
   return word ? word(item.note) : '';
 }
 
+// "Quiet" is not a judgement, it is a threshold: the document carries the same
+// number dm-status.sh uses for a long runner, and every surface that says "quiet"
+// says the number too. An unreadable stamp is NOT quiet - it is unknown, and
+// counting it as quiet would invent a claim.
+function isQuiet(item) {
+  if (typeof item.quiet_after_hours !== 'number') return false;
+  const quiet = hoursSince(item.last_signal_at);
+  return quiet !== null && quiet > item.quiet_after_hours;
+}
+
+const quietThreshold = (work) => {
+  const known = work.find((w) => typeof w.quiet_after_hours === 'number');
+  return known ? known.quiet_after_hours : null;
+};
+
 // "Is it moving?" answered from the only honest signal there is: how long since
 // this piece of work last reported anything.
 function movement(item) {
   if (item.state !== 'in_progress') return null;
-  const quiet = hoursSince(item.last_signal_at);
-  if (quiet === null) return null;
-  if (quiet <= item.quiet_after_hours) {
+  if (hoursSince(item.last_signal_at) === null) return null;
+  if (!isQuiet(item)) {
     return add(el('span', 'moving'), lamp('starboard'), el('span', null, 'moving'));
   }
   return add(el('span', 'moving is-quiet'), lamp('neutral'),
     el('span', null, `quiet ${ago(item.last_signal_at).replace(' ago', '')}`));
 }
 
-function voyage(item) {
+// Work that is over cannot be trashed, and there is nothing to ask for.
+const TRASHABLE = ['in_progress', 'ready_for_review', 'queued', 'blocked', 'needs_decision', 'paused', 'failed'];
+
+// The written state on its own, without the lamp: the request text needs the word
+// but not the colour.
+const WORK_STATE_LABEL = Object.keys(WORK_STATE).reduce((map, key) => {
+  map[key] = WORK_STATE[key][1];
+  return map;
+}, {});
+
+// The trash affordance. It ENQUEUES a request - naming the work the way the
+// operator sees it, since a task id is the one thing this seam keeps off the page
+// - and the dockmaster carries it out under the usual gates. Two steps, and it is
+// coloured as the destructive request it is.
+function trashControl(item, ctx) {
+  if (!TRASHABLE.includes(item.state)) return null;
+  return askControl({
+    kind: 'trash',
+    label: 'Trash this work',
+    confirm: 'Ask the dockmaster to drop this work and stop paying it any more attention.',
+    request: TRASH_REQUEST(item.title, item.repo, word(WORK_STATE_LABEL, item.state)),
+    ask: ctx.ask,
+  });
+}
+
+function voyage(item, ctx) {
   const [lampKind, stateWord] = lookup(WORK_STATE, item.state);
-  const card = el('article', 'voyage');
+  const card = el('article', `voyage is-${item.state}`);
   const header = el('div', 'voyage-head');
   const left = el('div');
   add(left,
@@ -147,7 +206,10 @@ function voyage(item) {
   }
   const note = noteText(item);
   if (note) add(card, el('p', 'voyage-note', note));
-  if (item.review_href) add(card, link(item.review_href, 'Open the review page', 'row-action'));
+  const foot = el('div', 'voyage-foot');
+  if (item.review_href) add(foot, link(item.review_href, 'Open the review page', 'row-action'));
+  add(foot, trashControl(item, ctx));
+  add(card, foot);
   return card;
 }
 
@@ -160,35 +222,88 @@ const CARD_GROUPS = [
   ['Paused', ['paused']],
 ];
 const LEDGER_GROUPS = [
-  ['Not started', ['queued']],
-  ['Recently finished', ['done']],
-  ['Dropped', ['dropped']],
+  ['Not started', ['queued'], true],
+  ['Recently finished', ['done'], false],
+  ['Dropped', ['dropped'], false],
 ];
 
-export function viewInFlight(state) {
+const NEEDS_STATES = ['ready_for_review', 'blocked', 'needs_decision', 'failed'];
+
+// The filters. Each one is a predicate over the SAME list - nothing is fetched,
+// nothing is re-derived - and every one of them is answerable from the document:
+// `state`, and how long since the work last reported anything.
+//
+// Only `all` shows everything, and it is the default. The rest NARROW, and some
+// states (paused, not started, not known) are reachable through `all` alone - so
+// the panel states how many rows a filter is holding back rather than letting a
+// choice made yesterday read as a fleet with less in it.
+const FLIGHT_FILTERS = [
+  { id: 'all', label: 'Everything', match: () => true },
+  { id: 'moving', label: 'Moving', match: (w) => w.state === 'in_progress' && !isQuiet(w) },
+  { id: 'quiet', label: 'Quiet', match: (w) => w.state === 'in_progress' && isQuiet(w) },
+  { id: 'needs', label: 'Needs you', match: (w) => NEEDS_STATES.includes(w.state) },
+  { id: 'done', label: 'Finished', match: (w) => w.state === 'done' || w.state === 'dropped' },
+];
+
+const flightFilter = (id) => FLIGHT_FILTERS.find((f) => f.id === id) || FLIGHT_FILTERS[0];
+
+// The threshold is NAMED, on screen, beside the control that uses it. A filter
+// called "quiet" that will not say what quiet means is the operator having to
+// take the page's word for it.
+function filterBar(state, ctx) {
+  const wrap = el('div', 'filters');
+  const current = flightFilter(ctx.filter).id;
+  const options = FLIGHT_FILTERS.map((f) => ({
+    id: f.id,
+    label: f.label,
+    count: state.work.filter(f.match).length,
+  }));
+  add(wrap, segmented('Filter the work', options, current, (id) => ctx.setFilter(id)));
+  const hours = quietThreshold(state.work);
+  add(wrap, el('p', 'filters-note', hours === null
+    ? 'Moving and quiet are read from when each piece of work last reported anything. No threshold was reported with this fleet.'
+    : `Quiet means nothing has been reported for more than ${hours}h — the same threshold the crew's own status report uses. Moving means it has.`));
+  return wrap;
+}
+
+export function viewInFlight(state, ctx) {
   const frag = document.createDocumentFragment();
   add(frag, head('In flight',
     'Where each piece of work has actually got to. A hollow mark is a stage it has not reached, '
     + 'a dashed line is what nothing has reported on yet — neither is a claim that it is failing.'));
   add(frag, lostHere(state, 'flight'));
+  add(frag, filterBar(state, ctx));
 
-  const open = state.work.filter((w) => CARD_GROUPS.some(([, keys]) => keys.includes(w.state)));
-  if (open.length === 0) {
-    add(frag, empty('Nothing is under way.', 'The crew has no open work right now.'));
+  const active = flightFilter(ctx.filter);
+  const shown = state.work.filter(active.match);
+  // A filter hiding work must SAY it is hiding work. Otherwise "nothing is under
+  // way" is a claim about the fleet made by a control the operator set earlier.
+  if (active.id !== 'all') {
+    add(frag, el('p', 'filters-count',
+      `Showing ${shown.length} of ${state.work.length}. ${state.work.length - shown.length} hidden by this filter.`));
   }
+  if (shown.length === 0) {
+    add(frag, active.id === 'all'
+      ? empty('Nothing is under way.', 'The crew has no open work right now.')
+      : empty('Nothing matches this filter.',
+        `${plural(state.work.length, 'piece of work is', 'pieces of work are')} here — none of them ${active.label.toLowerCase()}.`));
+    return frag;
+  }
+
+  const matches = (keys) => shown.filter((w) => keys.includes(w.state));
   for (const [label, keys] of CARD_GROUPS) {
-    const rows = state.work.filter((w) => keys.includes(w.state));
+    const rows = matches(keys);
     if (rows.length === 0) continue;
     const node = section(`${label} · ${rows.length}`);
     const list = el('div', 'voyages');
-    rows.forEach((row) => add(list, voyage(row)));
+    rows.forEach((row) => add(list, voyage(row, ctx)));
     add(frag, add(node, list));
   }
-  for (const [label, keys] of LEDGER_GROUPS) {
-    const rows = state.work.filter((w) => keys.includes(w.state));
+  for (const [label, keys, openByDefault] of LEDGER_GROUPS) {
+    const rows = matches(keys);
     if (rows.length === 0) continue;
-    const node = section(`${label} · ${rows.length}`);
-    add(node, table(['What', 'Repo', 'Started', 'Waiting on'], rows, (w) => add(el('tr'),
+    const { node, body } = foldedSection(ctx, 'flight', label, rows.length, openByDefault);
+    add(body, table(['What', 'Repo', 'Started', 'Waiting on'], rows, (w) => add(el('tr'),
       cell('cell-title', el('span', null, w.title)),
       cell('mono nowrap', el('span', null, w.repo)),
       cell('mono nowrap', el('span', null, ago(w.since))),
@@ -208,7 +323,12 @@ const NEEDS = {
     detail: `In ${item.repos.join(', ')}.`,
     action: item.count === 1 ? 'Open the review page' : 'See what is waiting',
   }),
-  decision: (item) => ({ head: item.question, detail: 'Only you can answer this.' }),
+  decision: (item) => ({
+    head: item.question,
+    detail: item.options && item.options.length
+      ? 'Only you can answer this. Pick one to draft the reply, or write your own.'
+      : 'Only you can answer this. Write the answer in the conversation.',
+  }),
   pr_red: (item) => ({ head: item.title, detail: 'Checks are failing on this pull request.', action: 'Open on GitHub' }),
   pr_changes: (item) => ({ head: item.title, detail: 'A review asked for changes.', action: 'Open on GitHub' }),
   pr_yours: (item) => ({
@@ -221,11 +341,18 @@ const NEEDS = {
   failed: (item) => ({ head: item.title, detail: item.detail || 'This did not complete.' }),
 };
 
+// The fallback never prints `kind`: an unrecognised kind is a gap in NEEDS, and
+// its token is exactly the sort of word that must not reach the screen. Exported
+// because the beacon above every panel says the same thing in one line, and two
+// places wording it independently would drift.
+export function needsWords(item) {
+  const words = NEEDS[item.kind];
+  if (words) return words(item);
+  return { head: item.title || 'Something is waiting on you', detail: item.detail || '' };
+}
+
 function berth(item, ctx) {
-  // The fallback never prints `kind`: an unrecognised kind is a gap in NEEDS,
-  // and its token is exactly the sort of word that must not reach the screen.
-  const words = (NEEDS[item.kind]
-    || ((i) => ({ head: i.title || 'Something is waiting on you', detail: i.detail || '' })))(item);
+  const words = needsWords(item);
   const row = el('div', 'row');
   const body = el('div');
   const where = item.repo || (item.repos || []).join(', ');
@@ -265,8 +392,12 @@ export function viewNeedsYou(state, ctx) {
         `Nothing needs you right now. ${plural(state.fleet.in_flight, 'change is', 'changes are')} under way.`));
     return frag;
   }
-  const hero = el('div', 'hero');
-  add(hero, el('span', 'hero-figure', state.needs_you.length), el('span', 'hero-label', 'waiting on you'));
+  const hero = el('div', 'hero is-urgent');
+  add(hero,
+    add(el('span', 'hero-figure'), el('span', null, state.needs_you.length)),
+    add(el('span', 'hero-side'),
+      el('span', 'hero-label', state.needs_you.length === 1 ? 'thing is waiting on you' : 'things are waiting on you'),
+      el('span', 'hero-sub', 'Each one is stopped until you act.')));
   add(frag, hero);
   const rows = el('div', 'rows');
   state.needs_you.forEach((item) => add(rows, berth(item, ctx)));
@@ -333,39 +464,43 @@ export function viewDecisions(state, ctx) {
   }
   add(frag, open);
 
-  const done = section(`Answered · ${state.decisions.resolved.length}`);
   if (state.decisions.resolved.length === 0) {
+    const done = section('Answered · 0');
     add(done, el('p', 'empty-note', 'Nothing answered yet.'));
-  } else {
-    add(done, table(['Question', 'Your answer', 'When'], state.decisions.resolved, (d) => add(el('tr'),
-      cell('cell-title', el('span', null, d.question)),
-      cell(null, el('span', null, d.answer || '—')),
-      cell('mono nowrap', el('span', null, ago(d.at))))));
+    return add(frag, done);
   }
-  return add(frag, done);
+  const { node, body } = foldedSection(ctx, 'decisions', 'Answered', state.decisions.resolved.length, false);
+  add(body, table(['Question', 'Your answer', 'When'], state.decisions.resolved, (d) => add(el('tr'),
+    cell('cell-title', el('span', null, d.question)),
+    cell(null, el('span', null, d.answer || '—')),
+    cell('mono nowrap', el('span', null, ago(d.at))))));
+  return add(frag, node);
 }
 
 // --- backlog -----------------------------------------------------------------
 
-export function viewBacklog(state) {
+export function viewBacklog(state, ctx) {
   const frag = document.createDocumentFragment();
   add(frag, head('Backlog', 'What the crew is on, what is next, and what has landed.'));
   add(frag, lostHere(state, 'backlog'));
   const groups = [
-    ['Under way', state.backlog.in_flight],
-    ['Queued', state.backlog.queued],
-    ['Landed', state.backlog.done],
+    ['Under way', state.backlog.in_flight, true],
+    ['Queued', state.backlog.queued, true],
+    ['Landed', state.backlog.done, false],
   ];
-  for (const [label, rows] of groups) {
-    const node = section(`${label} · ${rows.length}`);
+  const rowsOf = (rows) => table(['What', 'Repo', 'Waiting on'], rows, (item) => add(el('tr'),
+    cell('cell-title', el('span', null, item.title)),
+    cell('mono nowrap', el('span', null, item.repo || '—')),
+    cell(null, el('span', item.blocked_by ? '' : 'mono mono-mute', item.blocked_by || '—'))));
+  for (const [label, rows, openByDefault] of groups) {
     if (rows.length === 0) {
+      const node = section(`${label} · 0`);
       add(node, el('p', 'empty-note', 'Nothing here.'));
-    } else {
-      add(node, table(['What', 'Repo', 'Waiting on'], rows, (item) => add(el('tr'),
-        cell('cell-title', el('span', null, item.title)),
-        cell('mono nowrap', el('span', null, item.repo || '—')),
-        cell(null, el('span', item.blocked_by ? '' : 'mono mono-mute', item.blocked_by || '—')))));
+      add(frag, node);
+      continue;
     }
+    const { node, body } = foldedSection(ctx, 'backlog', label, rows.length, openByDefault);
+    add(body, rowsOf(rows));
     add(frag, node);
   }
   return frag;
@@ -430,7 +565,7 @@ export function viewRepos(state) {
 
 // --- reviews -----------------------------------------------------------------
 
-export function viewReviews(state) {
+export function viewReviews(state, ctx) {
   const frag = document.createDocumentFragment();
   add(frag, head('Reviews', 'Every review page the crew has produced. They stay openable after the work lands.'));
   const lost = lostHere(state, 'reviews');
@@ -439,7 +574,7 @@ export function viewReviews(state) {
     if (!lost) add(frag, empty('No review pages yet.', 'One appears here each time a change is ready for you.'));
     return frag;
   }
-  add(frag, table(['What', 'Repo', 'State', 'Rendered', ''], state.reviews, (r) => {
+  const rowsOf = (rows) => table(['What', 'Repo', 'State', 'Rendered', ''], rows, (r) => {
     const awaiting = r.state === 'awaiting';
     return add(el('tr'),
       // A review page outlives the record that named it; when that is gone the
@@ -449,7 +584,21 @@ export function viewReviews(state) {
       cell('nowrap', stateCell(awaiting ? 'brass' : 'neutral', awaiting ? 'Waiting for you' : 'Reviewed')),
       cell('mono nowrap', el('span', null, ago(r.at))),
       cell('nowrap', link(r.href, 'Open')));
-  }));
+  });
+  // Waiting and reviewed are two different jobs: one is a queue, the other an
+  // archive. The archive folds away; the queue never does.
+  const waiting = state.reviews.filter((r) => r.state === 'awaiting');
+  const archived = state.reviews.filter((r) => r.state !== 'awaiting');
+  if (waiting.length > 0) {
+    const node = section(`Waiting for you · ${waiting.length}`);
+    add(node, rowsOf(waiting));
+    add(frag, node);
+  }
+  if (archived.length > 0) {
+    const { node, body } = foldedSection(ctx, 'reviews', 'Reviewed', archived.length, false);
+    add(body, rowsOf(archived));
+    add(frag, node);
+  }
   return frag;
 }
 
@@ -459,7 +608,8 @@ export function viewHealth(state) {
   const frag = document.createDocumentFragment();
   add(frag, head('Health', 'Whether the dockmaster can do its job, and what it would like to tidy up.'));
 
-  const hero = el('div', 'hero');
+  // A verdict is a WORD, not a figure, so it does not get the figure's type.
+  const hero = el('div', 'hero is-verdict');
   add(hero, el('span', 'hero-figure', state.health.verdict), el('span', 'hero-label', 'to take on work'));
   add(frag, hero);
 
@@ -485,7 +635,116 @@ export function viewHealth(state) {
     cell('cell-title', el('span', null, c.label)),
     cell('mono num nowrap', el('span', null, c.count)),
     cell(null, el('span', null, c.note)))));
+  add(tidy, link('#tidy', 'Ask the dockmaster to clear these', 'row-action'));
   return add(frag, tidy);
+}
+
+// --- tidy up -----------------------------------------------------------------
+
+// The operator asked for a way to clean things up. There are two kinds, and the
+// difference is the whole point of this panel: one only changes what this page
+// SHOWS, and happens on the spot. The other removes real work, so this page never
+// does it - it asks, and the dockmaster carries it out under the usual gates.
+export function viewTidy(state, ctx) {
+  const frag = document.createDocumentFragment();
+  add(frag, head('Tidy up',
+    'Two kinds of tidying, kept apart on purpose. Folding a group away only changes what this '
+    + 'page shows. Anything that removes real work is a request — this page sends it, the '
+    + 'dockmaster carries it out.'));
+
+  const view = section('On this page only');
+  add(view, el('p', 'view-note', 'Nothing here leaves the browser. Fold the groups holding finished '
+    + 'work away, or open them all back up.'));
+  const controls = el('div', 'tidy-actions');
+  const foldAll = el('button', 'btn', 'Fold the finished groups away');
+  foldAll.type = 'button';
+  foldAll.addEventListener('click', () => ctx.setFolds(FINISHED_GROUPS, false));
+  const openAll = el('button', 'btn btn-quiet', 'Open everything back up');
+  openAll.type = 'button';
+  openAll.addEventListener('click', () => ctx.setFolds(FINISHED_GROUPS, true));
+  add(controls, foldAll, openAll);
+  add(view, controls);
+  add(frag, view);
+
+  const ask = section('Ask the dockmaster');
+  add(ask, el('p', 'view-note', 'Each of these writes one request into the conversation. You confirm '
+    + 'it first, and you can see exactly what will be sent.'));
+  add(ask, lostHere(state, 'health'));
+
+  const requests = [];
+  for (const row of state.health.cleanup) {
+    if (!row.count || !CLEANUP_REQUEST[row.kind]) continue;
+    requests.push(askControl({
+      kind: 'tidy',
+      label: `${row.label} — ${row.count}`,
+      confirm: `${row.label}: ${row.count}. ${row.note}`,
+      request: CLEANUP_REQUEST[row.kind](row.count),
+      ask: ctx.ask,
+    }));
+  }
+  const landed = state.backlog.done.length;
+  if (landed > 0) {
+    requests.push(askControl({
+      kind: 'tidy',
+      label: `Landed rows in the backlog — ${landed}`,
+      confirm: `${landed} rows in the backlog have landed and are only taking up room.`,
+      request: CLEANUP_REQUEST.landed_backlog(landed),
+      ask: ctx.ask,
+    }));
+  }
+  if (requests.length === 0) {
+    add(ask, empty('Nothing to clear.', 'No finished work is leaving anything behind right now.'));
+  } else {
+    add(ask, add(el('div', 'asks'), ...requests));
+  }
+  add(frag, ask);
+
+  const never = section('What this page will never do');
+  add(never, el('p', 'view-note', 'No control here merges, lands, or deletes anything. Every one of '
+    + 'them sends a message; the dockmaster does the work under the same gates as always.'));
+  return add(frag, never);
+}
+
+// --- updates -----------------------------------------------------------------
+
+// The conversation read as a feed: only what the dockmaster has said, newest
+// first, so a glance answers "what has happened" without scrolling a transcript.
+// One source - the same messages the conversation renders - read two ways.
+export function viewUpdates(state, ctx) {
+  const frag = document.createDocumentFragment();
+  add(frag, head('Updates',
+    'Everything the dockmaster has posted, newest first. The same conversation, read as a log.'));
+  if (ctx.updates.length === 0) {
+    add(frag, empty('No updates yet.',
+      'The dockmaster posts here as work moves. Ask it something in the conversation to start one.'));
+    return frag;
+  }
+  const feed = el('div', 'feed');
+  const recent = ctx.updates.slice(0, FEED_HEAD);
+  recent.forEach((message) => add(feed, feedLine(message)));
+  add(frag, feed);
+  const older = ctx.updates.slice(FEED_HEAD);
+  if (older.length > 0) {
+    const { node, body } = foldedSection(ctx, 'updates', 'Earlier', older.length, false);
+    const rest = el('div', 'feed');
+    older.forEach((message) => add(rest, feedLine(message)));
+    add(body, rest);
+    add(frag, node);
+  }
+  return frag;
+}
+
+// How many updates stay open before the rest folds away. A day of status lines is
+// a wall; the newest handful is what is actually being read.
+const FEED_HEAD = 20;
+
+function feedLine(message) {
+  const row = el('div', 'feed-line');
+  add(row,
+    el('span', 'feed-at', clockTime(message.at)),
+    el('span', 'feed-ago', ago(message.at)),
+    el('p', 'feed-text', message.text));
+  return row;
 }
 
 // --- the registry ------------------------------------------------------------
@@ -497,31 +756,36 @@ const LIVE_STATES = ['in_progress', 'ready_for_review', 'blocked', 'needs_decisi
 // fact knows nothing - the operator reads that 0 as "none", not "not read".
 const counted = (panel, fn) => (s) => (lostAny(s, panel) ? null : fn(s));
 
+// The rail's groups are NAMED, because the grouping is a claim about the content:
+// one panel is the queue, three are live work, three are reference, two are the
+// console's own housekeeping. An unlabelled divider left the reader to guess.
 export const VIEWS = [
   {
-    id: 'needs', label: 'Needs you', group: 0, urgent: true, render: viewNeedsYou,
+    id: 'needs', label: 'Needs you', group: 'Waiting on you', urgent: true, render: viewNeedsYou,
     count: (s) => s.needs_you.length,
   },
+  { id: 'updates', label: 'Updates', group: 'Waiting on you', render: viewUpdates, count: () => null },
   {
-    id: 'flight', label: 'In flight', group: 1, render: viewInFlight,
+    id: 'flight', label: 'In flight', group: 'The work', render: viewInFlight,
     count: (s) => s.work.filter((w) => LIVE_STATES.includes(w.state)).length,
   },
   {
-    id: 'prs', label: 'Pull requests', group: 1, render: viewPullRequests,
+    id: 'prs', label: 'Pull requests', group: 'The work', render: viewPullRequests,
     count: counted('prs', (s) => s.prs.length),
   },
   {
-    id: 'decisions', label: 'Decisions', group: 1, render: viewDecisions,
+    id: 'decisions', label: 'Decisions', group: 'The work', render: viewDecisions,
     count: counted('decisions', (s) => s.decisions.open.length),
   },
   {
-    id: 'backlog', label: 'Backlog', group: 2, render: viewBacklog,
+    id: 'backlog', label: 'Backlog', group: 'Reference', render: viewBacklog,
     count: counted('backlog', (s) => s.backlog.in_flight.length + s.backlog.queued.length),
   },
-  { id: 'repos', label: 'Repos', group: 2, render: viewRepos, count: (s) => s.repos.length },
+  { id: 'repos', label: 'Repos', group: 'Reference', render: viewRepos, count: (s) => s.repos.length },
   {
-    id: 'reviews', label: 'Reviews', group: 2, render: viewReviews,
+    id: 'reviews', label: 'Reviews', group: 'Reference', render: viewReviews,
     count: counted('reviews', (s) => s.reviews.filter((r) => r.state === 'awaiting').length),
   },
-  { id: 'health', label: 'Health', group: 2, render: viewHealth, count: () => null },
+  { id: 'tidy', label: 'Tidy up', group: 'The console', render: viewTidy, count: () => null },
+  { id: 'health', label: 'Health', group: 'The console', render: viewHealth, count: () => null },
 ];

@@ -1284,11 +1284,13 @@
     ],
     "cleanup": [
       {
+        "kind": "finished_copies",
         "label": "Local copies of finished work",
         "count": 6,
         "note": "Safe to clear."
       },
       {
+        "kind": "orphan_copies",
         "label": "Local copies with no work behind them",
         "count": 2,
         "note": "Left over; nothing depends on them."

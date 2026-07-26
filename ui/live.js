@@ -44,6 +44,11 @@ const MEMORY_LINES = 14;
 // in-progress work is reported as quiet rather than moving.
 const QUIET_AFTER_HOURS = 4;
 
+// The kinds of leftover the console can report. The page owns the REQUEST
+// sentence for each one, the way it owns every other word the operator reads;
+// tests/check-console.js pins that none of them is missing a sentence.
+const CLEANUP_KINDS = ['finished_copies', 'orphan_copies'];
+
 // The task states that still have a live track worth drawing.
 const OPEN_STATES = [
   'in_progress', 'ready_for_review', 'queued', 'blocked', 'needs_decision', 'paused', 'failed', 'unknown',
@@ -475,13 +480,18 @@ function toReviews(rendered, tasks) {
 function toHealth(doctor, tasks, worktrees) {
   const closed = new Set(tasks.filter((t) => t.state === 'done' || t.state === 'dropped').map((t) => t.id));
   const known = new Set(tasks.map((t) => t.id));
+  // `kind` is the token the page keys its cleanup REQUEST off - the sentence the
+  // operator sends is written on the page, not here, like every other word they
+  // read. The label and note stay free text: they are already written for them.
   const cleanup = [
     {
+      kind: CLEANUP_KINDS[0],
       label: 'Local copies of finished work',
       count: (worktrees || []).filter((w) => closed.has(w.id)).length,
       note: 'Safe to clear.',
     },
     {
+      kind: CLEANUP_KINDS[1],
       label: 'Local copies with no work behind them',
       count: (worktrees || []).filter((w) => !known.has(w.id) || !w.exists).length,
       note: 'Left over; nothing depends on them.',
@@ -673,4 +683,5 @@ module.exports = {
   SOURCES,
   STATE_WORDS,
   QUIET_AFTER_HOURS,
+  CLEANUP_KINDS,
 };

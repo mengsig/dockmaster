@@ -23,6 +23,7 @@ const os = require('os')
 const path = require('path')
 
 const ROOT = process.env.DM_CHECK_ROOT ? path.resolve(process.env.DM_CHECK_ROOT) : path.join(__dirname, '..')
+const chat = require(path.join(ROOT, 'ui', 'chat.js'))
 const BOOT_TIMEOUT_MS = 15000
 const BOOT_ATTEMPTS = 3
 
@@ -194,6 +195,46 @@ async function checkThePageItselfStillWorks(port, home) {
   console.log('ok   the page and a local tool can still post; both land exactly once')
 }
 
+// A message being PICKED UP adds nothing to the transcript, so a long poll that
+// only holds out for a new message left "1 message waiting for the dockmaster" on
+// screen for the whole 25s window after it had already been answered. The count
+// is live state, and the page has to learn when it changes.
+async function checkPickingUpAMessageRefreshesTheCount(port, home) {
+  await request(port, 'POST', '/api/chat',
+    { 'content-type': 'application/json' }, JSON.stringify({ text: 'waiting to be picked up' }))
+  const before = json(await request(port, 'GET', '/api/chat?since=0'))
+  ok(before.pending > 0, 'the message is queued for the dockmaster')
+
+  const waiting = request(port, 'GET', `/api/chat?since=${before.total}&wait=1`)
+  await sleep(200)
+  // Exactly what `dm-ui.sh poll` does: claim, deliver, acknowledge.
+  const claim = chat.claimOldest(home)
+  ok(claim !== null, 'the poll claims it')
+  claim.acknowledge()
+
+  const answered = await waiting
+  equal(answered.status, 200, 'the parked poll is answered')
+  const body = json(answered)
+  equal(body.messages.length, 0, 'with no new message - nothing was said')
+  equal(body.pending, before.pending - 1, 'and a count the page can trust')
+
+  // The race the page could actually see: the count moves while the page is
+  // BETWEEN polls, so a waiter that reads the count as it parks has nothing to
+  // report and the page holds a stale number for the whole 25s window. The page
+  // sends what it is showing, so a wait against an out-of-date view is answered
+  // at once rather than held.
+  await request(port, 'POST', '/api/chat',
+    { 'content-type': 'application/json' }, JSON.stringify({ text: 'queued while the page was not looking' }))
+  const now = json(await request(port, 'GET', '/api/chat?since=0'))
+  const stale = json(await request(port, 'GET',
+    `/api/chat?since=${now.total}&pending=${now.pending + 7}&wait=1`))
+  equal(stale.pending, now.pending, 'a wait against a stale count is answered immediately, with the real one')
+
+  const bad = await request(port, 'GET', '/api/chat?since=0&pending=-2')
+  equal(bad.status, 400, 'a nonsense count is refused, not guessed at')
+  console.log('ok   the waiting count is never stale: a pick-up wakes the page, a stale view is corrected at once')
+}
+
 // --- 2. bad input does not take the server down ------------------------------
 
 // Two processes append to the transcript, so a torn line is a real possibility.
@@ -330,6 +371,7 @@ async function main() {
   try {
     await checkCrossSiteWritesAreRefused(port, home)
     await checkThePageItselfStillWorks(port, home)
+    await checkPickingUpAMessageRefreshesTheCount(port, home)
     await checkATornTranscriptLineDoesNotKillIt(port, home)
     await checkBadRequestsAreRefusedNotCrashed(port)
     await checkReviewAssetsAtAnyDepth(port, home)

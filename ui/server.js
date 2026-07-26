@@ -271,25 +271,42 @@ function settle(watchers, waiter, force) {
 }
 
 // GET /api/chat?since=N - returns messages after index N. With wait=1 it holds
-// the request open until one arrives (or LONG_POLL_MS), so the page stays live
-// without a busy loop.
+// the request open until something changes (or LONG_POLL_MS), so the page stays
+// live without a busy loop.
 function serveChat(res, cfg, url, watchers) {
   const since = Number(url.searchParams.get('since') || 0);
   if (!Number.isInteger(since) || since < 0) {
     return fail(res, 400, `chat: 'since' must be a non-negative integer`);
   }
+  // What the CALLER believes is still waiting for the dockmaster. Reading the
+  // count here instead was a race the operator could see: the count moves twice
+  // while a drain runs, the page is answered on the first change, and by the time
+  // it re-parks the second has already happened - so the waiter saw nothing to
+  // report and the page sat on a number that was two picks-up out of date.
+  // Comparing against the caller's own view cannot miss a change it has not seen.
+  const claimed = url.searchParams.get('pending');
+  if (claimed !== null && !/^[0-9]+$/.test(claimed)) {
+    return fail(res, 400, `chat: 'pending' must be a non-negative integer`);
+  }
   const waiter = {
     res,
     timer: null,
-    // force=true answers whatever there is; otherwise it holds out for
-    // something new. `unreadable` crosses so the page can say what it lost.
+    // A message being PICKED UP adds nothing to the transcript, so holding out
+    // for a new message alone left "1 message waiting for the dockmaster" on
+    // screen for the whole poll window after it had already been answered.
+    // A caller that sends no view of its own gets the old behaviour: hold out
+    // until the count moves from where it is right now.
+    pending: claimed === null ? chat.pendingCount(cfg.dmHome) : Number(claimed),
+    // force=true answers whatever there is; otherwise it holds out for a change.
+    // `unreadable` crosses so the page can say what it lost.
     answer(force) {
       const { messages, unreadable } = chat.read(cfg.dmHome);
-      if (!force && messages.length <= since) return false;
+      const pending = chat.pendingCount(cfg.dmHome);
+      if (!force && messages.length <= since && pending === this.pending) return false;
       sendJson(res, 200, {
         total: messages.length,
         unreadable,
-        pending: chat.pendingCount(cfg.dmHome),
+        pending,
         messages: messages.slice(since),
       });
       return true;
@@ -388,6 +405,18 @@ function main() {
   // process - watch it so an open page shows the answer without a refresh.
   const transcript = path.join(chat.uiDir(cfg.dmHome), 'chat.jsonl');
   fs.watchFile(transcript, { interval: 400 }, () => wake(watchers));
+
+  // The inbox changes without the transcript changing: a poll PICKING UP a
+  // message is exactly that. Watch it too, or the page keeps saying a message is
+  // waiting until the long poll times out. The 25s timeout stays the correctness
+  // path - fs.watch drops events on some filesystems - so a failed watch here
+  // degrades the latency, not the answer.
+  const inbox = path.join(chat.uiDir(cfg.dmHome), 'inbox');
+  const inboxWatcher = fs.watch(inbox, () => wake(watchers));
+  inboxWatcher.on('error', (err) => {
+    process.stderr.write(`console: chat: the inbox watch failed (${err.message}); the page now learns of a pick-up on its next poll\n`);
+    inboxWatcher.close();
+  });
 
   server.listen(cfg.port, '127.0.0.1', () => {
     process.stdout.write(`http://127.0.0.1:${cfg.port}/ (${cfg.source})\n`);
