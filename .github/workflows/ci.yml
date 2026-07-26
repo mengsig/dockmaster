@@ -110,6 +110,14 @@ jobs:
       - name: Check compatible-host runner gates
         run: node tests/check-pr-runner.js
 
+      # A subcommand whose nonzero exit is an ANSWER must offer --json, or a
+      # strict consumer reads the answer as a failure and quietly defaults. This
+      # one BUILDS A FIXTURE and runs the real bin/ scripts, so it needs bash,
+      # git and jq (all present on every runner image used here); a missing tool
+      # is a hard error, never a silent skip.
+      - name: Check answer-carrying subcommands offer a machine-readable form
+        run: node tests/check-answer-forms.js
+
       # This workflow gates itself, so a PR that weakens the gate would verify
       # itself green. Pin the job graph's shape here, where it always runs.
       - name: Check CI job graph has not drifted
@@ -139,6 +147,7 @@ jobs:
           bash -n tests/runtime-evidence-dir.sh tests/runtime-performance.sh tests/runtime-smoke.sh tests/runtime-waiter-child.sh
           node --check tests/check-skill-triggers.js
           node --check tests/check-pr-runner.js
+          node --check tests/check-answer-forms.js
           node --check tests/check-ci-graph.js
           node --check tests/check-console.js
           node --check tests/check-console-http.js
@@ -279,6 +288,7 @@ jobs:
             | node --input-type=module --check
           node tests/check-gate-drift.js
           node tests/check-pr-runner.js
+          node tests/check-answer-forms.js
           node tests/check-ci-graph.js
           node tests/check-skill-triggers.js
           node tests/check-console.js

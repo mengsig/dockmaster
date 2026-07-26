@@ -53,22 +53,23 @@ that injects the runner's workflow API; nothing auto-discovers it. It reads:
   integer 1..3. The runner batches five review lenses and every skeptic set to
   this bound; default 3 preserves the six-thread runtime's three reserved slots.
 - **`optional`** on the `verify` gate (rigorous) — the decision comes from
-  `bin/dm-verify.sh gate <id>`, which reads the diff: exit 0 = a user-facing
-  surface moved (boot the app and drive it), 1 = none moved (explicit skip),
-  2 = could not decide, 3 = a surface moved but the repo has no `app_start_cmd`
-  (reported **unavailable**, never a pass). The runner cannot exec, so it
-  requires the agent to report those exit codes and refuses a `passed: true`
-  that they do not support. A caller-declared `noRuntimeSurface` is an override
+  `bin/dm-verify.sh gate <id> --json`, which reads the diff and answers in
+  `decision`: `required` = a user-facing surface moved (boot the app and drive
+  it), `not-applicable` = none moved (explicit skip), `undetermined` = could not
+  decide, `unavailable` = a surface moved but the repo has no `app_start_cmd`
+  (never a pass). It exits 0 for all four. The runner cannot exec, so it requires
+  the agent to report that decision and refuses a `passed: true` it does not
+  support. A caller-declared `noRuntimeSurface` is an override
   that skips the gate without asking. `verify` ships in the rigorous tier ONLY
   until every managed repo has app config — in `default` it would abort the
   pipeline for each repo that has none.
 - **`max_rounds`** on a `fix` gate — the fix→re-review loop cap.
 - **`optional`** on the `security` gate (default/fast) — the runner self-computes
-  this by running `bin/dm-pr.sh security-scan` itself (same as rigorous
+  this by running `bin/dm-pr.sh security-scan --json` itself (same as rigorous
   `method: "auto"` below) and only reviewing on a hit, so no caller wiring is
   required. A caller-declared `securitySurface` is an override: if set, the
   runner reviews directly without re-scanning. **`method: "auto"`** (rigorous)
-  runs `bin/dm-pr.sh security-scan` and performs a focused general security
+  runs `bin/dm-pr.sh security-scan --json` and performs a focused general security
   review only on a hit. The runner consumes a structured result: any finding or
   missing capability fails the gate; no-surface is an explicit skip.
 - **`method`** on the `pr` gate — surfaced in the runner's result so the

@@ -9,11 +9,14 @@
 # app-lifecycle commands (dm-repo.sh set <repo> app_start_cmd ...).
 #
 # Commands:
-#   gate <id>              should the verify gate run for this task's diff?
+#   gate <id> [--json]     should the verify gate run for this task's diff?
 #                          exit 0 = required, 1 = no user-facing surface,
 #                          2 = could not determine (never reported as a skip),
 #                          3 = surface touched but the repo has no app config
-#                          (UNAVAILABLE — report it, never a silent pass)
+#                          (UNAVAILABLE — report it, never a silent pass).
+#                          --json ALWAYS exits 0 and carries the same answer as
+#                          `decision`: required|not-applicable|undetermined|
+#                          unavailable. Machine callers read that, not $?.
 #   evidence <id>          print this gate's evidence block for the PR body
 #                          (dm-evidence.sh collects it); read-only, and it
 #                          reports the SAME decision `gate` exits on. Nothing
@@ -695,6 +698,38 @@ gate_decision() {
   return 0
 }
 
+# gate_unavailable_msg <count> <repo> -- the UNAVAILABLE sentence, including the
+# remediation hint. ONE owner, because the human form and the JSON `detail` must
+# say the same thing: a machine reader that got a shortened paraphrase would
+# relay a weaker claim than the operator is shown, and lose the way to fix it.
+gate_unavailable_msg() {
+  printf '%s changed file(s) touch a user-facing surface, but '"'"'%s'"'"' has no app_start_cmd registered, so the app cannot be booted and NOTHING was verified. Report this as unavailable, never as a pass. Register one: dm-repo.sh set %s app_start_cmd '"'"'<cmd honoring $DM_VERIFY_PORT>'"'"'\n' "$1" "$2" "$2"
+}
+
+# gate_json <id> <repo> <rc> <hits> <count> -- gate_decision's answer as one
+# object, exiting 0 for ALL FOUR decisions. 1/2/3 are answers, not failures, and
+# a machine reader that treats nonzero as failure loses them — the worst of those
+# losses defaults to "nothing to verify", the silent skip this gate exists to
+# prevent. Call it from the MAIN shell: inside $( ) its dm_die would be swallowed.
+gate_json() {
+  local id="$1" repo="$2" rc="$3" hits="$4" n="$5" decision detail
+  case "$rc" in
+    0) decision=required
+       detail="$n changed file(s) touch a user-facing surface of $repo" ;;
+    1) decision=not-applicable
+       detail="the diff touches no user-facing surface for $repo" ;;
+    2) decision=undetermined
+       detail="could not determine what '$id' changed, so the verify gate cannot decide" ;;
+    3) decision=unavailable
+       detail="$(gate_unavailable_msg "$n" "$repo")" ;;
+    *) dm_die "the verify gate returned an unrecognized decision ($rc) for '$id'" ;;
+  esac
+  jq -nc --arg id "$id" --arg repo "$repo" --arg decision "$decision" \
+    --arg detail "$detail" --arg files "$hits" \
+    '{id:$id, repo:$repo, decision:$decision, detail:$detail,
+      files: ($files | split("\n") | map(select(length > 0)))}'
+}
+
 # gate_hit_count <hits> -- how many paths gate_decision named. awk, not `wc -l`:
 # an empty list piped through printf still carries a newline and counts as 1.
 gate_hit_count() { printf '%s' "$1" | awk 'END { print NR + 0 }'; }
@@ -841,10 +876,19 @@ esac
 
 case "$cmd" in
   gate)
+    want_json=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --json) want_json=1; shift ;;
+        *) dm_die "usage: dm-verify.sh gate <id> [--json]" ;;
+      esac
+    done
+    [ "$want_json" -eq 0 ] || dm_need jq
     repo="$(dm_meta_get "$id" repo)"
     [ -n "$repo" ] || dm_die "task '$id' has no repo recorded"
     grc=0; hits="$(gate_decision "$id" "$repo")" || grc=$?
     n="$(gate_hit_count "$hits")"
+    if [ "$want_json" -eq 1 ]; then gate_json "$id" "$repo" "$grc" "$hits" "$n"; exit 0; fi
     case "$grc" in
       # Exit 2 for "could not determine", never 1: 1 means "no surface moved",
       # and reporting an unreadable worktree as nothing-to-verify is the silent
@@ -852,7 +896,7 @@ case "$cmd" in
       2) echo "error: could not determine what '$id' changed, so the verify gate cannot decide" >&2; exit 2 ;;
       1) echo "not-applicable: the diff touches no user-facing surface for $repo"; exit 1 ;;
       3)
-        echo "UNAVAILABLE: $n changed file(s) touch a user-facing surface, but '$repo' has no app_start_cmd registered, so the app cannot be booted and NOTHING was verified. Report this as unavailable, never as a pass. Register one: dm-repo.sh set $repo app_start_cmd '<cmd honoring \$DM_VERIFY_PORT>'" >&2
+        echo "UNAVAILABLE: $(gate_unavailable_msg "$n" "$repo")" >&2
         printf '%s\n' "$hits" >&2
         exit 3 ;;
       0)

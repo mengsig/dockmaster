@@ -110,3 +110,25 @@ these are the constraints that are not obvious from the code you are editing.
   drift. A `! cmd` test folds 2 onto 1 and silently reasserts the false claim, so
   capture the rc. A refusal that misstates its reason is what trains reflexive
   `--force` (the #84 lesson).
+- **[convention]** ANSWER-CARRYING subcommands — ones whose nonzero exit is an
+  *answer*, not a failure — each carry an additive `--json` form that exits `0`
+  whenever the question could be answered, reserving nonzero for genuine failure
+  (unreadable repo, missing task, bad usage). Today: `dm-worktree.sh tangle`,
+  `dm-worktree.sh landed`, `dm-pr.sh security-scan`, `dm-verify.sh gate`. The
+  bare exit codes are unchanged for shell/`set -e` callers; every MACHINE caller
+  reads the object. The answer is a single enum field with no derived boolean —
+  a `landed:false` would let `undetermined` be read as "not landed", the exact
+  confusion exit 2 exists to prevent. Adding `--json` to a subcommand also
+  TIGHTENS it: the flag parser rejects stray positional args the old form
+  silently ignored (`security-scan <id> EXTRA` went rc 0 → 1). That fails closed
+  and no in-tree caller passes more than one argument, but it is not purely
+  additive — say so when describing the change.
+  `tests/check-answer-forms.js` pins the family by BUILDING A FIXTURE and
+  running each `--json` form once per legitimate answer (it deliberately does not
+  verify by grepping `tests/smoke.sh`: a source-text match is satisfied by
+  assertions that are commented out). Its drift scan reads `bin/` headers for a
+  line NAMING an exit or return code (`exits N`, `exit N =`, `returns N`,
+  `nonzero`) and refuses any it cannot classify as answer-carrying (must offer
+  `--json`) or failure-carrying (needs a written reason). Prose that describes a
+  code without naming one is NOT caught — the registry in that file is the
+  contract, the scan is only the reminder.
