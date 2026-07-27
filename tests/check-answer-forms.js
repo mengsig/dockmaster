@@ -50,7 +50,6 @@ const FAMILY = [
 // drift scan below cannot be silenced by adding a bare name.
 const NOT_ANSWER_CARRYING = [
   { script: 'dm-backlog.sh', sub: 'validate', why: 'nonzero = the backlog file does not parse, a real failure' },
-  { script: 'dm-command-guard.sh', sub: null, why: 'prose about how a PreToolUse hook fails open, not a subcommand contract' },
   { script: 'dm-doctor.sh', sub: null, why: 'nonzero = a required tool is missing; check --json already carries the verdict' },
   { script: 'dm-lavish.sh', sub: null, why: 'prose about a caller degrading, not a subcommand contract' },
   { script: 'dm-sync.sh', sub: null, why: 'prose stating an internal helper always returns 0 and answers on stdout' },

@@ -17,9 +17,8 @@ these are the constraints that are not obvious from the code you are editing.
   artifact; `dm-test` tests gate; `dm-verify` verify gate (per-task app boot +
   isolated browser); `dm-evidence` collects each gate's `evidence <id>` block
   for the PR body; `dm-memory` context system; `dm-thread-name`
-  role-specific runtime labels; `dm-secondmate` locked supervisor identities;
-  `dm-command-guard` destructive-Git command parsing. Point work at the right
-  script instead of reinventing lifecycle logic.
+  role-specific runtime labels; `dm-secondmate` locked supervisor identities.
+  Point work at the right script instead of reinventing lifecycle logic.
 - **[invariant]** Scripts in `bin/` must run on bash 3.2 (macOS default): no
   `mapfile`/`readarray`, no `declare -A`, no `${var^^}`/`${var,,}`, no `&>>`.
   Use while-read loops and parallel indexed arrays instead. No test pins this —
