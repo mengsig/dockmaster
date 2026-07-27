@@ -15,7 +15,7 @@
 // Node stdlib, the committed fixture, a temp home, an ephemeral port. No
 // network, no shell.
 
-const { spawn } = require('child_process')
+const { spawn, spawnSync } = require('child_process')
 const fs = require('fs')
 const http = require('http')
 const net = require('net')
@@ -291,11 +291,16 @@ async function checkBadRequestsAreRefusedNotCrashed(port) {
   console.log(`ok   ${cases.length + 2} bad requests refused with a status, not a crash`)
 }
 
+// Nothing served under /review/ may show a script name, an errno or a path -
+// whether it is a worded failure or a page that rendered fine. Shared so the
+// success case below is held to the exact same bar as the failure cases here.
+const INTERNAL_LEAK = /dm-[a-z]+\.sh|--json|exit \d|ENOENT|ENOTDIR|EACCES|\/tmp\/|jq/
+
 // A /review/ address is a same-tab navigation: whatever comes back IS the page.
 // There is no script layer to word a failure, so the failure has to arrive
 // already worded - not as the script name, argv and stderr behind it.
 async function checkReviewFailuresAreWorded(port, home) {
-  const internal = /dm-[a-z]+\.sh|--json|exit \d|ENOENT|ENOTDIR|EACCES|\/tmp\/|jq/
+  const internal = INTERNAL_LEAK
   const cases = [
     [`/review/nothing-here/`, 404, 'an unknown review page'],
     [`/review/%zz/`, 400, 'a malformed address'],
@@ -325,8 +330,11 @@ async function checkReviewAssetsAtAnyDepth(port, home) {
   fs.writeFileSync(path.join(dir, 'shots', 'top.png'), 'top')
   fs.writeFileSync(path.join(dir, 'shots', 'run-1', 'deep.png'), 'deep')
 
-  const page = await request(port, 'GET', `/review/${id}/`)
-  equal(page.status, 200, 'the review page itself is served')
+  // The archived artifact itself - the console's own WRAPPER around it, at the
+  // index address, is a separate document and is checked in the next test.
+  // This one must be exactly as isolated as it always was.
+  const page = await request(port, 'GET', `/review/${id}/change.html`)
+  equal(page.status, 200, 'the archived artifact is served')
   const csp = page.headers['content-security-policy']
   ok(csp.includes("connect-src 'none'"), 'an archived review may not reach the network')
   // A review page is SAME-ORIGIN, so the cross-site refusal cannot stop it
@@ -362,6 +370,71 @@ async function checkReviewAssetsAtAnyDepth(port, home) {
     equal(res.status, status, `${why}: ${attack}`)
   }
   console.log('ok   a review page serves nested assets, and no path escapes its directory')
+}
+
+// The index address used to BE the archived artifact; the console now serves
+// its own wrapper there instead, so "Open the review page" works with no
+// lavish session server running. The artifact keeps rendering - now inside an
+// iframe at the asset address pinned above - and the wrapper is the only part
+// of the response allowed to reach the API, because it is the console's own
+// markup, not the artifact's.
+async function checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home) {
+  const id = 'demo-review-shell'
+  const dir = path.join(home, 'data', id, 'lavish')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'change.html'), '<p>the change</p>')
+  const created = spawnSync(path.join(ROOT, 'bin', 'dm-task.sh'),
+    ['new', id, '--kind', 'ship', '--repo', 'dockmaster', '--title', 'A demo change under review'],
+    { env: Object.assign({}, process.env, { DM_HOME: home }), encoding: 'utf8' })
+  equal(created.status, 0, `the task fixture behind the review is created: ${created.stderr}`)
+
+  const shell = await request(port, 'GET', `/review/${id}/`)
+  equal(shell.status, 200, 'the console serves its own wrapper at the review address')
+  const shellCsp = shell.headers['content-security-policy']
+  ok(shellCsp.includes("script-src 'self'"), 'the wrapper may run its own script')
+  ok(shellCsp.includes("connect-src 'self'"), 'and reach the API - unlike the artifact it wraps')
+  ok(!/unsafe-inline/.test(shellCsp), 'and needs no inline script or style to do either')
+
+  // The task record crosses as DATA, not prose - review.mjs is what decides how
+  // to say it, and only ever from this shape.
+  ok(shell.text.includes('"ok":true'), 'the task record behind this review was found')
+  ok(shell.text.includes('"title":"A demo change under review"'), 'its title crosses as data')
+  ok(shell.text.includes('"repo":"dockmaster"'), 'and its repo crosses as data')
+  ok(shell.text.includes('<iframe'), 'the artifact renders inside the wrapper, not standing alone')
+  ok(shell.text.includes('change.html'), 'pointed at the real artifact file')
+  ok(!INTERNAL_LEAK.test(shell.text), 'the wrapper shows no script name, path or internal detail')
+  ok(!shell.text.includes(home), 'and does not print the state directory')
+
+  // The artifact the wrapper embeds is unaffected: same address, same isolation.
+  const nested = await request(port, 'GET', `/review/${id}/change.html`)
+  equal(nested.status, 200, 'the artifact the wrapper embeds is still served on its own')
+  ok(nested.headers['content-security-policy'].includes("connect-src 'none'"),
+    'and still cannot reach the network by itself')
+
+  // An artifact whose task record is gone (archived, discarded) still renders -
+  // it just cannot safely name the work, so it says so as data rather than
+  // inventing a title.
+  const orphanId = 'demo-review-orphan'
+  const orphanDir = path.join(home, 'data', orphanId, 'lavish')
+  fs.mkdirSync(orphanDir, { recursive: true })
+  fs.writeFileSync(path.join(orphanDir, 'change.html'), '<p>orphaned</p>')
+  const orphan = await request(port, 'GET', `/review/${orphanId}/`)
+  equal(orphan.status, 200, 'a review still renders when its task record cannot be found')
+  ok(orphan.text.includes('"ok":false'), 'and says so as data instead of inventing a title')
+
+  console.log('ok   the console wraps an archived artifact in its own shell, and the artifact stays isolated')
+}
+
+// The two static files the wrapper's own script needs: the notes-box logic and
+// the shared postMessage() the composer also uses.
+async function checkReviewScriptsAreServed(port) {
+  const script = await request(port, 'GET', '/review.mjs')
+  equal(script.status, 200, 'the review page script is served')
+  equal(script.headers['content-type'], 'text/javascript; charset=utf-8', 'as a module script')
+  const api = await request(port, 'GET', '/api.mjs')
+  equal(api.status, 200, 'the shared postMessage helper is served too')
+  equal(api.headers['content-type'], 'text/javascript; charset=utf-8', 'as a module script')
+  console.log('ok   the review page\'s own script and the shared postMessage helper are served')
 }
 
 // --- 4. opening a review tries the lavish session, degrading honestly -------
@@ -453,6 +526,8 @@ async function main() {
     await checkATornTranscriptLineDoesNotKillIt(port, home)
     await checkBadRequestsAreRefusedNotCrashed(port)
     await checkReviewAssetsAtAnyDepth(port, home)
+    await checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home)
+    await checkReviewScriptsAreServed(port)
     await checkReviewFailuresAreWorded(port, home)
     await checkReviewOpenDegradesForAnUnknownId(port)
     await checkTheOpenLinkRedirectsRatherThanAnswering(port)

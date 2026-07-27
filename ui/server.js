@@ -30,6 +30,8 @@ const ROUTES = {
   '/console.mjs': ['console.mjs', 'text/javascript; charset=utf-8'],
   '/views.mjs': ['views.mjs', 'text/javascript; charset=utf-8'],
   '/dom.mjs': ['dom.mjs', 'text/javascript; charset=utf-8'],
+  '/api.mjs': ['api.mjs', 'text/javascript; charset=utf-8'],
+  '/review.mjs': ['review.mjs', 'text/javascript; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
 };
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -132,6 +134,46 @@ function reviewCsp(port) {
   return `default-src 'none'; script-src ${own} 'unsafe-inline'; style-src ${own} 'unsafe-inline'; `
     + `img-src ${own} data:; font-src ${own} data:; `
     + "connect-src 'none'; base-uri 'none'; form-action 'none'";
+}
+
+// The wrapper this console puts AROUND an archived artifact, at the same
+// /review/<id>/ address the raw artifact used to answer at directly. It is OUR
+// OWN markup - server-templated, nothing the artifact or the request supplies
+// reaches it unescaped - so it is trusted the same way index.html is, not the
+// way the artifact is: 'self' scripts and a same-origin fetch, so the notes box
+// can enqueue a message. The artifact keeps rendering inside an iframe, at the
+// SAME asset address the non-index branch of serveReview already answers,
+// still behind the unchanged, unforgiving reviewCsp() above - this shell gains
+// no access at all to whatever the artifact's own markup does.
+function reviewShellCsp() {
+  return "default-src 'none'; script-src 'self'; style-src 'self'; frame-src 'self'; "
+    + "connect-src 'self'; base-uri 'none'; form-action 'none'";
+}
+
+// reviewShellHtml(basename, info) - `info` is `{ title, repo }` when the task
+// record behind this review could still be read, or `null` when it could not
+// (archived, discarded, or the read itself failed) - carried into the page as
+// data, never as prose, so review.mjs decides how to say it exactly once.
+function reviewShellHtml(basename, info) {
+  const data = JSON.stringify({
+    ok: Boolean(info),
+    title: info ? info.title : '',
+    repo: info ? info.repo : '',
+  }).replace(/</g, '\\u003c');
+  // `basename` is a real file `reviewDir` already resolved, not request input -
+  // encoded and escaped anyway, on the same principle as every other href this
+  // page writes: composed, never trusted verbatim.
+  const iframeSrc = escapeHtml(encodeURIComponent(basename));
+  return `<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+    + `<meta name="color-scheme" content="dark light"><title>dockmaster — review</title>`
+    + `<link rel="stylesheet" href="/console.css"></head>`
+    + `<body class="review-shell">`
+    + `<script type="application/json" id="review-data">${data}</script>`
+    + `<div class="review-frame"><iframe src="${iframeSrc}" title="The change"></iframe></div>`
+    + `<div class="review-panel" id="review-panel"></div>`
+    + `<script type="module" src="/review.mjs"></script>`
+    + `</body></html>`;
 }
 
 // A header value is only ever echoed back bounded: it is attacker-controlled,
@@ -237,7 +279,25 @@ async function serveReview(res, cfg, pathname) {
   }
   const found = await live.reviewDir(cfg.bin, id);
   if (!found) return failReview(res, 404, 'There is no review page for that work.');
-  const file = isIndex ? found.file : path.join(found.dir, ...rest);
+
+  if (isIndex) {
+    // A wrapper this console builds itself, not the archived artifact: it
+    // renders the artifact in an iframe (still served, unchanged, by the
+    // branch below) and adds the notes box - see reviewShellCsp() for why that
+    // split is what keeps the artifact's own isolation intact.
+    let info = null;
+    try {
+      info = await live.taskInfo(cfg.bin, id);
+      if (!info.title && !info.repo) info = null; // the task record is gone
+    } catch (err) {
+      process.stderr.write(`console: review: could not read the task record for this review: ${err.message}\n`);
+    }
+    const basename = path.basename(found.file);
+    return send(res, 200, 'text/html; charset=utf-8', reviewShellHtml(basename, info),
+      { 'content-security-policy': reviewShellCsp() });
+  }
+
+  const file = path.join(found.dir, ...rest);
   let body;
   try {
     body = fs.readFileSync(file);

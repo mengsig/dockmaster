@@ -540,6 +540,10 @@ function toNeedsYou(work, prs, decisions) {
       // counts side by side that disagree read as a bug.
       href: waiting.length === 1 ? waiting[0].review_href : '#flight',
       at: waiting.map((w) => w.last_signal_at).sort()[0] || '',
+      // One entry per task actually waiting - the headline stays aggregated,
+      // but the page can still act on each task without a task id: title and
+      // repo, the same two things the trash and revision requests name work by.
+      items: waiting.map((w) => ({ title: w.title, repo: w.repo, review_href: w.review_href })),
     });
   }
   for (const decision of decisions.open) {
@@ -679,6 +683,19 @@ async function reviewDir(bin, id) {
   return { dir: row.path.replace(/\/[^/]*$/, ''), file: row.path };
 }
 
+// taskInfo(bin, id) -> { title, repo }. Only ever called with an id `reviewDir`
+// has already confirmed has a rendered artifact - a task id from a page the
+// operator typed is not a shape this ever has to defend against. `get` prints
+// empty, not an error, for a key on a task record that is gone (archived,
+// discarded); the caller treats that the same way as never having read it.
+async function taskInfo(bin, id) {
+  const [title, repo] = await Promise.all([
+    run(bin, 'dm-task.sh', ['get', id, 'title']),
+    run(bin, 'dm-task.sh', ['get', id, 'repo']),
+  ]);
+  return { title: title.trim(), repo: repo.trim() };
+}
+
 // The line `dm-lavish.sh open <id>` prints when it actually opened a session:
 //   session:
 //     file: /path/to/change.html
@@ -717,6 +734,7 @@ module.exports = {
   progressNote,
   memoryNotes,
   reviewDir,
+  taskInfo,
   openReviewSession,
   SOURCES,
   STATE_WORDS,

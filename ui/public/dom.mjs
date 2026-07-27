@@ -125,20 +125,40 @@ export function segmented(label, options, current, onPick) {
 // Two steps, always. The first click only STATES what will be asked and quotes
 // the request verbatim; nothing is sent until the second. Built here so every
 // call site inherits the same shape and the same promise.
+//
+// `spec.request` is a canned string for most callers (trash, cleanup). A
+// control whose request depends on free text the operator has to write first
+// (a revision request) sets `spec.notes: true` and `spec.buildRequest(notes)`
+// instead - the idle state grows a textarea, and nothing is quoted until there
+// is something to quote.
 export function askControl(spec) {
   const box = el('div', `ask${spec.kind === 'trash' ? ' ask-trash' : ''}`);
+  let textarea = null;
 
   const idle = () => {
     box.textContent = '';
     box.classList.remove('is-open');
+    if (spec.notes) {
+      textarea = el('textarea', 'ask-notes-input');
+      textarea.placeholder = spec.placeholder || '';
+      textarea.rows = 2;
+      add(box, textarea);
+    }
     const button = el('button', 'btn btn-ask');
     button.type = 'button';
     add(button, el('span', null, spec.label));
-    button.addEventListener('click', () => confirm());
+    button.addEventListener('click', () => {
+      if (!spec.notes) { confirm(spec.request); return; }
+      const notes = textarea.value.trim();
+      // Nothing to quote yet - stay in the idle state rather than confirm an
+      // empty request.
+      if (!notes) { textarea.focus(); return; }
+      confirm(spec.buildRequest(notes));
+    });
     add(box, button);
   };
 
-  const confirm = () => {
+  const confirm = (request) => {
     box.textContent = '';
     // The layout around a confirm strip differs from the layout around a button;
     // the class is what lets it say so without the caller knowing.
@@ -146,7 +166,7 @@ export function askControl(spec) {
     const panel = el('div', 'ask-confirm');
     add(panel,
       el('p', 'ask-what', spec.confirm),
-      el('p', 'ask-quote', spec.request),
+      el('p', 'ask-quote', request),
       el('p', 'ask-promise', 'This page sends the request. It does not carry it out.'));
     const send = el('button', 'btn btn-send', 'Send the request');
     send.type = 'button';
@@ -156,7 +176,7 @@ export function askControl(spec) {
     send.addEventListener('click', () => {
       send.disabled = true;
       cancel.disabled = true;
-      spec.ask(spec.request).then(sent, (err) => {
+      spec.ask(request).then(sent, (err) => {
         send.disabled = false;
         cancel.disabled = false;
         add(panel, el('p', 'ask-failed', `Not sent: ${err.message}`));
@@ -357,6 +377,16 @@ function sanitizeTitle(title) {
 // task id is exactly what this seam keeps off the page. Unambiguous enough for
 // the dockmaster to resolve, and readable in the transcript afterwards.
 export const TRASH_REQUEST = (title, repo, stateWord) => `Trash request: drop the work "${sanitizeTitle(title)}" in ${repo} (currently ${String(stateWord).toLowerCase()}). It is deprecated — stop it, do not land it, and clear up after it. I authorize discarding it.`;
+
+// The two requests an awaiting-review item can send - named by title and repo
+// like every other request here, never a task id. The notes half of a revision
+// request is the operator's own words verbatim (trimmed only), because it is
+// the one thing on this page that is genuinely free text meant for a human,
+// not a sentence this page composed.
+export const APPROVE_REQUEST = (title, repo) =>
+  `Approval: the work "${sanitizeTitle(title)}" in ${repo} — I approve this change.`;
+export const REVISION_REQUEST = (title, repo, notes) =>
+  `Revision request: the work "${sanitizeTitle(title)}" in ${repo} — ${String(notes).trim()}`;
 
 // A pull request that came back from the sweep unreadable. Kept in the list on
 // purpose - one that vanished would read as a fleet with one less problem.

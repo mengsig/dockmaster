@@ -13,6 +13,7 @@
 
 import { el, add, lamp, plural, clockTime, word, SOURCE_WORD } from './dom.mjs';
 import { VIEWS, needsWords } from './views.mjs';
+import { postMessage } from './api.mjs';
 
 const shell = {
   state: null,
@@ -455,38 +456,11 @@ function compose(text) {
   growComposer();
 }
 
-// Why a message was refused, worded here. The server's own text names files and
-// scripts, so the status is what crosses - 403/415 mean the request did not
-// come from this page at all, which the operator cannot cause and cannot fix.
-const SEND_REFUSAL = {
-  400: 'the console would not accept it. If it is very long, try a shorter one.',
-  413: 'it is too long to send.',
-  403: 'the console refused it — that request did not come from this page.',
-  415: 'the console refused it — that request did not come from this page.',
-  500: 'the console could not store it. Ask the dockmaster to look into it.',
-};
-
 // The ONE way anything leaves this page: as an operator message on the same queue
 // the composer uses. A cleanup or trash control goes through here too, so nothing
 // on the page has a shorter path to the dockmaster than a typed sentence does.
-// Rejects with an already-worded reason.
-async function postMessage(text) {
-  let response;
-  try {
-    response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-  } catch (err) {
-    throw new Error(`the console could not be reached (${err.message}).`);
-  }
-  // An unmapped status falls back to the number, which is honest and is not
-  // internal vocabulary - never to the server's own sentence.
-  if (!response.ok) {
-    throw new Error(SEND_REFUSAL[response.status] || `the console answered ${response.status}.`);
-  }
-}
+// `postMessage` itself lives in api.mjs, which a console-served review page
+// shares - one writer of the wire format, not two that could drift apart.
 
 async function sendMessage(event) {
   event.preventDefault();
