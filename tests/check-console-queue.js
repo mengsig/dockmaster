@@ -50,6 +50,18 @@ const dirOf = (home, which) => path.join(home, 'state', 'ui', which)
 const names = (home, which) => fs.readdirSync(dirOf(home, which)).filter((n) => n.endsWith('.json')).sort()
 const count = (home, which) => names(home, which).length
 
+// Poll an observable condition until it holds, rather than assume a fixed
+// delay was enough. A slow CI runner needs longer than a fast dev box to even
+// start claiming; a fixed sleep either wastes time or (as here) isn't enough.
+async function waitUntil(condition, { intervalMs = 50, ceilingMs = 15000, timeoutMessage } = {}) {
+  const deadline = Date.now() + ceilingMs
+  for (;;) {
+    if (condition()) return
+    if (Date.now() >= deadline) throw new Error(timeoutMessage || 'condition never became true')
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+}
+
 // Drain the way poll.js does, acknowledging each message as delivered.
 function drain(home, limit) {
   const delivered = []
@@ -216,8 +228,13 @@ async function checkACrashMidFlushIsRecoveredNotLost() {
     })
     const exited = new Promise((resolve) => child.on('exit', resolve))
     // No 'data' listener is ever attached to child.stdout: the pipe fills and
-    // stays full, so the write callback that would call acknowledge() never fires.
-    await new Promise((resolve) => setTimeout(resolve, 1000))
+    // stays full, so the write callback that would call acknowledge() never
+    // fires. How long the child takes to even start claiming varies with
+    // runner speed, so poll for the stuck state rather than assume a fixed
+    // delay was enough - a slow CI runner just needs more of the ceiling.
+    await waitUntil(() => count(home, 'claiming') === 3 && count(home, 'claimed') === 0, {
+      timeoutMessage: 'child never reached the stuck-writing state',
+    })
     equal(count(home, 'claiming'), 3, 'all three are claimed and stuck writing them out')
     equal(count(home, 'claimed'), 0, 'and none is acknowledged yet')
 
