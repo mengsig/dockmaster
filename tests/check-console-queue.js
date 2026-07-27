@@ -53,11 +53,14 @@ const count = (home, which) => names(home, which).length
 // Poll an observable condition until it holds, rather than assume a fixed
 // delay was enough. A slow CI runner needs longer than a fast dev box to even
 // start claiming; a fixed sleep either wastes time or (as here) isn't enough.
-async function waitUntil(condition, { intervalMs = 50, ceilingMs = 15000, timeoutMessage } = {}) {
+//
+// `describe` is called only at the ceiling, so the failure reports the state
+// that actually held rather than a sentence written before the run.
+async function waitUntil(condition, { intervalMs = 50, ceilingMs = 15000, describe } = {}) {
   const deadline = Date.now() + ceilingMs
   for (;;) {
     if (condition()) return
-    if (Date.now() >= deadline) throw new Error(timeoutMessage || 'condition never became true')
+    if (Date.now() >= deadline) throw new Error(describe ? describe() : 'condition never became true')
     await new Promise((resolve) => setTimeout(resolve, intervalMs))
   }
 }
@@ -208,41 +211,65 @@ function checkABigMessageArrivesWhole() {
   }
 }
 
+// How much a spawned child's unread stdout swallows before the write blocks is a
+// property of the RUNNER, not a constant: that stdout is a socketpair, so the
+// ceiling is the socket send buffer (net.core.wmem_default, 208KB by default on
+// Linux) less per-skb overhead that varies with the kernel. Three messages at
+// chat's 64KB ceiling came to 197KB, which lands inside that spread - under it on
+// the CI runners, over it on a dev box - so on CI the child delivered the whole
+// drain, acknowledged it and exited, and the test read that as "never got stuck".
+// A full queue is an order of magnitude past the buffer on any of them, and stays
+// under poll.js's drain bound of 50 so one poll still takes all of it.
+const CRASH_QUEUE = 40
+
 // The real process, killed while its write is genuinely stuck - not simulated.
-// Nobody reads the child's stdout, so once the OS pipe buffer is full the write
-// that would acknowledge the claim cannot complete. Killed there, the claim must
+// Nobody reads the child's stdout, so once its buffer is full the write that
+// would acknowledge the claims cannot complete. Killed there, the claims must
 // still be recoverable: this is the scenario the flush-then-acknowledge fix
 // exists for, run for real rather than reasoned about.
 async function checkACrashMidFlushIsRecoveredNotLost() {
   const home = makeHome()
   try {
-    // One message at chat's 64KB ceiling was not reliably bigger than this
-    // machine's pipe buffer (kernels vary). One drain writes every claim it took
-    // in a single call, so three - pushing the write comfortably past any
-    // reasonable pipe capacity - forces a real, unavoidable block.
-    const bodies = [0, 1, 2].map((i) => `msg-${i}-${'x'.repeat(64 * 1024 - 6)}`)
+    const bodies = []
+    for (let i = 0; i < CRASH_QUEUE; i += 1) bodies.push(`msg-${i}-${'x'.repeat(64 * 1024 - 16)}`)
     bodies.forEach((body) => chat.append(home, 'operator', body))
     const child = spawn(process.execPath, [POLL], {
       env: Object.assign({}, process.env, { DM_HOME: home, DM_UI_POLL_TIMEOUT: '30' }),
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
+    // Whatever the child says about itself, kept for the failure message - and
+    // actually read, so a talkative child cannot block on its own stderr.
+    let complained = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => { complained += chunk })
     const exited = new Promise((resolve) => child.on('exit', resolve))
-    // No 'data' listener is ever attached to child.stdout: the pipe fills and
+    // No 'data' listener is ever attached to child.stdout: the buffer fills and
     // stays full, so the write callback that would call acknowledge() never
     // fires. How long the child takes to even start claiming varies with
     // runner speed, so poll for the stuck state rather than assume a fixed
     // delay was enough - a slow CI runner just needs more of the ceiling.
-    await waitUntil(() => count(home, 'claiming') === 3 && count(home, 'claimed') === 0, {
-      timeoutMessage: 'child never reached the stuck-writing state',
+    await waitUntil(() => count(home, 'claiming') === CRASH_QUEUE && count(home, 'claimed') === 0, {
+      // The premise can fail two ways that need opposite fixes, and only the
+      // state at the ceiling tells them apart: a child that never ran (nothing
+      // claimed, an exit code, something on stderr), or one whose stdout took
+      // the whole drain and acknowledged it (nothing left to kill mid-write).
+      describe: () => `the child never reached the stuck-writing state: inbox=${count(home, 'inbox')}`
+        + ` claiming=${count(home, 'claiming')} claimed=${count(home, 'claimed')}`
+        + ` exit=${child.exitCode} signal=${child.signalCode}`
+        + (count(home, 'claimed') > 0
+          ? `; it delivered instead of blocking, so a ${CRASH_QUEUE}-message drain no longer`
+            + " outruns this runner's stdout buffer"
+          : '')
+        + (complained ? `; child stderr: ${complained}` : '; the child said nothing on stderr'),
     })
-    equal(count(home, 'claiming'), 3, 'all three are claimed and stuck writing them out')
+    equal(count(home, 'claiming'), CRASH_QUEUE, 'the whole queue is claimed and stuck writing out')
     equal(count(home, 'claimed'), 0, 'and none is acknowledged yet')
 
     child.kill('SIGKILL')
     await exited
     equal(count(home, 'claimed'), 0, 'nothing was acknowledged before the crash')
-    equal(chat.pendingCount(home), 3, 'every message is still owed')
-    equal(drain(home).join('|'), bodies.join('|'), 'and the next poll delivers all three, in order')
+    equal(chat.pendingCount(home), CRASH_QUEUE, 'every message is still owed')
+    equal(drain(home).join('|'), bodies.join('|'), 'and the next poll delivers all of them, in order')
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
