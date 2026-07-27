@@ -24,7 +24,8 @@
 #   resolve <key> "<answer>"
 #
 # A decision hold stays open until resolved; completing/tearing down the task
-# that surfaced it never closes it.
+# that surfaced it never closes it — the one exception is dm-trash.sh, which
+# resolves the trashed task's own open holds as "trashed: <reason>".
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"

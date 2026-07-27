@@ -139,33 +139,51 @@ $id's local copy is gone and the task is recorded discarded — that part is don
   dm-task.sh archive $id"
 }
 
-# resolve_decision_holds <id> <reason> -> one resolved key per line on stdout.
+# resolve_decision_holds <id> <reason> -> one "resolved:<key>" or
+# "unresolved:<key>" line per line on stdout (the caller turns each into the
+# matching key=value record; this function's own stdout is captured whole by
+# the caller, so it cannot emit key=value records directly).
+#
 # A hold belongs to this id if its key is <id>-decision-* (decision-hold
 # skill's convention) or its recorded origin references data/<id>/ (the
-# report-path convention) — both exist in the backlog today. Filtering on
-# status=="open" is what makes a resumed trash idempotent: a hold this flow
-# already resolved on an earlier run no longer matches, so it is silently
-# skipped rather than re-resolved or reported twice.
+# report-path convention) — both exist in the backlog today. This is
+# DELIBERATELY stricter than a bare substring match: it does not catch a hold
+# filed without --origin and not key-prefixed with this id, and that gap is
+# not closed here (widening the matcher risks resolving someone else's hold on
+# a coincidental substring, which is worse than leaving an unrelated one open).
+# Filtering on status=="open" is what makes a resumed trash idempotent: a hold
+# this flow already resolved on an earlier run no longer matches, so it is
+# silently skipped rather than re-resolved or reported twice.
 # A hold that fails to resolve must not abort bookkeeping that already
 # committed the destructive part — warn loudly and keep going.
 resolve_decision_holds() {
-  local id="$1" reason="$2" holds_json rc=0 keys hkey
-  holds_json="$("$BIN_DIR/dm-backlog.sh" decisions --json 2>/dev/null)" || rc=$?
+  local id="$1" reason="$2" holds_json rc=0 keys hkey errf err resolve_out resolve_rc
+  # stderr captured separately from stdout: stdout must stay pure JSON for the
+  # jq read below, so a diagnostic cannot be merged onto it the way archive_out
+  # merges 2>&1 elsewhere in this file (nothing here re-parses archive_out).
+  errf="$(mktemp "${TMPDIR:-/tmp}/dm-trash-decisions.XXXXXX")" \
+    || { dm_warn "could not read $id's decision holds (mktemp failed); none were resolved as part of this trash"; return 0; }
+  holds_json="$("$BIN_DIR/dm-backlog.sh" decisions --json 2>"$errf")" || rc=$?
+  err="$(cat "$errf" 2>/dev/null || true)"; rm -f "$errf"
   if [ "$rc" -ne 0 ]; then
-    dm_warn "could not read $id's decision holds; none were resolved as part of this trash"
+    dm_warn "could not read $id's decision holds; none were resolved as part of this trash ($(dm_first_line "${err:-no detail}"))"
     return 0
   fi
   keys="$(printf '%s' "$holds_json" | jq -r --arg pfx "$id-decision-" --arg path "data/$id/" '
     .[] | select(.status=="open") |
     select((.key|startswith($pfx)) or ((.origin//"")|contains($path))) |
-    .key')"
+    .key')" \
+    || { dm_warn "could not parse $id's decision holds; none were resolved as part of this trash"; return 0; }
   if [ -n "$keys" ]; then
     while IFS= read -r hkey; do
       [ -n "$hkey" ] || continue
-      if "$BIN_DIR/dm-backlog.sh" resolve "$hkey" "trashed: $reason" >/dev/null 2>&1; then
-        printf '%s\n' "$hkey"
+      resolve_out=""; resolve_rc=0
+      resolve_out="$("$BIN_DIR/dm-backlog.sh" resolve "$hkey" "trashed: $reason" 2>&1)" || resolve_rc=$?
+      if [ "$resolve_rc" -eq 0 ]; then
+        printf 'resolved:%s\n' "$hkey"
       else
-        dm_warn "could not resolve $id's decision hold '$hkey'; it is still open and must be closed by hand: dm-backlog.sh resolve $hkey $(dm_squote "trashed: $reason")"
+        printf 'unresolved:%s\n' "$hkey"
+        dm_warn "could not resolve $id's decision hold '$hkey'; it is still open and must be closed by hand: dm-backlog.sh resolve $hkey $(dm_squote "trashed: $reason") ($(dm_first_line "${resolve_out:-no detail}"))"
       fi
     done <<EOF
 $keys
@@ -561,7 +579,7 @@ esac
 # Trashed work must not leave a decision hold pointing at discarded intent
 # still showing up in "needs you". This never touches an already-resolved
 # hold (see resolve_decision_holds above), so a resume finds nothing left to do.
-resolved_holds="$(resolve_decision_holds "$id" "$reason")"
+hold_resolutions="$(resolve_decision_holds "$id" "$reason")"
 
 # A concurrent run of this same flow may already have archived it. That is the
 # tail finishing, not a failure — but only when the records really are there.
@@ -596,9 +614,13 @@ printf 'uncommitted_tracked=%s\n' "$tracked"
 printf 'untracked_paths=%s\n' "$untracked_count"
 printf 'uncommitted=%s\n' "$uncommitted"
 printf 'backlog=%s\n' "$backlog_result"
-if [ -n "$resolved_holds" ]; then
-  printf '%s\n' "$resolved_holds" | while IFS= read -r hkey; do
-    [ -z "$hkey" ] || printf 'resolved_hold=%s\n' "$hkey"
+if [ -n "$hold_resolutions" ]; then
+  printf '%s\n' "$hold_resolutions" | while IFS= read -r hline; do
+    case "$hline" in
+      resolved:*)   printf 'resolved_hold=%s\n' "${hline#resolved:}" ;;
+      unresolved:*) printf 'unresolved_hold=%s\n' "${hline#unresolved:}" ;;
+      '') ;;
+    esac
   done
 fi
 printf 'records=archived\n'

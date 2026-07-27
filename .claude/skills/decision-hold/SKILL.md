@@ -51,8 +51,9 @@ Before treating any investigation or visual review as complete:
   bin/dm-backlog.sh add <new-id> "<dependent work>" --status queued   # if any
   ```
 - A hold stays open until resolved — tearing down the originating task never
-  closes it. Verify with `bin/dm-backlog.sh list` before treating the
-  investigation as complete.
+  closes it, EXCEPT dm-trash.sh: discarding a task resolves that task's own
+  open holds as "trashed: <reason>". Verify with `bin/dm-backlog.sh list`
+  before treating the investigation as complete.
 
 ## Why
 
