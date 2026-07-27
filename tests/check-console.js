@@ -428,7 +428,99 @@ async function checkRecentlyFinishedSortsNewestFirst() {
   equal(sorted.map((r) => r.title).join(' | '),
     ['Newest, done at 19:00', 'A tie', 'B tie', 'Older, done at 09:00'].join(' | '),
     'recently-finished orders by completion time newest first, ties broken by title')
+
+  // A row whose last event never landed (or is otherwise unreadable) must sort
+  // last, not throw - an unreadable stamp is unknown, not a crash.
+  const withGap = views.byFinishedNewestFirst([
+    row('Known, older', '2026-01-10T09:00:00Z'),
+    row('No stamp at all', undefined),
+    row('Empty stamp', ''),
+    row('Known, newest', '2026-01-12T19:00:00Z'),
+  ])
+  equal(withGap.map((r) => r.title).join(' | '),
+    ['Known, newest', 'Known, older', 'Empty stamp', 'No stamp at all'].join(' | '),
+    'a row with a missing or empty completion stamp sorts last instead of throwing')
   console.log('ok   recently-finished sorts newest-completed first, deterministically')
+}
+
+// A minimal stand-in for `document`: every node it hands back is the same
+// plain shape (children captured in order, classList/setAttribute/addEventListener
+// as no-ops), which is all views.mjs and dom.mjs ever call. This is what lets the
+// test walk the ACTUAL rendered tree rather than trust that the sort helper it
+// pins above is still wired into the panel that renders it.
+function withCapturingDocument(fn) {
+  const had = 'document' in global
+  const previous = global.document
+  const makeNode = (tag) => ({
+    tag,
+    className: '',
+    textContent: '',
+    children: [],
+    classList: { add() {}, remove() {} },
+    setAttribute() {},
+    addEventListener() {},
+    appendChild(child) { this.children.push(child); return child },
+  })
+  global.document = {
+    createElement: makeNode,
+    createDocumentFragment: () => makeNode('fragment'),
+  }
+  try {
+    return fn()
+  } finally {
+    if (had) global.document = previous
+    else delete global.document
+  }
+}
+
+function collectByClass(node, cls, acc = []) {
+  if (!node) return acc
+  if (typeof node.className === 'string' && node.className.split(' ').includes(cls)) acc.push(node)
+  for (const child of node.children || []) collectByClass(child, cls, acc)
+  return acc
+}
+
+function collectByTag(node, tag, acc = []) {
+  if (!node) return acc
+  if (node.tag === tag) acc.push(node)
+  for (const child of node.children || []) collectByTag(child, tag, acc)
+  return acc
+}
+
+// This is the wiring, not the helper: it renders the actual in-flight panel over
+// rows whose creation order disagrees with completion order, and fails if the
+// LEDGER_GROUPS tuple wiring (finding 2) is ever removed and 'Recently finished'
+// silently reverts to matched (unsorted, filesystem/creation) order.
+async function checkRecentlyFinishedIsSortedInTheRenderedPanel() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const done = (title, last_signal_at) => ({
+    title, repo: 'demo', state: 'done', since: '2026-01-01T00:00:00Z', last_signal_at, note: '',
+  })
+  const state = {
+    degraded: [],
+    work: [
+      // Created in this order, but finished in the opposite order - if the panel
+      // fell back to render order, this would come out wrong.
+      done('First created, finished last', '2026-01-10T09:00:00Z'),
+      done('Second created, finished first', '2026-01-12T19:00:00Z'),
+    ],
+  }
+  const ctx = { filter: 'all', setFilter() {}, fold: () => false, setFold() {} }
+  withCapturingDocument(() => {
+    const frag = views.viewInFlight(state, ctx)
+    const titles = collectByClass(frag, 'cell-title')
+      .map((td) => td.children[0].textContent)
+    equal(titles.join(' | '),
+      ['Second created, finished first', 'First created, finished last'].join(' | '),
+      'the rendered "Recently finished" rows come out newest-completed first, not creation order')
+
+    // The group's own column reads the completion stamp, not the ledger's
+    // default start-time column, so the order is visible rather than silent.
+    const headers = collectByTag(frag, 'th').map((th) => th.textContent)
+    ok(headers.includes('Finished'), '"Recently finished" shows a Finished column')
+    ok(!headers.includes('Started'), '"Recently finished" does not show the Started column that hides its own order')
+  })
+  console.log('ok   the "Recently finished" render is wired to the completion-time sort, not just the helper')
 }
 
 async function main() {
@@ -446,6 +538,7 @@ async function main() {
   await checkTheDocumentCarriesNoTaskId()
   await checkFixtureIsNeutral()
   await checkRecentlyFinishedSortsNewestFirst()
+  await checkRecentlyFinishedIsSortedInTheRenderedPanel()
   checkShapeRefusesAHalfDocument()
   console.log(`\nconsole checks passed (${checks} assertions)`)
 }
