@@ -420,6 +420,11 @@ check "standard pipeline is valid JSON"       'jq -e . "$STD" >/dev/null'
 check "standard pipeline has one review pass" '[ "$(jq "[.gates[]|select(.gate==\"review\")]|length" "$STD")" = "1" ]'
 check "standard pipeline keeps tests gate"    '[ "$(jq "[.gates[]|select(.gate==\"tests\")]|length" "$STD")" -ge 1 ]'
 check "standard pipeline gate order is review,fix,tests,security,pr" '[ "$(jq -c "[.gates[].gate]" "$STD")" = "[\"review\",\"fix\",\"tests\",\"security\",\"pr\"]" ]'
+# The security gate on this single-pass tier is a fail-safe: a hit means the
+# tier was mis-chosen, so it must say "escalate", never "run the scan and
+# proceed" (a mis-chosen tier shipping a security-touching change on one pass).
+check "standard security gate note says escalate, not proceed" \
+  'jq -r "[.gates[]|select(.gate==\"security\")][0].note" "$STD" | grep -qi escalate'
 
 echo "== rigorous pipeline config =="
 RIG="$ROOT/config/pr-pipeline.rigorous.json"

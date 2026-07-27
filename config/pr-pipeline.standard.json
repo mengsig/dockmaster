@@ -5,7 +5,7 @@
     { "gate": "review", "pass": "coldstart", "effort": "high", "note": "the single independent read of the diff against base" },
     { "gate": "fix", "max_rounds": 2, "note": "apply coldstart findings on the same branch" },
     { "gate": "tests", "note": "must pass; standard never skips this" },
-    { "gate": "security", "optional": true, "note": "run only when the change has a security surface" },
+    { "gate": "security", "optional": true, "note": "a hit means this tier was mis-chosen: escalate to default/rigorous and re-run there instead of proceeding on this one-pass pipeline" },
     { "gate": "pr", "method": "squash", "note": "open the PR with the branch convention and a short human description" }
   ]
 }

@@ -113,7 +113,10 @@ All notable changes to this project are documented here. The format follows
   tests → security (optional) → pr, for small, low-blast-radius code changes —
   a single subsystem, covered by tests, touching no state/concurrency/safety/
   security surface and no public contract. Unlike `fast`, the lavish approval
-  gate still applies. Selection criteria and the `fast` < `standard` <
+  gate still applies. The security gate is a fail-safe: a hit means the tier
+  was mis-chosen (standard is defined to exclude a security surface), so it
+  escalates the change to `default`/`rigorous` rather than shipping it on one
+  pass. Selection criteria and the `fast` < `standard` <
   `default` < `rigorous` ladder (take the higher tier when unsure) are in the
   `pr-workflow` skill.
 - **`bin/dm-state.sh` — export, verify, and import the orchestration state.**

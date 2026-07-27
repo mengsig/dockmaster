@@ -43,9 +43,12 @@ recommendation to fall back on.
   code changes**: a single subsystem, covered by tests, no state, concurrency,
   safety, or security surface, and no public-contract change. One review pass,
   but this is real logic — the lavish approval gate still applies (only `fast`
-  may skip it). Adds an optional `security` gate before `pr` (same as `default`
-  and `rigorous`): skipped explicitly unless the change touches a security
-  surface.
+  may skip it). Adds an optional `security` gate before `pr` (same as
+  `default`): skipped explicitly unless the change touches a security surface,
+  and a hit here is a fail-safe, not a green light — it means the tier was
+  mis-chosen (standard never covers a security surface), so escalate to
+  `default` or `rigorous` and re-run there instead of shipping on this one
+  cold pass.
 - **`default`** (`config/pr-pipeline.default.json`) — **the norm.** Two
   independent review passes (coldstart, then merge-gate), each followed by
   fix + tests.
@@ -129,6 +132,11 @@ worktree/branch from meta, communicates only through the task record, and
   the task's diff for those signals and answers in `surface` (the bare form uses
   exit 0 = signals, 1 = none); it is advisory only and never blocks. Skip
   explicitly when there is no security surface; do not stack it as a reflex.
+  **When this gate appears in a single-pass tier (currently `standard`), a
+  hit is a fail-safe, not clearance to proceed**: `standard` is defined to
+  exclude a security surface, so a hit means the tier was mis-chosen — stop
+  and re-run the change on `default` or `rigorous` instead of running the
+  scan and shipping on one pass.
 - **pr** — open the PR (below).
 
 Adding a gate: document it here with the same contract (single responsibility,
