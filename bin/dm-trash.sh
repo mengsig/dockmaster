@@ -32,7 +32,10 @@
 #      hold characters git refuses in a ref name)
 #   6. read the recovery verdict out of that ref NAMESPACE, never out of the
 #      pre-removal snapshot: the namespace is what a recovery would actually use
-#   7. resolve the backlog row, archive the records
+#   7. resolve the backlog row, resolve the task's OPEN decision holds (a hold
+#      that fails to resolve WARNS and continues rather than stopping here —
+#      the destructive part already happened, and a silent half-done cleanup
+#      is worse than a loud one), archive the records
 #
 # A task already recorded discarded BY THIS FLOW (it is the only writer of
 # `trashed_reason`) is RESUMABLE: a re-run skips every destructive step and
@@ -134,6 +137,41 @@ $detail"
 $id's local copy is gone and the task is recorded discarded — that part is done and reconciles correctly. Finish the bookkeeping by re-running this command, or by hand:
   dm-backlog.sh done $id --note $(dm_squote "trashed: $reason")
   dm-task.sh archive $id"
+}
+
+# resolve_decision_holds <id> <reason> -> one resolved key per line on stdout.
+# A hold belongs to this id if its key is <id>-decision-* (decision-hold
+# skill's convention) or its recorded origin references data/<id>/ (the
+# report-path convention) — both exist in the backlog today. Filtering on
+# status=="open" is what makes a resumed trash idempotent: a hold this flow
+# already resolved on an earlier run no longer matches, so it is silently
+# skipped rather than re-resolved or reported twice.
+# A hold that fails to resolve must not abort bookkeeping that already
+# committed the destructive part — warn loudly and keep going.
+resolve_decision_holds() {
+  local id="$1" reason="$2" holds_json rc=0 keys hkey
+  holds_json="$("$BIN_DIR/dm-backlog.sh" decisions --json 2>/dev/null)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    dm_warn "could not read $id's decision holds; none were resolved as part of this trash"
+    return 0
+  fi
+  keys="$(printf '%s' "$holds_json" | jq -r --arg pfx "$id-decision-" --arg path "data/$id/" '
+    .[] | select(.status=="open") |
+    select((.key|startswith($pfx)) or ((.origin//"")|contains($path))) |
+    .key')"
+  if [ -n "$keys" ]; then
+    while IFS= read -r hkey; do
+      [ -n "$hkey" ] || continue
+      if "$BIN_DIR/dm-backlog.sh" resolve "$hkey" "trashed: $reason" >/dev/null 2>&1; then
+        printf '%s\n' "$hkey"
+      else
+        dm_warn "could not resolve $id's decision hold '$hkey'; it is still open and must be closed by hand: dm-backlog.sh resolve $hkey $(dm_squote "trashed: $reason")"
+      fi
+    done <<EOF
+$keys
+EOF
+  fi
+  return 0
 }
 
 id=""; reason=""; close_pr=0
@@ -519,6 +557,12 @@ case "$row_rc" in
   *) die_after_removal "$id" "$reason" "REFUSED: the backlog could not be read, so $id's row was not resolved and its records were not archived." "" ;;
 esac
 
+# --- resolve the task's open decision holds ---------------------------------
+# Trashed work must not leave a decision hold pointing at discarded intent
+# still showing up in "needs you". This never touches an already-resolved
+# hold (see resolve_decision_holds above), so a resume finds nothing left to do.
+resolved_holds="$(resolve_decision_holds "$id" "$reason")"
+
 # A concurrent run of this same flow may already have archived it. That is the
 # tail finishing, not a failure — but only when the records really are there.
 if [ ! -f "$meta_file" ] && [ -f "$DM_STATE/archive/$id.meta" ]; then
@@ -552,4 +596,9 @@ printf 'uncommitted_tracked=%s\n' "$tracked"
 printf 'untracked_paths=%s\n' "$untracked_count"
 printf 'uncommitted=%s\n' "$uncommitted"
 printf 'backlog=%s\n' "$backlog_result"
+if [ -n "$resolved_holds" ]; then
+  printf '%s\n' "$resolved_holds" | while IFS= read -r hkey; do
+    [ -z "$hkey" ] || printf 'resolved_hold=%s\n' "$hkey"
+  done
+fi
 printf 'records=archived\n'

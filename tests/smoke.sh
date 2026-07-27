@@ -6389,6 +6389,47 @@ check "that note never lands on the relayable stdout" \
 check "the dispatcher lists trash with a purpose" \
   'grep -qE "^  trash +[A-Za-z]" <<<"$(b dm help)"'
 
+# --- trashing a task must resolve the decision holds IT raised ---------------
+# The operator's real complaint: dm-trash discarded work but "needs you" kept
+# showing decisions filed against it. Both filing conventions from the
+# decision-hold skill are covered: key-prefixed (<id>-decision-<key>) and
+# origin-referenced (an origin path under data/<id>/).
+TRHOLDWT="$(trash_task tr-holds)"
+b dm-backlog.sh hold tr-holds-decision-angle "pick an angle" --options "A | B" >/dev/null
+b dm-backlog.sh hold review-tr-holds "approve the change" --origin "data/tr-holds/report.md" >/dev/null
+b dm-backlog.sh hold other-task-decision-unrelated "not this task" >/dev/null
+TRHOLDOUT="$(b dm-trash.sh tr-holds --reason "plan dropped" 2>/dev/null)"
+check "trash resolves the key-prefixed hold"      'grep -qx "resolved_hold=tr-holds-decision-angle" <<<"$TRHOLDOUT"'
+check "trash resolves the origin-referenced hold" 'grep -qx "resolved_hold=review-tr-holds" <<<"$TRHOLDOUT"'
+check "trash leaves an unrelated hold alone"       '! grep -q "resolved_hold=other-task-decision-unrelated" <<<"$TRHOLDOUT"'
+check "the resolution is recorded as DROPPED, not answered" \
+  'b dm-backlog.sh decisions --json \
+   | jq -e "any(.[]; .key==\"tr-holds-decision-angle\" and .status==\"resolved\" and (.answer|startswith(\"trashed: plan dropped\")))" >/dev/null \
+   && b dm-backlog.sh decisions --json \
+   | jq -e "any(.[]; .key==\"review-tr-holds\" and .status==\"resolved\" and (.answer|startswith(\"trashed:\")))" >/dev/null'
+check "the unrelated hold is untouched, still open" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"other-task-decision-unrelated\" and .status==\"open\")" >/dev/null'
+check "a task with no holds emits no resolved_hold noise" \
+  '! grep -q "^resolved_hold=" <<<"$TROUT"'
+
+# A resume must not re-touch a hold this flow already resolved: kill the flow
+# after bookkeeping resolves the hold but before it archives (same trick as
+# tr-resume above), then re-run and confirm no duplicate and no error.
+TRHOLD2WT="$(trash_task tr-holds2)"
+b dm-backlog.sh hold tr-holds2-decision-x "pick one" >/dev/null
+mkdir -p "$DM_HOME/state/archive"
+mv "$DM_HOME/state/archive" "$TMP/tr-holds2-archive-aside"
+printf 'not a directory\n' > "$DM_HOME/state/archive"
+b dm-trash.sh tr-holds2 --reason "first attempt" >/dev/null 2>&1 || true
+rm -f "$DM_HOME/state/archive"
+mv "$TMP/tr-holds2-archive-aside" "$DM_HOME/state/archive"
+check "the interrupted trash already resolved the hold" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"tr-holds2-decision-x\" and .status==\"resolved\")" >/dev/null'
+TRHOLD2RESUME="$(b dm-trash.sh tr-holds2 --reason "second attempt" 2>"$TMP/tr-holds2.err")"
+check "the resumed run does not re-report an already-resolved hold" \
+  '! grep -q "^resolved_hold=" <<<"$TRHOLD2RESUME"'
+check "and resuming raises no resolve failure"  '! grep -qi "could not resolve" "$TMP/tr-holds2.err"'
+
 echo "== trash with a PR: closed unmerged, never merged, branch left alone =="
 # The PR half needs GitHub, so it runs against a stub gh and a clone whose origin
 # looks like a GitHub slug. gh-axi is filtered off PATH so the argv shape under
