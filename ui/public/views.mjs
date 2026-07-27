@@ -220,11 +220,32 @@ const CARD_GROUPS = [
   ['Stopped', ['blocked', 'needs_decision', 'failed']],
   ['Paused', ['paused']],
 ];
+// The optional 4th/5th slots carry a group's own sort and its own time column,
+// so a label rename can never silently drop either: both travel WITH the group
+// they belong to, never keyed off its label at the call site.
 const LEDGER_GROUPS = [
   ['Not started', ['queued'], true],
-  ['Recently finished', ['done'], false],
+  ['Recently finished', ['done'], false, byFinishedNewestFirst,
+    { header: 'Finished', value: (w) => w.last_signal_at }],
   ['Dropped', ['dropped'], false],
 ];
+
+// "Recently finished" reads newest-completed first. `last_signal_at` is the
+// last recorded event - the landing append when the dockmaster landed it
+// (dm-pr.sh / dm-merge.sh write that append right there), but the PR-open
+// stamp when the operator merged on GitHub themselves (a `never`-authority
+// repo's dm-pr.sh check records pr_state=MERGED with no append of its own) -
+// so for those it is a lower bound on completion, not the completion time
+// itself. It already falls back to the task's created time when no event ever
+// landed, so no extra field is needed. Title breaks ties so the order never
+// depends on object insertion order. A row missing the field sorts last
+// rather than throwing, since an unreadable stamp is unknown, not a crash.
+export function byFinishedNewestFirst(rows) {
+  return [...rows].sort((a, b) => (
+    String(b.last_signal_at || '').localeCompare(String(a.last_signal_at || ''))
+    || a.title.localeCompare(b.title)
+  ));
+}
 
 // Every group that holds work which is over - what "fold the finished groups
 // away" on the Tidy panel acts on. DERIVED, not restated: a group holds
@@ -321,14 +342,17 @@ export function viewInFlight(state, ctx) {
     rows.forEach((row) => add(list, voyage(row, ctx)));
     add(frag, add(node, list));
   }
-  for (const [label, keys, openByDefault] of LEDGER_GROUPS) {
-    const rows = matches(keys);
-    if (rows.length === 0) continue;
+  for (const [label, keys, openByDefault, sortRows, timeColumn] of LEDGER_GROUPS) {
+    const matched = matches(keys);
+    if (matched.length === 0) continue;
+    const rows = sortRows ? sortRows(matched) : matched;
     const { node, body } = foldedSection(ctx, 'flight', label, rows.length, openByDefault);
-    add(body, table(['What', 'Repo', 'Started', 'Waiting on'], rows, (w) => add(el('tr'),
+    const timeHeader = timeColumn ? timeColumn.header : 'Started';
+    const timeValue = timeColumn ? timeColumn.value : (w) => w.since;
+    add(body, table(['What', 'Repo', timeHeader, 'Waiting on'], rows, (w) => add(el('tr'),
       cell('cell-title', el('span', null, w.title)),
       cell('mono nowrap', el('span', null, w.repo)),
-      cell('mono nowrap', el('span', null, ago(w.since))),
+      cell('mono nowrap', el('span', null, ago(timeValue(w)))),
       cell(null, el('span', noteText(w) ? '' : 'mono mono-mute', noteText(w) || '—')))));
     add(frag, node);
   }
