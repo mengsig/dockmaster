@@ -6023,8 +6023,10 @@ trash_task() {
   local id="$1" extra="${2:-}" wt
   b dm-task.sh new "$id" --kind ship --repo demo --title "trash probe $id" >/dev/null
   wt="$(b dm-worktree.sh create "$id" demo | tail -n1)"
-  git -C "$wt" checkout -q -b "work/$id"
-  printf 'committed\n' > "$wt/$id.txt"
+  # -B and unique content: a REUSED id must survive the earlier discard's
+  # leftover branch, and two same-second discards must not hash to one commit.
+  git -C "$wt" checkout -q -B "work/$id"
+  printf 'committed %s\n' "$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')" > "$wt/$id.txt"
   git -C "$wt" add -A >/dev/null
   git -C "$wt" commit -qm "work for $id" >/dev/null
   if [ "$extra" = dirty ]; then
