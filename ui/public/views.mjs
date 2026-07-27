@@ -143,11 +143,6 @@ function isQuiet(item) {
   return quiet !== null && quiet > item.quiet_after_hours;
 }
 
-const quietThreshold = (work) => {
-  const known = work.find((w) => typeof w.quiet_after_hours === 'number');
-  return known ? known.quiet_after_hours : null;
-};
-
 // "Is it moving?" answered from the only honest signal there is: how long since
 // this piece of work last reported anything.
 function movement(item) {
@@ -227,29 +222,41 @@ const LEDGER_GROUPS = [
   ['Dropped', ['dropped'], false],
 ];
 
-const NEEDS_STATES = ['ready_for_review', 'blocked', 'needs_decision', 'failed'];
+// The raw states dm-status.sh reports are finer than the operator wants to pick
+// through: "idle" covers everything that is not running, not yet reviewed, and
+// not over - paused voluntarily, stopped on a blocker or a question, or a task
+// that failed and needs new work. Grouped here, once, rather than at each call
+// site, so the filter and the label it shows can never drift apart.
+const IDLE_STATES = ['queued', 'paused', 'blocked', 'needs_decision', 'failed'];
 
 // The filters. Each one is a predicate over the SAME list - nothing is fetched,
-// nothing is re-derived - and every one of them is answerable from the document:
-// `state`, and how long since the work last reported anything.
+// nothing is re-derived - and every one is answerable from the document's own
+// `state`, the real status the dm-* scripts report, never a label invented here.
 //
-// Only `all` shows everything, and it is the default. The rest NARROW, and some
-// states (paused, not started, not known) are reachable through `all` alone - so
-// the panel states how many rows a filter is holding back rather than letting a
+// Only `all` shows everything, and it is the default. The rest NARROW, so the
+// panel states how many rows a filter is holding back rather than letting a
 // choice made yesterday read as a fleet with less in it.
 const FLIGHT_FILTERS = [
   { id: 'all', label: 'Everything', match: () => true },
-  { id: 'moving', label: 'Moving', match: (w) => w.state === 'in_progress' && !isQuiet(w) },
-  { id: 'quiet', label: 'Quiet', match: (w) => w.state === 'in_progress' && isQuiet(w) },
-  { id: 'needs', label: 'Needs you', match: (w) => NEEDS_STATES.includes(w.state) },
-  { id: 'done', label: 'Finished', match: (w) => w.state === 'done' || w.state === 'dropped' },
+  { id: 'running', label: 'Running', match: (w) => w.state === 'in_progress' },
+  { id: 'review', label: 'Ready for review', match: (w) => w.state === 'ready_for_review' },
+  { id: 'idle', label: 'Idle', match: (w) => IDLE_STATES.includes(w.state) },
+  { id: 'done', label: 'Done', match: (w) => w.state === 'done' || w.state === 'dropped' },
 ];
 
 const flightFilter = (id) => FLIGHT_FILTERS.find((f) => f.id === id) || FLIGHT_FILTERS[0];
 
-// The threshold is NAMED, on screen, beside the control that uses it. A filter
-// called "quiet" that will not say what quiet means is the operator having to
-// take the page's word for it.
+// What each filter actually means, named on screen beside the control that uses
+// it - a filter called "idle" that will not say what it covers is the operator
+// having to take the page's word for it.
+const FILTER_NOTE = {
+  all: 'Every piece of work, whatever it is doing.',
+  running: 'Under way right now.',
+  review: 'Done and waiting on your review.',
+  idle: 'Not moving right now — paused, stopped on a blocker or a question you have not answered yet, not started, or failed and waiting on new work.',
+  done: 'Over — landed or dropped.',
+};
+
 function filterBar(state, ctx) {
   const wrap = el('div', 'filters');
   const current = flightFilter(ctx.filter).id;
@@ -259,10 +266,7 @@ function filterBar(state, ctx) {
     count: state.work.filter(f.match).length,
   }));
   add(wrap, segmented('Filter the work', options, current, (id) => ctx.setFilter(id)));
-  const hours = quietThreshold(state.work);
-  add(wrap, el('p', 'filters-note', hours === null
-    ? 'Moving and quiet are read from when each piece of work last reported anything. No threshold was reported with this fleet.'
-    : `Quiet means nothing has been reported for more than ${hours}h — the same threshold the crew's own status report uses. Moving means it has.`));
+  add(wrap, el('p', 'filters-note', FILTER_NOTE[current]));
   return wrap;
 }
 
