@@ -87,7 +87,11 @@ function append(dmHome, from, text) {
 
   if (from === 'operator') {
     sequence += 1;
-    const seq = String(sequence).padStart(6, '0');
+    // Widened past what any single process realistically sends: padStart never
+    // truncates, so once `sequence` outgrew the pad width, a same-millisecond
+    // tie between a 6-digit and a 7-digit sequence sorted by string length
+    // first ("999999" > "1000000" as text) rather than by count.
+    const seq = String(sequence).padStart(9, '0');
     const name = `${Date.now()}-${seq}-${process.pid}-${Math.random().toString(36).slice(2, 8)}.json`;
     fs.writeFileSync(path.join(dir, 'inbox', name), line, 'utf8');
   }
@@ -240,6 +244,11 @@ function claimOldest(dmHome) {
       if (err.code === 'ENOENT') continue; // another poller took it; try the next
       throw err;
     }
+    // rename() carries the inbox mtime across, not the claim time - the stale
+    // rule measures how long THIS CLAIM has sat unacknowledged, so it must be
+    // stamped now or an old message is stolen back the instant it is claimed.
+    const now = new Date();
+    fs.utimesSync(claim, now, now);
     const message = readClaimed(claim);
     if (message) return { message, acknowledge: () => fs.renameSync(claim, settled) };
     fs.renameSync(claim, settled);

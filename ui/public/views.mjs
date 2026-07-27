@@ -677,7 +677,15 @@ export function viewTidy(state, ctx) {
 
   const requests = [];
   for (const row of state.health.cleanup) {
-    if (!row.count || !CLEANUP_REQUEST[row.kind]) continue;
+    if (!row.count) continue;
+    // A kind with a count but no sentence in CLEANUP_REQUEST is a gap in THIS
+    // file, not something to drop: dropping it silently would read as "nothing
+    // to clear" when the health panel just said otherwise.
+    if (!CLEANUP_REQUEST[row.kind]) {
+      requests.push(add(el('div', 'ask'),
+        el('p', 'ask-what', `${row.label} — ${row.count}. No request written for this yet.`)));
+      continue;
+    }
     requests.push(askControl({
       kind: 'tidy',
       label: `${row.label} — ${row.count}`,

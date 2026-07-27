@@ -44,10 +44,14 @@ const MEMORY_LINES = 14;
 // in-progress work is reported as quiet rather than moving.
 const QUIET_AFTER_HOURS = 4;
 
-// The kinds of leftover the console can report. The page owns the REQUEST
+// Every kind of cleanup request the page can send. The page owns the REQUEST
 // sentence for each one, the way it owns every other word the operator reads;
-// tests/check-console.js pins that none of them is missing a sentence.
-const CLEANUP_KINDS = ['finished_copies', 'orphan_copies'];
+// tests/check-console.js pins that none of them is missing a sentence. The
+// first two are rows this collector emits under `state.health.cleanup`, keyed
+// positionally below; `landed_backlog` is issued straight from
+// `state.backlog.done.length` in the view instead, but its sentence needs the
+// same coverage, so it is listed here too.
+const CLEANUP_KINDS = ['finished_copies', 'orphan_copies', 'landed_backlog'];
 
 // The task states that still have a live track worth drawing.
 const OPEN_STATES = [

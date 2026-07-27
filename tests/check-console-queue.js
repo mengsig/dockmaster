@@ -196,6 +196,41 @@ function checkABigMessageArrivesWhole() {
   }
 }
 
+// The real process, killed while its write is genuinely stuck - not simulated.
+// Nobody reads the child's stdout, so once the OS pipe buffer is full the write
+// that would acknowledge the claim cannot complete. Killed there, the claim must
+// still be recoverable: this is the scenario the flush-then-acknowledge fix
+// exists for, run for real rather than reasoned about.
+async function checkACrashMidFlushIsRecoveredNotLost() {
+  const home = makeHome()
+  try {
+    // One message at chat's 64KB ceiling was not reliably bigger than this
+    // machine's pipe buffer (kernels vary). One drain writes every claim it took
+    // in a single call, so three - pushing the write comfortably past any
+    // reasonable pipe capacity - forces a real, unavoidable block.
+    const bodies = [0, 1, 2].map((i) => `msg-${i}-${'x'.repeat(64 * 1024 - 6)}`)
+    bodies.forEach((body) => chat.append(home, 'operator', body))
+    const child = spawn(process.execPath, [POLL], {
+      env: Object.assign({}, process.env, { DM_HOME: home, DM_UI_POLL_TIMEOUT: '30' }),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const exited = new Promise((resolve) => child.on('exit', resolve))
+    // No 'data' listener is ever attached to child.stdout: the pipe fills and
+    // stays full, so the write callback that would call acknowledge() never fires.
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+    equal(count(home, 'claiming'), 3, 'all three are claimed and stuck writing them out')
+    equal(count(home, 'claimed'), 0, 'and none is acknowledged yet')
+
+    child.kill('SIGKILL')
+    await exited
+    equal(count(home, 'claimed'), 0, 'nothing was acknowledged before the crash')
+    equal(chat.pendingCount(home), 3, 'every message is still owed')
+    equal(drain(home).join('|'), bodies.join('|'), 'and the next poll delivers all three, in order')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}
+
 function checkATimeoutWithNothingQueued() {
   const home = makeHome()
   try {
@@ -281,6 +316,28 @@ function checkAStaleClaimIsRecoveredWhateverItsPidSaysNow() {
     fs.utimesSync(claim, old, old)
     equal(chat.pendingCount(home), 1, 'an old claim is owed again however alive its pid looks')
     equal(drain(home).join('|'), 'claimed under a recycled pid', 'and it is delivered')
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
+}
+
+// rename() carries the ORIGINAL file's mtime across. If claiming did not
+// restamp it, a message that had simply sat in the inbox a while looked like a
+// claim that had sat unacknowledged a while - stolen back and re-delivered to
+// a second poller the instant the first one took it.
+function checkAFreshClaimOnAnOldMessageIsNotStolenBack() {
+  const home = makeHome()
+  try {
+    chat.append(home, 'operator', 'old message, fresh claim')
+    const name = names(home, 'inbox')[0]
+    const old = new Date(Date.now() - chat.STALE_CLAIM_MS - 60000)
+    fs.utimesSync(path.join(dirOf(home, 'inbox'), name), old, old)
+
+    const claimed = chat.claimOldest(home)
+    ok(claimed !== null, 'the message is claimed')
+    equal(chat.pendingCount(home), 0, 'a fresh claim on an old message is not owed again')
+    equal(chat.claimOldest(home), null, 'a second claim attempt finds nothing to take')
+    claimed.acknowledge()
   } finally {
     fs.rmSync(home, { recursive: true, force: true })
   }
@@ -377,10 +434,12 @@ async function main() {
     ['the drain is bounded and says what it left', checkTheDrainIsBoundedAndSaysSo],
     ['the record count comes from the queue, not the text', checkTheCountHeaderIsTheAuthority],
     ['a message big enough to fill a pipe arrives whole', checkABigMessageArrivesWhole],
+    ['a real crash mid-flush is recovered, not lost', checkACrashMidFlushIsRecoveredNotLost],
     ['an empty queue times out with 3', checkATimeoutWithNothingQueued],
     ['a claim abandoned by a dead poller is queued again', checkAnAbandonedClaimIsQueuedAgain],
     ['a claim held by a live poller is left alone', checkALiveClaimIsLeftAlone],
     ['a stale claim is recovered whatever its pid says now', checkAStaleClaimIsRecoveredWhateverItsPidSaysNow],
+    ['a fresh claim on an old message is not stolen back', checkAFreshClaimOnAnOldMessageIsNotStolenBack],
     ['two pollers cannot both win one message', checkTwoPollersCannotBothWinAMessage],
     ['an unreadable entry is set aside exactly once', checkAnUnreadableEntryIsSetAsideOnce],
     ['an unrecognised claim is left alone', checkAnUnrecognisedClaimIsLeftAlone],

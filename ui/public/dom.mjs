@@ -342,10 +342,21 @@ export const CLEANUP_REQUEST = {
   landed_backlog: (n) => `Cleanup request: clear the ${n} landed rows out of the backlog.`,
 };
 
+// A title reaches here as free text from the work's own record, not something
+// this page validated. Quoted verbatim inside the sentence, a stray newline or
+// quote mark would break the sentence out of its quotes, and an unbounded title
+// would make the transcript unreadable - so it is flattened and capped before
+// it goes anywhere near the message.
+const TITLE_MAX = 120;
+function sanitizeTitle(title) {
+  const flat = String(title).replace(/[\r\n"]+/g, ' ').trim();
+  return flat.length > TITLE_MAX ? `${flat.slice(0, TITLE_MAX - 1)}…` : flat;
+}
+
 // The work is named the way the OPERATOR sees it - title, repo, state - because a
 // task id is exactly what this seam keeps off the page. Unambiguous enough for
 // the dockmaster to resolve, and readable in the transcript afterwards.
-export const TRASH_REQUEST = (title, repo, stateWord) => `Trash request: drop the work "${title}" in ${repo} (currently ${String(stateWord).toLowerCase()}). It is deprecated — stop it, do not land it, and clear up after it. I authorize discarding it.`;
+export const TRASH_REQUEST = (title, repo, stateWord) => `Trash request: drop the work "${sanitizeTitle(title)}" in ${repo} (currently ${String(stateWord).toLowerCase()}). It is deprecated — stop it, do not land it, and clear up after it. I authorize discarding it.`;
 
 // A pull request that came back from the sweep unreadable. Kept in the list on
 // purpose - one that vanished would read as a fleet with one less problem.

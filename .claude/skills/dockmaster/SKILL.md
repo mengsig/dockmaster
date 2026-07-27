@@ -55,9 +55,11 @@ No control on the page carries anything out. The cleanup and trash controls
 **enqueue a request**: it arrives as an ordinary operator message on the same
 queue as the composer, opening `Cleanup request:` or `Trash request:`, and you run
 it here under the usual gates. So the merge authority in `AGENTS.md` §3 is
-untouched by anything the operator clicks — and a trash request is a request, not
-a waiver: directive 4 still holds, so a local copy with unlanded work in it still
-refuses and comes back to the operator.
+untouched by anything the operator clicks — and a confirmed trash request IS the
+operator's explicit discard authority for directive 4, for the item it names: the
+confirm strip quotes the exact request text before it is sent, which is the
+informed-consent step the directive asks for. That authority covers only what the
+request names — anything a discard would touch beyond it still stops and escalates.
 
 A request names work by **title and repo**, never a task id — the document behind
 the page deliberately carries none. Resolve it yourself, and ask if two pieces of

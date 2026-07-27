@@ -21,6 +21,17 @@ const path = require('node:path');
 
 const chat = require('./chat');
 
+// A reader that closes early (the operator's shell piping this into `head`, a
+// killed terminal) can turn the write into an EPIPE reported as a stream
+// 'error' event rather than through write()'s own callback. Unhandled, that is
+// an uncaught exception - the one thing here worse than losing a message is
+// crashing before the failure is even reported. Nothing to do about it beyond
+// what an ordinary write error already does: leave the claim unacknowledged.
+process.stdout.on('error', (err) => {
+  process.stderr.write(`console: poll: stdout failed (${err.message}); nothing was acknowledged\n`);
+  process.exitCode = 1;
+});
+
 const IDLE_RECHECK_MS = 1000;
 // A poll that cannot read its inbox at all is broken, not busy. It says so and
 // exits rather than spinning silently while the dockmaster waits on it.

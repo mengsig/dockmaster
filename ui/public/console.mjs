@@ -213,11 +213,14 @@ function show(id, keepScroll, animate) {
   renderRail();
 }
 
-// A redraw the operator did not ask for must not take a control out from under
-// them. A confirm strip is the case that matters: it is mid-decision, and losing
-// it means clicking through the request again.
+// A confirm strip is mid-decision: the panel showing it must not be replaced out
+// from under the operator, and the pulse above it must not claim a freshness the
+// frozen panel does not have either - "as of just now" beside a strip quoting a
+// request from a minute ago is the page telling two different times at once.
+const hasOpenConfirm = () => Boolean(byId('view').querySelector('.ask-confirm'));
+
 function redraw() {
-  if (byId('view').querySelector('.ask-confirm')) return;
+  if (hasOpenConfirm()) return;
   show(shell.current, true, false);
 }
 
@@ -279,8 +282,10 @@ async function loadState(keepScroll, force) {
   shell.readAt = Date.now();
   setStale(null);
   renderSource(body.source);
-  renderPulse();
-  renderBeacon();
+  // A confirm strip freezes the panel (see redraw()); the pulse's "as of" and the
+  // beacon must freeze with it, or the bar above claims data fresher than what
+  // the operator is actually looking at.
+  if (!hasOpenConfirm()) { renderPulse(); renderBeacon(); }
   if (keepScroll) redraw();
   else show(shell.current, false, true);
 }
@@ -334,6 +339,12 @@ function renderMessage(message, animate) {
 // it - still there, still readable, no longer a wall to scroll past.
 const LOG_OPEN = 40;
 
+// A tab left open for days must not grow this without bound: it is a
+// convenience feed of what happened in THIS tab, not the record of the
+// conversation - the transcript on disk is that. Oldest drop first once it's
+// past this, same as the DOM log below.
+const MESSAGES_KEPT = 2000;
+
 function compactLog() {
   const messages = byId('chat-messages');
   const body = byId('chat-archive-body');
@@ -361,6 +372,10 @@ function renderPendingError(message) {
   const row = byId('chat-pending');
   row.hidden = false;
   byId('chat-pending-text').textContent = `Not connected: ${message}. Retrying.`;
+  // The last known count is no longer a claim this page can stand behind - left
+  // up, it reads as still live. Drop it rather than show a number that might
+  // already be wrong.
+  byId('chat-toggle').textContent = 'Chat';
 }
 
 // A refused send is NOT transient - the message is back in the composer waiting
@@ -400,6 +415,9 @@ async function pumpChat() {
           shell.chat.messages.push(m);
           add(messages, renderMessage(m, !first));
         });
+        if (shell.chat.messages.length > MESSAGES_KEPT) {
+          shell.chat.messages.splice(0, shell.chat.messages.length - MESSAGES_KEPT);
+        }
         // Compacting moves nodes off the top, which shifts what a reader scrolled
         // up is looking at. So it waits until they are back at the bottom.
         if (atBottom || first) {
