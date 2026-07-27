@@ -489,7 +489,7 @@ function collectByTag(node, tag, acc = []) {
 
 // This is the wiring, not the helper: it renders the actual in-flight panel over
 // rows whose creation order disagrees with completion order, and fails if the
-// LEDGER_GROUPS tuple wiring (finding 2) is ever removed and 'Recently finished'
+// LEDGER_GROUPS tuple wiring is ever removed and 'Recently finished'
 // silently reverts to matched (unsorted, filesystem/creation) order.
 async function checkRecentlyFinishedIsSortedInTheRenderedPanel() {
   const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
