@@ -4,7 +4,7 @@
 
 The dockmaster is read-only over the repositories it manages except for a few
 narrow, guarded fast-forward paths (clone, sync, approved local landing). Within
-those paths it never rewrites history, and it never discards unlanded work:
+those paths it never rewrites history. It never discards unlanded work:
 teardown refuses a worktree with unlanded commits or untracked files unless the
 operator passes `--force`. Credentials a crewmate needs are passed **by
 reference, never by value** — the secret is never written into a brief,
@@ -41,13 +41,17 @@ look:
   written under. The archive is written mode 0600 and `.env` is never included,
   but storing it encrypted, and keeping it out of any repository, is on you.
 
-Guarded toolbelt paths, worktree isolation, and the operating contract are the
-primary controls against a confused or destructive agent. There is no
-command-level guardrail today: an earlier destructive-command parser was
-attempted and reverted (arming it as a `PreToolUse` hook refused ordinary
-compound shell, and a hook that times out fails open — a control that
-disarms itself on exactly the inputs that take longest is not a control worth
-carrying), and it was later removed rather than re-attempted.
+Guarded toolbelt paths, worktree isolation, `settings.json` permission rules,
+and the operating contract are the primary controls against a confused or
+destructive agent. Anything worth blocking at the command level belongs in
+`permissions.deny`, which the permission engine evaluates in-process — no
+timeout or exit-code race. There is no command-level PreToolUse guardrail
+today: an earlier destructive-command parser was attempted and reverted
+(arming it as a `PreToolUse` hook refused ordinary compound shell, and a hook
+that times out fails open — a control that disarms itself on exactly the
+inputs that take longest is not a control worth carrying), and it was later
+removed rather than re-attempted. This repo's `.claude/settings.json` carries
+`permissions.allow` only.
 
 ## Reporting a vulnerability
 

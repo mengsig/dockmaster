@@ -63,3 +63,10 @@ Read before adding a skill or touching anything the test suite measures.
   and every `.claude/skills/*/SKILL.md` by SHA-256 and exact inventory. Any
   intentional skill edit must re-baseline those hashes in the same commit; the
   pin is a context-budget tripwire, not an objection to the edit.
+- **[measured]** A `PreToolUse` hook fails open both on timeout AND on any exit
+  code other than 0 or 2 (measured on Claude Code 2.1.219 — the docs state
+  fail-open only for `UserPromptSubmit`). Binds any hook this distro ever adds:
+  never pin a short hook timeout (platform default 600s). Related measured git
+  fact: git falls back to unprefixed `PAGER`/`EDITOR`/`VISUAL`/`SSH_ASKPASS`
+  when the `GIT_*` twin is unset (measured, git 2.54) — relevant to any future
+  command-level rule.

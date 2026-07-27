@@ -310,9 +310,9 @@ opt-in, bounded, non-fatal diagnostic:
 Run `node tests/check-skill-triggers.js` for skill/trigger drift,
 `bash tests/runtime-performance.sh` for context guardrails, and
 `bash tests/runtime-smoke.sh` for Claude CLI/config compatibility and
-installed-CLI checks. Runtime smoke deletes its evidence on success or failure; add
-`--keep-evidence` only when sanitized version/status artifacts are needed for a
-report.
+installed-CLI checks. Runtime smoke deletes its evidence on success or
+failure; add `--keep-evidence` only when sanitized version/status artifacts
+are needed for a report.
 
 ## Environment
 

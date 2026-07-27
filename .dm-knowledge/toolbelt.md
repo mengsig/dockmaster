@@ -32,7 +32,8 @@ these are the constraints that are not obvious from the code you are editing.
   lock, re-verified before removal); a stuck-but-alive or metadata-less lock
   fails visibly at ~30s.
 - **[invariant]** dm_lock's reclaim marker (`<file>.lock.reclaim`) must never
-  become a permanent wedge: it records its owner PID and self-heals two ways —
+  become a permanent wedge (#122): it records its owner PID and self-heals two
+  ways —
   a dead recorded owner, or (when unstamped) having blocked a waiter for
   `DM_LOCK_RECLAIM_STALL_SPINS` spins. Age is valid evidence for the MARKER
   only, because its critical section is bounded and tiny; it is NOT valid for
