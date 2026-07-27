@@ -433,6 +433,70 @@ async function checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home) {
   console.log('ok   the console wraps an archived artifact in its own shell, and the artifact stays isolated')
 }
 
+// A cross-site page framing either the console shell or a review page can stage
+// a decoy atop the real Approve button and turn a click meant for the decoy
+// into one that reaches this document (clickjacking). Two independent layers
+// close it: frame-ancestors 'none' on both documents' CSPs (a browser must
+// refuse to render either inside ANY frame), and crossSiteRefusal on the GET
+// navigation itself, so a browser that ignored the CSP still gets a 403.
+async function checkClickjackDefenses(port, home) {
+  const index = await request(port, 'GET', '/')
+  equal(index.status, 200, 'the console shell loads normally')
+  ok(index.headers['content-security-policy'].includes("frame-ancestors 'none'"),
+    'the console shell refuses to be framed by anyone')
+
+  const framedShell = await request(port, 'GET', '/', { 'sec-fetch-site': 'cross-site' })
+  equal(framedShell.status, 403, 'a cross-site attempt to load the shell as a frame is refused outright')
+
+  const id = 'demo-review-clickjack'
+  const dir = path.join(home, 'data', id, 'lavish')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'change.html'), '<p>the change</p>')
+  const created = spawnSync(path.join(ROOT, 'bin', 'dm-task.sh'),
+    ['new', id, '--kind', 'ship', '--repo', 'dockmaster', '--title', 'A clickjack fixture'],
+    { env: Object.assign({}, process.env, { DM_HOME: home }), encoding: 'utf8' })
+  equal(created.status, 0, `the task fixture behind the clickjack review is created: ${created.stderr}`)
+
+  const shell = await request(port, 'GET', `/review/${id}/`)
+  equal(shell.status, 200, 'the review shell loads normally')
+  ok(shell.headers['content-security-policy'].includes("frame-ancestors 'none'"),
+    'the review shell - where Approve actually lives - refuses to be framed too')
+
+  const framedReview = await request(port, 'GET', `/review/${id}/`, { 'sec-fetch-site': 'cross-site' })
+  equal(framedReview.status, 403, 'a cross-site attempt to load the review shell as a frame is refused outright')
+
+  // Same-origin navigation (an operator opening the review page themselves)
+  // still works - the refusal is about CROSS-site framing, not framing at all.
+  const sameOrigin = await request(port, 'GET', `/review/${id}/`, { 'sec-fetch-site': 'same-origin' })
+  equal(sameOrigin.status, 200, 'a same-origin request for the review shell is unaffected')
+  console.log('ok   both the console shell and a review page refuse to be framed cross-site, by CSP and by refusal')
+}
+
+// dm-task.sh allows a titleless task (--title is optional); the wrapper used to
+// null the whole record only when BOTH title and repo were empty, so a
+// titleless task's real record slipped through with an empty title and an
+// Approval would have named no work at all ("Approval: the work "" in ..."). It
+// must fall back to the SAME '(untitled)' word live.js:392 uses for the exact
+// same case, not treat the record as gone (repo, required at creation, is what
+// actually means gone).
+async function checkTitlelessTaskGetsTheSameUntitledFallback(port, home) {
+  const id = 'demo-review-titleless'
+  const dir = path.join(home, 'data', id, 'lavish')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'change.html'), '<p>the change</p>')
+  const created = spawnSync(path.join(ROOT, 'bin', 'dm-task.sh'),
+    ['new', id, '--kind', 'ship', '--repo', 'dockmaster'],
+    { env: Object.assign({}, process.env, { DM_HOME: home }), encoding: 'utf8' })
+  equal(created.status, 0, `the titleless task fixture is created: ${created.stderr}`)
+
+  const shell = await request(port, 'GET', `/review/${id}/`)
+  equal(shell.status, 200, 'the shell still renders for a titleless task')
+  ok(shell.text.includes('"ok":true'), 'the task record was found, even with no title')
+  ok(shell.text.includes('"title":"(untitled)"'),
+    'an empty title falls back to the same word live.js uses, not a blank Approval')
+  console.log('ok   a titleless task gets the same (untitled) fallback the fleet page uses, not a blank name')
+}
+
 // The two static files the wrapper's own script needs: the notes-box logic and
 // the shared postMessage() the composer also uses.
 // The task title crosses into the wrapper as JSON inside a literal
@@ -562,6 +626,8 @@ async function main() {
     await checkBadRequestsAreRefusedNotCrashed(port)
     await checkReviewAssetsAtAnyDepth(port, home)
     await checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home)
+    await checkClickjackDefenses(port, home)
+    await checkTitlelessTaskGetsTheSameUntitledFallback(port, home)
     await checkHostileTitleCannotBreakOutOfTheDataBlock(port, home)
     await checkReviewScriptsAreServed(port)
     await checkReviewFailuresAreWorded(port, home)

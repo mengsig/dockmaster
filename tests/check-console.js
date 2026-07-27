@@ -368,32 +368,50 @@ async function checkApproveAndRevisionRequestsAreWorded() {
 
 // An awaiting-review item is the only place Approve/Request changes may show -
 // showing them anywhere else would let the page word a request for a task that
-// is not actually stopped on the operator's review.
+// is not actually stopped on the operator's review. And even there, both
+// controls require a rendered artifact behind `review_href`: the artifact IS
+// the approval gate, so a task with nothing to review must not offer a button
+// that would word an approval or a revision request for it anyway.
 async function checkApproveAndChangesControlsShowOnlyWhenAwaitingReview() {
   const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
-  const row = (state) => ({
-    title: 'Fix the login redirect', repo: 'harbourmaster', kind: 'change', state,
+  const row = (title, state, reviewHref) => ({
+    title, repo: 'harbourmaster', kind: 'change', state,
     since: '2026-01-01T00:00:00Z', last_signal_at: '2026-01-01T00:00:00Z', note: '', track: null,
+    review_href: reviewHref,
   })
-  const docState = { degraded: [], work: [row('ready_for_review'), row('in_progress')] }
+  const docState = {
+    degraded: [],
+    work: [
+      row('Fix the login redirect', 'ready_for_review', '/review/a/'),
+      row('Add the retry budget', 'in_progress', '/review/b/'),
+      row('Nothing rendered yet', 'ready_for_review', ''),
+    ],
+  }
   const ctx = { filter: 'all', setFilter() {}, fold: () => false, setFold() {}, ask: () => Promise.resolve() }
 
   await withCapturingDocument(() => {
     const frag = views.viewInFlight(docState, ctx)
     const cards = collectByClass(frag, 'voyage')
-    equal(cards.length, 2, 'both pieces of work render a card')
+    equal(cards.length, 3, 'all three pieces of work render a card')
     const labelled = (card, label) => collectByClass(card, 'btn-ask')
       .some((b) => b.children.some((c) => c.textContent === label))
+    // Grouped by state (CARD_GROUPS), not by array order - found by title rather
+    // than by position so the assertion does not depend on that grouping order.
+    const cardTitled = (title) => cards.find((c) => collectByClass(c, 'voyage-title')[0].textContent === title)
 
-    const waiting = cards.find((c) => c.className.includes('is-ready_for_review'))
-    ok(labelled(waiting, 'Approve'), 'an awaiting-review card shows Approve')
+    const waiting = cardTitled('Fix the login redirect')
+    ok(labelled(waiting, 'Approve'), 'an awaiting-review card with a rendered artifact shows Approve')
     ok(labelled(waiting, 'Request changes'), 'and Request changes')
 
-    const running = cards.find((c) => c.className.includes('is-in_progress'))
+    const running = cardTitled('Add the retry budget')
     ok(!labelled(running, 'Approve'), 'a card that is not awaiting review shows neither')
     ok(!labelled(running, 'Request changes'), 'not Request changes either')
+
+    const noArtifact = cardTitled('Nothing rendered yet')
+    ok(!labelled(noArtifact, 'Approve'), 'an awaiting-review card with NO rendered artifact shows no Approve')
+    ok(!labelled(noArtifact, 'Request changes'), 'nor Request changes - there is nothing to review yet')
   })
-  console.log('ok   Approve and Request changes show only on a card actually awaiting review')
+  console.log('ok   Approve and Request changes show only on a card actually awaiting review with a rendered artifact')
 }
 
 // The Needs-you row for "N changes are waiting for your review" aggregates the

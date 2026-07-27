@@ -13,6 +13,9 @@
 
 import { el, add, lamp, plural, clockTime, word, SOURCE_WORD } from './dom.mjs';
 import { VIEWS, needsWords } from './views.mjs';
+// The one writer of the wire format: a console-served review page (review.mjs)
+// shares this same module, so the composer and every enqueue-only control on
+// either page post through the exact same function.
 import { postMessage } from './api.mjs';
 
 const shell = {
@@ -456,12 +459,10 @@ function compose(text) {
   growComposer();
 }
 
-// The ONE way anything leaves this page: as an operator message on the same queue
-// the composer uses. A cleanup or trash control goes through here too, so nothing
-// on the page has a shorter path to the dockmaster than a typed sentence does.
-// `postMessage` itself lives in api.mjs, which a console-served review page
-// shares - one writer of the wire format, not two that could drift apart.
-
+// The composer's submit handler - posts the typed text as an ordinary operator
+// message and clears the input once it lands. Every other control (cleanup,
+// trash, approve, request changes) enqueues the same way, straight through
+// ctx.ask, without passing through here at all.
 async function sendMessage(event) {
   event.preventDefault();
   const input = byId('chat-input');

@@ -187,21 +187,22 @@ function trashControl(item, ctx) {
 // The two awaiting-review affordances. Same enqueue-only pattern as the trash
 // control above: each one only ever puts an ordinary message on the queue, and
 // the dockmaster is the one that reads it and acts. Neither shows outside
-// `ready_for_review` - approving or asking for changes on anything else is not
-// a request this page can even word.
+// `ready_for_review`, and neither shows without a rendered artifact behind
+// `review_href` - the artifact IS the approval gate, so approving or asking for
+// changes with nothing to review is not a request this page can even word.
 function approveControl(item, ctx) {
-  if (item.state !== 'ready_for_review') return null;
+  if (item.state !== 'ready_for_review' || !item.review_href) return null;
   return askControl({
     kind: 'approve',
     label: 'Approve',
-    confirm: 'Ask the dockmaster to approve this change and carry it through to landing.',
+    confirm: "Ask the dockmaster to approve this change. Landing still follows the repo's own merge authority.",
     request: APPROVE_REQUEST(item.title, item.repo),
     ask: ctx.ask,
   });
 }
 
 function changesControl(item, ctx) {
-  if (item.state !== 'ready_for_review') return null;
+  if (item.state !== 'ready_for_review' || !item.review_href) return null;
   return askControl({
     kind: 'changes',
     label: 'Request changes',
@@ -442,8 +443,9 @@ function reviewRow(sub, ctx) {
   // `state` is synthesized, always 'ready_for_review' - approveControl's/
   // changesControl's own gate on it is vacuous here. The real guarantee is
   // upstream: live.js only ever maps a task actually awaiting review into
-  // this items[] array in the first place.
-  const stand = { state: 'ready_for_review', title: sub.title, repo: sub.repo };
+  // this items[] array in the first place. `review_href` crosses through
+  // unchanged, so the artifact-rendered gate still applies to this row too.
+  const stand = { state: 'ready_for_review', title: sub.title, repo: sub.repo, review_href: sub.review_href };
   add(actions, approveControl(stand, ctx));
   add(actions, changesControl(stand, ctx));
   add(row, actions);

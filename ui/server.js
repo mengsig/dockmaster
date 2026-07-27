@@ -35,7 +35,7 @@ const ROUTES = {
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
 };
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-  + "connect-src 'self'; base-uri 'none'; form-action 'none'";
+  + "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const MAX_BODY_BYTES = 64 * 1024;
 const LONG_POLL_MS = 25000;
 // A review page ships beside its screenshots. One path segment, no slashes and
@@ -155,9 +155,14 @@ function reviewCsp(port) {
 // access into this document - it cannot reach this shell's Approve/Send buttons
 // or its connect-src 'self' fetch. The CSP above is defense-in-depth on the
 // artifact's own document; the sandbox is the isolation guarantee.
+// frame-ancestors 'none' - nothing may frame the SHELL itself. A hostile page
+// that could frame it could overlay a decoy atop the real Approve button and
+// turn a click meant for the decoy into one that reaches this document instead
+// (classic clickjacking) - the shell's own iframe of the artifact is unaffected,
+// since frame-ancestors governs who may frame THIS document, not what it frames.
 function reviewShellCsp() {
   return "default-src 'none'; script-src 'self'; style-src 'self'; frame-src 'self'; "
-    + "connect-src 'self'; base-uri 'none'; form-action 'none'";
+    + "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 }
 
 // reviewShellHtml(basename, info) - `info` is `{ title, repo }` when the task
@@ -197,6 +202,12 @@ const shown = (value) => String(value).slice(0, 40).replace(/[^\x20-\x7e]/g, '?'
 // attack. It does nothing about a cross-site request that CHANGES something: a
 // hostile page can aim one straight at this literal loopback URL, and the
 // browser sets the Host header itself, so it arrives looking local.
+//
+// Also applied to the GET / and GET /review/ navigations (below), alongside
+// frame-ancestors 'none' on both CSPs: a hostile page framing this console (or
+// a review page) to stage a clickjacked click is a cross-site NAVIGATION, and
+// Sec-Fetch-Site on it says so - refusing it here is defense-in-depth should a
+// browser ever ignore frame-ancestors.
 //
 //   Sec-Fetch-Site  the browser sets it and page script cannot forge it (it is
 //                   a forbidden header name); anything but same-origin/none is
@@ -299,7 +310,15 @@ async function serveReview(res, cfg, pathname) {
     let info = null;
     try {
       info = await live.taskInfo(cfg.bin, id);
-      if (!info.title && !info.repo) info = null; // the task record is gone
+      // `repo` is required at creation (dm-task.sh new --repo); missing it means
+      // the record itself is gone. A title alone may legitimately be empty
+      // (dm-task.sh allows titleless tasks) - the old `&&` here let an empty
+      // title through as-is, so an Approval could name no work at all. Falling
+      // back to the same '(untitled)' live.js:392 uses instead of nulling the
+      // whole record keeps this page and the fleet page agreeing on what a
+      // titleless task looks like.
+      if (!info.repo) info = null;
+      else if (!info.title) info.title = '(untitled)';
     } catch (err) {
       process.stderr.write(`console: review: could not read the task record for this review: ${err.message}\n`);
     }
@@ -423,6 +442,15 @@ function handle(req, res, cfg, watchers) {
   if (!hostIsLocal(req, cfg.port)) return fail(res, 403, `refused a request for host '${req.headers.host}'`);
   const url = new URL(req.url, `http://127.0.0.1:${cfg.port}`);
 
+  // The console shell itself is the page a clickjack overlays: framed, its own
+  // Approve-style controls would not exist yet (this is the shell, not the
+  // review page), but it is the top-level navigation the attack loads before
+  // deep-linking into a review, so it gets the same refusal as that below.
+  if (req.method === 'GET' && url.pathname === '/') {
+    const refusal = crossSiteRefusal(req, cfg.port);
+    if (refusal) return fail(res, refusal.status, refusal.message);
+    return serveStatic(res, url.pathname);
+  }
   if (req.method === 'GET' && Object.prototype.hasOwnProperty.call(ROUTES, url.pathname)) {
     return serveStatic(res, url.pathname);
   }
@@ -447,6 +475,10 @@ function handle(req, res, cfg, watchers) {
       });
   }
   if (req.method === 'GET' && url.pathname.startsWith('/review/')) {
+    // The review shell is where a clickjacked click actually pays off - it is
+    // the document with the Approve/Request-changes controls on it.
+    const refusal = crossSiteRefusal(req, cfg.port);
+    if (refusal) return failReview(res, refusal.status, refusal.message);
     return serveReview(res, cfg, url.pathname)
       .catch((err) => failReview(res, 500, 'The review archive could not be read.', err.message));
   }

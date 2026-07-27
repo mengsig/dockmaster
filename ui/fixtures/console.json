@@ -23,17 +23,17 @@
         {
           "title": "Empty states across the settings screens",
           "repo": "harbourmaster",
-          "review_href": "/review/demo-empty-states"
+          "review_href": "/review/demo-empty-states/"
         },
         {
           "title": "Contributor guide rewrite",
           "repo": "lantern",
-          "review_href": "/review/demo-contributor-guide"
+          "review_href": "/review/demo-contributor-guide/"
         },
         {
           "title": "Search returns deleted records for a minute after deletion",
           "repo": "tidebook",
-          "review_href": "/review/demo-search-tombstones"
+          "review_href": "/review/demo-search-tombstones/"
         }
       ],
       "href": "#flight",
@@ -392,7 +392,7 @@
       "last_signal_at": "2026-01-15T06:00:00.000Z",
       "note_kind": "",
       "note": "",
-      "review_href": "/review/demo-empty-states",
+      "review_href": "/review/demo-empty-states/",
       "track": {
         "mode": "pipeline",
         "stages": [
@@ -444,7 +444,7 @@
       "last_signal_at": "2026-01-15T03:00:00.000Z",
       "note_kind": "",
       "note": "",
-      "review_href": "/review/demo-contributor-guide",
+      "review_href": "/review/demo-contributor-guide/",
       "track": {
         "mode": "local-only",
         "stages": [
@@ -486,7 +486,7 @@
       "last_signal_at": "2026-01-14T22:00:00.000Z",
       "note_kind": "",
       "note": "",
-      "review_href": "/review/demo-search-tombstones",
+      "review_href": "/review/demo-search-tombstones/",
       "track": {
         "mode": "pipeline",
         "stages": [

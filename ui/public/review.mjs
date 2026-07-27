@@ -13,11 +13,20 @@ import { postMessage } from './api.mjs';
 
 // The server embeds this as data, never as prose - a task record that could
 // not be read is `{ ok: false }`, not a title and repo this page invented.
+// That is a NORMAL, worded outcome, not one of the two failures below: a
+// missing node is the template itself broken, and a parse error is a corrupt
+// or truncated block - both are bugs in this page, distinguished here so the
+// console's log says which.
 function readData() {
   const node = document.getElementById('review-data');
+  if (!node) {
+    console.error('review: the review-data block is missing from the page');
+    return { ok: false, title: '', repo: '' };
+  }
   try {
     return JSON.parse(node.textContent);
   } catch (err) {
+    console.error(`review: the review-data block could not be parsed: ${err.message}`);
     return { ok: false, title: '', repo: '' };
   }
 }
@@ -35,7 +44,7 @@ function render() {
   add(panel, askControl({
     kind: 'approve',
     label: 'Approve',
-    confirm: 'Ask the dockmaster to approve this change and carry it through to landing.',
+    confirm: "Ask the dockmaster to approve this change. Landing still follows the repo's own merge authority.",
     request: APPROVE_REQUEST(data.title, data.repo),
     ask: postMessage,
   }));
