@@ -66,7 +66,7 @@ case "${1:-}" in
       || { echo "smoke.sh: no '# shard:epilogue' marker; the slices would carry no verdict" >&2; exit 2; }
     ;;
   # No args is the sequential run. A MISSPELLED flag is not: without this it
-  # would fall through and quietly run all 168 sections as if nothing was asked.
+  # would fall through and quietly run all sections as if nothing was asked.
   --*) echo "smoke.sh: unknown flag: $1" >&2; shard_usage ;;
 esac
 
@@ -4544,8 +4544,8 @@ echo "== bin/ must PARSE under bash 3.2: no bare esac in a pattern list (#164) =
 # bash 3.2 reads a bare `esac` ANYWHERE in a case pattern list as the reserved
 # word and the file stops parsing; bash >= 4 accepts it. So a construct that is
 # fine on every dev machine, and on every CI leg that resolves `bash` through
-# PATH, makes the file unloadable on a stock macOS shell -- which is how a
-# script once shipped that did not parse at all. Measured: only `esac`
+# PATH, makes the file unloadable on a stock macOS shell -- which is how #160
+# shipped a script that did not parse at all. Measured: only `esac`
 # behaves this way; case/do/done/in/time/function are all fine unquoted.
 esac_in_pattern_list() {
   grep -nE '(\|[[:space:]]*esac[[:space:]]*[|)])|((^|[[:space:]])esac[[:space:]]*\|)' "$@" || true

@@ -3,12 +3,12 @@
 ## Trust model
 
 The dockmaster is read-only over the repositories it manages except for a few
-narrow, guarded fast-forward paths (clone, sync, approved local landing). It
-never rewrites history, and it never discards unlanded work: teardown refuses a
-worktree with unlanded commits or untracked files unless the operator passes
-`--force`. Credentials a crewmate needs are passed **by reference, never by
-value** — the secret is never written into a brief, commit, task record, log, or
-review artifact.
+narrow, guarded fast-forward paths (clone, sync, approved local landing). Within
+those paths it never rewrites history, and it never discards unlanded work:
+teardown refuses a worktree with unlanded commits or untracked files unless the
+operator passes `--force`. Credentials a crewmate needs are passed **by
+reference, never by value** — the secret is never written into a brief,
+commit, task record, log, or review artifact.
 
 There is exactly one force operation against a remote: after a PR merges
 successfully, `bin/dm-pr.sh` may delete the merged branch with a

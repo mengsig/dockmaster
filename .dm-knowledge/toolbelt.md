@@ -31,6 +31,14 @@ these are the constraints that are not obvious from the code you are editing.
   section). It self-heals only a DEAD-PID lock (reclaim serialized by a second
   lock, re-verified before removal); a stuck-but-alive or metadata-less lock
   fails visibly at ~30s.
+- **[invariant]** dm_lock's reclaim marker (`<file>.lock.reclaim`) must never
+  become a permanent wedge: it records its owner PID and self-heals two ways —
+  a dead recorded owner, or (when unstamped) having blocked a waiter for
+  `DM_LOCK_RECLAIM_STALL_SPINS` spins. Age is valid evidence for the MARKER
+  only, because its critical section is bounded and tiny; it is NOT valid for
+  the lock itself, which reclaims solely on a dead recorded PID. The ~30s
+  timeout message must name both the lock dir and the marker, or an operator
+  removes the wrong one.
 - **[invariant]** `dm-lib.sh` owns task-meta syntax: ids and keys are
   allowlisted, keys cannot contain `=`/line breaks, and values cannot contain
   CR/LF. Validate there before locking so every writer shares the same injection
