@@ -128,17 +128,7 @@ if [ -n "$tasks" ]; then
       [ -n "$(dm_meta_get "$tid" model)" ]  || missing="model"
       [ -n "$(dm_meta_get "$tid" effort)" ] || missing="${missing:+$missing and }effort"
       if [ -n "$missing" ]; then
-        rec="$(dm_meta_get "$tid" model_recommended)"
-        erec="$(dm_meta_get "$tid" effort_recommended)"
-        # A task whose brief was never generated recorded no recommendation;
-        # recompute the build-pass one rather than leave the hint blank. Failure
-        # is contained here so the digest never aborts on a hint.
-        if [ -z "$rec" ] || [ -z "$erec" ]; then
-          pair="$(dm_recommended_dispatch build "$(dm_meta_get "$tid" kind)")" || pair=""
-          [ -n "$rec" ]  || rec="${pair%% *}"
-          [ -n "$erec" ] || erec="${pair##* }"
-        fi
-        unsized+="  UNSIZED: task $tid is working with no $missing recorded (recommended: $rec, $erec effort; per-pass sizing: dm-task.sh recommend <role> $tid)"$'\n'
+        unsized+="  UNSIZED: task $tid is working with no $missing recorded (record both: dm-task.sh set $tid model <tier>; dm-task.sh set $tid effort <level>)"$'\n'
       fi
     fi
     # A live task working against a brief that was never dispatch-ready (#115).

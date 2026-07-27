@@ -127,8 +127,9 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   count and no FAIL summary, which reads exactly like success.
 - **[measured]** Where the time actually goes (219 s local run, 131 sections):
   `brief: unfilled {TASK}` 38.7 s, `dm-state export/import` 25.3 s, `toolbelt
-  input guards` 11.8 s, `brief: both recommendations` 11.7 s, `dispatch
-  right-sizing` 10.4 s, `worktree cleanup safety matrix` 10.3 s (that one is
+  input guards` 11.8 s, `brief: sizing is the dockmaster's call, not a computed
+  anchor` 11.7 s, `dispatch right-sizing: dm-status flags an unsized dispatch`
+  10.4 s, `worktree cleanup safety matrix` 10.3 s (that one is
   `tests/scout-cleanup.sh`). Top 10 sections are 60% of the run. The cost is
   subprocess spawns — `dm-worktree.sh create`, `dm-status.sh`, and the jq
   passes every `bin/` invocation pays to validate the registry — not sleeps:

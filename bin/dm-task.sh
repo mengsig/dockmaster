@@ -25,14 +25,11 @@
 #   archive <id>          move a terminal (done/discarded) task's records +
 #                         artifacts to state/archive/ (fails closed otherwise)
 #   list [--json]
-#   recommend <role> <id> size a spawn for this task from real signals (role,
-#                         kind, measured diff) — a recommendation, not a record
 #   sizing [--transcripts <dir>]
-#                         the dispatch distribution over every task record:
-#                         counts by model, by effort, and how many are unsized.
-#                         With --transcripts, also cross-checks each record
-#                         against what its crewmate actually ran (exit 3 on a
-#                         mismatch)
+#                         the recorded dispatch distribution: counts by model,
+#                         by effort, and how many are missing either dial. With
+#                         --transcripts, also cross-checks each record against
+#                         what its crewmate actually ran (exit 3 on a mismatch)
 
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/dm-lib.sh"
@@ -250,8 +247,8 @@ case "$cmd" in
           esac
         fi
         # Both sizing dials must be a deliberate CHOICE before a dispatch counts.
-        # Not the RECOMMENDED value — overriding the anchor is the point — but
-        # neither may be left unset, or one axis silently defaults forever.
+        # Not any particular value — the gate forces a choice, not a default —
+        # but neither may be left unset, or one axis silently defaults forever.
         # A RECORD gate, not a spawn gate: the agent is already running, and
         # nothing checks the recorded effort against the subagent_type actually
         # passed. It forces the choice to be written down, it does not verify it.
@@ -477,35 +474,6 @@ case "$cmd" in
     printf '%s\n' "$out" | column -t -s$'\t' 2>/dev/null || printf '%s\n' "$out"
     ;;
 
-  recommend)
-    # What THIS spawn is worth, computed from what exists at dispatch: the pass
-    # being run, the task kind, and the branch's real diff. Not a record — the
-    # orchestrator still chooses and records with `set model` / `set effort`.
-    role="${1:-}"; id="${2:-}"
-    [ -n "$role" ] && [ -n "$id" ] || dm_die "usage: dm-task.sh recommend <$(printf '%s' "$DM_DISPATCH_ROLES" | tr ' ' '|')> <id>"
-    dm_role_is_valid "$role" || dm_die "role must be one of: $DM_DISPATCH_ROLES (it is the PASS being dispatched, not the task's kind)"
-    dm_require_id "$id"
-    [ -f "$(dm_meta_path "$id")" ] || dm_die "no such task: $id"
-    kind="$(dm_meta_get "$id" kind)"
-    # An unmeasurable branch is a MISSING signal, not a zero one, and the
-    # recommendation falls back to the anchor. Measurement refuses SILENTLY by
-    # contract; stderr is dropped so a missing clone cannot spam an advisory.
-    size=""; size="$(dm_task_diff_size "$id" 2>/dev/null)" || size=""
-    # Unquoted on purpose: "<files> <lines>" splits into the two count args.
-    pair="$(dm_recommended_dispatch "$role" "$kind" $size)" \
-      || dm_die "could not size a '$role' dispatch for $id"
-    class="$(dm_diff_size_class $size)"
-    if [ "$class" = "unknown" ]; then
-      evidence="none measurable"
-    else
-      evidence="files=${size%% *} lines=${size##* }"
-    fi
-    printf 'model=%s\n' "${pair%% *}"
-    printf 'effort=%s\n' "${pair##* }"
-    printf 'subagent_type=crew-%s\n' "${pair##* }"
-    printf 'signals=role:%s kind:%s diff:%s (%s)\n' "$role" "${kind:-unknown}" "$class" "$evidence"
-    ;;
-
   sizing)
     # "Was our spend proportionate?" answered from the records themselves, so it
     # never needs a bespoke grep (#177). Reads meta only: no network, no
@@ -571,5 +539,5 @@ case "$cmd" in
     ;;
 
   *)
-    echo "usage: dm-task.sh {new|set|get|event|state|close|archive|list|recommend|sizing} ..." >&2; exit 2 ;;
+    echo "usage: dm-task.sh {new|set|get|event|state|close|archive|list|sizing} ..." >&2; exit 2 ;;
 esac

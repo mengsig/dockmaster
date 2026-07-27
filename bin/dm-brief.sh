@@ -53,28 +53,6 @@ title="$(dm_meta_get "$id" title)"
 [ -n "$kind" ] || dm_die "task $id has no kind; run dm-task.sh new first"
 [ -n "$wt" ] || dm_die "task $id has no worktree; run dm-worktree.sh create first"
 
-# Dispatch right-sizing (#77, #166, #177): a recommendation COMPUTED from what
-# is measurable now — this is the build pass, the task's kind, and the branch's
-# real diff if it already has one — recorded in meta so dm-status can flag a
-# dispatch that never chose. Both bind at spawn, and `dm-task.sh set agent_id`
-# refuses until both are chosen.
-# An unmeasurable branch is a MISSING signal, not a zero one; the recommendation
-# then falls back to the anchor rather than calling the work mechanical.
-size=""; size="$(dm_task_diff_size "$id" 2>/dev/null)" || size=""
-# Unquoted on purpose: "<files> <lines>" splits into the two count args.
-size_class="$(dm_diff_size_class $size)"
-rec_pair="$(dm_recommended_dispatch build "$kind" $size)" \
-  || dm_die "could not size the dispatch for $id"
-model_rec="${rec_pair%% *}"
-effort_rec="${rec_pair##* }"
-if [ "$size_class" = "unknown" ]; then
-  size_note="no diff to measure yet"
-else
-  size_note="files=${size%% *} lines=${size##* }"
-fi
-dm_meta_set "$id" model_recommended "$model_rec"
-dm_meta_set "$id" effort_recommended "$effort_rec"
-
 out="$DM_DATA/$id"; mkdir -p "$out"
 brief="$out/brief.md"
 
@@ -118,16 +96,8 @@ fleet="$(recall_block "recall(--global)" "(no fleet-wide context recorded yet.)"
 cat <<EOF
 # Task $id ($kind) - repo: $repo
 
-> Sized for this dispatch on two independent dials, both applied at spawn.
->
-> Model tier: $model_rec - passed as the Agent \`model\`.
-> Reasoning effort: $effort_rec - applied via \`subagent_type: crew-$effort_rec\`.
->
-> Computed from the signals this dispatch actually has - role: build, kind:
-> $kind, diff: $size_class ($size_note). It is a RECOMMENDATION, not a verdict:
-> the dockmaster holds the task context and tunes either dial - low|medium|high|
-> xhigh for effort, any model tier. Neither dial implies the other, so sonnet at
-> low effort and haiku at high effort are both ordinary choices.
+> Sized by the dockmaster: model tier + reasoning effort, judged from this
+> brief's clarity and the work's stakes (task-lifecycle has the ladder).
 
 You are a crewmate working one task to completion. You report only to the
 dockmaster through short status lines, never to a human. Work only inside your
