@@ -11,7 +11,7 @@
  */
 'use strict';
 
-import { el, add, lamp, plural, clockTime, word, SOURCE_WORD } from './dom.mjs';
+import { el, add, lamp, plural, clockTime, word, storedTheme, THEME_KEY, SOURCE_WORD } from './dom.mjs';
 import { VIEWS, needsWords } from './views.mjs';
 // The one writer of the wire format: a console-served review page (review.mjs)
 // shares this same module, so the composer and every enqueue-only control on
@@ -496,7 +496,7 @@ function growComposer() {
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   byId('theme-toggle').textContent = theme === 'dark' ? 'Light' : 'Dark';
-  localStorage.setItem('dm-console-theme', theme);
+  localStorage.setItem(THEME_KEY, theme);
 }
 
 function setChatOpen(open) {
@@ -521,8 +521,7 @@ function wire() {
   // Shown until the first read proves otherwise, so an empty conversation reads
   // as an invitation rather than a blank panel.
   byId('chat-empty').hidden = false;
-  applyTheme(localStorage.getItem('dm-console-theme')
-    || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
+  applyTheme(storedTheme());
   setFocus(localStorage.getItem('dm-console-focus') === '1');
   byId('theme-toggle').addEventListener('click', () => {
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');

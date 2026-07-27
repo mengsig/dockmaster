@@ -683,17 +683,34 @@ async function reviewDir(bin, id) {
   return { dir: row.path.replace(/\/[^/]*$/, ''), file: row.path };
 }
 
-// taskInfo(bin, id) -> { title, repo }. Only ever called with an id `reviewDir`
-// has already confirmed has a rendered artifact - a task id from a page the
-// operator typed is not a shape this ever has to defend against. `get` prints
-// empty, not an error, for a key on a task record that is gone (archived,
+// The state word off `dm-task.sh state <id>`, whose single line reads
+// "state: WORD · source: ... · detail". Mapped through the same STATE_WORDS the
+// fleet page's rows go through, so the review page and the fleet page cannot
+// disagree about what state a task is in. An unparseable line or a word with no
+// mapping (`unknown`, printed for a record that is gone) yields '' - never a
+// guess, because the only caller shows Approve on a positive answer alone.
+function stateWord(line) {
+  const match = /^state:\s*([^\s·]+)/.exec(String(line).trim());
+  return match ? (STATE_WORDS[match[1]] || '') : '';
+}
+
+// taskInfo(bin, id) -> { title, repo, state }. Only ever called with an id
+// `reviewDir` has already confirmed has a rendered artifact - a task id from a
+// page the operator typed is not a shape this ever has to defend against. `get`
+// prints empty, not an error, for a key on a task record that is gone (archived,
 // discarded); the caller treats that the same way as never having read it.
+//
+// `state` is the RECONCILED state, not a meta field: the review shell gates its
+// Approve/Request-changes controls on it, and an artifact outlives the work by
+// design - the Reviews archive links to landed and dropped reviews too. Nothing
+// pins pr_state here, so `state` is what notices an out-of-band merge.
 async function taskInfo(bin, id) {
-  const [title, repo] = await Promise.all([
+  const [title, repo, state] = await Promise.all([
     run(bin, 'dm-task.sh', ['get', id, 'title']),
     run(bin, 'dm-task.sh', ['get', id, 'repo']),
+    run(bin, 'dm-task.sh', ['state', id]),
   ]);
-  return { title: title.trim(), repo: repo.trim() };
+  return { title: title.trim(), repo: repo.trim(), state: stateWord(state) };
 }
 
 // The line `dm-lavish.sh open <id>` prints when it actually opened a session:

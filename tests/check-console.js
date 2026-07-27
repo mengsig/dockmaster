@@ -414,6 +414,77 @@ async function checkApproveAndChangesControlsShowOnlyWhenAwaitingReview() {
   console.log('ok   Approve and Request changes show only on a card actually awaiting review with a rendered artifact')
 }
 
+// review.mjs reads the operator's stored theme through dom.mjs's storedTheme(),
+// so the two browser globals that needs are stubbed around it: the store the
+// console shell writes the choice into, and the system-preference fallback used
+// when nothing is stored.
+async function withStoredTheme(theme, fn) {
+  const had = { storage: 'localStorage' in global, window: 'window' in global }
+  const previous = { storage: global.localStorage, window: global.window }
+  const reads = []
+  global.localStorage = {
+    getItem(key) { reads.push(key); return key === 'dm-console-theme' ? theme : null },
+    setItem() {},
+  }
+  global.window = { matchMedia: () => ({ matches: false }) }
+  try {
+    return await fn(reads)
+  } finally {
+    if (had.storage) global.localStorage = previous.storage; else delete global.localStorage
+    if (had.window) global.window = previous.window; else delete global.window
+  }
+}
+
+// The console-served review page is a SECOND document carrying the same two
+// controls, and review.mjs - not views.mjs - decides whether to draw them there.
+// It must hold the same invariant: the review archive keeps an artifact after the
+// work lands or is dropped and links to it, so this page is reachable for work
+// there is nothing left to decide about, and offering Approve there would enqueue
+// an instruction about a finished change. The server states the case as data
+// (server.js reviewShellHtml -> `awaiting`); this pins that the page obeys it.
+//
+// It also pins the theme: the shell is served with the console's own default, so
+// the page has to apply the operator's stored choice or a light-theme operator
+// gets a dark review page.
+async function checkTheReviewShellOnlyOffersApproveWhileAwaitingReview() {
+  const cases = [
+    [{ ok: true, title: 'Fix the login redirect', repo: 'harbourmaster', awaiting: true },
+      true, 'work actually awaiting review'],
+    [{ ok: true, title: 'Fix the login redirect', repo: 'harbourmaster', awaiting: false },
+      false, 'work whose review is over'],
+    [{ ok: false, title: '', repo: '', awaiting: false },
+      false, 'a review whose task record is gone'],
+  ]
+  for (const [data, offers, what] of cases) {
+    await withCapturingDocument(async () => {
+      const panel = global.document.createElement('div')
+      const block = global.document.createElement('script')
+      block.textContent = JSON.stringify(data)
+      const nodes = { 'review-panel': panel, 'review-data': block }
+      global.document.getElementById = (id) => nodes[id] || null
+      global.document.documentElement = { dataset: {} }
+      await withStoredTheme('light', async (reads) => {
+        // A fresh module instance per case: review.mjs renders on load, and the
+        // import cache would otherwise hand back the first case's run.
+        await import(`file://${path.join(ROOT, 'ui', 'public', 'review.mjs')}?case=${encodeURIComponent(what)}`)
+        equal(global.document.documentElement.dataset.theme, 'light',
+          `${what}: the review page follows the stored theme, not a hardcoded dark`)
+        ok(reads.includes('dm-console-theme'),
+          `${what}: and reads it from the same key the console shell writes`)
+      })
+      const labelled = (label) => collectByClass(panel, 'btn-ask')
+        .some((b) => b.children.some((c) => c.textContent === label))
+      equal(labelled('Approve'), offers, `${what}: Approve shown = ${offers}`)
+      equal(labelled('Request changes'), offers, `${what}: Request changes shown = ${offers}`)
+      if (!offers) {
+        equal(collectByClass(panel, 'review-missing').length, 1,
+          `${what}: the page says why there is nothing to decide instead of going quiet`)
+      }
+    })
+  }
+  console.log('ok   the review page offers Approve only while the work awaits review, and follows the stored theme')
+}
+
 // The Needs-you row for "N changes are waiting for your review" aggregates the
 // HEADLINE, but each underlying task still gets its own Approve/Request changes -
 // this pins that both the rows and the enqueued text are per-task, not the
@@ -706,6 +777,7 @@ async function main() {
   await checkEveryCleanupKindHasARequest()
   await checkApproveAndRevisionRequestsAreWorded()
   await checkApproveAndChangesControlsShowOnlyWhenAwaitingReview()
+  await checkTheReviewShellOnlyOffersApproveWhileAwaitingReview()
   await checkNeedsYouReviewRowsActPerTaskAndEnqueueTheRightText()
   await checkTheDocumentCarriesNoTaskId()
   await checkFixtureIsNeutral()

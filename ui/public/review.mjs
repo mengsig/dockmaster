@@ -8,7 +8,7 @@
  */
 'use strict';
 
-import { el, add, askControl, APPROVE_REQUEST, REVISION_REQUEST } from './dom.mjs';
+import { el, add, askControl, storedTheme, APPROVE_REQUEST, REVISION_REQUEST } from './dom.mjs';
 import { postMessage } from './api.mjs';
 
 // The server embeds this as data, never as prose - a task record that could
@@ -21,17 +21,21 @@ function readData() {
   const node = document.getElementById('review-data');
   if (!node) {
     console.error('review: the review-data block is missing from the page');
-    return { ok: false, title: '', repo: '' };
+    return { ok: false, title: '', repo: '', awaiting: false };
   }
   try {
     return JSON.parse(node.textContent);
   } catch (err) {
     console.error(`review: the review-data block could not be parsed: ${err.message}`);
-    return { ok: false, title: '', repo: '' };
+    return { ok: false, title: '', repo: '', awaiting: false };
   }
 }
 
 function render() {
+  // The server serves this document with the console's own default theme; the
+  // operator's actual choice lives in their browser, so it is applied here.
+  document.documentElement.dataset.theme = storedTheme();
+
   const panel = document.getElementById('review-panel');
   const data = readData();
   if (!data.ok) {
@@ -41,6 +45,19 @@ function render() {
     return;
   }
   add(panel, el('p', 'review-panel-head', `${data.title} — ${data.repo}`));
+  // The same invariant the fleet page's cards hold (views.mjs approveControl):
+  // these two requests exist only while the work is actually awaiting review.
+  // The review archive keeps an artifact after the work lands or is dropped, and
+  // its rows link here, so this page is reachable for work there is nothing left
+  // to decide about - approving that would put a meaningless instruction on the
+  // dockmaster's queue. The server decides the state (server.js reviewShellHtml);
+  // this page only obeys it.
+  if (!data.awaiting) {
+    add(panel, el('p', 'review-missing',
+      'This work is no longer waiting on your review, so there is nothing to '
+      + 'approve or send back here. The page is kept for the record.'));
+    return;
+  }
   add(panel, askControl({
     kind: 'approve',
     label: 'Approve',

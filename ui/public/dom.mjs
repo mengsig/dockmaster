@@ -60,6 +60,19 @@ export function link(href, text, className) {
   return node;
 }
 
+// THEME_KEY / storedTheme() - the theme the operator picked, read from the one
+// place it lives: their own browser. Shared because the console shell is not the
+// only document on this origin any more - the review page (review.mjs) is one
+// too, and it hardcoded dark, so a light-theme operator opening a review got a
+// dark page. One reader, one key, no drift.
+export const THEME_KEY = 'dm-console-theme';
+
+export function storedTheme() {
+  const stored = localStorage.getItem(THEME_KEY);
+  if (stored === 'light' || stored === 'dark') return stored;
+  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
 export function table(columns, rows, buildRow) {
   const wrap = el('div', 'scroll');
   const t = el('table');
