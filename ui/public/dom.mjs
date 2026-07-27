@@ -136,12 +136,17 @@ export function askControl(spec) {
   let textarea = null;
 
   const idle = () => {
+    // Cancel rebuilds this box from scratch (idle() is its click handler), which
+    // would otherwise silently drop whatever the operator had already typed -
+    // carry it forward into the fresh textarea instead of discarding it.
+    const notes = textarea ? textarea.value : '';
     box.textContent = '';
     box.classList.remove('is-open');
     if (spec.notes) {
       textarea = el('textarea', 'ask-notes-input');
       textarea.placeholder = spec.placeholder || '';
       textarea.rows = 2;
+      textarea.value = notes;
       add(box, textarea);
     }
     const button = el('button', 'btn btn-ask');

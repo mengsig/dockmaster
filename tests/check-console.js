@@ -472,6 +472,12 @@ async function checkTheDocumentCarriesNoTaskId() {
   }
   for (const item of doc.needs_you) {
     ok(!('id' in item), 'a needs-you row carries no task id')
+    // review_href legitimately embeds the id as a URL, the same pre-existing
+    // pattern voyage cards use (item.review_href above) - only the bare `id`
+    // key is what must never appear, on an items[] sub-row same as the parent.
+    for (const sub of item.items || []) {
+      ok(!('id' in sub), 'a needs-you review sub-item carries no task id')
+    }
   }
   console.log('ok   no task id crosses to the page')
 }

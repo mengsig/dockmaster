@@ -439,6 +439,10 @@ function reviewRow(sub, ctx) {
   add(row, el('p', 'review-item-what', `${sub.title} — ${sub.repo}`));
   const actions = el('div', 'review-item-actions');
   if (sub.review_href) add(actions, link(sub.review_href, 'Open the review page', 'row-action'));
+  // `state` is synthesized, always 'ready_for_review' - approveControl's/
+  // changesControl's own gate on it is vacuous here. The real guarantee is
+  // upstream: live.js only ever maps a task actually awaiting review into
+  // this items[] array in the first place.
   const stand = { state: 'ready_for_review', title: sub.title, repo: sub.repo };
   add(actions, approveControl(stand, ctx));
   add(actions, changesControl(stand, ctx));

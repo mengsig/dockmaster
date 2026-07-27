@@ -19,6 +19,23 @@
         "lantern",
         "tidebook"
       ],
+      "items": [
+        {
+          "title": "Empty states across the settings screens",
+          "repo": "harbourmaster",
+          "review_href": "/review/demo-empty-states"
+        },
+        {
+          "title": "Contributor guide rewrite",
+          "repo": "lantern",
+          "review_href": "/review/demo-contributor-guide"
+        },
+        {
+          "title": "Search returns deleted records for a minute after deletion",
+          "repo": "tidebook",
+          "review_href": "/review/demo-search-tombstones"
+        }
+      ],
       "href": "#flight",
       "at": "2026-01-14T22:00:00.000Z"
     },

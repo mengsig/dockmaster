@@ -402,14 +402,22 @@ async function checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home) {
   ok(shell.text.includes('"repo":"dockmaster"'), 'and its repo crosses as data')
   ok(shell.text.includes('<iframe'), 'the artifact renders inside the wrapper, not standing alone')
   ok(shell.text.includes('change.html'), 'pointed at the real artifact file')
+  // The isolation guarantee is this sandbox, not the CSP below: no
+  // allow-same-origin means the artifact renders into an opaque origin and gets
+  // no window.parent, so its inline scripts cannot reach this wrapper's
+  // connect-src 'self' fetch or click its own Approve/Send buttons.
+  ok(/<iframe[^>]*\bsandbox="allow-scripts"/.test(shell.text),
+    'the artifact iframe is sandboxed, with no allow-same-origin')
   ok(!INTERNAL_LEAK.test(shell.text), 'the wrapper shows no script name, path or internal detail')
   ok(!shell.text.includes(home), 'and does not print the state directory')
 
-  // The artifact the wrapper embeds is unaffected: same address, same isolation.
+  // The artifact the wrapper embeds is unaffected: same address, same CSP. This
+  // is the artifact's OWN defense-in-depth, not the isolation guarantee - that
+  // is the sandbox attribute asserted above.
   const nested = await request(port, 'GET', `/review/${id}/change.html`)
   equal(nested.status, 200, 'the artifact the wrapper embeds is still served on its own')
   ok(nested.headers['content-security-policy'].includes("connect-src 'none'"),
-    'and still cannot reach the network by itself')
+    "the artifact's own CSP still blocks it from reaching the network directly")
 
   // An artifact whose task record is gone (archived, discarded) still renders -
   // it just cannot safely name the work, so it says so as data rather than
@@ -427,6 +435,33 @@ async function checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home) {
 
 // The two static files the wrapper's own script needs: the notes-box logic and
 // the shared postMessage() the composer also uses.
+// The task title crosses into the wrapper as JSON inside a literal
+// <script type="application/json"> block (reviewShellHtml). A title containing
+// `</script>` could otherwise close that tag early and inject markup/script
+// into the wrapper document - reviewShellHtml escapes `<` to `<` for
+// exactly this reason. This pins it against a REAL hostile title, through the
+// real server, not just the escaping helper in isolation.
+async function checkHostileTitleCannotBreakOutOfTheDataBlock(port, home) {
+  const id = 'demo-review-hostile-title'
+  const dir = path.join(home, 'data', id, 'lavish')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'change.html'), '<p>the change</p>')
+  const hostileTitle = '</script><script>alert(1)</script>'
+  const created = spawnSync(path.join(ROOT, 'bin', 'dm-task.sh'),
+    ['new', id, '--kind', 'ship', '--repo', 'dockmaster', '--title', hostileTitle],
+    { env: Object.assign({}, process.env, { DM_HOME: home }), encoding: 'utf8' })
+  equal(created.status, 0, `the task fixture behind the hostile-title review is created: ${created.stderr}`)
+
+  const shell = await request(port, 'GET', `/review/${id}/`)
+  equal(shell.status, 200, 'the wrapper still renders for a hostile title')
+  const dataBlock = shell.text.match(/<script type="application\/json" id="review-data">([^]*?)<\/script>/)
+  ok(dataBlock, 'the data block is present and still ends where a script tag ends')
+  ok(!dataBlock[1].includes('</script'), 'no raw </script inside the data block, escaped or otherwise')
+  ok(!dataBlock[1].includes('<'), 'no raw < of any kind inside the JSON string')
+  ok(dataBlock[1].includes('\\u003c'), 'the hostile `<` crosses escaped as \\u003c instead')
+  console.log('ok   a hostile task title cannot break out of the review data block')
+}
+
 async function checkReviewScriptsAreServed(port) {
   const script = await request(port, 'GET', '/review.mjs')
   equal(script.status, 200, 'the review page script is served')
@@ -527,6 +562,7 @@ async function main() {
     await checkBadRequestsAreRefusedNotCrashed(port)
     await checkReviewAssetsAtAnyDepth(port, home)
     await checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home)
+    await checkHostileTitleCannotBreakOutOfTheDataBlock(port, home)
     await checkReviewScriptsAreServed(port)
     await checkReviewFailuresAreWorded(port, home)
     await checkReviewOpenDegradesForAnUnknownId(port)

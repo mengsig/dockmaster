@@ -127,8 +127,13 @@ function hostIsLocal(req, port) {
 // loop through an <img>, a <link rel=stylesheet> or an @font-face. That request
 // drives a fleet-wide sweep which writes and takes the task lock, and the
 // cross-site refusal cannot stop it because a review page IS same-origin.
-// Together with connect-src 'none' and form-action 'none', the API is
-// unreachable from an archived review by any means.
+// connect-src 'none' and form-action 'none' hold the artifact to that, but a CSP
+// is a per-document restriction the artifact's own inline script obeys - it is
+// defense-in-depth, not the isolation boundary. The boundary is the sandbox
+// attribute on the iframe this CSP is served into (see reviewShellHtml): without
+// it, same-origin framing hands the artifact window.parent and it could call
+// parent.fetch, or simply click the wrapper's own buttons, regardless of what
+// this CSP says.
 function reviewCsp(port) {
   const own = localHosts(port).map((host) => `http://${host}/review/`).join(' ');
   return `default-src 'none'; script-src ${own} 'unsafe-inline'; style-src ${own} 'unsafe-inline'; `
@@ -143,8 +148,13 @@ function reviewCsp(port) {
 // way the artifact is: 'self' scripts and a same-origin fetch, so the notes box
 // can enqueue a message. The artifact keeps rendering inside an iframe, at the
 // SAME asset address the non-index branch of serveReview already answers,
-// still behind the unchanged, unforgiving reviewCsp() above - this shell gains
-// no access at all to whatever the artifact's own markup does.
+// still behind the unchanged, unforgiving reviewCsp() above. What actually keeps
+// this shell safe from the artifact is `sandbox="allow-scripts"` on that iframe
+// (reviewShellHtml, below): no allow-same-origin means the artifact renders into
+// an opaque origin, so it can script itself but gets no window.parent and no DOM
+// access into this document - it cannot reach this shell's Approve/Send buttons
+// or its connect-src 'self' fetch. The CSP above is defense-in-depth on the
+// artifact's own document; the sandbox is the isolation guarantee.
 function reviewShellCsp() {
   return "default-src 'none'; script-src 'self'; style-src 'self'; frame-src 'self'; "
     + "connect-src 'self'; base-uri 'none'; form-action 'none'";
@@ -170,7 +180,8 @@ function reviewShellHtml(basename, info) {
     + `<link rel="stylesheet" href="/console.css"></head>`
     + `<body class="review-shell">`
     + `<script type="application/json" id="review-data">${data}</script>`
-    + `<div class="review-frame"><iframe src="${iframeSrc}" title="The change"></iframe></div>`
+    + `<div class="review-frame"><iframe src="${iframeSrc}" title="The change" `
+    + `sandbox="allow-scripts"></iframe></div>`
     + `<div class="review-panel" id="review-panel"></div>`
     + `<script type="module" src="/review.mjs"></script>`
     + `</body></html>`;
