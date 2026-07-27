@@ -226,6 +226,18 @@ const LEDGER_GROUPS = [
   ['Dropped', ['dropped'], false],
 ];
 
+// "Recently finished" reads newest-completed first. `last_signal_at` is the
+// task's last recorded event - for a done task that is the landing/merge
+// event itself (dm-pr.sh and dm-merge.sh both append it right there) - and it
+// already falls back to the task's created time when no event ever landed, so
+// no extra field is needed. Title breaks ties so the order never depends on
+// object insertion order.
+export function byFinishedNewestFirst(rows) {
+  return [...rows].sort((a, b) => (
+    b.last_signal_at.localeCompare(a.last_signal_at) || a.title.localeCompare(b.title)
+  ));
+}
+
 // Every group that holds work which is over - what "fold the finished groups
 // away" on the Tidy panel acts on. DERIVED, not restated: a group holds
 // finished work exactly when it folds itself away by default, so the in-flight
@@ -322,8 +334,9 @@ export function viewInFlight(state, ctx) {
     add(frag, add(node, list));
   }
   for (const [label, keys, openByDefault] of LEDGER_GROUPS) {
-    const rows = matches(keys);
-    if (rows.length === 0) continue;
+    const matched = matches(keys);
+    if (matched.length === 0) continue;
+    const rows = label === 'Recently finished' ? byFinishedNewestFirst(matched) : matched;
     const { node, body } = foldedSection(ctx, 'flight', label, rows.length, openByDefault);
     add(body, table(['What', 'Repo', 'Started', 'Waiting on'], rows, (w) => add(el('tr'),
       cell('cell-title', el('span', null, w.title)),

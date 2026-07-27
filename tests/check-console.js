@@ -416,6 +416,21 @@ function checkShapeRefusesAHalfDocument() {
   console.log('ok   a half-shaped or unattributed document is refused at the seam')
 }
 
+async function checkRecentlyFinishedSortsNewestFirst() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const row = (title, last_signal_at) => ({ title, last_signal_at })
+  const sorted = views.byFinishedNewestFirst([
+    row('Older, done at 09:00', '2026-01-10T09:00:00Z'),
+    row('B tie', '2026-01-12T17:00:00Z'),
+    row('A tie', '2026-01-12T17:00:00Z'),
+    row('Newest, done at 19:00', '2026-01-12T19:00:00Z'),
+  ])
+  equal(sorted.map((r) => r.title).join(' | '),
+    ['Newest, done at 19:00', 'A tie', 'B tie', 'Older, done at 09:00'].join(' | '),
+    'recently-finished orders by completion time newest first, ties broken by title')
+  console.log('ok   recently-finished sorts newest-completed first, deterministically')
+}
+
 async function main() {
   checkTrackShapes()
   checkNothingIsClaimedWithoutEvidence()
@@ -430,6 +445,7 @@ async function main() {
   await checkEveryCleanupKindHasARequest()
   await checkTheDocumentCarriesNoTaskId()
   await checkFixtureIsNeutral()
+  await checkRecentlyFinishedSortsNewestFirst()
   checkShapeRefusesAHalfDocument()
   console.log(`\nconsole checks passed (${checks} assertions)`)
 }
