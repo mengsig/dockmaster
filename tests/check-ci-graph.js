@@ -22,7 +22,15 @@ const path = require('path')
 
 const ROOT = process.env.DM_CHECK_ROOT || path.join(__dirname, '..')
 const WORKFLOW = path.join(ROOT, '.github', 'workflows', 'ci.yml')
+const SMOKE = path.join(ROOT, 'tests', 'smoke.sh')
 const MAX_TIMEOUT_MINUTES = 30
+
+// The legs that run tests/smoke.sh in slices. The shard count is owned by
+// smoke.sh (its `# shard:split` markers), so the matrix and the `--shard k/n`
+// argument are both derived from it here rather than pinned to a literal: a
+// marker added without touching the workflow would otherwise leave a whole
+// group of sections unrun, and no test would notice.
+const SHARDED_LEGS = ['smoke-linux', 'smoke-bash32']
 
 // The heavy legs, and the `changes` output that decides whether each runs.
 // ci-gate must read the SAME output rather than trusting the job's own result.
@@ -35,25 +43,33 @@ const GATED_LEGS = {
 // Jobs that must run on every event, which is what lets ci-gate hard-require
 // them. A `needs:` or `if:` on either would make a skip legitimate.
 const UNCONDITIONAL_JOBS = ['fast', 'node14-compat']
-// Pinned so a widened exclusion list is a deliberate, reviewed edit. Growing it
-// is how a path filter silently stops running a needed test.
-const EXPECTED_FILTERS = [
-  '**',
-  '!docs/**',
-  '!.dm-knowledge/**',
-  '!assets/**',
-  '!CHANGELOG.md',
-  '!CONTRIBUTING.md',
-  '!SECURITY.md',
-  '!LICENSE',
-]
+// Pinned PER FILTER, so a widened `code` exclusion list is a deliberate,
+// reviewed edit (growing it is how a path filter silently stops running a
+// needed test) and so an inclusion pattern cannot be smuggled into `code`.
+// The two inclusion filters hold ONE pattern each on purpose: under
+// predicate-quantifier 'every' a file must match every pattern in its filter,
+// so a second entry would make the filter match nothing.
+const EXPECTED_FILTERS = {
+  code: [
+    '**',
+    '!docs/**',
+    '!.dm-knowledge/**',
+    '!assets/**',
+    '!CHANGELOG.md',
+    '!CONTRIBUTING.md',
+    '!SECURITY.md',
+    '!LICENSE',
+  ],
+  suite: ['tests/smoke.sh'],
+  ci_workflow: ['.github/workflows/ci.yml'],
+}
 // The two expressions the whole design hangs on, pinned VERBATIM. `code:
 // ${{ steps.filter.outputs.code == 'true' }}` (dropping the non-PR clause) is a
 // plausible simplification that stays green on every PR and surfaces only as a
 // red main on the first push; `code: 'false'` is a total silent bypass.
 const EXPECTED_OUTPUTS = {
   code: "${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}",
-  macos_full: "${{ github.event_name != 'pull_request' || (steps.filter.outputs.code == 'true' && contains(github.event.pull_request.labels.*.name, 'ci:macos')) }}",
+  macos_full: "${{ github.event_name != 'pull_request' || (steps.filter.outputs.code == 'true' && (contains(github.event.pull_request.labels.*.name, 'ci:macos') || steps.filter.outputs.suite == 'true' || steps.filter.outputs.ci_workflow == 'true')) }}",
 }
 // Load-bearing lines of the ci-gate script. Without these the gate is back to
 // reading each leg's own `skipped` as permission to pass.
@@ -158,7 +174,7 @@ function checkOneJobIsWired(gate, name, fail) {
   }
 }
 
-// Pulls the literal block scalar under `filters:` and returns its list entries,
+// Pulls the literal block scalar under `filters:` and returns { filter: [items] },
 // accepting single-quoted, double-quoted and bare items alike. A double-quoted
 // entry was invisible to the single-quote-only regex this replaces, which let a
 // `- "!bin/**"` exclusion ride along under a still-matching pinned list.
@@ -175,26 +191,39 @@ function parseFilterPatterns(changesText, fail) {
     return null
   }
   const baseIndent = /^\s*/.exec(lines[at])[0].length
-  const patterns = []
+  const filters = {}
+  let current = null
   for (let i = at + 1; i < lines.length; i++) {
     if (lines[i].trim() === '') continue
     if (/^\s*/.exec(lines[i])[0].length <= baseIndent) break
+    const named = /^\s*("?[A-Za-z0-9_-]+"?|'[A-Za-z0-9_-]+'):\s*$/.exec(lines[i])
+    if (named) { current = unquote(named[1]); filters[current] = []; continue }
     const item = /^\s*-\s+(.*?)\s*$/.exec(lines[i])
-    if (item) patterns.push(unquote(item[1]))
+    if (!item) continue
+    if (!current) { fail('a `filters:` entry appears before any filter name'); return null }
+    filters[current].push(unquote(item[1]))
   }
-  return patterns
+  return filters
 }
 
 function checkPathFilter(changesText, fail) {
   if (!/predicate-quantifier:\s*'every'/.test(changesText)) {
     fail("changes must set predicate-quantifier: 'every' -- the `some` default ORs the `!` patterns into `**` and the filter stops excluding anything")
   }
-  const patterns = parseFilterPatterns(changesText, fail)
-  if (patterns) {
-    const same = patterns.length === EXPECTED_FILTERS.length
-      && patterns.every((p, i) => p === EXPECTED_FILTERS[i])
-    if (!same) {
-      fail(`path-filter list changed. Every entry is a promise that nothing under test reads it -- re-verify before updating this test.\n     expected: [${EXPECTED_FILTERS.join(', ')}]\n     actual:   [${patterns.join(', ')}]`)
+  const filters = parseFilterPatterns(changesText, fail)
+  if (filters) {
+    const want = Object.keys(EXPECTED_FILTERS).sort()
+    const got = Object.keys(filters).sort()
+    if (want.join(',') !== got.join(',')) {
+      fail(`the set of path filters changed: expected [${want.join(', ')}], got [${got.join(', ')}].\n     Each one feeds a \`changes\` output, so adding or dropping one silently redefines when a leg runs.`)
+    }
+    for (const name of want) {
+      const patterns = filters[name] || []
+      const expected = EXPECTED_FILTERS[name]
+      const same = patterns.length === expected.length && patterns.every((p, i) => p === expected[i])
+      if (!same) {
+        fail(`the \`${name}\` path filter changed. In \`code\` every entry is a promise that nothing under test reads it; in an inclusion filter a second entry makes it match NOTHING under predicate-quantifier 'every'. Re-verify before updating this test.\n     expected: [${expected.join(', ')}]\n     actual:   [${patterns.join(', ')}]`)
+      }
     }
   }
   for (const name of Object.keys(EXPECTED_OUTPUTS)) {
@@ -220,6 +249,35 @@ function checkLegGuards(jobs, gateText, fail) {
   }
 }
 
+// The matrix must cover exactly 1..n of smoke.sh's own shard count, and the
+// invocation must pass that same n. smoke.sh refuses a mismatched n at runtime,
+// so a drifted denominator is loud -- but a matrix that is merely SHORT (fewer
+// legs than shards) runs green while silently dropping sections, which is the
+// case this pin exists for.
+function checkShardMatrix(jobs, fail) {
+  const shards = fs.readFileSync(SMOKE, 'utf8').split('\n')
+    .filter((line) => line === '# shard:split').length + 1
+  const wantList = Array.from({ length: shards }, (unused, i) => i + 1).join(', ')
+  for (const leg of SHARDED_LEGS) {
+    if (!jobs[leg]) { fail(`job ${leg} is gone; it is what runs the smoke suite`); continue }
+    const matrix = /^ {8}shard: \[([^\]]*)\]\s*$/m.exec(jobs[leg])
+    if (!matrix) {
+      fail(`${leg} must declare its shards inline as \`shard: [1, 2, ...]\` (tests/smoke.sh has ${shards})`)
+    } else if (matrix[1].trim() !== wantList) {
+      fail(`${leg}'s matrix is [${matrix[1].trim()}] but tests/smoke.sh has ${shards} shards; expected [${wantList}]`)
+    }
+    if (!/^ {6}fail-fast: false\s*$/m.test(jobs[leg])) {
+      fail(`${leg} must set \`fail-fast: false\`, or one red shard cancels the others and their failures go unreported`)
+    }
+    const invocations = jobs[leg].match(/--shard \$\{\{ matrix\.shard \}\}\/(\d+)/g) || []
+    if (invocations.length !== 1) {
+      fail(`${leg} must run the suite exactly once as \`--shard \${{ matrix.shard }}/${shards}\` (found ${invocations.length})`)
+    } else if (invocations[0] !== `--shard \${{ matrix.shard }}/${shards}`) {
+      fail(`${leg} runs \`${invocations[0]}\` but tests/smoke.sh has ${shards} shards`)
+    }
+  }
+}
+
 function checkUnconditionalJobs(jobs, fail) {
   for (const name of UNCONDITIONAL_JOBS) {
     if (!jobs[name]) { fail(`job ${name} is gone; ci-gate hard-requires it`); continue }
@@ -240,11 +298,18 @@ function checkTimeouts(jobs, fail) {
 }
 
 // This file guards nothing while nothing runs it. Deleting the step that
-// invokes it would otherwise be invisible to every check above.
+// invokes it would otherwise be invisible to every check above. Same for the
+// partition check: it is the only thing in CI that proves the shards cover the
+// whole suite, and everything above only pins the workflow's side of that.
 function checkSelfIsInvoked(jobs, fail) {
-  const wanted = '        run: node tests/check-ci-graph.js'
-  if (!jobs.fast || !hasLine(jobs.fast, wanted)) {
-    fail(`the fast job must invoke this check verbatim:\n     ${wanted.trim()}\n     Otherwise deleting the step silently disables every pin in this file.`)
+  const wanted = [
+    '        run: node tests/check-ci-graph.js',
+    '        run: bash tests/smoke.sh --shard-plan',
+  ]
+  for (const line of wanted) {
+    if (!jobs.fast || !hasLine(jobs.fast, line)) {
+      fail(`the fast job must invoke this step verbatim:\n     ${line.trim()}\n     Otherwise deleting it silently disables the check it runs.`)
+    }
   }
 }
 
@@ -261,6 +326,7 @@ function main() {
   checkGateWiring(jobs, fail)
   checkPathFilter(jobs.changes, fail)
   checkLegGuards(jobs, jobs['ci-gate'], fail)
+  checkShardMatrix(jobs, fail)
   checkUnconditionalJobs(jobs, fail)
   checkSelfIsInvoked(jobs, fail)
 

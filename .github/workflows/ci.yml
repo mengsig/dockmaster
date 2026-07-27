@@ -39,7 +39,12 @@ jobs:
       # Single owner of "should macos-full run": both the job's own `if:` and
       # ci-gate read THIS, so the gate can require success rather than infer it
       # from the job's own `skipped`.
-      macos_full: ${{ github.event_name != 'pull_request' || (steps.filter.outputs.code == 'true' && contains(github.event.pull_request.labels.*.name, 'ci:macos')) }}
+      # ci:macos on demand, and automatically whenever the PR touches the suite
+      # or this workflow: macos-full is the only leg left that runs smoke.sh
+      # UNSLICED, so the sequential path has to be proven on exactly the PRs that
+      # can break it. Still `code == 'true' &&`, so macos_full implies code and
+      # the `needs: macos` guard can never be waiting on a skipped job.
+      macos_full: ${{ github.event_name != 'pull_request' || (steps.filter.outputs.code == 'true' && (contains(github.event.pull_request.labels.*.name, 'ci:macos') || steps.filter.outputs.suite == 'true' || steps.filter.outputs.ci_workflow == 'true')) }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
@@ -59,6 +64,13 @@ jobs:
               - '!CONTRIBUTING.md'
               - '!SECURITY.md'
               - '!LICENSE'
+            # Two INCLUSION filters, one pattern each. Under predicate-quantifier
+            # 'every' a file must match EVERY pattern in its filter, so a single
+            # filter listing both paths would match nothing at all.
+            suite:
+              - 'tests/smoke.sh'
+            ci_workflow:
+              - '.github/workflows/ci.yml'
             # README.md, AGENTS.md and CLAUDE.md are deliberately NOT excluded:
             # the smoke suite asserts on their contents (the plain-gh parity
             # sentence, the documented DM_* override list, the AGENTS.md byte
@@ -88,9 +100,9 @@ jobs:
       # left the dispatcher unchecked by the one job that runs unconditionally.
       - name: Check for banned bash-4 constructs in bin/
         run: |
-          if grep -REn 'mapfile|readarray|declare -A|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|&>>' bin/*.sh bin/dm \
+          if grep -REn 'mapfile|readarray|declare -A|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|&>>' bin/*.sh bin/dm tests/*.sh \
               | grep -vE ':[0-9]+:[[:space:]]*#'; then
-            echo "banned bash-4 construct found in bin/ (see above)"
+            echo "banned bash-4 construct found in bin/ or tests/ (see above)"
             exit 1
           fi
 
@@ -123,6 +135,12 @@ jobs:
       - name: Check CI job graph has not drifted
         run: node tests/check-ci-graph.js
 
+      # The shards must PARTITION the suite. smoke-parallel.sh proves that at
+      # run time and nothing proved it in CI, so a group orphaned by a moved
+      # marker would just not run, green on every leg. Slices without running.
+      - name: Check the smoke shards partition the suite
+        run: bash tests/smoke.sh --shard-plan
+
       - name: Check skill/trigger coverage
         run: node tests/check-skill-triggers.js
 
@@ -145,6 +163,7 @@ jobs:
       - name: Check runtime test syntax
         run: |
           bash -n tests/runtime-evidence-dir.sh tests/runtime-performance.sh tests/runtime-smoke.sh tests/runtime-waiter-child.sh
+          bash -n tests/smoke.sh tests/smoke-parallel.sh
           node --check tests/check-skill-triggers.js
           node --check tests/check-pr-runner.js
           node --check tests/check-answer-forms.js
@@ -153,19 +172,29 @@ jobs:
           node --check tests/check-console-http.js
           node --check tests/runtime-performance.js
 
-  # The suite as a contributor runs it: bash 5, GNU userland.
+  # The suite as a contributor runs it: bash 5, GNU userland. Sharded across
+  # runners because the suite WAS the whole PR wall clock. The shard count is a
+  # property of tests/smoke.sh (its `# shard:split` markers) and the runner
+  # REFUSES a mismatched n, so a matrix that drifts fails loudly instead of
+  # dropping sections; tests/check-ci-graph.js pins the two to each other.
+  # fail-fast off: one red shard must not cancel the others, or the log that
+  # would name the second failure never gets written.
   smoke-linux:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
       - name: Run smoke tests
-        run: bash tests/smoke.sh
+        run: bash tests/smoke.sh --shard ${{ matrix.shard }}/6
 
   # The bash-3.2 portability invariant, on a Linux runner instead of a macOS
   # one. This is STRICTLY MORE 3.2 coverage than the macOS leg ever had: there,
@@ -178,9 +207,13 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # 12 rather than the 10 the other PR-blocking jobs get: this one also pays
-    # an image pull and an apk install on top of the suite (measured ~5m40s).
+    # 12 rather than the 10 the other PR-blocking jobs get: every shard pays its
+    # own image pull and apk install on top of its slice of the suite.
     timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - name: Parse and run the suite under real bash 3.2
@@ -200,7 +233,7 @@ jobs:
               *) echo "the bash:3.2 image no longer ships bash 3.2"; exit 1 ;;
             esac
             for f in bin/*.sh bin/dm; do echo "checking $f"; bash -n "$f"; done
-            bash tests/smoke.sh
+            bash tests/smoke.sh --shard ${{ matrix.shard }}/6
           '
 
   # macOS is the only place BSD userland and the macOS process / symlinked-tmpdir

@@ -6,6 +6,12 @@ Read before editing the verify gate or anything that drives a browser.
   SILENT before start. Never attach to whatever is listening: the operator runs
   their own instance of the same app, and "verifying" theirs is a fabricated
   pass. `app_start_cmd` therefore has to honor `$DM_VERIFY_PORT`.
+- **[decision]** That per-task port derives from `$DM_HOME` AND the task id, then
+  scans forward past anything busy. The id alone made two installs (or two suite
+  runs) on one host aim at the SAME port and fight over it (#199); a run's own
+  `$DM_HOME` is what separates them while keeping the port stable across repeated
+  runs of one task. Any test that mirrors the formula must source `dm-lib.sh` for
+  the canonicalized `$DM_HOME`, not rebuild it.
 - **[invariant]** Silence-then-start is a TOCTOU whose window is the whole
   readiness timeout — a start command that binds nothing, plus anything that
   binds the port seconds later, and the gate verified a foreign process. So

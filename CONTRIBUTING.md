@@ -8,7 +8,7 @@ gitignored. Changes to the tracked surface go through this repo's own PR path.
 ## Testing
 
 ```sh
-bash tests/smoke.sh
+bash tests/smoke-parallel.sh   # the same suite, every shard at once
 node tests/check-skill-triggers.js
 bash tests/runtime-performance.sh
 bash tests/runtime-smoke.sh
@@ -20,6 +20,20 @@ covers the local-only lifecycle; the PR path has no automated coverage. Run it
 before every change to `bin/`, and add an assertion when you change a script's
 behavior.
 
+`bash tests/smoke.sh` still runs the whole thing in order. It is one linear
+script over one `DM_HOME`, so a shard is a contiguous run of sections:
+`tests/smoke.sh --shard k/n` runs group k (`--shards` prints n), and
+`tests/smoke-parallel.sh` runs them all concurrently and checks their section
+counts add up. `tests/smoke.sh --shard-plan` proves the same thing without
+running anything (CI's `fast` job does exactly that), and `--shard-plan k/n`
+prints one slice so you can read what a shard will actually run.
+
+Adding a section needs no bookkeeping — it joins the group that encloses it,
+as long as it goes ABOVE the `# shard:epilogue` marker. Moving a
+`# shard:split` marker is the expensive edit: the sections after it lose the
+state the earlier group built, and it fails as an unbound variable or a missing
+repo rather than a wrong assertion. Re-run every shard when you move one.
+
 `tests/runtime-waiter-live.md` is a manual proof, not a CI check: only a live
 authenticated session can observe whether a background child's completion wakes
 its parent. Run it by hand when changing how background work is awaited.
@@ -29,11 +43,12 @@ CI (`.github/workflows/ci.yml`) runs on every pull request, every push to `main`
 Two jobs run unconditionally: `fast` (every cheap check — the JS checks, the
 waiter child, bash/JS syntax, the bash-3.2 lint) and `node14-compat`, which
 re-runs the JS checks under Node 14. The suite itself runs in `smoke-linux`
-(bash 5), `smoke-bash32` (a `bash:3.2` container, where the toolbelt too runs on
-3.2) and `macos`; those three are skipped only when a PR touches nothing any
-test reads. `macos` runs the 3.2 parse and the BSD-sensitive scripts; the full
-suite on macOS is `macos-full`, which runs on `main`, nightly, and on a PR
-labelled `ci:macos`. `ci-gate` aggregates them all and fails closed.
+(bash 5) and `smoke-bash32` (a `bash:3.2` container, where the toolbelt too runs
+on 3.2) — one shard per matrix leg in each — and `macos`. Those three legs are
+skipped only when a PR touches nothing any test reads. `macos` runs the 3.2
+parse and the BSD-sensitive scripts; the full suite on macOS is `macos-full`,
+which runs on `main`, nightly, and on a PR labelled `ci:macos`. `ci-gate`
+aggregates them all and fails closed.
 `.dm-knowledge/ci.md` has the reasoning and the measured numbers.
 
 ## Portability

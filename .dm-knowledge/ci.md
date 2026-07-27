@@ -17,8 +17,15 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   which `macos-full` is 6m47s. Every PR-blocking cap therefore has 2x+ headroom:
   10 min against a 3m05s longest, 12 against `smoke-bash32`'s 4m54s, and the
   20-min `macos-full` cap blocks nobody.
-- **[decision]** Eight jobs. `changes` gates `smoke-linux`, `smoke-bash32` and
-  `macos`; `macos-full` additionally needs `macos`. `fast` and `node14-compat`
+- **[decision]** Eight jobs, two of them matrixed: `smoke-linux` and
+  `smoke-bash32` run one shard per leg. A matrix does not change the job name, so
+  `needs.<job>.result` still aggregates (success only if every leg succeeded) and
+  `ci-gate` needed no change. `fail-fast: false` on both, or one red shard
+  cancels the others and the second failure never gets logged. The matrix length
+  and the `--shard k/n` denominator are both pinned to smoke.sh's own marker
+  count by `tests/check-ci-graph.js` — a SHORT matrix would otherwise run green
+  while silently dropping a group. `changes` gates `smoke-linux`, `smoke-bash32`
+  and `macos`; `macos-full` additionally needs `macos`. `fast` and `node14-compat`
   depend on NOTHING — no `needs:`, no `if:` — on purpose, so they run on every
   event and a docs-only PR still gets a real gate. `ci-gate` needs all seven.
 - **[pitfall]** `ci-gate` is DESIGNED to be the single required status for
@@ -88,11 +95,14 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   `true`), but that is reasoning, not evidence. The first push-to-main run must
   show `smoke-linux`, `smoke-bash32`, `macos` and `macos-full` all RUNNING.
 - **[pitfall]** `smoke-bash32` is now the critical path and it pulls `bash:3.2`
-  from Docker Hub unauthenticated. An anonymous-pull rate limit would fail the
-  job — loudly, not silently. If that starts happening, mirror the image to
-  GHCR rather than dropping the leg. The tag (not a digest) is deliberate: the
-  image is rebuilt on a current Alpine, and the job asserts `version 3.2`
-  itself, so a bad rebuild fails instead of rotting silently.
+  from Docker Hub unauthenticated — now SIX times per run, once per shard leg,
+  which is six times closer to the anonymous-pull limit than the single pull
+  this note was written for. A limit would fail the job loudly, not silently. If
+  that starts happening, mirror the image to GHCR rather than dropping the leg;
+  a shared pull-and-save step feeding the legs is the other option. The tag (not
+  a digest) is deliberate: the image is rebuilt on a current Alpine, and the job
+  asserts `version 3.2` itself, so a bad rebuild fails instead of rotting
+  silently.
 - **[decision]** macOS keeps the coverage nothing else can give (BSD userland,
   the `/var -> /private/var` symlinked tmpdir, macOS lock/process semantics) but
   is off the PR critical path: it was 100% of wall clock, 9m07s of runtime plus
@@ -116,16 +126,52 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   FAILED, not cancelled — the cancel lands as an empty result, which the gate
   correctly refuses. Harmless: the check-runs API defaults to `filter=latest`,
   so only the newest run is what any consumer sees. Do not chase it as a red.
-- **[finding]** Sharding the suite was investigated and rejected. It is one
-  linear script over one `$DM_HOME`: sections build task/repo state that later
-  sections assert on (the `dm-state` round-trip at L3237 reads `arch-wip`,
-  created at L964), and many `check` bodies MUTATE state rather than just
-  reading it, so no-op'ing out-of-range checks changes what later sections see.
-  Splitting needs a real refactor into hermetic files, not a line-range split.
-  If that is ever done, the shard runner must assert the shard counts SUM to the
-  expected total: a shard that dies in top-level setup prints a truncated pass
-  count and no FAIL summary, which reads exactly like success.
-- **[measured]** Where the time actually goes (219 s local run, 131 sections):
+- **[decision]** The suite IS sharded — six contiguous groups, marked in
+  `tests/smoke.sh` by `# shard:split` lines, run by `--shard k/n` and by
+  `tests/smoke-parallel.sh` locally. `--shard-plan` (no spec) proves the groups
+  PARTITION the suite without running anything and is what the `fast` job runs;
+  `--shard-plan k/n` prints one slice. Both refuse if the `# shard:epilogue`
+  marker is gone — the tail after it carries `[ "$fail" -eq 0 ]`, so a slice
+  without it would exit 0 however red it was. `--shard` SLICES the file (awk:
+  prelude + the group's sections + that tail) and execs the slice; only
+  32% of the run is inside `check` bodies, so skipping the assertion while still
+  running the section buys almost nothing — the section itself has to go.
+- **[decision]** The groups are CONTIGUOUS because the suite is one linear script
+  over one `$DM_HOME`: later sections assert on state earlier ones built. What
+  crossed a boundary anyway is handled two ways, and both are the whole reason a
+  boundary move is expensive. Shared FIXTURES (`all_blocked`/`all_allowed`, the
+  no-gh-axi PATH, the `gh` stub, `prfn`, the squatter helpers) were hoisted into
+  the prelude, which every shard runs. Shared STATE lives in sections marked
+  `# shard:bootstrap` (`registry`, `create`, `task + worktree + brief`, `state
+  reconciliation`, `test gate`, `backlog`, `guarded land + teardown`, `archive`,
+  `dm-memory`, and the two that register `mauth`): those re-run in every LATER
+  shard for their side effects, and `ok()` does not count a check the shard does
+  not own, so the shards' pass counts SUM to the sequential total.
+- **[pitfall]** Adding a section is free — it joins the enclosing group. MOVING a
+  split marker is not: every section after it loses the state the previous group
+  built, and the failure is an unbound variable or a missing repo, not a wrong
+  assertion. Rebalancing cost four rounds of "run all shards, hoist what broke".
+  Verify by running every shard, and check the section counts sum: a shard that
+  dies in top-level setup prints a truncated pass count and no FAIL summary,
+  which reads exactly like success. `smoke-parallel.sh` asserts that sum.
+- **[measured]** 2026-07-27 on a 16-core box: sequential 401 s / 1546 passed;
+  six shards in parallel 66 s / 1546 passed / all 168 sections (6.1x). Both
+  counts moved after: the port-pin check made it 1547, and #201 dropped four
+  sizing sections, so the suite is 164 sections. Per shard:
+  61 s, 39 s, 43 s, 11 s, 66 s, 14 s — the pole is the verify-gate group, which
+  is mostly readiness timeouts, and it cannot be split further without breaking
+  the one-app-one-task narrative those sections share. Two concurrent full
+  parallel runs (12 shards at once): both green, 57 s.
+- **[pitfall]** Sharding trades BILLED time for wall clock: a code PR went from 2
+  heavy jobs to 12, each paying its own checkout (and, on `smoke-bash32`, its own
+  image pull and apk install). The suite's own work is unchanged, the per-leg
+  overhead is not. Nobody is waiting on it, but the invoice is bigger.
+- **[decision]** Sharding also removes a SUPERLINEAR cost, not just a linear one:
+  `dm-status.sh` walks every task, so it slowed from 0.6 s early in the run to
+  ~9 s late in it. Fewer tasks per shard's `$DM_HOME` is why merging two groups
+  measured worse than the sum of their parts.
+- **[measured]** Where the time went before the shard split (219 s local run,
+  131 sections):
   `brief: unfilled {TASK}` 38.7 s, `dm-state export/import` 25.3 s, `toolbelt
   input guards` 11.8 s, `brief: sizing is the dockmaster's call, not a computed
   anchor` 11.7 s, `dispatch right-sizing: dm-status flags an unsized dispatch`
