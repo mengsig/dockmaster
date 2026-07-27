@@ -28,7 +28,13 @@ const chat = require('./chat');
 // crashing before the failure is even reported. Nothing to do about it beyond
 // what an ordinary write error already does: leave the claim unacknowledged.
 process.stdout.on('error', (err) => {
-  process.stderr.write(`console: poll: stdout failed (${err.message}); nothing was acknowledged\n`);
+  // Whatever closed stdout - a killed terminal - very often took stderr with
+  // it, and a throw from THIS write is an uncaught exception raised inside the
+  // handler that exists to prevent one. There is nowhere left to report to at
+  // that point; the nonzero exit is the whole signal.
+  try {
+    process.stderr.write(`console: poll: stdout failed (${err.message}); nothing was acknowledged\n`);
+  } catch (ignored) { /* stderr is gone too */ }
   process.exitCode = 1;
 });
 

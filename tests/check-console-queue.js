@@ -325,20 +325,44 @@ function checkAStaleClaimIsRecoveredWhateverItsPidSaysNow() {
 // restamp it, a message that had simply sat in the inbox a while looked like a
 // claim that had sat unacknowledged a while - stolen back and re-delivered to
 // a second poller the instant the first one took it.
-function checkAFreshClaimOnAnOldMessageIsNotStolenBack() {
+//
+// Claimed in THIS process, abandonedClaims() would skip it as "our own pid"
+// regardless of the restamp - the skip that exists for the claim actively being
+// delivered right now would silently cover for a missing fix. So a separate,
+// live process does the claiming; its pid is foreign, and only the restamp
+// keeps it from reading as an abandoned, stealable claim.
+async function checkAFreshClaimOnAnOldMessageIsNotStolenBack() {
   const home = makeHome()
+  let child
   try {
     chat.append(home, 'operator', 'old message, fresh claim')
     const name = names(home, 'inbox')[0]
     const old = new Date(Date.now() - chat.STALE_CLAIM_MS - 60000)
     fs.utimesSync(path.join(dirOf(home, 'inbox'), name), old, old)
 
-    const claimed = chat.claimOldest(home)
-    ok(claimed !== null, 'the message is claimed')
-    equal(chat.pendingCount(home), 0, 'a fresh claim on an old message is not owed again')
-    equal(chat.claimOldest(home), null, 'a second claim attempt finds nothing to take')
-    claimed.acknowledge()
+    const script = `
+      const chat = require(${JSON.stringify(path.join(ROOT, 'ui', 'chat.js'))})
+      const claim = chat.claimOldest(${JSON.stringify(home)})
+      if (!claim) { process.stdout.write('no-claim\\n'); process.exit(1) }
+      process.stdout.write('claimed\\n')
+      setInterval(() => {}, 1000)
+    `
+    child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'pipe', 'inherit'] })
+    const said = await new Promise((resolve, reject) => {
+      let buf = ''
+      child.stdout.on('data', (chunk) => {
+        buf += chunk
+        if (buf.includes('\n')) resolve(buf.split('\n')[0])
+      })
+      child.on('exit', (code) => reject(new Error(`the claiming process exited early (code ${code})`)))
+    })
+    equal(said, 'claimed', 'a separate, live process claims the old message')
+
+    equal(chat.pendingCount(home), 0,
+      'a fresh claim on an old message is not owed again, even under a pid that is not this process')
+    equal(chat.claimOldest(home), null, 'and this process cannot take it either')
   } finally {
+    if (child) child.kill('SIGKILL')
     fs.rmSync(home, { recursive: true, force: true })
   }
 }

@@ -478,6 +478,11 @@ function toReviews(rendered, tasks) {
     state: awaiting.has(item.id) ? 'awaiting' : 'archived',
     at: item.rendered_at || '',
     href: `/review/${encodeURIComponent(item.id)}/`,
+    // A real link, not a fetch: the tab this opens must come from the click's
+    // own user activation, so the server 302s it straight to the session (or
+    // to `href` above, when there is none) rather than the page choosing
+    // between them after an async round trip.
+    open_href: `/api/review-open?id=${encodeURIComponent(item.id)}&redirect=1`,
   }));
 }
 
@@ -686,10 +691,15 @@ const SESSION_URL = /url:\s*"(https?:\/\/[^"]+)"/;
 // the command failed for any other reason. Every one of those looks the same
 // from here: this is a courtesy on top of the raw review page, so nothing it
 // can fail at is treated as fatal - the caller falls back to the plain archive.
+//
+// --no-open: this call is SERVER-SIDE. The operator's own browser is the one
+// that must show the session, via the tab the console opens; a second tab
+// launched here, in whatever display the server process happens to have, is
+// not that - it is a stray window nobody asked for on this machine.
 async function openReviewSession(bin, id) {
   let stdout;
   try {
-    stdout = await run(bin, 'dm-lavish.sh', ['open', id]);
+    stdout = await run(bin, 'dm-lavish.sh', ['open', id, '--no-open']);
   } catch (err) {
     return { url: null };
   }

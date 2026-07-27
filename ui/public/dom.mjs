@@ -178,30 +178,6 @@ export function askControl(spec) {
   return box;
 }
 
-// A review archive's "Open" action: try the annotatable lavish session the
-// crewmate reviewed the change in, falling back to the raw page when that
-// surface is not available - `ctx.openReview` never rejects, it always
-// resolves to what to do next. Two rests only, no spinner in between: the
-// session either opens or it doesn't, and either way this click is answered.
-export function reviewOpenControl(href, ctx) {
-  const box = el('span', 'review-open');
-  const button = el('button', 'link-btn', 'Open');
-  button.type = 'button';
-  const note = el('span', 'cell-sub cell-warn');
-  button.addEventListener('click', () => {
-    button.disabled = true;
-    note.textContent = '';
-    ctx.openReview(href).then((result) => {
-      button.disabled = false;
-      const url = result && result.url;
-      window.open(url || href, '_blank', 'noopener,noreferrer');
-      if (!url) note.textContent = 'Annotation unavailable; opened the page instead.';
-    });
-  });
-  add(box, button, note);
-  return box;
-}
-
 export function head(title, note) {
   const frag = document.createDocumentFragment();
   add(frag, el('h1', 'view-title', title));

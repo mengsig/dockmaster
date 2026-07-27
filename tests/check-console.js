@@ -297,13 +297,16 @@ function withStubDocument(fn) {
 async function checkEveryOutboundLinkOpensAway() {
   const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
   withStubDocument(() => {
-    // A pull request, an archived review page, and the console's own origin. All
-    // three LEAVE the panel the operator was reading, so none of them may take
+    // A pull request, an archived review page, the console's own origin, and the
+    // review archive's Open control - which is a real link precisely so the tab
+    // comes from the click itself, and 302s on to the annotatable session. All
+    // of them LEAVE the panel the operator was reading, so none of them may take
     // the console's tab with it.
     for (const href of [
       'https://github.com/example-org/demo/pull/1',
       '/review/some-task/',
       'http://127.0.0.1:4877/review/some-task/',
+      '/api/review-open?id=some-task&redirect=1',
     ]) {
       const node = dom.link(href, 'Open')
       equal(node.target, '_blank', `${href} opens in its own tab`)

@@ -247,8 +247,17 @@ function claimOldest(dmHome) {
     // rename() carries the inbox mtime across, not the claim time - the stale
     // rule measures how long THIS CLAIM has sat unacknowledged, so it must be
     // stamped now or an old message is stolen back the instant it is claimed.
-    const now = new Date();
-    fs.utimesSync(claim, now, now);
+    //
+    // A failed stamp costs at most one duplicate delivery of THIS message; a
+    // throw here costs every message after it, because it kills the poller the
+    // dockmaster wakes on. So it is reported and the delivery goes ahead.
+    try {
+      const now = new Date();
+      fs.utimesSync(claim, now, now);
+    } catch (err) {
+      process.stderr.write('console: chat: could not stamp the claim time on '
+        + `${claim} (${err.message}); this message may be delivered twice\n`);
+    }
     const message = readClaimed(claim);
     if (message) return { message, acknowledge: () => fs.renameSync(claim, settled) };
     fs.renameSync(claim, settled);

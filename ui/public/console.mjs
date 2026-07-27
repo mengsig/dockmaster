@@ -166,7 +166,6 @@ function panelContext() {
   return {
     compose,
     ask: postMessage,
-    openReview,
     filter: ui.filter,
     setFilter(id) {
       ui.filter = id;
@@ -342,14 +341,20 @@ const LOG_OPEN = 40;
 
 // A tab left open for days must not grow this without bound: it is a
 // convenience feed of what happened in THIS tab, not the record of the
-// conversation - the transcript on disk is that. Oldest drop first once it's
-// past this, same as the DOM log below.
+// conversation - the transcript on disk is that. Past this the oldest are
+// dropped, from the store and from the archive alike.
 const MESSAGES_KEPT = 2000;
 
+// Two different jobs, and only the second one loses anything. Folding MOVES
+// nodes out of the open log into the archive - still on the page, still
+// readable. Trimming is what enforces MESSAGES_KEPT: without it the archive
+// would hold every node the tab ever rendered while the store behind it had
+// long since dropped them.
 function compactLog() {
   const messages = byId('chat-messages');
   const body = byId('chat-archive-body');
   while (messages.children.length > LOG_OPEN) body.appendChild(messages.firstChild);
+  while (body.children.length > MESSAGES_KEPT - LOG_OPEN) body.removeChild(body.firstChild);
   byId('chat-archive').hidden = body.children.length === 0;
   byId('chat-archive-count').textContent = String(body.children.length);
 }
@@ -480,22 +485,6 @@ async function postMessage(text) {
   // internal vocabulary - never to the server's own sentence.
   if (!response.ok) {
     throw new Error(SEND_REFUSAL[response.status] || `the console answered ${response.status}.`);
-  }
-}
-
-// openReview(href) -> { url } for the lavish session behind this review, or
-// { url: null } on ANY failure - offline, a non-JSON answer, the server's own
-// degrade. This never rejects: the control it feeds always has something to do
-// (open the returned url, or fall back to `href`), never an error to handle.
-async function openReview(href) {
-  const id = href.replace(/^\/review\//, '').replace(/\/+$/, '');
-  try {
-    const response = await fetch(`/api/review-open?id=${encodeURIComponent(id)}`);
-    if (!response.ok) return { url: null };
-    const body = await response.json();
-    return { url: typeof body.url === 'string' ? body.url : null };
-  } catch (err) {
-    return { url: null };
   }
 }
 

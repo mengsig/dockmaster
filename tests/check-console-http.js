@@ -381,17 +381,44 @@ async function checkReviewOpenDegradesForAnUnknownId(port) {
   console.log('ok   opening a review with no session behind it degrades to { url: null }, not a crash')
 }
 
+// What the page's Open link actually hits. It is a real navigation, so the
+// answer has to be a redirect the browser can follow on its own - the operator
+// lands on the review either way, and never on a JSON body. `{ url: null }`
+// would be the bug here: the tab has already opened by the time this answers.
+async function checkTheOpenLinkRedirectsRatherThanAnswering(port) {
+  const res = await request(port, 'GET', '/api/review-open?id=not-a-real-review&redirect=1')
+  equal(res.status, 302, 'the link is answered with a redirect, not a document')
+  equal(res.headers.location, '/review/not-a-real-review/',
+    'and with no session to send it to, it falls back to the raw review page')
+  equal(res.text, '', 'a redirect carries no body for the browser to render')
+
+  // A link the page built without an id is a bug in the page, and saying so is
+  // how it gets found - a 302 to /review// would send the operator nowhere.
+  const missing = await request(port, 'GET', '/api/review-open?redirect=1')
+  equal(missing.status, 400, 'a redirect asked for with no id is refused outright')
+  console.log('ok   the review Open link is answered with a redirect, and degrades to the raw page')
+}
+
 // The route only WORDS what dm-lavish.sh said; the parsing itself is pinned
 // directly against a stand-in for it, so this does not depend on lavish-axi
 // being installed or spend a real session opening one.
 async function checkReviewOpenParsesTheRealScriptsShape() {
   const stubBin = fs.mkdtempSync(path.join(os.tmpdir(), 'dm-lavish-stub-'))
+  const argvFile = path.join(stubBin, 'argv')
   try {
     fs.writeFileSync(path.join(stubBin, 'dm-lavish.sh'), '#!/usr/bin/env bash\n'
+      + `printf '%s\\n' "$*" > ${JSON.stringify(argvFile)}\n`
       + 'printf \'session:\\n  file: /x/change.html\\n  url: "http://127.0.0.1:4387/session/abc123"\\n  status: opened\\n\'\n')
     fs.chmodSync(path.join(stubBin, 'dm-lavish.sh'), 0o755)
     const opened = await live.openReviewSession(stubBin, 'whatever')
     equal(opened.url, 'http://127.0.0.1:4387/session/abc123', 'the session url is parsed off the real output shape')
+
+    // This call runs on the SERVER. The operator's browser is what must show
+    // the session; a tab opened here would land in whatever display the server
+    // process has, which is nobody's screen on a remote box and a stray window
+    // on a local one.
+    equal(fs.readFileSync(argvFile, 'utf8').trim(), 'open whatever --no-open',
+      'the console asks for the session without lavish-axi opening a browser itself')
 
     // dm-lavish.sh's own degrade when lavish-axi is missing: exits 0, says
     // nothing shaped like a session.
@@ -428,6 +455,7 @@ async function main() {
     await checkReviewAssetsAtAnyDepth(port, home)
     await checkReviewFailuresAreWorded(port, home)
     await checkReviewOpenDegradesForAnUnknownId(port)
+    await checkTheOpenLinkRedirectsRatherThanAnswering(port)
     await checkReviewOpenParsesTheRealScriptsShape()
 
     // Every case above ran against ONE process. Had any of them killed it the

@@ -8,30 +8,34 @@
 
 import {
   el, add, lamp, stateCell, meta, link, table, cell, section, head, empty,
-  foldable, segmented, askControl, reviewOpenControl,
+  foldable, segmented, askControl,
   plural, lookup, word, ago, clockTime, hoursSince,
   WORK_STATE, CHECKS, REVIEW_VERDICT, AUTHORITY, KIND, CHECK_STATUS, MODE,
   STAGE_LABEL, STAGE_STATE, SOURCE_WORD, PR_UNREADABLE, TESTS_RESULT,
   CLEANUP_REQUEST, TRASH_REQUEST,
 } from './dom.mjs';
 
+// What a fold is remembered under. One owner for the format: the Tidy panel
+// names the same groups from outside, and a key it spelled itself would fold
+// nothing the day a label changed.
+const foldKey = (view, label) => `${view}:${label}`;
+
 // A group of finished work folds itself away: the count stays on screen, the rows
 // stop crowding the page. `ctx.fold` remembers what the operator opened.
 function foldedSection(ctx, view, label, count, openByDefault) {
-  const key = `${view}:${label}`;
+  const key = foldKey(view, label);
   const { node, body } = foldable(label, count, ctx.fold(key, openByDefault),
     (open) => ctx.setFold(key, open));
   node.classList.add('section');
   return { node, body };
 }
 
-// Every group that holds work which is over. These are the ones "fold the
-// finished groups away" on the Tidy panel acts on, so the control and the
-// defaults cannot drift apart.
-export const FINISHED_GROUPS = [
-  'flight:Recently finished', 'flight:Dropped',
-  'backlog:Landed', 'decisions:Answered', 'reviews:Reviewed',
-];
+// The labels of the groups that hold work which is over. Each is named here
+// rather than at its call site because "fold the finished groups away" on the
+// Tidy panel has to address the very same group - see FINISHED_GROUPS below.
+const LANDED = 'Landed';
+const ANSWERED = 'Answered';
+const REVIEWED = 'Reviewed';
 
 // --- what this panel could not read ------------------------------------------
 
@@ -220,6 +224,20 @@ const LEDGER_GROUPS = [
   ['Not started', ['queued'], true],
   ['Recently finished', ['done'], false],
   ['Dropped', ['dropped'], false],
+];
+
+// Every group that holds work which is over - what "fold the finished groups
+// away" on the Tidy panel acts on. DERIVED, not restated: a group holds
+// finished work exactly when it folds itself away by default, so the in-flight
+// ones come straight off LEDGER_GROUPS and the rest off the labels their own
+// call sites use. A hand-written key here would go on folding the group that
+// used to have that name.
+export const FINISHED_GROUPS = [
+  ...LEDGER_GROUPS.filter(([, , openByDefault]) => !openByDefault)
+    .map(([label]) => foldKey('flight', label)),
+  foldKey('backlog', LANDED),
+  foldKey('decisions', ANSWERED),
+  foldKey('reviews', REVIEWED),
 ];
 
 // The raw states dm-status.sh reports are finer than the operator wants to pick
@@ -469,11 +487,11 @@ export function viewDecisions(state, ctx) {
   add(frag, open);
 
   if (state.decisions.resolved.length === 0) {
-    const done = section('Answered · 0');
+    const done = section(`${ANSWERED} · 0`);
     add(done, el('p', 'empty-note', 'Nothing answered yet.'));
     return add(frag, done);
   }
-  const { node, body } = foldedSection(ctx, 'decisions', 'Answered', state.decisions.resolved.length, false);
+  const { node, body } = foldedSection(ctx, 'decisions', ANSWERED, state.decisions.resolved.length, false);
   add(body, table(['Question', 'Your answer', 'When'], state.decisions.resolved, (d) => add(el('tr'),
     cell('cell-title', el('span', null, d.question)),
     cell(null, el('span', null, d.answer || '—')),
@@ -490,7 +508,7 @@ export function viewBacklog(state, ctx) {
   const groups = [
     ['Under way', state.backlog.in_flight, true],
     ['Queued', state.backlog.queued, true],
-    ['Landed', state.backlog.done, false],
+    [LANDED, state.backlog.done, false],
   ];
   const rowsOf = (rows) => table(['What', 'Repo', 'Waiting on'], rows, (item) => add(el('tr'),
     cell('cell-title', el('span', null, item.title)),
@@ -587,10 +605,10 @@ export function viewReviews(state, ctx) {
       cell('mono nowrap', el('span', null, r.repo || '—')),
       cell('nowrap', stateCell(awaiting ? 'brass' : 'neutral', awaiting ? 'Waiting for you' : 'Reviewed')),
       cell('mono nowrap', el('span', null, ago(r.at))),
-      // Opening tries the annotatable session first - the same surface it was
-      // reviewed in - and falls back to the raw page, honestly, if that is
-      // not available. Never a plain <a>: the destination is not known yet.
-      cell('nowrap', reviewOpenControl(r.href, ctx)));
+      // A REAL link, so opening the tab is the click's own gesture: the server
+      // redirects it to the annotatable session - the same surface it was
+      // reviewed in - or to this row's raw page when there is no session.
+      cell('nowrap', link(r.open_href, 'Open')));
   });
   // Waiting and reviewed are two different jobs: one is a queue, the other an
   // archive. The archive folds away; the queue never does.
@@ -602,7 +620,7 @@ export function viewReviews(state, ctx) {
     add(frag, node);
   }
   if (archived.length > 0) {
-    const { node, body } = foldedSection(ctx, 'reviews', 'Reviewed', archived.length, false);
+    const { node, body } = foldedSection(ctx, 'reviews', REVIEWED, archived.length, false);
     add(body, rowsOf(archived));
     add(frag, node);
   }
@@ -676,7 +694,11 @@ export function viewTidy(state, ctx) {
   const ask = section('Ask the dockmaster');
   add(ask, el('p', 'view-note', 'Each of these writes one request into the conversation. You confirm '
     + 'it first, and you can see exactly what will be sent.'));
-  add(ask, lostHere(state, 'health'));
+  // Both sources this section counts from: the cleanup rows come from health,
+  // the landed-rows request from the backlog. If either failed to read, "Nothing
+  // to clear." below is a guess, so the failure is named here rather than
+  // letting the page imply there is nothing left behind.
+  add(ask, lostHere(state, 'health', 'backlog'));
 
   const requests = [];
   for (const row of state.health.cleanup) {

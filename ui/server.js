@@ -381,19 +381,31 @@ function handle(req, res, cfg, watchers) {
   }
   // Opening the annotatable session runs a dm-* script, the same class of
   // action the fleet sweep behind /api/state already is, so it takes the same
-  // cross-site refusal. It never answers anything but 200: a session that could
-  // not be opened is `{ url: null }`, for the page to fall back on honestly,
-  // not an error for it to handle.
+  // cross-site refusal.
+  //
+  // `redirect=1` is what the page's link actually uses: the browser's own
+  // navigation of a real <a target=_blank>, landing here from the click's own
+  // user activation, then 302-ing on to wherever the session turned out to be
+  // - the session url, or the raw /review/<id>/ page when there is none. A
+  // window opened after an awaited fetch has NO such activation and can be
+  // silently popup-blocked; a redirect from the click itself cannot be. The
+  // plain JSON form (no `redirect`) stays for tests and any other local tool.
   if (req.method === 'GET' && url.pathname === '/api/review-open') {
     const refusal = crossSiteRefusal(req, cfg.port);
     if (refusal) return fail(res, refusal.status, refusal.message);
     const id = url.searchParams.get('id') || '';
-    if (!id) return sendJson(res, 200, { url: null });
+    const redirect = url.searchParams.get('redirect') === '1';
+    const fallback = `/review/${encodeURIComponent(id)}/`;
+    const goTo = (location) => {
+      res.writeHead(302, { location, 'content-length': 0, 'cache-control': 'no-store' });
+      res.end();
+    };
+    if (!id) return redirect ? fail(res, 400, 'missing id') : sendJson(res, 200, { url: null });
     return live.openReviewSession(cfg.bin, id)
-      .then((result) => sendJson(res, 200, result))
+      .then((result) => (redirect ? goTo(result.url || fallback) : sendJson(res, 200, result)))
       .catch((err) => {
         process.stderr.write(`console: /api/review-open: ${err.message}\n`);
-        sendJson(res, 200, { url: null });
+        return redirect ? goTo(fallback) : sendJson(res, 200, { url: null });
       });
   }
   if (req.method === 'GET' && url.pathname === '/api/chat') return serveChat(res, cfg, url, watchers);
