@@ -107,9 +107,12 @@ worktree/branch from meta, communicates only through the task record, and
   `git -C <worktree> diff <base>...HEAD` and the changed files. It must not trust
   the crewmate's summary. Report concrete findings ranked by severity;
   correctness and safety before style.
-- **fix** — hand the findings to the implementing crewmate as one exact
+- **fix** — hand the findings to the crewmate working the branch as one exact
   instruction; it fixes on the same branch and commits. Loop up to `max_rounds`;
-  escalate if findings persist past the cap.
+  escalate if findings persist past the cap. Each round is a fresh continuation
+  crewmate by default, per the respawn-over-resume doctrine (`task-lifecycle`
+  §Recovery) — brief it with the worktree, branch, and the findings, rather than
+  resuming the same agent round after round.
 - **tests** — `bin/dm-test.sh <id>` runs the repo's registered test command in
   the worktree and records the result. Non-zero fails the gate. No registered
   command → it reports a soft skip (never a fabricated pass).

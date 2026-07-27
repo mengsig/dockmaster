@@ -24,7 +24,9 @@ bin/dm-merge.sh rebase <id>
 
 ## Resolve (dispatch a crewmate)
 
-Brief the crewmate (or re-brief the task's existing crewmate) with:
+Brief a fresh continuation crewmate by default (task-lifecycle §Recovery), or
+the task's existing crewmate when its transcript alone holds the needed state,
+with:
 
 - its worktree path and branch, and the base branch to rebase onto;
 - the list of conflicted files from the detect step;

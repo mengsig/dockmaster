@@ -28,7 +28,7 @@ Sort each comment into one of:
 
 ## Loop until green and satisfied
 
-1. Relay each actionable item to the implementing crewmate as one clear
+1. Relay each actionable item to the crewmate working the branch as one clear
    instruction, on the **same branch** (do not open a second branch or task).
 2. The crewmate fixes, commits, and the branch pushes — the PR updates itself.
 3. Re-run the tests gate (`bin/dm-test.sh <id>`) and re-check the PR
@@ -42,7 +42,8 @@ the operator's word — or, under a standing `yolo`, for LOW/MEDIUM-risk green w
 
 ## Rules
 
-- Same branch, same task, same crewmate — this is a continuation, not new work.
+- Same branch, same task — this is a continuation, not new work (the crewmate
+  itself is fresh by default, see task-lifecycle §Recovery).
 - A post-open CI failure is treated like any red gate: fix and re-run, never
   merge around it.
 - Escalate only comments that require a decision the operator owns.
