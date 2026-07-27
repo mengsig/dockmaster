@@ -31,9 +31,8 @@ Read before editing the verify gate or anything that drives a browser.
   `src/pages/Home.tsx`, `app/views/home.erb` and `app.py` and skipped the very
   change that broke the app.
 - **[convention]** `verify` ships in the RIGOROUS tier only. In `default` it
-  fails the pipeline before `pr` for every repo with no app config, and the only
-  escape is a blanket `noRuntimeSurface` override whose routine use turns the
-  gate into a no-op. Add it to `default` once the fleet is configured.
+  fails the pipeline before `pr` for every repo with no app config. Add it to
+  `default` once the fleet is configured.
 - **[invariant]** A `pass` is EVIDENCE, not an assertion, and the gate enforces
   it rather than asking a crewmate to: `flow … pass` refuses without a live app,
   a live browser, an unmoved worktree, and a real PNG named after the flow;

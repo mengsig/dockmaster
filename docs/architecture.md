@@ -28,7 +28,7 @@ prompt context clean while preserving one lifecycle and one toolbelt.
 | global memory | `state/operator.md`, `state/learnings.md`, optional runtime memory | shared |
 | per-repo memory | committed `.dm-knowledge/` notes + private `.dm/` stores | shared |
 | delivery modes | modular **PR pipeline** (ordered gates) per repo | shared |
-| no-mistakes gate | review/test/security gates + optional runner | fresh Agent reviewers |
+| no-mistakes gate | review/test/security gates | fresh Agent reviewers |
 | right-sizing | task shape, review tier, focused context | per-agent model/effort |
 | review surface | lavish-axi | background poll notification |
 | self-update / fleet sync | guarded fast-forward via `bin/` | shared |
@@ -299,13 +299,11 @@ coldstart review → fix → tests → merge-gate review → fix → tests → (
 ```
 
 then a **merge gate**: the operator merges on GitHub, or the dockmaster asks for
-approval and merges (`bin/dm-pr.sh merge`, never red). By default the gates are
-executed by the **dockmaster itself**, driving runtime-native review workers
-while following `pr-workflow`; nothing else runs them.
-`workflows/pr-pipeline.js` is an **optional** deterministic runner for hosts that
-expose its injected workflow API. It is not auto-discovered or wired to a `bin/`
-script. Adding a gate means documenting it in the `pr-workflow` skill and listing
-it in the config array. See `config/README.md` for executor coverage.
+approval and merges (`bin/dm-pr.sh merge`, never red). The gates are executed by
+the **dockmaster itself**, driving runtime-native review workers while following
+`pr-workflow`; nothing else runs them. Adding a gate means documenting it in the
+`pr-workflow` skill and listing it in the config array. See `config/README.md`
+for what reads the config.
 
 **Branch naming:** `<type>/<issue>/<slug>` — `type ∈ {feat,fix,bug,chore,refactor,docs,perf,test}`,
 `issue` = the issue number (or `x` when none), `slug` = a short kebab summary.
@@ -335,7 +333,6 @@ docs/architecture.md     this file
 bin/                     portable helper scripts (repo/worktree/pr/backlog/merge/memory)
 .claude/skills/          the workflow skills
 .dm-knowledge/           this repo's own committed shared-memory notes
-workflows/               optional Workflow runner for the PR pipeline (opt-in)
 config/                  pipeline defaults + per-repo overrides (committed defaults)
 tests/                   lifecycle, runtime, and performance checks
 .github/                 CI workflow (smoke + syntax on ubuntu + macos)
@@ -354,6 +351,7 @@ block — that migration is finished here (#129), and `AGENTS.md` keeps only the
 operating contract plus an index into the notes. Recall still unions the legacy
 block for managed repos that have not migrated, so nothing is stranded.
 
-`state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
-tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `workflows/`, `config/`
-defaults, docs) is the shared distro and ships through this repo's own PR path.
+`state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored.
+The tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `config/`
+defaults, docs) is the shared distro and ships through this repo's own PR
+path.

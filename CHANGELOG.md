@@ -20,6 +20,10 @@ All notable changes to this project are documented here. The format follows
   is otherwise unchanged. The adapter never appeared in a tagged release, so its
   unreleased entries below are withdrawn rather than kept as history.
 
+- **The deterministic PR-pipeline runner** (`workflows/pr-pipeline.js`) and its
+  two keep-honest tests, unusable on this host since 2026-07-22. PR gates run
+  agent-style.
+
 ### Changed
 
 - **The command guard stops refusing ordinary work, and stays dormant** (#143,

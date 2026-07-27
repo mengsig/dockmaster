@@ -147,7 +147,6 @@ docs/architecture.md the design and why it is built this way
 bin/                 the toolbelt; run `bin/dm help` for the full list (`bin/dm <sub>` dispatches to `bin/dm-<sub>.sh`)
 .claude/skills/      the workflow skills
 .dm-knowledge/       this repo's own committed shared-memory notes
-workflows/           optional deterministic PR-pipeline runner
 config/              PR-pipeline defaults and per-repo overrides
 ui/                  the local console served by `bin/dm-ui.sh` (no build step)
 tests/               lifecycle, runtime, and performance checks

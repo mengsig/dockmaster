@@ -1,8 +1,9 @@
 # PR pipeline config
 
 `pr-pipeline.default.json` (and per-repo `pr-pipeline.<repo>.json` overrides)
-declare the PR delivery pipeline as an **ordered list of gates**. Two things read
-this file, and they read different parts of it — so keep every field meaningful:
+declare the PR delivery pipeline as an **ordered list of gates**, read by the
+dockmaster while it drives the pipeline agent-style — so keep every field
+meaningful:
 
 ## Rigor tiers
 
@@ -19,10 +20,10 @@ the `pr-workflow` skill for the selection criteria):
   auto `security` → `pr`. (The CI-wait is not a config gate; it runs in the
   operator-mediated merge tail after the PR opens — see `pr-workflow`.)
 
-## The default executor: the dockmaster (agent-driven)
+## The executor: the dockmaster (agent-driven)
 
-By default the dockmaster runs the pipeline itself, driving each gate with a
-subagent while following `pr-workflow`. It reads:
+The dockmaster runs the pipeline itself, driving each gate with a subagent
+while following `pr-workflow`. It reads:
 
 - the gate **order** (top to bottom), and
 - each review gate's **`pass`** label (`coldstart` | `merge-gate`), which names
@@ -31,56 +32,16 @@ subagent while following `pr-workflow`. It reads:
 It also honors the `pr` gate's **`method`** at the merge-authority step, by
 passing it to `bin/dm-pr.sh merge --method <method>`.
 
-## The optional executor: `workflows/pr-pipeline.js`
-
-Only when the operator opts into hands-off multi-agent orchestration on a host
-that injects the runner's workflow API; nothing auto-discovers it. It reads:
-
-- **`effort`** on `review` / `security` gates — the reasoning effort the RUNNER
-  passes to that gate's workers through its own `agent()` selector. A different
-  executor from the dockmaster's Agent-tool dispatch, where effort is the
-  `crew-<level>` `subagent_type` and choosing it is gated (`task-lifecycle`);
-  this field binds only inside the runner. A host that does not expose the
-  selector carries right-sizing through agent count and prompt scope instead.
-- **`dimensions`** on a `review` gate (rigorous) — an array of lenses
-  (`correctness`, `security`, `concurrency`, `portability`, `tests`); the runner
-  fans out one fresh reviewer per lens with `parallel()` and merges their
-  findings. Absent → a single generalist read.
-- **`voters`** on the `verify-findings` gate (rigorous) — how many skeptics
-  independently try to refute each finding (default 3); a finding survives only
-  if it is not refuted by a majority. Only survivors reach `fix`.
-- **`parallelCapacity`** in runner `args` — current injected reviewer capacity,
-  integer 1..3. The runner batches five review lenses and every skeptic set to
-  this bound; default 3 preserves the six-thread runtime's three reserved slots.
-- **`optional`** on the `verify` gate (rigorous) — the decision comes from
-  `bin/dm-verify.sh gate <id> --json`, which reads the diff and answers in
-  `decision`: `required` = a user-facing surface moved (boot the app and drive
-  it), `not-applicable` = none moved (explicit skip), `undetermined` = could not
-  decide, `unavailable` = a surface moved but the repo has no `app_start_cmd`
-  (never a pass). It exits 0 for all four. The runner cannot exec, so it requires
-  the agent to report that decision and refuses a `passed: true` it does not
-  support. A caller-declared `noRuntimeSurface` is an override
-  that skips the gate without asking. `verify` ships in the rigorous tier ONLY
-  until every managed repo has app config — in `default` it would abort the
-  pipeline for each repo that has none.
-- **`max_rounds`** on a `fix` gate — the fix→re-review loop cap.
-- **`optional`** on the `security` gate (default/fast) — the runner self-computes
-  this by running `bin/dm-pr.sh security-scan --json` itself (same as rigorous
-  `method: "auto"` below) and only reviewing on a hit, so no caller wiring is
-  required. A caller-declared `securitySurface` is an override: if set, the
-  runner reviews directly without re-scanning. **`method: "auto"`** (rigorous)
-  runs `bin/dm-pr.sh security-scan --json` and performs a focused general security
-  review only on a hit. The runner consumes a structured result: any finding or
-  missing capability fails the gate; no-surface is an explicit skip.
-- **`method`** on the `pr` gate — surfaced in the runner's result so the
-  operator-mediated merge step can honor it (the runner never merges).
-
-There is no CI-wait gate in the config. Because every executor opens the PR at
-the terminal `pr` gate and never merges, waiting for CI (`bin/dm-pr.sh
+There is no CI-wait gate in the config: the dockmaster opens the PR at the
+terminal `pr` gate and never merges, so waiting for CI (`bin/dm-pr.sh
 await-checks`) belongs to the operator-mediated merge tail that runs after the
-PR is open — see `pr-workflow` ("Merge authority"). The runner
-still recognizes a stray `await-checks` in a custom config and defers it there
-rather than waiting on a PR it has not opened.
+PR is open — see `pr-workflow` ("Merge authority").
+
+The remaining gate fields — `effort`, `max_rounds`, `dimensions`, `voters`,
+`optional`, and `method` on `verify-findings`/`security` — are contract too;
+`pr-workflow` covers their semantics. In the agent-driven path, `effort` maps
+to the `crew-<level>` subagent_type; choosing it is sized per
+task-lifecycle's ladder.
 
 ## `note`
 
@@ -89,8 +50,3 @@ this file. Nothing executes it.
 
 Adding a gate: document its contract in the `pr-workflow` skill, then add its
 name (and any fields above) to the `gates` array here.
-
-`workflows/pr-pipeline.js`'s built-in `FAST_GATES`/`DEFAULT_GATES`/`RIGOROUS_GATES`
-constants (the fallback used only when a caller passes no `args.gates`) are meant
-to mirror the gate order of the three files above. `node tests/check-gate-drift.js`
-(run in CI) checks the gate-name sequence stays in sync — update both together.

@@ -77,7 +77,7 @@ jobs:
             # cap), so a "docs-only" edit to them can genuinely fail a test.
 
   # Every check that costs no measurable time, in one always-on job. Split out
-  # so a syntax error, a drifted gate list or a broken skill trigger fails in
+  # so a syntax error, a drifted CI graph or a broken skill trigger fails in
   # well under a minute instead of behind a four-minute suite. Runs on every
   # event including a docs-only PR, so the aggregate gate is never vacuous.
   fast:
@@ -112,15 +112,6 @@ jobs:
             echo "checking $f"
             bash -n "$f"
           done
-
-      - name: Check workflows/pr-pipeline.js syntax
-        run: node --check workflows/pr-pipeline.js
-
-      - name: Check pr-pipeline gate lists match config
-        run: node tests/check-gate-drift.js
-
-      - name: Check compatible-host runner gates
-        run: node tests/check-pr-runner.js
 
       # A subcommand whose nonzero exit is an ANSWER must offer --json, or a
       # strict consumer reads the answer as a failure and quietly defaults. This
@@ -170,7 +161,6 @@ jobs:
           bash -n tests/runtime-evidence-dir.sh tests/runtime-performance.sh tests/runtime-smoke.sh tests/runtime-waiter-child.sh
           bash -n tests/smoke.sh tests/smoke-parallel.sh
           node --check tests/check-skill-triggers.js
-          node --check tests/check-pr-runner.js
           node --check tests/check-answer-forms.js
           node --check tests/check-ci-graph.js
           node --check tests/check-console.js
@@ -323,10 +313,6 @@ jobs:
           node-version: '14'
       - name: Check documented minimum Node syntax and tests
         run: |
-          { printf '%s\n' 'export async function __syntax(args, agent, parallel, log) {'; sed 's/^export const meta =/const meta =/' workflows/pr-pipeline.js; printf '%s\n' '}'; } \
-            | node --input-type=module --check
-          node tests/check-gate-drift.js
-          node tests/check-pr-runner.js
           node tests/check-answer-forms.js
           node tests/check-ci-graph.js
           node tests/check-skill-triggers.js
