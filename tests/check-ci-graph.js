@@ -277,11 +277,18 @@ function checkTimeouts(jobs, fail) {
 }
 
 // This file guards nothing while nothing runs it. Deleting the step that
-// invokes it would otherwise be invisible to every check above.
+// invokes it would otherwise be invisible to every check above. Same for the
+// partition check: it is the only thing in CI that proves the shards cover the
+// whole suite, and everything above only pins the workflow's side of that.
 function checkSelfIsInvoked(jobs, fail) {
-  const wanted = '        run: node tests/check-ci-graph.js'
-  if (!jobs.fast || !hasLine(jobs.fast, wanted)) {
-    fail(`the fast job must invoke this check verbatim:\n     ${wanted.trim()}\n     Otherwise deleting the step silently disables every pin in this file.`)
+  const wanted = [
+    '        run: node tests/check-ci-graph.js',
+    '        run: bash tests/smoke.sh --shard-plan',
+  ]
+  for (const line of wanted) {
+    if (!jobs.fast || !hasLine(jobs.fast, line)) {
+      fail(`the fast job must invoke this step verbatim:\n     ${line.trim()}\n     Otherwise deleting it silently disables the check it runs.`)
+    }
   }
 }
 

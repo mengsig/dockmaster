@@ -12,9 +12,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SMOKE="$ROOT/tests/smoke.sh"
 SHARDS="$("$SMOKE" --shards)"
-# Every section must be accounted for by exactly one shard. A shard that dies in
-# top-level setup prints a truncated pass count and no FAIL summary, which reads
-# exactly like success — the section total is what catches it.
+# Every section must be owned by exactly one shard, or a group orphaned by a
+# moved marker simply never runs and every shard is green. Each shard reports
+# how many it owns; these have to add up. (`smoke.sh --shard-plan` proves the
+# same thing statically, which is the form CI's `fast` job runs.)
 EXPECTED_SECTIONS="$(grep -c '^echo "== ' "$SMOKE")"
 
 OUT="$(mktemp -d "${TMPDIR:-/tmp}/dm-smoke-parallel.XXXXXX")"
@@ -23,7 +24,9 @@ trap 'rm -rf "$OUT"' EXIT
 pids=""
 k=1
 while [ "$k" -le "$SHARDS" ]; do
-  ( "$SMOKE" --shard "$k/$SHARDS" > "$OUT/$k.log" 2>&1; printf '%s\n' "$?" > "$OUT/$k.rc" ) &
+  # set +e inside the subshell: under the inherited -e a failing shard exits
+  # before it can record its status, and every failure would read as exit 1.
+  ( set +e; "$SMOKE" --shard "$k/$SHARDS" > "$OUT/$k.log" 2>&1; printf '%s\n' "$?" > "$OUT/$k.rc" ) &
   pids="$pids $!"
   k=$((k + 1))
 done

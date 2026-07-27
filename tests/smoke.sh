@@ -22,43 +22,93 @@ ROOT="${SMOKE_ROOT:-$(cd "$(dirname "$SELF")/.." && pwd)}"
 # --- shards -------------------------------------------------------------------
 # The suite is one linear script over one $DM_HOME: later sections assert on
 # state earlier ones built. So a shard is a CONTIGUOUS group of sections,
-# delimited by the `# shard:split` marker lines further down, and `--shard k/N`
+# delimited by the `# shard:split` marker lines further down, and `--shard k/n`
 # SLICES the file rather than skipping at runtime — a check's body is where the
 # subprocess spawns are, so skipping the assertion alone buys almost nothing.
 # Sections marked `# shard:bootstrap` build fixtures LATER groups need: they run
 # again in every shard after their own, but only the shard that owns them counts
 # their checks, so the shards' pass counts sum to the sequential total.
 # Adding a section needs no bookkeeping — it joins whichever group encloses it.
-if [ "${1:-}" = "--shards" ] || [ "${1:-}" = "--shard" ]; then
-  SHARD_TOTAL=$(grep -c '^# shard:split$' "$SELF" || true)
-  SHARD_TOTAL=$((SHARD_TOTAL + 1))
-fi
-if [ "${1:-}" = "--shards" ]; then printf '%s\n' "$SHARD_TOTAL"; exit 0; fi
-if [ "${1:-}" = "--shard" ]; then
-  SHARD_SPEC="${2:-}"
-  SHARD_K="${SHARD_SPEC%%/*}"; SHARD_N="${SHARD_SPEC##*/}"
-  case "$SHARD_SPEC" in */*) ;; *) echo "usage: smoke.sh --shard <k>/<n>" >&2; exit 2 ;; esac
-  case "$SHARD_K$SHARD_N" in ''|*[!0-9]*) echo "usage: smoke.sh --shard <k>/<n>" >&2; exit 2 ;; esac
-  # The split count is a property of the FILE, so a stale caller (a CI matrix
-  # that was not updated with the markers) must fail loudly, not silently run
-  # the wrong slice or drop sections on the floor.
-  [ "$SHARD_N" = "$SHARD_TOTAL" ] || { echo "smoke.sh: this suite has $SHARD_TOTAL shards, not $SHARD_N" >&2; exit 2; }
-  [ "$SHARD_K" -ge 1 ] && [ "$SHARD_K" -le "$SHARD_TOTAL" ] || { echo "smoke.sh: shard $SHARD_K is outside 1..$SHARD_TOTAL" >&2; exit 2; }
-  SMOKE_SLICE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dm-smoke-slice.XXXXXX")"
-  awk -v K="$SHARD_K" '
-    /^# shard:epilogue$/ { epi = 1 }
+#
+#   --shards          how many shards this file has
+#   --shard k/n       run group k
+#   --shard-plan k/n  print that slice instead of running it
+#   --shard-plan      prove the groups PARTITION the suite (the `fast` CI job)
+shard_usage() { echo "usage: smoke.sh --shard|--shard-plan <k>/<n>" >&2; exit 2; }
+
+# shard_slice <k> -- group k's sections on stdout, wrapped in the prelude and the
+# `# shard:epilogue` tail. `shard_owned_sections` is emitted as a CONSTANT rather
+# than counted at run time: sections inside a conditional skip (the node-less
+# verify block) are still owned, and the partition check has to stay exact.
+shard_slice() {
+  awk -v K="$1" '
+    /^# shard:epilogue$/ { epi = 1; printf "shard_owned_sections=%d\n", owned }
     epi { print; next }
     /^# shard:split$/ { group++; next }
     /^# shard:bootstrap$/ { boot = 1; next }
     /^echo "== / {
       insec = 1; keep = (group == K || (boot && K > group)); own = (group == K); boot = 0
+      if (own) owned++
       if (keep) printf "_shard_sec %d\n", own
     }
     { if (!insec || keep) print }
     BEGIN { group = 1 }
-  ' "$SELF" > "$SMOKE_SLICE_DIR/smoke.sh"
+  ' "$SELF"
+}
+
+case "${1:-}" in
+  --shards|--shard|--shard-plan)
+    SHARD_TOTAL=$(grep -c '^# shard:split$' "$SELF" || true)
+    SHARD_TOTAL=$((SHARD_TOTAL + 1))
+    # Everything after that marker is in EVERY slice, and it is what carries the
+    # verdict (`[ "$fail" -eq 0 ]`). Lose the marker and a red shard exits 0.
+    grep -q '^# shard:epilogue$' "$SELF" \
+      || { echo "smoke.sh: no '# shard:epilogue' marker; the slices would carry no verdict" >&2; exit 2; }
+    ;;
+esac
+
+if [ "${1:-}" = "--shards" ]; then printf '%s\n' "$SHARD_TOTAL"; exit 0; fi
+
+# The groups must PARTITION the suite: every section owned by exactly one shard.
+# A marker moved so a group is orphaned costs nothing at run time — those
+# sections simply never run, and every shard is green.
+if [ "${1:-}" = "--shard-plan" ] && [ -z "${2:-}" ]; then
+  SHARD_ALL_SECTIONS=$(grep -c '^echo "== ' "$SELF" || true)
+  shard_seen=0
+  shard_k=1
+  while [ "$shard_k" -le "$SHARD_TOTAL" ]; do
+    shard_plan="$(shard_slice "$shard_k")"
+    printf '%s\n' "$shard_plan" | grep -qxF '[ "$fail" -eq 0 ]' \
+      || { echo "smoke.sh: shard $shard_k/$SHARD_TOTAL carries no verdict line" >&2; exit 1; }
+    shard_seen=$((shard_seen + $(printf '%s\n' "$shard_plan" | grep -c '^_shard_sec 1$' || true)))
+    shard_k=$((shard_k + 1))
+  done
+  [ "$shard_seen" -eq "$SHARD_ALL_SECTIONS" ] \
+    || { echo "smoke.sh: the $SHARD_TOTAL shards own $shard_seen sections, the suite has $SHARD_ALL_SECTIONS" >&2; exit 1; }
+  echo "ok   $SHARD_TOTAL shards partition all $SHARD_ALL_SECTIONS sections, each carrying its verdict"
+  exit 0
+fi
+
+if [ "${1:-}" = "--shard" ] || [ "${1:-}" = "--shard-plan" ]; then
+  SHARD_SPEC="${2:-}"
+  case "$SHARD_SPEC" in */*) ;; *) shard_usage ;; esac
+  SHARD_K="${SHARD_SPEC%%/*}"; SHARD_N="${SHARD_SPEC#*/}"
+  # Each half on its own, so `1/2/6` (n = "2/6") and `/6` (k = "") are refused
+  # here instead of reaching the range test as a bare-word integer error.
+  case "$SHARD_K" in ''|*[!0-9]*) shard_usage ;; esac
+  case "$SHARD_N" in ''|*[!0-9]*) shard_usage ;; esac
+  # The split count is a property of the FILE, so a stale caller (a CI matrix
+  # that was not updated with the markers) must fail loudly, not silently run
+  # the wrong slice or drop sections on the floor.
+  [ "$SHARD_N" = "$SHARD_TOTAL" ] || { echo "smoke.sh: this suite has $SHARD_TOTAL shards, not $SHARD_N" >&2; exit 2; }
+  [ "$SHARD_K" -le "$SHARD_TOTAL" ] && [ "$SHARD_K" -ge 1 ] || { echo "smoke.sh: shard $SHARD_K is outside 1..$SHARD_TOTAL" >&2; exit 2; }
+  if [ "${1:-}" = "--shard-plan" ]; then shard_slice "$SHARD_K"; exit 0; fi
+  SMOKE_SLICE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dm-smoke-slice.XXXXXX")"
+  shard_slice "$SHARD_K" > "$SMOKE_SLICE_DIR/smoke.sh"
   export SMOKE_ROOT="$ROOT" SMOKE_SLICE_DIR SMOKE_SHARD="$SHARD_K/$SHARD_TOTAL"
-  exec bash "$SMOKE_SLICE_DIR/smoke.sh"
+  # $BASH, not a PATH lookup: on macOS the caller is /bin/bash 3.2 while `bash`
+  # resolves to Homebrew 5, so the slice would silently stop testing 3.2.
+  exec "${BASH:-bash}" "$SMOKE_SLICE_DIR/smoke.sh"
 fi
 
 # Canonicalize the temp root so DM_HOME and every path derived from it are
@@ -74,8 +124,10 @@ pass=0; fail=0
 # A shard runs the bootstrap sections it does not own for their side effects
 # only: their passes belong to the owning shard's count, but a FAILURE there is
 # real and is reported by whichever shard hits it.
-shard_owned=1; shard_sections=0
-_shard_sec() { shard_owned="$1"; [ "$1" = 0 ] || shard_sections=$((shard_sections + 1)); }
+# shard_owned_sections is overwritten by a constant the slicer emits; 0 here is
+# the sequential run, which prints a summary that does not mention sections.
+shard_owned=1; shard_owned_sections=0
+_shard_sec() { shard_owned="$1"; }
 ok()   { [ "$shard_owned" = 1 ] || return 0; pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
@@ -5078,6 +5130,10 @@ check "up boots the app"                 'vup vrf1 >/dev/null 2>&1'
 VPORT="$(b dm-task.sh get vrf1 verify_port)"
 VDIR="$DM_HOME/data/vrf1/verify"
 check "the port is in the per-task range" '[ "$VPORT" -ge 8600 ] && [ "$VPORT" -le 8999 ]'
+# derived_app_port mirrors dm-verify.sh's formula and the squatter checks below
+# hang on it, so the mirror has to be pinned to the real thing. Nothing else was
+# listening in that range here, so the boot got its derived port outright.
+check "the boot used the derived port"    '[ "$VPORT" = "$(derived_app_port vrf1)" ]'
 check "app state is recorded up"          '[ "$(b dm-task.sh get vrf1 verify_app_state)" = "up" ]'
 [ -s "$VDIR/app.log" ] && printf '       fixture app.log: %s\n' "$(head -c 300 "$VDIR/app.log" | tr '\n' ' ')"
 check "the app really listens"            'node -e "require(\"net\").connect($VPORT,\"127.0.0.1\").on(\"connect\",function(){process.exit(0)}).on(\"error\",function(){process.exit(1)})"'
@@ -5459,7 +5515,7 @@ while [ "$VCLRWAIT" -lt 10 ] && node -e "require('net').connect($VCLRPORT,'127.0
   VCLRWAIT=$((VCLRWAIT+1)); sleep 1
 done
 squat_port "$VCLRPORT" 20
-check "the foreign listener really took the port" 'squat_bound'
+check "the squatter really took the app's old port" 'squat_bound'
 VCLR_RC=0; VCLR="$("$V" report vrf1 2>&1)" || VCLR_RC=$?
 check "a foreign listener is not the app"       '[ "$VCLR_RC" = 2 ]'
 check "the refusal names the ownership proof"   'grep -q "no longer proves it is the instance" <<<"$VCLR"'
@@ -5881,10 +5937,10 @@ check "console http checks pass" 'node "$ROOT/tests/check-console-http.js" >/dev
 # shard:epilogue
 echo
 if [ -n "${SMOKE_SHARD:-}" ]; then
-  # The section count is the shard's own proof it ran to the end: a shard that
-  # dies in top-level setup prints a truncated pass count, which reads exactly
-  # like success. tests/smoke-parallel.sh checks the counts sum.
-  echo "smoke[$SMOKE_SHARD]: $pass passed, $fail failed, $shard_sections sections"
+  # How many sections this slice OWNS, so tests/smoke-parallel.sh can check the
+  # shards partition the suite. Reaching this line at all is the separate proof
+  # the shard ran to the end: a shard that dies earlier prints no summary.
+  echo "smoke[$SMOKE_SHARD]: $pass passed, $fail failed, $shard_owned_sections sections"
 else
   echo "smoke: $pass passed, $fail failed"
 fi

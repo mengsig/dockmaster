@@ -88,9 +88,9 @@ jobs:
       # left the dispatcher unchecked by the one job that runs unconditionally.
       - name: Check for banned bash-4 constructs in bin/
         run: |
-          if grep -REn 'mapfile|readarray|declare -A|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|&>>' bin/*.sh bin/dm \
+          if grep -REn 'mapfile|readarray|declare -A|\$\{[A-Za-z_][A-Za-z0-9_]*(\^\^|,,)|&>>' bin/*.sh bin/dm tests/*.sh \
               | grep -vE ':[0-9]+:[[:space:]]*#'; then
-            echo "banned bash-4 construct found in bin/ (see above)"
+            echo "banned bash-4 construct found in bin/ or tests/ (see above)"
             exit 1
           fi
 
@@ -122,6 +122,12 @@ jobs:
       # itself green. Pin the job graph's shape here, where it always runs.
       - name: Check CI job graph has not drifted
         run: node tests/check-ci-graph.js
+
+      # The shards must PARTITION the suite. smoke-parallel.sh proves that at
+      # run time and nothing proved it in CI, so a group orphaned by a moved
+      # marker would just not run, green on every leg. Slices without running.
+      - name: Check the smoke shards partition the suite
+        run: bash tests/smoke.sh --shard-plan
 
       - name: Check skill/trigger coverage
         run: node tests/check-skill-triggers.js

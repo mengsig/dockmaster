@@ -95,11 +95,14 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   `true`), but that is reasoning, not evidence. The first push-to-main run must
   show `smoke-linux`, `smoke-bash32`, `macos` and `macos-full` all RUNNING.
 - **[pitfall]** `smoke-bash32` is now the critical path and it pulls `bash:3.2`
-  from Docker Hub unauthenticated. An anonymous-pull rate limit would fail the
-  job — loudly, not silently. If that starts happening, mirror the image to
-  GHCR rather than dropping the leg. The tag (not a digest) is deliberate: the
-  image is rebuilt on a current Alpine, and the job asserts `version 3.2`
-  itself, so a bad rebuild fails instead of rotting silently.
+  from Docker Hub unauthenticated — now SIX times per run, once per shard leg,
+  which is six times closer to the anonymous-pull limit than the single pull
+  this note was written for. A limit would fail the job loudly, not silently. If
+  that starts happening, mirror the image to GHCR rather than dropping the leg;
+  a shared pull-and-save step feeding the legs is the other option. The tag (not
+  a digest) is deliberate: the image is rebuilt on a current Alpine, and the job
+  asserts `version 3.2` itself, so a bad rebuild fails instead of rotting
+  silently.
 - **[decision]** macOS keeps the coverage nothing else can give (BSD userland,
   the `/var -> /private/var` symlinked tmpdir, macOS lock/process semantics) but
   is off the PR critical path: it was 100% of wall clock, 9m07s of runtime plus
@@ -125,8 +128,12 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   so only the newest run is what any consumer sees. Do not chase it as a red.
 - **[decision]** The suite IS sharded — six contiguous groups, marked in
   `tests/smoke.sh` by `# shard:split` lines, run by `--shard k/n` and by
-  `tests/smoke-parallel.sh` locally. `--shard` SLICES the file (awk: prelude +
-  the group's sections + the `# shard:epilogue` tail) and execs the slice; only
+  `tests/smoke-parallel.sh` locally. `--shard-plan` (no spec) proves the groups
+  PARTITION the suite without running anything and is what the `fast` job runs;
+  `--shard-plan k/n` prints one slice. Both refuse if the `# shard:epilogue`
+  marker is gone — the tail after it carries `[ "$fail" -eq 0 ]`, so a slice
+  without it would exit 0 however red it was. `--shard` SLICES the file (awk:
+  prelude + the group's sections + that tail) and execs the slice; only
   32% of the run is inside `check` bodies, so skipping the assertion while still
   running the section buys almost nothing — the section itself has to go.
 - **[decision]** The groups are CONTIGUOUS because the suite is one linear script
@@ -153,6 +160,10 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   is mostly readiness timeouts, and it cannot be split further without breaking
   the one-app-one-task narrative those sections share. Two concurrent full
   parallel runs (12 shards at once): both green, 57 s.
+- **[pitfall]** Sharding trades BILLED time for wall clock: a code PR went from 2
+  heavy jobs to 12, each paying its own checkout (and, on `smoke-bash32`, its own
+  image pull and apk install). The suite's own work is unchanged, the per-leg
+  overhead is not. Nobody is waiting on it, but the invoice is bigger.
 - **[decision]** Sharding also removes a SUPERLINEAR cost, not just a linear one:
   `dm-status.sh` walks every task, so it slowed from 0.6 s early in the run to
   ~9 s late in it. Fewer tasks per shard's `$DM_HOME` is why merging two groups
