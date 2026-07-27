@@ -27,7 +27,9 @@
 #      when and why
 #   4. close the PR (reversible: a closed PR can be reopened)
 #   5. remove the local copy under the recorded authority — dm-worktree.sh parks
-#      the discarded head at refs/dm-discarded/<id>/<sha> in the clone
+#      the discarded head at refs/dm-discarded/<id>/<sha> in the clone, where
+#      <id> is the SANITIZED id component (dm_ref_component: an id may legally
+#      hold characters git refuses in a ref name)
 #   6. read the recovery verdict out of that ref NAMESPACE, never out of the
 #      pre-removal snapshot: the namespace is what a recovery would actually use
 #   7. resolve the backlog row, archive the records
@@ -74,6 +76,23 @@ backlog_has_row() {
   local doc
   doc="$("$BIN_DIR/dm-backlog.sh" list --json)" || return 2
   printf '%s' "$doc" | jq -e --arg id "$1" 'any(.items[]; .id==$id)' >/dev/null
+}
+
+# admin_head <clone-dir> <id> <recorded-path> -> the head git's admin record still
+# holds for this task's worktree, or empty. Derived managed path first (canonical
+# by construction), the stored path only as a fallback — a record written before
+# DM_HOME was canonicalized holds a symlinked path git never string-matches.
+# Porcelain reports an unborn or corrupt HEAD as all-zeros, which names no commit;
+# park_discarded_head filters exactly that, and this second copy of the lookup
+# must not diverge from it.
+admin_head() {
+  local h
+  h="$(dm_admin_worktree_head "$1" "$DM_WT/$2")"
+  [ -n "$h" ] || h="$(dm_admin_worktree_head "$1" "$3")"
+  case "$h" in
+    ''|*[!0]*) printf '%s' "$h" ;;
+    *) dm_warn "git reports an unborn or unresolvable HEAD ($h) for $2's local copy; there is no commit behind it" ;;
+  esac
 }
 
 # parked_refs <clone-dir> <id> -> "<sha> <refname>", one line per recovery ref
@@ -209,15 +228,36 @@ if [ "$resume" -eq 1 ]; then
   untracked_count="$(dm_meta_get "$id" trashed_untracked)"; [ -n "$untracked_count" ] || untracked_count=undetermined
   landed="$(dm_meta_get "$id" trashed_landed)"; [ -n "$landed" ] || landed=undetermined
   trashed_by="$(dm_meta_get "$id" trashed_by)"; [ -n "$trashed_by" ] || trashed_by=unknown
-  # `worktree` was cleared by the removal, so the recorded branch is the only
-  # thing left that says whether there ever was a local copy: it is `none` only
-  # for a task that never had one.
-  [ "$branch" = none ] || worktree_result=removed-earlier
-  case "$(dm_meta_get "$id" pr_state)" in
-    '') : ;;
-    CLOSED) pr_action=already-closed ;;
-    *) [ -z "$pr" ] || pr_action=recorded-open ;;
-  esac
+  # `worktree` was cleared by the removal, so this recorded fact is what says
+  # whether there ever was a local copy. A record from before this field existed
+  # falls back to the branch name, which is `none` only for a task that had none.
+  had_worktree="$(dm_meta_get "$id" trashed_had_worktree)"
+  if [ -z "$had_worktree" ]; then
+    if [ "$branch" = none ]; then had_worktree=0; else had_worktree=1; fi
+  fi
+  [ "$had_worktree" -eq 0 ] || worktree_result=removed-earlier
+  # One live re-check before reporting. Between the discard and this resume the PR
+  # can have been reopened or even merged, and archiving the task as
+  # `already-closed` on a stale record would file a state that is no longer true.
+  # This never CLOSES anything: the authority to do that belonged to the run that
+  # discarded the work, so a PR found open is reported, loudly, with the command
+  # that closes it.
+  if [ -n "$pr" ]; then
+    pr_live=0
+    if dm_should_refresh_pr_state "$id"; then
+      if "$BIN_DIR/dm-pr.sh" check "$id" >/dev/null 2>&1; then pr_live=1; fi
+    fi
+    case "$(dm_meta_get "$id" pr_state)" in
+      MERGED)
+        pr_action=MERGED
+        dm_warn "$id's PR ($pr) is MERGED — its work landed AFTER the discard was recorded. This resume only finishes the bookkeeping; if the landed change must go, that is a revert (rollback skill)." ;;
+      CLOSED)
+        if [ "$pr_live" -eq 1 ]; then pr_action=already-closed; else pr_action=closed-unconfirmed; fi ;;
+      *)
+        pr_action=STILL-OPEN
+        dm_warn "$id was discarded but its PR ($pr) is not closed, so abandoned work is still open for merge. This resume does not close PRs — close it with: dm-pr.sh close $id --reason $(dm_squote "trashed: $reason")" ;;
+    esac
+  fi
   printf 'resuming %s: its local copy is already gone, only the backlog row and the records are left\n' "$id" >&2
 else
   # --- the open-PR guard ------------------------------------------------------
@@ -261,8 +301,7 @@ else
     # commit": the clone's admin record still names the head and the object is
     # still there. dm-worktree.sh parks from the same fallback.
     if [ -z "$head" ] && [ -n "$clone_dir" ]; then
-      head="$(dm_admin_worktree_head "$clone_dir" "$DM_WT/$id")"
-      [ -n "$head" ] || head="$(dm_admin_worktree_head "$clone_dir" "$wt")"
+      head="$(admin_head "$clone_dir" "$id" "$wt")"
       [ -z "$head" ] \
         || dm_warn "cannot read HEAD inside $id's local copy; using the head git's own admin record still holds ($head)"
     fi
@@ -284,14 +323,16 @@ else
     # Recorded but already absent: the interrupted-cleanup shape. The directory is
     # gone, but git's admin record still names its head — and the removal parks
     # that head, so reading it here is what lets the summary report the work as
-    # recoverable instead of silently under-claiming. Same lookup ORDER as
-    # dm-worktree.sh's own: the derived managed path first (canonical by
-    # construction), the stored path only as a fallback (a record written before
-    # DM_HOME was canonicalized holds a symlinked path git never string-matches).
+    # recoverable instead of silently under-claiming.
+    #
+    # Nothing about the TREE can be read, though. Leaving the dirty counters at
+    # their `none` initializers would print a definite "nothing uncommitted was
+    # lost" about a directory this run never saw — the exact all-clear the
+    # undetermined value exists for.
     branch=unknown; landed=undetermined
+    tracked=undetermined; untracked_count=undetermined
     if [ -n "$clone_dir" ]; then
-      head="$(dm_admin_worktree_head "$clone_dir" "$DM_WT/$id")"
-      [ -n "$head" ] || head="$(dm_admin_worktree_head "$clone_dir" "$wt")"
+      head="$(admin_head "$clone_dir" "$id" "$wt")"
       [ -n "$head" ] || head=none
     fi
   fi
@@ -313,6 +354,12 @@ else
   dm_meta_set "$id" trashed_branch "$branch"
   dm_meta_set "$id" trashed_head "$head"
   dm_meta_set "$id" trashed_landed "$landed"
+  # Recorded as a FACT rather than inferred later from the branch name: the
+  # removal clears `worktree`, so after it there is nothing else left that
+  # distinguishes "its local copy was removed" from "it never had one" — and
+  # that distinction decides whether an empty recovery namespace is an all-clear.
+  if [ -n "$wt" ]; then had_worktree=1; else had_worktree=0; fi
+  dm_meta_set "$id" trashed_had_worktree "$had_worktree"
   # A non-terminal verb, appended before the destruction. `dm-task.sh state` reads
   # an unknown verb through its fallback as `working`, which is exactly right if
   # this flow dies next: the local copy is still there and its work still has not
@@ -369,12 +416,6 @@ The task still reconciles as live and the trash intent is on its record. Fix the
   fi
 fi
 
-# A recorded `branch` of `none` is only ever written for a task that never had a
-# local copy, so it survives the removal clearing `worktree` and is the signal a
-# resumed run can still trust.
-had_worktree=1
-[ "$branch" != none ] || had_worktree=0
-
 # --- the recovery verdict, read out of the ref namespace ---------------------
 # dm-worktree.sh parks the discarded head, WARNING rather than failing when it
 # cannot, so what actually exists is the only trustworthy source. Every ref found
@@ -388,24 +429,28 @@ if [ "$head" != none ] && [ -n "$parked_list" ]; then
   head_ref="$(printf '%s\n' "$parked_list" | awk -v h="$head" '$1 == h && !f { print $2; f = 1 }')"
 fi
 
+# A ref under this id's namespace is only THIS task's work if a head ties it
+# there. Task ids are REUSABLE and refs/dm-discarded/* is keyed by sha precisely
+# so an earlier discard survives the reuse — so with no head to match against,
+# an inherited ref says nothing about this run, and naming it would resurrect
+# someone else's commit while the one actually at risk goes unmentioned.
 recoverable=""; recover_cmd=""
 if [ -n "$head_ref" ]; then
   recoverable="$head_ref"
   recover_cmd="git -C $(dm_squote "$clone_dir") branch recovered-$(dm_ref_component "$id") $head"
 elif [ "$landed" = landed ]; then
   recoverable=already-in-base
-elif [ "$parked_count" -eq 1 ]; then
+elif [ "$head" != none ] && [ "$parked_count" -eq 1 ]; then
   # A ref exists but not for the head we snapshotted: the admin record was
   # already pruned, or the removal parked a commit made after the snapshot.
   # Report the ref that EXISTS, and say it is not the head we recorded.
   parked_sha="${parked_list%% *}"
   recoverable="${parked_list#* }"
   recover_cmd="git -C $(dm_squote "$clone_dir") branch recovered-$(dm_ref_component "$id") $parked_sha"
-  [ "$head" = none ] \
-    || dm_warn "$id's recovery ref holds $parked_sha, not the head this run recorded ($head); the work was preserved, but as a different commit"
-elif [ "$parked_count" -gt 1 ]; then
+  dm_warn "$id's recovery ref holds $parked_sha, not the head this run recorded ($head); the work was preserved, but as a different commit"
+elif [ "$head" != none ] && [ "$parked_count" -gt 1 ]; then
   recoverable=parked-refs
-  dm_warn "$id has $parked_count recovery refs and none matches the head this run recorded (${head}); ids are reusable, so inspect the parked_ref lines before recovering"
+  dm_warn "$id has $parked_count recovery refs and none matches the head this run recorded ($head); ids are reusable, so inspect the parked_ref lines before recovering"
 elif [ "$had_worktree" -eq 0 ]; then
   recoverable=nothing-committed
 elif [ -z "$clone_dir" ]; then
@@ -422,16 +467,24 @@ else
   # A local copy existed but its head could never be determined. Never an
   # all-clear: `nothing-committed` is reserved for a task that never had one.
   recoverable=UNDETERMINED
-  dm_warn "$id had a local copy whose head could not be determined and no recovery ref exists; if it held commits, they are reachable only until the clone is garbage-collected"
+  undet_note="$id had a local copy whose head could not be determined, so nothing here can name what it held; if it held commits, they are reachable only until the clone is garbage-collected"
+  [ "$parked_count" -eq 0 ] \
+    || undet_note="$undet_note. The $parked_count parked_ref line(s) below belong to an EARLIER discard of this reusable id, not to this one — do not read them as this task's work"
+  dm_warn "$undet_note"
 fi
 
 # Uncommitted and untracked files are the one thing this flow never keeps, so the
 # summary must not imply loss where there was nothing to lose — nor hide it where
 # there was. DISCARDED means gone for good; undetermined means git could not be
 # read and something MAY have been lost with it.
+# The `none/none` pair is the never-had-a-local-copy shape, so it is gated on
+# that fact rather than trusted on its own: an initializer that survived a branch
+# which could not read the tree must not print as a clean bill of health.
 case "$tracked/$untracked_count" in
   undetermined/*|*/undetermined) uncommitted=undetermined ;;
-  clean/0|none/none)             uncommitted=none ;;
+  clean/0)                       uncommitted=none ;;
+  none/none)
+    if [ "$had_worktree" -eq 0 ]; then uncommitted=none; else uncommitted=undetermined; fi ;;
   *)                             uncommitted=DISCARDED ;;
 esac
 

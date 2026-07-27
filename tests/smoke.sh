@@ -1849,6 +1849,54 @@ check "the cached sweep line is unchanged, to the byte" \
 check "the missing-clone sweep line is unchanged, to the byte" \
   'grep -qxF "  sweep-noclone  (repo unregistered or clone missing: sweepnoclone — skipped)  https://github.com/o/r/pull/9" <<<"$SWEEP2"'
 
+echo "== pr-sweep: the cache write-back never clobbers, never aborts =="
+# The ONLINE write-back is where two races meet, and both were untested: between
+# the enumeration and the write, (1) another command can establish a TERMINAL PR
+# state that this pre-close snapshot would overwrite, and (2) the task can be
+# archived out from under it, which used to abort the whole sweep — a live path,
+# since the console refresh runs it. The stub creates each race deterministically
+# by acting on the record WHILE it answers.
+b dm-repo.sh add sweepguard "$TMP/origin.git" --mode pipeline --no-memory >/dev/null 2>&1
+git -C "$DM_HOME/repos/sweepguard" remote set-url origin o/r.git
+b dm-task.sh new sweep-race-closed  --kind ship --repo sweepguard >/dev/null
+b dm-task.sh new sweep-race-archive --kind ship --repo sweepguard >/dev/null
+( . "$ROOT/bin/dm-lib.sh"
+  dm_meta_set sweep-race-closed  pr "https://github.com/o/r/pull/51"
+  dm_meta_set sweep-race-closed  pr_state OPEN
+  dm_meta_set sweep-race-archive pr "https://github.com/o/r/pull/52"
+  dm_meta_set sweep-race-archive pr_state OPEN ) >/dev/null 2>&1
+SWGSTUB="$TMP/sweep-guard-stub"; mkdir -p "$SWGSTUB"
+cat > "$SWGSTUB/gh" <<STUB
+#!/usr/bin/env bash
+# Answers OPEN for both PRs, but first does what a concurrent command would:
+# pull/51's task gets closed, pull/52's task gets archived.
+case "\$*" in
+  *number=51*)
+    ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set sweep-race-closed pr_state CLOSED ) >/dev/null 2>&1 ;;
+  *number=52*)
+    mkdir -p "$DM_HOME/state/archive"
+    mv "$DM_HOME/state/tasks/sweep-race-archive.meta" "$DM_HOME/state/archive/sweep-race-archive.meta"
+    mv "$DM_HOME/state/tasks/sweep-race-archive.status" "$DM_HOME/state/archive/sweep-race-archive.status" ;;
+esac
+cat <<'JSON'
+{"data":{"repository":{"pullRequest":{"merged":false,"state":"OPEN",
+ "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]},
+ "reviews":{"nodes":[],"pageInfo":{"hasNextPage":false}},
+ "headRefOid":"abc123","title":"race","createdAt":"2026-01-01T00:00:00Z"}}}}
+JSON
+STUB
+chmod +x "$SWGSTUB/gh"
+SWGRC=0
+SWGOUT="$(PATH="$SWGSTUB:$NOAXI_PATH" b dm-pr.sh sweep 2>&1)" || SWGRC=$?
+check "the sweep survives a task archived mid-walk"   '[ "$SWGRC" -eq 0 ]'
+check "and still reports the rest of the fleet"       'grep -q "open PR(s)" <<<"$SWGOUT"'
+check "a terminal CLOSED is not downgraded to OPEN" \
+  '[ "$(b dm-task.sh get sweep-race-closed pr_state)" = "CLOSED" ]'
+check "the vanished task's write-back is named, not swallowed" \
+  'grep -q "could not cache sweep-race-archive" <<<"$SWGOUT"'
+check "no archived record was resurrected as active" \
+  '[ ! -f "$DM_HOME/state/tasks/sweep-race-archive.meta" ]'
+
 echo "== pr-sweep: status surfaces the open-PRs section (#26) =="
 STATUS_PR="$(b dm-status.sh 2>&1 || true)"
 check "status shows the open-PRs section"  'grep -q "OPEN PRs" <<<"$STATUS_PR"'
@@ -6109,6 +6157,62 @@ check "the commit survives an aggressive gc" \
   'git -C "$DM_HOME/repos/demo" gc --prune=now --quiet 2>/dev/null; \
    git -C "$DM_HOME/repos/demo" cat-file -e "$TRADMHEAD^{commit}"'
 
+# --- a REUSED id must never inherit an earlier discard's commit --------------
+# refs/dm-discarded/* is keyed by sha exactly so reusing an id cannot clobber the
+# first discard. That means the namespace can hold refs from a PREVIOUS task of
+# the same name, and with no head to tie a ref to this run, naming one would hand
+# the operator someone else's commit while the one actually at risk goes
+# unmentioned. Both shapes below were reproduced.
+TRRWT="$(trash_task tr-reuse)"
+TRRSHA1="$(git -C "$TRRWT" rev-parse HEAD)"
+b dm-trash.sh tr-reuse --reason "first discard" >/dev/null 2>&1
+check "the first discard of a reusable id is parked" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/tr-reuse/$TRRSHA1" || true)" = "$TRRSHA1" ]'
+# Second task, same id, never dispatched: nothing was built, so nothing can be
+# recoverable — least of all the previous task's commit.
+b dm-task.sh new tr-reuse --kind ship --repo demo --title "reused id" >/dev/null
+TRREUSE="$(b dm-trash.sh tr-reuse --reason "nothing built this time" 2>/dev/null)"
+check "a reused id with nothing built reports nothing-committed" \
+  'grep -qx "committed_work=nothing-committed" <<<"$TRREUSE"'
+check "it never names the earlier discard as this task's work" \
+  '! grep -q "committed_work=refs/dm-discarded/tr-reuse/$TRRSHA1" <<<"$TRREUSE" \
+   && ! grep -q "^recover_cmd=" <<<"$TRREUSE"'
+check "the inherited ref is still LISTED, just not claimed" \
+  'grep -qx "parked_ref=$TRRSHA1 refs/dm-discarded/tr-reuse/$TRRSHA1" <<<"$TRREUSE"'
+
+# Same reuse, but the second task DID build and its head cannot be read: the
+# verdict must be UNDETERMINED and must not offer the earlier sha as the rescue.
+TRR2WT="$(trash_task tr-reuse2)"
+TRR2SHA1="$(git -C "$TRR2WT" rev-parse HEAD)"
+b dm-trash.sh tr-reuse2 --reason "first discard" >/dev/null 2>&1
+TRR2WT2="$(trash_task tr-reuse2)"
+TRR2SHA2="$(git -C "$TRR2WT2" rev-parse HEAD)"
+rm -f "$TRR2WT2/.git"
+rm -rf "$DM_HOME/repos/demo/.git/worktrees/tr-reuse2"
+TRREUSE2="$(b dm-trash.sh tr-reuse2 --reason "second discard" 2>"$TMP/tr-reuse2.err")"
+check "a reused id with an unreadable head is UNDETERMINED" \
+  'grep -qx "committed_work=UNDETERMINED" <<<"$TRREUSE2"'
+check "it offers no rescue command at all" '! grep -q "^recover_cmd=" <<<"$TRREUSE2"'
+check "and never presents the earlier sha as this run's work" \
+  '! grep -q "committed_work=.*$TRR2SHA1" <<<"$TRREUSE2"'
+check "the warning says the refs found are an earlier discard's" \
+  'grep -q "EARLIER discard of this reusable id" "$TMP/tr-reuse2.err"'
+check "the two discards are genuinely different commits" '[ "$TRR2SHA1" != "$TRR2SHA2" ]'
+
+# --- a directory this run never saw is not a clean bill of health ------------
+# The vanished-local-copy branch can read nothing about the TREE, so reporting
+# uncommitted=none there would be a definite all-clear over work that may well
+# have been dirty.
+TRGDWT="$(trash_task tr-ghost-dirty dirty)"
+rm -rf "$TRGDWT"
+TRGDIRTY="$(b dm-trash.sh tr-ghost-dirty --reason "worker died" 2>/dev/null)"
+check "a vanished local copy never reports uncommitted=none" \
+  '! grep -qx "uncommitted=none" <<<"$TRGDIRTY"'
+check "it reports the tree as undetermined, in every field" \
+  'grep -qx "uncommitted=undetermined" <<<"$TRGDIRTY" \
+   && grep -qx "uncommitted_tracked=undetermined" <<<"$TRGDIRTY" \
+   && grep -qx "untracked_paths=undetermined" <<<"$TRGDIRTY"'
+
 # The worker signal is reported, never acted on: stopping an agent is the
 # session's job, and this command cannot do it.
 TRWKWT="$(trash_task tr-worker)"
@@ -6376,6 +6480,45 @@ check "closing an already-closed PR exits 0 and says so" \
 check "and it issues no close mutation for it"     '! grep -q "PATCH" "$TRSTUB/calls"'
 check "close refuses a reason that would be read as a file" \
   '! PATH="$TRSTUB:$NOAXI_PATH" b dm-pr.sh close tr-pr-again --reason "@/etc/passwd" >/dev/null 2>&1'
+# A PR can be REOPENED (or even merged) between the discard and a resume, so the
+# resume re-checks rather than filing the recorded state. It still never closes
+# anything: that authority belonged to the run that discarded the work.
+tr_stub_pr 45 tr-pr-resume
+pr_trash_task tr-pr-resume 45 >/dev/null
+mkdir -p "$DM_HOME/state/archive"
+mv "$DM_HOME/state/archive" "$TMP/tr-pr-resume-aside"
+printf 'not a directory\n' > "$DM_HOME/state/archive"
+PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-resume --reason "superseded" --close-pr >/dev/null 2>&1 || true
+rm -f "$DM_HOME/state/archive"
+mv "$TMP/tr-pr-resume-aside" "$DM_HOME/state/archive"
+check "the killed trash had closed the PR before it died" \
+  '[ "$(b dm-task.sh get tr-pr-resume pr_state)" = "CLOSED" ]'
+tr_stub_pr 45 tr-pr-resume            # reopened on GitHub
+: > "$TRSTUB/calls"
+TRPRRES="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-resume --reason "superseded" 2>"$TMP/tr-pr-resume.err")"
+check "a resume re-checks the PR instead of trusting the record" \
+  'grep -qx "pr=STILL-OPEN" <<<"$TRPRRES" && ! grep -q "already-closed" <<<"$TRPRRES"'
+check "it names the command that closes it, and closes nothing itself" \
+  'grep -q "dm-pr.sh close tr-pr-resume" "$TMP/tr-pr-resume.err" \
+   && ! grep -q "PATCH /repos/o/r/pulls/45" "$TRSTUB/calls"'
+check "the resume still finishes the bookkeeping"  'grep -qx "records=archived" <<<"$TRPRRES"'
+# The same window can end in a MERGE, which must be labelled as one rather than
+# read as just "not closed".
+tr_stub_pr 46 tr-pr-landed
+pr_trash_task tr-pr-landed 46 >/dev/null
+mkdir -p "$DM_HOME/state/archive"
+mv "$DM_HOME/state/archive" "$TMP/tr-pr-landed-aside"
+printf 'not a directory\n' > "$DM_HOME/state/archive"
+PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-landed --reason "superseded" --close-pr >/dev/null 2>&1 || true
+rm -f "$DM_HOME/state/archive"
+mv "$TMP/tr-pr-landed-aside" "$DM_HOME/state/archive"
+printf '{"state":"closed","merged":true,"head":{"sha":"abc123","ref":"work/tr-pr-landed","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$TRSTUB/pr-46.json"
+TRPRLANDED="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-landed --reason "superseded" 2>"$TMP/tr-pr-landed.err")"
+check "a PR merged after the discard is labelled MERGED" \
+  'grep -qx "pr=MERGED" <<<"$TRPRLANDED"'
+check "and the resume says the landed change is rollback territory" \
+  'grep -q "rollback skill" "$TMP/tr-pr-landed.err"'
+
 # The confirmed-CLOSED path: with the live check succeeding, no --close-pr needed.
 TRCONF="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-again --reason "already closed upstream" 2>/dev/null)"
 check "a CONFIRMED closed PR needs no --close-pr"  'grep -qx "pr=already-closed" <<<"$TRCONF"'
