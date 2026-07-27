@@ -233,10 +233,11 @@ finished tasks; the records stay recoverable under `state/archive/`.
 
 ## 6. Scout → ship promotion
 
-When implementation is separately authorized, promote in place — do not respawn.
-Flip the kind and re-brief the same crewmate to carry over only the intended fix
-(not scratch commits/debug edits), create a proper branch, and follow the repo's
-delivery mode:
+When implementation is separately authorized, promote in place — same task id,
+same worktree, never a second task record. Flip the kind and re-brief (a fresh
+continuation crewmate by default, see Recovery) to carry over only the intended
+fix (not scratch commits/debug edits), create a proper branch, and follow the
+repo's delivery mode:
 
 ```
 bin/dm-task.sh set <id> kind ship
@@ -269,17 +270,17 @@ State lives on disk, not in conversation memory. After any restart, reconcile
 each task with `bin/dm-task.sh state <id>` (authoritative current state) before
 acting. For a crewmate whose agent is gone but whose worktree holds unlanded
 work, load `stuck-worker` — preserve the worktree and identity; never spawn a
-duplicate.
+duplicate (two LIVE agents sharing one worktree at once — a fresh agent on the
+same worktree instead of the old one is a continuation, not a duplicate).
 
 **Respawn over resume for a new round.** A fix round, rebase, or follow-up
 scope is a NEW round of work, not a continuation of the old conversation —
 default to a fresh continuation crewmate rather than resuming the one that did
-the last round. The worktree, task meta, status log, and brief already
-externalize what a continuation needs, so a fresh agent briefed with the
-worktree path, branch, a one-paragraph task recap, and the round's instruction
-re-onboards for a fraction of what re-paying an ever-growing transcript costs.
-A fresh agent on the same worktree is a continuation, not a duplicate — only
-two LIVE agents sharing one worktree is. Resume the existing agent only when
+the last round (which has normally already finished; stop it first if it has
+not). The worktree, task meta, status log, and brief already externalize what
+a continuation needs — brief the fresh agent with the worktree path, branch, a
+one-paragraph task recap, and the round's instruction. Resume the existing
+agent only when
 the needed state is genuinely transcript-only: mid-operation (a half-resolved
 rebase, uncommitted exploratory changes only it understands) or an interrupted
 round where re-reading costs more than resuming. Rule of thumb: if the

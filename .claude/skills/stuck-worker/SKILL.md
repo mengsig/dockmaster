@@ -35,14 +35,13 @@ splits one task across two copies.
    operator the plain outcome, and report exactly what work is preserved and
    where.
 
-Steps 2-3 (answer/correct) keep talking to the SAME live agent — the crash/stall
-is mid-round, so its transcript is genuinely where the state lives, and that
-stays cheap while the transcript is small. Once it has grown large (roughly
-150-200k tokens), prefer relaunching fresh even for this same-round recovery
-(step 4's shape) over one more message into a transcript that expensive — a
-stopped or dead agent's round handed to a fresh agent on the same worktree is a
+Steps 2-3 keep talking to the SAME live agent — the stall is mid-round, so its
+transcript is genuinely where the state lives, and that stays cheap while the
+transcript is small. Once it has grown large (roughly 150-200k tokens), prefer
+relaunching fresh even for this same-round recovery (step 4's shape). A stopped
+or dead agent's round handed to a fresh agent on the same worktree is a
 continuation, per the respawn-over-resume doctrine in `task-lifecycle`
-§Recovery, not the duplicate this skill warns against; a duplicate is two LIVE
+§Recovery, not the duplicate this skill warns against — a duplicate is two LIVE
 agents on one worktree at once.
 
 ## Continuing an already-completed or terminated worker
