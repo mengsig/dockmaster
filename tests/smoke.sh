@@ -6389,6 +6389,128 @@ check "that note never lands on the relayable stdout" \
 check "the dispatcher lists trash with a purpose" \
   'grep -qE "^  trash +[A-Za-z]" <<<"$(b dm help)"'
 
+# --- trashing a task must resolve the decision holds IT raised ---------------
+# The operator's real complaint: dm-trash discarded work but "needs you" kept
+# showing decisions filed against it. Both filing conventions from the
+# decision-hold skill are covered: key-prefixed (<id>-decision-<key>) and
+# origin-referenced (an origin path under data/<id>/).
+TRHOLDWT="$(trash_task tr-holds)"
+b dm-backlog.sh hold tr-holds-decision-angle "pick an angle" --options "A | B" >/dev/null
+b dm-backlog.sh hold review-tr-holds "approve the change" --origin "data/tr-holds/report.md" >/dev/null
+b dm-backlog.sh hold other-task-decision-unrelated "not this task" >/dev/null
+TRHOLDOUT="$(b dm-trash.sh tr-holds --reason "plan dropped" 2>/dev/null)"
+check "trash resolves the key-prefixed hold"      'grep -qx "resolved_hold=tr-holds-decision-angle" <<<"$TRHOLDOUT"'
+check "trash resolves the origin-referenced hold" 'grep -qx "resolved_hold=review-tr-holds" <<<"$TRHOLDOUT"'
+check "trash leaves an unrelated hold alone"       '! grep -q "resolved_hold=other-task-decision-unrelated" <<<"$TRHOLDOUT"'
+check "the resolution is recorded as DROPPED, not answered" \
+  'b dm-backlog.sh decisions --json \
+   | jq -e "any(.[]; .key==\"tr-holds-decision-angle\" and .status==\"resolved\" and (.answer|startswith(\"trashed: plan dropped\")))" >/dev/null \
+   && b dm-backlog.sh decisions --json \
+   | jq -e "any(.[]; .key==\"review-tr-holds\" and .status==\"resolved\" and (.answer|startswith(\"trashed:\")))" >/dev/null'
+check "the unrelated hold is untouched, still open" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"other-task-decision-unrelated\" and .status==\"open\")" >/dev/null'
+
+# The "no holds" case, on a run that actually went through this trash and this
+# section — not a reuse of an unrelated earlier $TROUT capture (that task never
+# had a hold filed against it at all, so its absence of resolved_hold lines
+# would hold even with resolve_decision_holds deleted outright).
+TRNONEWT="$(trash_task tr-holds-none)"
+TRNONEOUT="$(b dm-trash.sh tr-holds-none --reason "plan dropped" 2>/dev/null)"
+check "a task with no holds emits no resolved_hold noise" \
+  '! grep -q "^resolved_hold=" <<<"$TRNONEOUT"'
+check "a task with no holds emits no unresolved_hold noise either" \
+  '! grep -q "^unresolved_hold=" <<<"$TRNONEOUT"'
+
+# --- the matcher's own boundaries: near-misses must stay open, not caught ----
+# The matcher is deliberately stricter than a bare substring: a hold keyed
+# "<id>-decisionfoo" (no separating hyphen after "decision") does not match the
+# <id>-decision- prefix, and an origin under a SIBLING path ("<id>-other")
+# does not contain "data/<id>/". Both are known gaps (documented in
+# .dm-knowledge/dm-trash-hold-cleanup.md), not bugs — pin them so a widened
+# matcher would be a deliberate, reviewed change, not an accidental drift.
+TRBOUNDWT="$(trash_task tr-boundary)"
+b dm-backlog.sh hold tr-boundary-decisionfoo "near miss on the key" >/dev/null
+b dm-backlog.sh hold boundary-review "near miss on the origin" --origin "data/tr-boundary-other/x.md" >/dev/null
+TRBOUNDOUT="$(b dm-trash.sh tr-boundary --reason "plan dropped" 2>/dev/null)"
+check "a key-near-miss (no separating hyphen) is not touched" \
+  '! grep -q "resolved_hold=tr-boundary-decisionfoo" <<<"$TRBOUNDOUT"'
+check "an origin-near-miss (sibling path) is not touched" \
+  '! grep -q "resolved_hold=boundary-review" <<<"$TRBOUNDOUT"'
+check "the key-near-miss hold is still open after trashing" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"tr-boundary-decisionfoo\" and .status==\"open\")" >/dev/null'
+check "the origin-near-miss hold is still open after trashing" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"boundary-review\" and .status==\"open\")" >/dev/null'
+
+# --- a newline-bearing key must not smuggle a second, unrelated key ---------
+# hold never validates its key argument, so a caller (or a bug upstream) can
+# hand it a key with an embedded newline. jq -r would emit that as two lines,
+# and the naive `while read` loop would treat the second line as its own key
+# — silently resolving an unrelated open hold while leaving the malformed one
+# (and the real task hold) untouched. The fix excludes any key containing a
+# newline before the match; it must stay open, and so must the victim.
+TRNLWT="$(trash_task tr-nlkey)"
+b dm-backlog.sh hold "victim-decision-key" "an unrelated hold that must not be touched" >/dev/null
+b dm-backlog.sh hold "$(printf 'tr-nlkey-decision-p\nvictim-decision-key')" "malformed multi-line key" >/dev/null
+TRNLOUT="$(b dm-trash.sh tr-nlkey --reason "plan dropped" 2>/dev/null)"
+check "the unrelated victim hold is not reported resolved" \
+  '! grep -q "resolved_hold=victim-decision-key" <<<"$TRNLOUT"'
+check "the unrelated victim hold is still open after trashing" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"victim-decision-key\" and .status==\"open\")" >/dev/null'
+check "the malformed multi-line hold is still open after trashing" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; (.key|contains(\"tr-nlkey-decision-p\")) and .status==\"open\")" >/dev/null'
+
+# --- a hold that fails to resolve must still surface on stdout --------------
+# stdout is THE relayable key=value record; a resolve failure must not be
+# stderr-only. Force exactly one resolve call to fail with a throwaway copy of
+# the toolbelt whose dm-backlog.sh refuses one specific key and delegates
+# every other command, unmodified, to the real script — no shared file is
+# touched, so this cannot race a concurrent shard.
+TRFAILBIN="$TMP/tr-fail-bin"
+mkdir -p "$TRFAILBIN"
+for f in "$ROOT"/bin/*.sh; do ln -sf "$f" "$TRFAILBIN/$(basename "$f")"; done
+[ -f "$ROOT/bin/dm" ] && ln -sf "$ROOT/bin/dm" "$TRFAILBIN/dm"
+rm -f "$TRFAILBIN/dm-backlog.sh"
+cat > "$TRFAILBIN/dm-backlog.sh" <<TRFAILWRAP
+#!/usr/bin/env bash
+# test-only stub: fail exactly one resolve call, delegate everything else
+if [ "\${1:-}" = "resolve" ] && [ "\${2:-}" = "tr-holdfail-decision-x" ]; then
+  echo "simulated resolve failure for tr-holdfail-decision-x" >&2
+  exit 1
+fi
+exec "$ROOT/bin/dm-backlog.sh" "\$@"
+TRFAILWRAP
+chmod +x "$TRFAILBIN/dm-backlog.sh"
+TRHOLDFAILWT="$(trash_task tr-holdfail)"
+b dm-backlog.sh hold tr-holdfail-decision-x "pick one" >/dev/null
+TRHOLDFAILOUT="$("$TRFAILBIN/dm-trash.sh" tr-holdfail --reason "dropped" 2>"$TMP/tr-holdfail.err")"
+check "a resolve failure is reported on stdout, not only stderr" \
+  'grep -qx "unresolved_hold=tr-holdfail-decision-x" <<<"$TRHOLDFAILOUT"'
+check "a resolve failure is also warned on stderr, with the fix-by-hand command" \
+  'grep -q "could not resolve.*tr-holdfail-decision-x" "$TMP/tr-holdfail.err" \
+   && grep -q "dm-backlog.sh resolve tr-holdfail-decision-x" "$TMP/tr-holdfail.err"'
+check "the failed hold is never also reported resolved" \
+  '! grep -q "^resolved_hold=tr-holdfail-decision-x" <<<"$TRHOLDFAILOUT"'
+check "bookkeeping still finishes (records archived) despite the resolve failure" \
+  'grep -qx "records=archived" <<<"$TRHOLDFAILOUT"'
+
+# A resume must not re-touch a hold this flow already resolved: kill the flow
+# after bookkeeping resolves the hold but before it archives (same trick as
+# tr-resume above), then re-run and confirm no duplicate and no error.
+TRHOLD2WT="$(trash_task tr-holds2)"
+b dm-backlog.sh hold tr-holds2-decision-x "pick one" >/dev/null
+mkdir -p "$DM_HOME/state/archive"
+mv "$DM_HOME/state/archive" "$TMP/tr-holds2-archive-aside"
+printf 'not a directory\n' > "$DM_HOME/state/archive"
+b dm-trash.sh tr-holds2 --reason "first attempt" >/dev/null 2>&1 || true
+rm -f "$DM_HOME/state/archive"
+mv "$TMP/tr-holds2-archive-aside" "$DM_HOME/state/archive"
+check "the interrupted trash already resolved the hold" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"tr-holds2-decision-x\" and .status==\"resolved\")" >/dev/null'
+TRHOLD2RESUME="$(b dm-trash.sh tr-holds2 --reason "second attempt" 2>"$TMP/tr-holds2.err")"
+check "the resumed run does not re-report an already-resolved hold" \
+  '! grep -q "^resolved_hold=" <<<"$TRHOLD2RESUME"'
+check "and resuming raises no resolve failure"  '! grep -qi "could not resolve" "$TMP/tr-holds2.err"'
+
 echo "== trash with a PR: closed unmerged, never merged, branch left alone =="
 # The PR half needs GitHub, so it runs against a stub gh and a clone whose origin
 # looks like a GitHub slug. gh-axi is filtered off PATH so the argv shape under
