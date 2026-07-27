@@ -36,14 +36,16 @@ gates them — getting each one right is yours, every time; there is no computed
 recommendation to fall back on.
 
 - **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial, non-logic**
-  changes only (see `change-review` for the criteria): docs, comments, a config
-  value, string/copy text. One review pass instead of two, the lavish approval
-  gate may be skipped. Tests still run; merge authority unchanged.
+  changes only (see `change-review` for the criteria). One review pass instead
+  of two, the lavish approval gate may be skipped. Tests still run; merge
+  authority unchanged.
 - **`standard`** (`config/pr-pipeline.standard.json`) — **small, low-blast-radius
   code changes**: a single subsystem, covered by tests, no state, concurrency,
   safety, or security surface, and no public-contract change. One review pass,
   but this is real logic — the lavish approval gate still applies (only `fast`
-  may skip it).
+  may skip it). Adds an optional `security` gate before `pr` (same as `default`
+  and `rigorous`): skipped explicitly unless the change touches a security
+  surface.
 - **`default`** (`config/pr-pipeline.default.json`) — **the norm.** Two
   independent review passes (coldstart, then merge-gate), each followed by
   fix + tests.

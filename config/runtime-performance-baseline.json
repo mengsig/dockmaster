@@ -3,7 +3,7 @@
   "base_commit": "#177",
   "shared_agents_bytes": 13126,
   "claude_settings_bytes": 1579,
-  "claude_skill_bytes": 106319,
+  "claude_skill_bytes": 106419,
   "claude_skill_description_bytes": 5264,
   "claude_files_sha256": {
     ".claude/agents/crew-high.md": "6ba9373cd62f942dfeae79ca3b7c1e26f29d71b51362862860b5943131f77001",
@@ -22,7 +22,7 @@
     ".claude/skills/memory-routing/SKILL.md": "a27ddcbc312125f1b3d6d94c91346c7db8b7d4208f90990d067a798ebf04cc9c",
     ".claude/skills/merge-conflict/SKILL.md": "3b01fe3540e251cdc0876f4eae0d4ae4993a743699e9247168e83909c184143a",
     ".claude/skills/post-pr-review/SKILL.md": "c27cc2123399e48c8bf4a084016c10715c42f3c26e405c275d9f8f48250b1f11",
-    ".claude/skills/pr-workflow/SKILL.md": "5a29cd552f35e0c98f45ba2a5efa416b0f039e74181066ffb995fe53b09c4f9d",
+    ".claude/skills/pr-workflow/SKILL.md": "e45806584db69847550c9641a32b3ae4b4e6ac1163057820f1bbdc695208b0af",
     ".claude/skills/project-management/SKILL.md": "7bc3f66ab7229ddc4cfd2f022ac179db06c3d544f5dee2d5e1a98fc8caa92cfe",
     ".claude/skills/repo-sync/SKILL.md": "a8dac0bdae8d3ee31b0631940aeaf8239ada0aebd2008ad3232a521503bce638",
     ".claude/skills/rollback/SKILL.md": "6b6f4b1b4289362b5c50a5b195b19ca4ad01a24e0dd361eef99bd94682ddd284",

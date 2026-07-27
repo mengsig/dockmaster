@@ -43,9 +43,8 @@ PR is open — see `pr-workflow` ("Merge authority").
 
 The remaining gate fields — `effort`, `max_rounds`, `dimensions`, `optional`,
 and `method` on `security` — are contract too; `pr-workflow` covers their
-semantics. In the agent-driven path, `effort` maps
-to the `crew-<level>` subagent_type; choosing it is sized per
-task-lifecycle's ladder.
+semantics. In the agent-driven path, `effort` maps to the `crew-<level>`
+subagent_type; choosing it is sized per task-lifecycle's ladder.
 
 ## `note`
 

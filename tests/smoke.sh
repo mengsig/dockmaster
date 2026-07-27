@@ -419,7 +419,7 @@ check "standard pipeline config exists"       '[ -f "$STD" ]'
 check "standard pipeline is valid JSON"       'jq -e . "$STD" >/dev/null'
 check "standard pipeline has one review pass" '[ "$(jq "[.gates[]|select(.gate==\"review\")]|length" "$STD")" = "1" ]'
 check "standard pipeline keeps tests gate"    '[ "$(jq "[.gates[]|select(.gate==\"tests\")]|length" "$STD")" -ge 1 ]'
-check "standard pipeline gate order is review,fix,tests,pr" '[ "$(jq -c "[.gates[].gate]" "$STD")" = "[\"review\",\"fix\",\"tests\",\"pr\"]" ]'
+check "standard pipeline gate order is review,fix,tests,security,pr" '[ "$(jq -c "[.gates[].gate]" "$STD")" = "[\"review\",\"fix\",\"tests\",\"security\",\"pr\"]" ]'
 
 echo "== rigorous pipeline config =="
 RIG="$ROOT/config/pr-pipeline.rigorous.json"
@@ -432,6 +432,7 @@ check "rigorous review is dimension-parallel"  '[ "$(jq "[.gates[]|select(.gate=
 check "rigorous has no verify-findings gate"   '[ "$(jq "[.gates[]|select(.gate==\"verify-findings\")]|length" "$RIG")" = "0" ]'
 check "rigorous starts review then fix"        '[ "$(jq -r ".gates[0].gate" "$RIG")" = "review" ] && [ "$(jq -r ".gates[1].gate" "$RIG")" = "fix" ]'
 check "rigorous ends in pr gate"               '[ "$(jq -r ".gates[-1].gate" "$RIG")" = "pr" ]'
+check "rigorous gate order is review,fix,tests,verify,security,pr" '[ "$(jq -c "[.gates[].gate]" "$RIG")" = "[\"review\",\"fix\",\"tests\",\"verify\",\"security\",\"pr\"]" ]'
 # The four shipped tiers must share the same top-level shape (a consistent gate
 # schema is what lets one runner drive any of them).
 check "all four tiers share the top-level shape" 'for f in default fast standard rigorous; do [ "$(jq -r "has(\"version\") and has(\"description\") and has(\"gates\")" "$ROOT/config/pr-pipeline.$f.json")" = "true" ] || exit 1; done'

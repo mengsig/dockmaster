@@ -1,10 +1,11 @@
 {
   "version": "dockmaster-pr-pipeline/2",
-  "description": "Standard PR pipeline for SMALL, LOW-BLAST-RADIUS code changes: a single subsystem, covered by tests, touching no state/concurrency/safety/security surface and no public contract. One cold review pass instead of two (unlike fast, this is real logic and the lavish approval gate still applies). Select per task, not per repo; when in doubt use pr-pipeline.default.json.",
+  "description": "Standard PR pipeline for SMALL, LOW-BLAST-RADIUS code changes: a single subsystem, covered by tests, touching no state/concurrency/safety/security surface and no public contract. One cold review pass instead of two (unlike fast, this is real logic and the lavish approval gate still applies). Tests still run and merge authority is unchanged (never merge red; see the pr-workflow skill). Select per task, not per repo; when in doubt use pr-pipeline.default.json.",
   "gates": [
     { "gate": "review", "pass": "coldstart", "effort": "high", "note": "the single independent read of the diff against base" },
     { "gate": "fix", "max_rounds": 2, "note": "apply coldstart findings on the same branch" },
     { "gate": "tests", "note": "must pass; standard never skips this" },
+    { "gate": "security", "optional": true, "note": "run only when the change has a security surface" },
     { "gate": "pr", "method": "squash", "note": "open the PR with the branch convention and a short human description" }
   ]
 }
