@@ -39,7 +39,12 @@ jobs:
       # Single owner of "should macos-full run": both the job's own `if:` and
       # ci-gate read THIS, so the gate can require success rather than infer it
       # from the job's own `skipped`.
-      macos_full: ${{ github.event_name != 'pull_request' || (steps.filter.outputs.code == 'true' && contains(github.event.pull_request.labels.*.name, 'ci:macos')) }}
+      # ci:macos on demand, and automatically whenever the PR touches the suite
+      # or this workflow: macos-full is the only leg left that runs smoke.sh
+      # UNSLICED, so the sequential path has to be proven on exactly the PRs that
+      # can break it. Still `code == 'true' &&`, so macos_full implies code and
+      # the `needs: macos` guard can never be waiting on a skipped job.
+      macos_full: ${{ github.event_name != 'pull_request' || (steps.filter.outputs.code == 'true' && (contains(github.event.pull_request.labels.*.name, 'ci:macos') || steps.filter.outputs.suite == 'true' || steps.filter.outputs.ci_workflow == 'true')) }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
@@ -59,6 +64,13 @@ jobs:
               - '!CONTRIBUTING.md'
               - '!SECURITY.md'
               - '!LICENSE'
+            # Two INCLUSION filters, one pattern each. Under predicate-quantifier
+            # 'every' a file must match EVERY pattern in its filter, so a single
+            # filter listing both paths would match nothing at all.
+            suite:
+              - 'tests/smoke.sh'
+            ci_workflow:
+              - '.github/workflows/ci.yml'
             # README.md, AGENTS.md and CLAUDE.md are deliberately NOT excluded:
             # the smoke suite asserts on their contents (the plain-gh parity
             # sentence, the documented DM_* override list, the AGENTS.md byte

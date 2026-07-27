@@ -43,25 +43,33 @@ const GATED_LEGS = {
 // Jobs that must run on every event, which is what lets ci-gate hard-require
 // them. A `needs:` or `if:` on either would make a skip legitimate.
 const UNCONDITIONAL_JOBS = ['fast', 'node14-compat']
-// Pinned so a widened exclusion list is a deliberate, reviewed edit. Growing it
-// is how a path filter silently stops running a needed test.
-const EXPECTED_FILTERS = [
-  '**',
-  '!docs/**',
-  '!.dm-knowledge/**',
-  '!assets/**',
-  '!CHANGELOG.md',
-  '!CONTRIBUTING.md',
-  '!SECURITY.md',
-  '!LICENSE',
-]
+// Pinned PER FILTER, so a widened `code` exclusion list is a deliberate,
+// reviewed edit (growing it is how a path filter silently stops running a
+// needed test) and so an inclusion pattern cannot be smuggled into `code`.
+// The two inclusion filters hold ONE pattern each on purpose: under
+// predicate-quantifier 'every' a file must match every pattern in its filter,
+// so a second entry would make the filter match nothing.
+const EXPECTED_FILTERS = {
+  code: [
+    '**',
+    '!docs/**',
+    '!.dm-knowledge/**',
+    '!assets/**',
+    '!CHANGELOG.md',
+    '!CONTRIBUTING.md',
+    '!SECURITY.md',
+    '!LICENSE',
+  ],
+  suite: ['tests/smoke.sh'],
+  ci_workflow: ['.github/workflows/ci.yml'],
+}
 // The two expressions the whole design hangs on, pinned VERBATIM. `code:
 // ${{ steps.filter.outputs.code == 'true' }}` (dropping the non-PR clause) is a
 // plausible simplification that stays green on every PR and surfaces only as a
 // red main on the first push; `code: 'false'` is a total silent bypass.
 const EXPECTED_OUTPUTS = {
   code: "${{ github.event_name != 'pull_request' || steps.filter.outputs.code == 'true' }}",
-  macos_full: "${{ github.event_name != 'pull_request' || (steps.filter.outputs.code == 'true' && contains(github.event.pull_request.labels.*.name, 'ci:macos')) }}",
+  macos_full: "${{ github.event_name != 'pull_request' || (steps.filter.outputs.code == 'true' && (contains(github.event.pull_request.labels.*.name, 'ci:macos') || steps.filter.outputs.suite == 'true' || steps.filter.outputs.ci_workflow == 'true')) }}",
 }
 // Load-bearing lines of the ci-gate script. Without these the gate is back to
 // reading each leg's own `skipped` as permission to pass.
@@ -166,7 +174,7 @@ function checkOneJobIsWired(gate, name, fail) {
   }
 }
 
-// Pulls the literal block scalar under `filters:` and returns its list entries,
+// Pulls the literal block scalar under `filters:` and returns { filter: [items] },
 // accepting single-quoted, double-quoted and bare items alike. A double-quoted
 // entry was invisible to the single-quote-only regex this replaces, which let a
 // `- "!bin/**"` exclusion ride along under a still-matching pinned list.
@@ -183,26 +191,39 @@ function parseFilterPatterns(changesText, fail) {
     return null
   }
   const baseIndent = /^\s*/.exec(lines[at])[0].length
-  const patterns = []
+  const filters = {}
+  let current = null
   for (let i = at + 1; i < lines.length; i++) {
     if (lines[i].trim() === '') continue
     if (/^\s*/.exec(lines[i])[0].length <= baseIndent) break
+    const named = /^\s*("?[A-Za-z0-9_-]+"?|'[A-Za-z0-9_-]+'):\s*$/.exec(lines[i])
+    if (named) { current = unquote(named[1]); filters[current] = []; continue }
     const item = /^\s*-\s+(.*?)\s*$/.exec(lines[i])
-    if (item) patterns.push(unquote(item[1]))
+    if (!item) continue
+    if (!current) { fail('a `filters:` entry appears before any filter name'); return null }
+    filters[current].push(unquote(item[1]))
   }
-  return patterns
+  return filters
 }
 
 function checkPathFilter(changesText, fail) {
   if (!/predicate-quantifier:\s*'every'/.test(changesText)) {
     fail("changes must set predicate-quantifier: 'every' -- the `some` default ORs the `!` patterns into `**` and the filter stops excluding anything")
   }
-  const patterns = parseFilterPatterns(changesText, fail)
-  if (patterns) {
-    const same = patterns.length === EXPECTED_FILTERS.length
-      && patterns.every((p, i) => p === EXPECTED_FILTERS[i])
-    if (!same) {
-      fail(`path-filter list changed. Every entry is a promise that nothing under test reads it -- re-verify before updating this test.\n     expected: [${EXPECTED_FILTERS.join(', ')}]\n     actual:   [${patterns.join(', ')}]`)
+  const filters = parseFilterPatterns(changesText, fail)
+  if (filters) {
+    const want = Object.keys(EXPECTED_FILTERS).sort()
+    const got = Object.keys(filters).sort()
+    if (want.join(',') !== got.join(',')) {
+      fail(`the set of path filters changed: expected [${want.join(', ')}], got [${got.join(', ')}].\n     Each one feeds a \`changes\` output, so adding or dropping one silently redefines when a leg runs.`)
+    }
+    for (const name of want) {
+      const patterns = filters[name] || []
+      const expected = EXPECTED_FILTERS[name]
+      const same = patterns.length === expected.length && patterns.every((p, i) => p === expected[i])
+      if (!same) {
+        fail(`the \`${name}\` path filter changed. In \`code\` every entry is a promise that nothing under test reads it; in an inclusion filter a second entry makes it match NOTHING under predicate-quantifier 'every'. Re-verify before updating this test.\n     expected: [${expected.join(', ')}]\n     actual:   [${patterns.join(', ')}]`)
+      }
     }
   }
   for (const name of Object.keys(EXPECTED_OUTPUTS)) {

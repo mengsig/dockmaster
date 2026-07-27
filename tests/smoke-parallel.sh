@@ -58,8 +58,10 @@ if [ "$failed" -ne 0 ]; then
   echo "smoke-parallel: $failed of $SHARDS shards failed (full logs above)"
   exit 1
 fi
+# Owned counts, not executed ones: an early exit is caught above (no summary
+# line, non-zero status). What this catches is a section no shard owns.
 if [ "$sections" -ne "$EXPECTED_SECTIONS" ]; then
-  echo "smoke-parallel: shards ran $sections sections, the suite has $EXPECTED_SECTIONS — a shard exited early"
+  echo "smoke-parallel: the slicer's owned counts do not partition the suite — $sections owned across $SHARDS shards, the suite has $EXPECTED_SECTIONS"
   exit 1
 fi
 echo "smoke-parallel: $passed passed across $SHARDS shards, all $sections sections"

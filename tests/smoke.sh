@@ -65,6 +65,9 @@ case "${1:-}" in
     grep -q '^# shard:epilogue$' "$SELF" \
       || { echo "smoke.sh: no '# shard:epilogue' marker; the slices would carry no verdict" >&2; exit 2; }
     ;;
+  # No args is the sequential run. A MISSPELLED flag is not: without this it
+  # would fall through and quietly run all 168 sections as if nothing was asked.
+  --*) echo "smoke.sh: unknown flag: $1" >&2; shard_usage ;;
 esac
 
 if [ "${1:-}" = "--shards" ]; then printf '%s\n' "$SHARD_TOTAL"; exit 0; fi
@@ -104,6 +107,10 @@ if [ "${1:-}" = "--shard" ] || [ "${1:-}" = "--shard-plan" ]; then
   [ "$SHARD_K" -le "$SHARD_TOTAL" ] && [ "$SHARD_K" -ge 1 ] || { echo "smoke.sh: shard $SHARD_K is outside 1..$SHARD_TOTAL" >&2; exit 2; }
   if [ "${1:-}" = "--shard-plan" ]; then shard_slice "$SHARD_K"; exit 0; fi
   SMOKE_SLICE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dm-smoke-slice.XXXXXX")"
+  # Own it from the moment it exists, or a failed slice write leaks it. `exec`
+  # replaces this shell without running EXIT traps, so the trap does not follow
+  # the slice into its own run — the slice re-arms it from $SMOKE_SLICE_DIR.
+  trap 'rm -rf "$SMOKE_SLICE_DIR"' EXIT
   shard_slice "$SHARD_K" > "$SMOKE_SLICE_DIR/smoke.sh"
   export SMOKE_ROOT="$ROOT" SMOKE_SLICE_DIR SMOKE_SHARD="$SHARD_K/$SHARD_TOTAL"
   # $BASH, not a PATH lookup: on macOS the caller is /bin/bash 3.2 while `bash`
@@ -118,7 +125,7 @@ fi
 # is the "already-canonical temp dir" the dm-100-cleanup-safety note prescribes;
 # scout-cleanup.sh keeps its OWN symlinked root to exercise the canonicalization.
 TMP="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/dm-smoke.XXXXXX")" && pwd -P)"
-trap 'rm -rf "$TMP" ${SMOKE_SLICE_DIR:+"$SMOKE_SLICE_DIR"}' EXIT
+trap 'rm -rf "$TMP"; [ -z "${SMOKE_SLICE_DIR:-}" ] || rm -rf "$SMOKE_SLICE_DIR"' EXIT
 export DM_HOME="$TMP/home"
 pass=0; fail=0
 # A shard runs the bootstrap sections it does not own for their side effects
@@ -5315,7 +5322,9 @@ vapp_register || true
 # The honest-probe boot IS the canonical state the sections below assume (app up,
 # browser live, one flow driven this run), so it is not torn down and rebuilt.
 # Setup lines are `|| true`: a bare failing command here aborts the whole suite
-# under `set -e`, printing a truncated count and no FAIL summary — reads as success.
+# under `set -e`, losing every later section's coverage. The abort itself is
+# loud (non-zero exit, no summary line), but silence is not the point — the
+# sections below are.
 check "the honest probe still boots"              'vup vrf1 >/dev/null 2>&1'
 vsh session vrf1 >/dev/null 2>&1 || true
 DM_SMOKE_SHOT=png vsh shot vrf1 login >/dev/null 2>&1 || true
@@ -5434,8 +5443,8 @@ check "the refusal names the dead port"        'grep -q "nothing is listening on
 # Leave the canonical state the sections below assume: app up, browser live, and
 # one flow (`login`) driven and recorded from THIS run. Every line is `|| true`:
 # these are SETUP, not assertions, and a bare failing command here aborts the
-# whole suite under `set -e` — printing a truncated count and no FAIL summary,
-# which reads like success.
+# whole suite under `set -e`, taking every later section with it. The abort is
+# loud; the lost coverage is the cost.
 "$V" down vrf1 >/dev/null 2>&1 || true
 vup vrf1 >/dev/null 2>&1 || true
 vsh session vrf1 >/dev/null 2>&1 || true

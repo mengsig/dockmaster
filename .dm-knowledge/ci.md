@@ -155,7 +155,8 @@ Read before changing `.github/workflows/ci.yml` or adding a test file.
   dies in top-level setup prints a truncated pass count and no FAIL summary,
   which reads exactly like success. `smoke-parallel.sh` asserts that sum.
 - **[measured]** 2026-07-27 on a 16-core box: sequential 401 s / 1546 passed;
-  six shards in parallel 66 s / 1546 passed / all 168 sections (6.1x). Per shard:
+  six shards in parallel 66 s / 1546 passed / all 168 sections (6.1x). The count
+  is 1547 after the port-pin check landed. Per shard:
   61 s, 39 s, 43 s, 11 s, 66 s, 14 s — the pole is the verify-gate group, which
   is mostly readiness timeouts, and it cannot be split further without breaking
   the one-app-one-task narrative those sections share. Two concurrent full
