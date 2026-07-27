@@ -17,9 +17,8 @@ these are the constraints that are not obvious from the code you are editing.
   artifact; `dm-test` tests gate; `dm-verify` verify gate (per-task app boot +
   isolated browser); `dm-evidence` collects each gate's `evidence <id>` block
   for the PR body; `dm-memory` context system; `dm-thread-name`
-  role-specific runtime labels; `dm-secondmate` locked supervisor identities;
-  `dm-command-guard` destructive-Git command parsing. Point work at the right
-  script instead of reinventing lifecycle logic.
+  role-specific runtime labels; `dm-secondmate` locked supervisor identities.
+  Point work at the right script instead of reinventing lifecycle logic.
 - **[invariant]** Scripts in `bin/` must run on bash 3.2 (macOS default): no
   `mapfile`/`readarray`, no `declare -A`, no `${var^^}`/`${var,,}`, no `&>>`.
   Use while-read loops and parallel indexed arrays instead. No test pins this —
@@ -32,6 +31,15 @@ these are the constraints that are not obvious from the code you are editing.
   section). It self-heals only a DEAD-PID lock (reclaim serialized by a second
   lock, re-verified before removal); a stuck-but-alive or metadata-less lock
   fails visibly at ~30s.
+- **[invariant]** dm_lock's reclaim marker (`<file>.lock.reclaim`) must never
+  become a permanent wedge (#122): it records its owner PID and self-heals two
+  ways —
+  a dead recorded owner, or (when unstamped) having blocked a waiter for
+  `DM_LOCK_RECLAIM_STALL_SPINS` spins. Age is valid evidence for the MARKER
+  only, because its critical section is bounded and tiny; it is NOT valid for
+  the lock itself, which reclaims solely on a dead recorded PID. The ~30s
+  timeout message must name both the lock dir and the marker, or an operator
+  removes the wrong one.
 - **[invariant]** `dm-lib.sh` owns task-meta syntax: ids and keys are
   allowlisted, keys cannot contain `=`/line breaks, and values cannot contain
   CR/LF. Validate there before locking so every writer shares the same injection

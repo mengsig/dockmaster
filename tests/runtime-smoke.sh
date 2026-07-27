@@ -46,29 +46,6 @@ fi
 
 node "$ROOT/tests/check-skill-triggers.js"
 
-check_guard_blocked() {
-  if "$ROOT/bin/dm-command-guard.sh" check "$1" >/dev/null 2>&1; then
-    printf 'command guard allowed destructive probe: %s\n' "$1" >&2
-    return 1
-  fi
-}
-
-check_guard_blocked 'git -C /tmp reset HEAD --hard'
-check_guard_blocked '/usr/bin/git --no-pager -C /tmp clean -d -f'
-# A path-scoped restore is permitted work (#89); the whole-tree form is not.
-check_guard_blocked '/usr/bin/git -C /tmp restore --source HEAD .'
-check_guard_blocked '/usr/bin/git -C /tmp switch --discard-changes main'
-check_guard_blocked 'git -C "/tmp/a path with spaces" reset --hard'
-check_guard_blocked 'bash -c "git clean -fd"'
-check_guard_blocked '$GIT restore file.txt'
-"$ROOT/bin/dm-command-guard.sh" check 'git -C "/tmp/a path with spaces" status'
-SPACED_GUARD_DIR="$EVIDENCE/root with spaces/bin"
-mkdir -p "$SPACED_GUARD_DIR"
-cp "$ROOT/bin/dm-command-guard.sh" "$SPACED_GUARD_DIR/"
-printf '{"tool_input":{"command":"git status"}}' \
-  | "${SPACED_GUARD_DIR}/dm-command-guard.sh" hook
-printf 'ok   command-policy probes\n'
-
 if command -v claude >/dev/null 2>&1; then
   CLAUDE_VERSION="$(evidence_file claude-version.txt)"
   CLAUDE_HELP="$(evidence_file claude-help.txt)"

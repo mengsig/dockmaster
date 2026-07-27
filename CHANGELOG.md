@@ -19,6 +19,12 @@ All notable changes to this project are documented here. The format follows
   `dm-session-start.sh` drop `--runtime` and probe Claude only. The Claude path
   is otherwise unchanged. The adapter never appeared in a tagged release, so its
   unreleased entries below are withdrawn rather than kept as history.
+- **The destructive-command guard.** `bin/dm-command-guard.sh` parsed shell
+  commands to refuse destructive Git forms, but arming it as a `PreToolUse`
+  hook was tried and reverted — a hook that times out fails open, so it bought
+  nothing at runtime while carrying the largest script and the heaviest test
+  coverage in the toolbelt. Never appeared in a tagged release, so its
+  unreleased entries below are withdrawn rather than kept as history.
 
 - **The deterministic PR-pipeline runner** (`workflows/pr-pipeline.js`) and its
   two keep-honest tests, unusable on this host since 2026-07-22. PR gates run
@@ -26,18 +32,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- **The command guard stops refusing ordinary work, and stays dormant** (#143,
-  #89). `git restore <path>` and `git checkout [<tree-ish>] -- <path>` are now
-  permitted when scoped to literal paths — the drifted-lockfile restore, refused
-  outright before — and ordinary compound shell (`for r in …; do git -C "$r"
-  status; done`, `if git diff --quiet; then …; fi`, `time git status`) and
-  heredoc PR bodies are no longer refused. Arming it as a `PreToolUse` hook was
-  attempted here and **reverted**: a hook that times out **fails open** — the
-  tool runs — which was measured, not assumed, and the parser was quadratic
-  (32KB took 21s against a 10s timeout). The parser is now linear and refuses
-  anything over 64KB rather than racing a timeout it loses silently. #89 stays
-  open; `SECURITY.md` gains a "Why arming is not free" section stating the
-  fail-open result and what a future wiring has to account for.
 - **`AGENTS.md` is now the contract, not the manual** (#129). Cut roughly in half
   (28680 → 12736 bytes) by retiring two blocks that did not need to be re-read on
   every session and in every crewmate brief. The commandments mirror is gone — the
@@ -59,64 +53,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- **Command guard: prose false positives, and two unclassified positions**
-  (#143, #144, #139, #138). Re-entry now distinguishes command position from
-  argument position — an option, or the value of the option before it, is data,
-  so a quoted sentence there is prose and is not classified as a command. Bodies
-  whose first word reads like a wrapper or a runner ("watch the git log for
-  changes", "xargs with git ls-files is faster") stop refusing, while bare `git`
-  tokens, operand position, command runners and `sh -c` stay strict. Substitution
-  content is now classified in argument position too, so `echo $(git push
-  --force)` no longer runs the push. `GIT_TRACE*` with a file destination is
-  refused as an unguarded filesystem write (`=1`/`=2`/`=true` still pass, with
-  the `trace2.*Target` config twin refused alongside). `*.path` is enumerated to
-  the tool families that name an executable, so `submodule.<name>.path` — a tree
-  path — no longer refuses.
-- **Command guard: four ways a real command reached past it.** A quoted command
-  in an *argument* of an unmodelled executable was never classified, so `find .
-  -exec sh -c "git push --force" \;` and `docker run img sh -c …` passed — the
-  nested-shell rule does not fire there, because the shell is find's argument
-  rather than the segment's executable. `git restore ../..`, `./.`, `.//`,
-  `src/../..` and absolute paths all reached the whole worktree, because only
-  `.` and `..` were named; the pathspec test now runs per path component.
-  Substitution paren counting is quote-aware, so `$(grep "(" file)` no longer
-  refuses, and a genuinely unbalanced substitution is left opaque instead of
-  refused — a real shell fails to parse it and runs nothing.
-- **The command guard is an allowlist, and its parsers agree with each other**
-  (#121). A Git subcommand is now refused unless it is named permitted, so
-  unknown and future subcommands fail closed — the old denylist had silently
-  permitted force-push, stash, `reflog expire`, `gc --prune`, `filter-branch`,
-  `branch -D`, `update-ref -d`, and anything behind `timeout`/`nohup`/`xargs`.
-  The allowlist is walked against git's real subcommand list so ordinary work
-  does not discover each refusal as an incident. Closed on top of that: `&`
-  inside a redirection no longer ends the segment and strands later flags;
-  `--opt=value` is matched alongside the detached spelling (`--force-with-lease`
-  stays permitted); config keys are matched case-insensitively and by pattern;
-  a comment now ends at end of LINE rather than end of INPUT, which had
-  discarded every later newline-separated command unguarded. Process
-  redirection is refused in both spellings — `--exec-path`, `--git-dir`,
-  `--work-tree` alongside `GIT_EXEC_PATH`, `GIT_DIR`, `GIT_WORK_TREE`, `PATH`,
-  `LD_PRELOAD`, `DYLD_*` — and an unrecognized pre-subcommand option fails
-  closed. `-C` is documented as a deliberate exception to that rule, not as
-  coverage — it reaches another repo's config and hooks exactly as `--git-dir`
-  does, but the toolbelt depends on it. The same both-spellings rule applies to
-  the environment: Git falls back to plain `PAGER`, `EDITOR`, `VISUAL` and
-  `SSH_ASKPASS` when the `GIT_*` twin is unset, and all four were verified
-  executing a payload against git 2.54. Over-blocking fixed in the same pass:
-  `git <sub> --help` is permitted, and a quoted string is classified by
-  re-entering the guard rather than refused for starting with the word "git", so
-  a PR body reading `--body "git log shows the bug"` is no longer collateral —
-  while ` git push --force`, `env git push --force` and `timeout 5 git push
-  --force` inside such a string are still refused, since re-entry runs the
-  normal segmentation and wrapper handling instead of testing the first word.
-  Config keys whose `.path` Git executes (the `difftool`/`mergetool`/`browser`/
-  `man` tool family, plus `include.path`) are refused alongside `*.cmd`. The
-  re-entry trigger consults a second table, `is_command_runner`, kept separate
-  from the unwrapping table because the two fail in opposite directions —
-  widening the re-entry list is safety-neutral, while widening the unwrap list
-  would make the guard trust an argv it cannot see, which is exactly why `xargs`
-  stays out of it. The execute-a-handed-string class is narrowed, NOT closed,
-  and the guard says so rather than implying a boundary.
 - **A leaked reclaim marker no longer wedges `dm_lock` recovery** (#122). The
   marker was unstamped and untrapped, so one reclaimer killed mid-reclaim made
   every later dead-PID lock hard-fail at ~30s, permanently.
