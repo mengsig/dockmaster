@@ -28,7 +28,7 @@ prompt context clean while preserving one lifecycle and one toolbelt.
 | global memory | `state/operator.md`, `state/learnings.md`, optional runtime memory | shared |
 | per-repo memory | committed `.dm-knowledge/` notes + private `.dm/` stores | shared |
 | delivery modes | modular **PR pipeline** (ordered gates) per repo | shared |
-| no-mistakes gate | review/test/security gates + optional runner | fresh Agent reviewers |
+| no-mistakes gate | review/test/security gates | fresh Agent reviewers |
 | right-sizing | task shape, review tier, focused context | per-agent model/effort |
 | review surface | lavish-axi | background poll notification |
 | self-update / fleet sync | guarded fast-forward via `bin/` | shared |
@@ -351,6 +351,7 @@ block — that migration is finished here (#129), and `AGENTS.md` keeps only the
 operating contract plus an index into the notes. Recall still unions the legacy
 block for managed repos that have not migrated, so nothing is stranded.
 
-`state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
-tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `config/`
-defaults, docs) is the shared distro and ships through this repo's own PR path.
+`state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored.
+The tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `config/`
+defaults, docs) is the shared distro and ships through this repo's own PR
+path.
