@@ -55,7 +55,8 @@ dm_ensure_dirs
 # (itself a git repo), attaching a worker's copy to the distro root.
 dm_registry_require_valid
 
-DM_WT="$DM_STATE/worktrees"
+# DM_WT (the managed worktree root) is a dm-lib layout constant: the same path
+# is how git's admin record is keyed, and dm-trash.sh reads that record too.
 mkdir -p "$DM_WT"
 
 # --- isolation assertion: the load-bearing safety invariant ------------------
@@ -98,10 +99,9 @@ git_remove_worktree() {
   git -C "$dir" worktree remove --force "$wt"
 }
 
-# Task ids allow `.`, so a legal id can still be an illegal ref component
-# (`a..b`, `x.lock`, `trail.`). Map everything outside [A-Za-z0-9_-] to `_` so
-# the work is preserved anyway; the sha below keeps distinct ids from colliding.
-ref_component() { printf '%s' "${1//[!A-Za-z0-9_-]/_}"; }
+# The parked-head ref layout is owned by dm-lib (dm_discard_ref /
+# dm_ref_component): dm-trash.sh verifies the same path before it reports the
+# work recoverable, so the composition must have exactly one owner.
 
 # Discards were once parked FLAT at refs/dm-discarded/<id>. A ref living at that
 # path is a git D/F conflict: nothing can be created beneath it, so upgrading to
@@ -110,7 +110,7 @@ ref_component() { printf '%s' "${1//[!A-Za-z0-9_-]/_}"; }
 # Returns 0 when the parent path is clear to park under, 1 when it is not.
 migrate_flat_discard_ref() {
   local id="$1" dir="$2" flat old out
-  flat="refs/dm-discarded/$(ref_component "$id")"
+  flat="$(dm_discard_ref "$id")"
   old="$(git -C "$dir" rev-parse --verify --quiet "$flat" 2>/dev/null)" || return 0
   [ -n "$old" ] || return 0
   # Delete before create: the nested path cannot exist while the flat ref does.
@@ -146,7 +146,7 @@ park_discarded_head() {
     *[!0]*) ;;
     *) dm_warn "cannot park $id's discarded head: git reports an unborn or unresolvable HEAD ($head); there is no commit to preserve"; return 0 ;;
   esac
-  ref="refs/dm-discarded/$(ref_component "$id")/$head"
+  ref="$(dm_discard_ref "$id" "$head")"
   if ! git check-ref-format "$ref" 2>/dev/null; then
     dm_warn "cannot park $id's discarded head $head: '$ref' is not a valid ref name; the commit may be unreachable after gc"
     return 0
@@ -161,24 +161,25 @@ park_discarded_head() {
   printf '%s\n' "$head"
 }
 
-# HEAD that git's admin record still holds for a worktree at <path>. A vanished
-# DIRECTORY does not take the commit with it — the object lives in the clone and
-# the admin record is its last reference, so this must be read before pruning.
-admin_worktree_head() {
-  local dir="$1" path="$2"
-  git -C "$dir" worktree list --porcelain 2>/dev/null | awk -v p="$path" '
-    $1 == "worktree" { in_entry = (substr($0, 10) == p) }
-    in_entry && $1 == "HEAD" { print $2; exit }
-  '
-}
-
 # Work not proven landed is about to be deleted. A detached worktree's reflog
 # dies with its directory, so park HEAD before anything is removed.
+#
+# An unreadable in-worktree HEAD (deleted/corrupt `.git` file) is NOT "no
+# commit": the clone's admin record still names the head, and the object is
+# still in the clone. Falling back to it is what stops a real commit from being
+# discarded with no recovery ref at all. Same lookup ORDER as
+# clear_missing_worktree: derived managed path first, stored path second.
 preserve_discarded_head() {
   local id="$1" wt="$2" dir="$3" head
   head="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null)" || head=""
+  if [ -z "$head" ]; then
+    head="$(dm_admin_worktree_head "$dir" "$DM_WT/$id")"
+    [ -n "$head" ] || head="$(dm_admin_worktree_head "$dir" "$wt")"
+    [ -z "$head" ] \
+      || dm_warn "cannot read HEAD inside $id's worktree; using the head git's own admin record still holds ($head)"
+  fi
   [ -n "$head" ] \
-    || { dm_warn "cannot read HEAD of $id's worktree; discarding with no recovery ref"; return 0; }
+    || { dm_warn "cannot read HEAD of $id's worktree, and git's admin record names none; discarding with no recovery ref"; return 0; }
   park_discarded_head "$id" "$dir" "$head"
 }
 
@@ -195,8 +196,8 @@ clear_missing_worktree() {
   # written before DM_HOME was canonicalized holds a symlinked path that never
   # string-matches git's physical entry. The directory is gone, so the stored
   # path cannot be canonicalized at read time — only used as a fallback.
-  head="$(admin_worktree_head "$dir" "$DM_WT/$id")"
-  [ -n "$head" ] || head="$(admin_worktree_head "$dir" "$recorded")"
+  head="$(dm_admin_worktree_head "$dir" "$DM_WT/$id")"
+  [ -n "$head" ] || head="$(dm_admin_worktree_head "$dir" "$recorded")"
   parked=""
   [ -z "$head" ] || parked="$(park_discarded_head "$id" "$dir" "$head")"
   if ! prune_out="$(git -C "$dir" worktree prune 2>&1)"; then
@@ -204,7 +205,7 @@ clear_missing_worktree() {
   fi
   note="stale worktree record cleared with operator discard authority; directory was already absent: $recorded"
   if [ -n "$parked" ]; then
-    note="$note; head $parked kept at refs/dm-discarded/$(ref_component "$id")/$parked in the clone"
+    note="$note; head $parked kept at $(dm_discard_ref "$id" "$parked") in the clone"
   elif [ -n "$head" ]; then
     note="$note; head $head could NOT be preserved"
   else
@@ -627,7 +628,7 @@ Its commit cannot be preserved without the clone. Re-run with --force (explicit 
       if [ "$landed_rc" -ne 0 ]; then
         discard_note="$discard_note; work not proven landed: ${landed_out##*$'\n'}"
         if [ -n "$discarded_head" ]; then
-          discard_note="$discard_note; head $discarded_head kept at refs/dm-discarded/$(ref_component "$id")/$discarded_head in the clone"
+          discard_note="$discard_note; head $discarded_head kept at $(dm_discard_ref "$id" "$discarded_head") in the clone"
         else
           discard_note="$discard_note; head could NOT be preserved"
         fi

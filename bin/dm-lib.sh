@@ -37,6 +37,10 @@ DM_REPOS="$DM_HOME/repos"
 DM_CONFIG="$DM_HOME/config"
 DM_REGISTRY="$DM_STATE/repos.json"
 DM_TASKS="$DM_STATE/tasks"
+# The managed worktree root. Here rather than in dm-worktree.sh because a task's
+# managed path is the FIRST key git's admin record is looked up by (see
+# dm_admin_worktree_head), and two scripts now need that lookup.
+DM_WT="$DM_STATE/worktrees"
 
 dm_die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 dm_warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -837,6 +841,57 @@ dm_require_worktree() {
   local wt; wt="$(dm_meta_get "$1" worktree)"
   [ -n "$wt" ] && [ -d "$wt" ] || dm_die "no worktree for $1"
   printf '%s\n' "$wt"
+}
+
+# --- where a discarded head is parked ----------------------------------------
+# Single owner of the recovery-ref LAYOUT, because two scripts depend on it:
+# dm-worktree.sh remove --force creates the ref, and dm-trash.sh verifies it
+# resolves before telling the operator the work is recoverable. A second,
+# hand-composed copy of this path is how a recovery claim drifts from the ref
+# that actually exists.
+
+# Task ids allow `.`, so a legal id can still be an illegal ref component
+# (`a..b`, `x.lock`, `trail.`). Map everything outside [A-Za-z0-9_-] to `_` so
+# the work is preserved anyway; the sha keeps distinct ids from colliding.
+dm_ref_component() { printf '%s' "${1//[!A-Za-z0-9_-]/_}"; }
+
+# dm_admin_worktree_head <clone-dir> <worktree-path> -> the HEAD git's admin
+# record still holds for a worktree at that path, or empty. A vanished DIRECTORY
+# does not take the commit with it — the object lives in the clone and the admin
+# record is its last reference, so this is the only way to name the head of a
+# worktree whose directory is already gone (and it must be read before a prune).
+#
+# awk reads to EOF and keeps only the FIRST match instead of `exit`-ing on it:
+# exiting early closes the pipe, git dies of SIGPIPE, and `pipefail` turns the
+# whole function into exit 141 — which, in a plain `head="$(...)"` assignment
+# under `set -e`, kills the caller. It only surfaces once git's output exceeds
+# the pipe buffer (many worktrees), so it is invisible in small fixtures.
+dm_admin_worktree_head() {
+  local dir="$1" path="$2"
+  git -C "$dir" worktree list --porcelain 2>/dev/null | awk -v p="$path" '
+    $1 == "worktree" { in_entry = (substr($0, 10) == p) }
+    in_entry && $1 == "HEAD" && !found { print $2; found = 1 }
+  '
+}
+
+# dm_squote <string> -> the string as a single-quoted shell word, safe to paste
+# into a command line. Used for paths in the recovery instructions this toolbelt
+# PRINTS for an operator to run: an unquoted path breaks on the first space, and
+# that instruction is sometimes the only route back to a discarded commit.
+dm_squote() {
+  local s="$1"
+  # Close the quote, emit an escaped quote, reopen — the only way to carry a
+  # single quote inside single quotes.
+  printf "'%s'" "$(printf '%s' "$s" | sed "s/'/'\\\\''/g")"
+}
+
+# dm_discard_ref <id> [<sha>] -> the ref a discarded head is parked on. With no
+# sha, the PARENT path (the legacy flat layout's own ref; nothing can be created
+# beneath it while a ref lives there — see migrate_flat_discard_ref).
+dm_discard_ref() {
+  local base
+  base="refs/dm-discarded/$(dm_ref_component "$1")"
+  if [ -n "${2:-}" ]; then printf '%s/%s\n' "$base" "$2"; else printf '%s\n' "$base"; fi
 }
 
 # --- FF-sync-with-fallback reaction: shared by callers that best-effort sync a
