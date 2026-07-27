@@ -8,7 +8,7 @@
 
 import {
   el, add, lamp, stateCell, meta, link, table, cell, section, head, empty,
-  foldable, segmented, askControl,
+  foldable, segmented, askControl, reviewOpenControl,
   plural, lookup, word, ago, clockTime, hoursSince,
   WORK_STATE, CHECKS, REVIEW_VERDICT, AUTHORITY, KIND, CHECK_STATUS, MODE,
   STAGE_LABEL, STAGE_STATE, SOURCE_WORD, PR_UNREADABLE, TESTS_RESULT,
@@ -587,7 +587,10 @@ export function viewReviews(state, ctx) {
       cell('mono nowrap', el('span', null, r.repo || '—')),
       cell('nowrap', stateCell(awaiting ? 'brass' : 'neutral', awaiting ? 'Waiting for you' : 'Reviewed')),
       cell('mono nowrap', el('span', null, ago(r.at))),
-      cell('nowrap', link(r.href, 'Open')));
+      // Opening tries the annotatable session first - the same surface it was
+      // reviewed in - and falls back to the raw page, honestly, if that is
+      // not available. Never a plain <a>: the destination is not known yet.
+      cell('nowrap', reviewOpenControl(r.href, ctx)));
   });
   // Waiting and reviewed are two different jobs: one is a queue, the other an
   // archive. The archive folds away; the queue never does.

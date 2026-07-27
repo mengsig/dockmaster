@@ -126,6 +126,18 @@ button, input, textarea { font: inherit; color: inherit; }
 a { color: var(--brass); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
+/* A button that must look and read like the links beside it - the review
+   archive's "Open" tries a live session before it can commit to a plain
+   navigation, so it cannot be a plain <a href>. */
+.link-btn {
+  background: none; border: 0; padding: 0; margin: 0; font: inherit;
+  color: var(--brass); cursor: pointer;
+}
+.link-btn:hover { text-decoration: underline; }
+.link-btn:disabled { color: var(--fg-mute); cursor: default; text-decoration: none; }
+.review-open { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 0.125rem; }
+.review-open .cell-warn:empty { display: none; }
+
 :focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; border-radius: 2px; }
 
 .sr-only {

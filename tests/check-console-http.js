@@ -24,6 +24,7 @@ const path = require('path')
 
 const ROOT = process.env.DM_CHECK_ROOT ? path.resolve(process.env.DM_CHECK_ROOT) : path.join(__dirname, '..')
 const chat = require(path.join(ROOT, 'ui', 'chat.js'))
+const live = require(path.join(ROOT, 'ui', 'live.js'))
 const BOOT_TIMEOUT_MS = 15000
 const BOOT_ATTEMPTS = 3
 
@@ -158,6 +159,9 @@ async function checkCrossSiteWritesAreRefused(port, home) {
     ['/api/state', { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': 'image' }, 'an <img src> read'],
     ['/api/state', { 'sec-fetch-site': 'same-site' }, 'a read from another port of 127.0.0.1'],
     ['/api/state', { origin: 'https://evil.example' }, 'a read carrying a hostile Origin'],
+    // Opening a review session runs a dm-* script the same way /api/state does,
+    // so a hostile page must not be able to fire it either.
+    ['/api/review-open?id=x', { 'sec-fetch-site': 'cross-site' }, 'a cross-site session open'],
   ]
   for (const [urlPath, headers, what] of reads) {
     const res = await request(port, 'GET', urlPath, headers)
@@ -360,6 +364,53 @@ async function checkReviewAssetsAtAnyDepth(port, home) {
   console.log('ok   a review page serves nested assets, and no path escapes its directory')
 }
 
+// --- 4. opening a review tries the lavish session, degrading honestly -------
+
+// Against the REAL dm-lavish.sh, no artifact behind the id: `open` refuses
+// before it ever touches lavish-axi, which is exactly the shape a real "no
+// session for this one" answer takes. The route must turn that into a plain
+// { url: null }, never a 500 - the page's fallback is what handles it.
+async function checkReviewOpenDegradesForAnUnknownId(port) {
+  const res = await request(port, 'GET', '/api/review-open?id=not-a-real-review')
+  equal(res.status, 200, 'an id with no artifact still answers 200')
+  equal(json(res).url, null, 'and says there is no session to open')
+
+  const missing = await request(port, 'GET', '/api/review-open')
+  equal(missing.status, 200, 'no id at all is handled the same way, not a 500')
+  equal(json(missing).url, null, 'and answers the same shape')
+  console.log('ok   opening a review with no session behind it degrades to { url: null }, not a crash')
+}
+
+// The route only WORDS what dm-lavish.sh said; the parsing itself is pinned
+// directly against a stand-in for it, so this does not depend on lavish-axi
+// being installed or spend a real session opening one.
+async function checkReviewOpenParsesTheRealScriptsShape() {
+  const stubBin = fs.mkdtempSync(path.join(os.tmpdir(), 'dm-lavish-stub-'))
+  try {
+    fs.writeFileSync(path.join(stubBin, 'dm-lavish.sh'), '#!/usr/bin/env bash\n'
+      + 'printf \'session:\\n  file: /x/change.html\\n  url: "http://127.0.0.1:4387/session/abc123"\\n  status: opened\\n\'\n')
+    fs.chmodSync(path.join(stubBin, 'dm-lavish.sh'), 0o755)
+    const opened = await live.openReviewSession(stubBin, 'whatever')
+    equal(opened.url, 'http://127.0.0.1:4387/session/abc123', 'the session url is parsed off the real output shape')
+
+    // dm-lavish.sh's own degrade when lavish-axi is missing: exits 0, says
+    // nothing shaped like a session.
+    fs.writeFileSync(path.join(stubBin, 'dm-lavish.sh'), '#!/usr/bin/env bash\n'
+      + 'echo "lavish-axi not installed; the interactive review surface is unavailable." >&2\n')
+    const noTool = await live.openReviewSession(stubBin, 'whatever')
+    equal(noTool.url, null, 'no session line on stdout is unavailable, not a throw')
+
+    // A hard refusal (no artifact): exits nonzero.
+    fs.writeFileSync(path.join(stubBin, 'dm-lavish.sh'), '#!/usr/bin/env bash\n'
+      + 'echo "no artifact" >&2\nexit 1\n')
+    const failed = await live.openReviewSession(stubBin, 'whatever')
+    equal(failed.url, null, 'a nonzero exit degrades the same way, never throws')
+  } finally {
+    fs.rmSync(stubBin, { recursive: true, force: true })
+  }
+  console.log('ok   opening a review parses the real script\'s session line and degrades on anything else')
+}
+
 // --- run ---------------------------------------------------------------------
 
 async function main() {
@@ -376,6 +427,8 @@ async function main() {
     await checkBadRequestsAreRefusedNotCrashed(port)
     await checkReviewAssetsAtAnyDepth(port, home)
     await checkReviewFailuresAreWorded(port, home)
+    await checkReviewOpenDegradesForAnUnknownId(port)
+    await checkReviewOpenParsesTheRealScriptsShape()
 
     // Every case above ran against ONE process. Had any of them killed it the
     // later ones would have failed; this states the property outright.

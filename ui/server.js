@@ -379,6 +379,23 @@ function handle(req, res, cfg, watchers) {
     return serveReview(res, cfg, url.pathname)
       .catch((err) => failReview(res, 500, 'The review archive could not be read.', err.message));
   }
+  // Opening the annotatable session runs a dm-* script, the same class of
+  // action the fleet sweep behind /api/state already is, so it takes the same
+  // cross-site refusal. It never answers anything but 200: a session that could
+  // not be opened is `{ url: null }`, for the page to fall back on honestly,
+  // not an error for it to handle.
+  if (req.method === 'GET' && url.pathname === '/api/review-open') {
+    const refusal = crossSiteRefusal(req, cfg.port);
+    if (refusal) return fail(res, refusal.status, refusal.message);
+    const id = url.searchParams.get('id') || '';
+    if (!id) return sendJson(res, 200, { url: null });
+    return live.openReviewSession(cfg.bin, id)
+      .then((result) => sendJson(res, 200, result))
+      .catch((err) => {
+        process.stderr.write(`console: /api/review-open: ${err.message}\n`);
+        sendJson(res, 200, { url: null });
+      });
+  }
   if (req.method === 'GET' && url.pathname === '/api/chat') return serveChat(res, cfg, url, watchers);
   if (req.method === 'POST' && url.pathname === '/api/chat') {
     const refusal = writeRefusal(req, cfg.port);

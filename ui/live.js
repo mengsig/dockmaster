@@ -674,6 +674,29 @@ async function reviewDir(bin, id) {
   return { dir: row.path.replace(/\/[^/]*$/, ''), file: row.path };
 }
 
+// The line `dm-lavish.sh open <id>` prints when it actually opened a session:
+//   session:
+//     file: /path/to/change.html
+//     url: "http://127.0.0.1:4387/session/<token>"
+//     status: opened
+const SESSION_URL = /url:\s*"(https?:\/\/[^"]+)"/;
+
+// openReviewSession(bin, id) -> { url } for the annotatable lavish session, or
+// { url: null } when lavish-axi is not installed, the id has no artifact, or
+// the command failed for any other reason. Every one of those looks the same
+// from here: this is a courtesy on top of the raw review page, so nothing it
+// can fail at is treated as fatal - the caller falls back to the plain archive.
+async function openReviewSession(bin, id) {
+  let stdout;
+  try {
+    stdout = await run(bin, 'dm-lavish.sh', ['open', id]);
+  } catch (err) {
+    return { url: null };
+  }
+  const match = SESSION_URL.exec(stdout);
+  return { url: match ? match[1] : null };
+}
+
 module.exports = {
   collectLocal,
   collectPullRequests,
@@ -684,6 +707,7 @@ module.exports = {
   progressNote,
   memoryNotes,
   reviewDir,
+  openReviewSession,
   SOURCES,
   STATE_WORDS,
   QUIET_AFTER_HOURS,

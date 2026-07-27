@@ -166,6 +166,7 @@ function panelContext() {
   return {
     compose,
     ask: postMessage,
+    openReview,
     filter: ui.filter,
     setFilter(id) {
       ui.filter = id;
@@ -479,6 +480,22 @@ async function postMessage(text) {
   // internal vocabulary - never to the server's own sentence.
   if (!response.ok) {
     throw new Error(SEND_REFUSAL[response.status] || `the console answered ${response.status}.`);
+  }
+}
+
+// openReview(href) -> { url } for the lavish session behind this review, or
+// { url: null } on ANY failure - offline, a non-JSON answer, the server's own
+// degrade. This never rejects: the control it feeds always has something to do
+// (open the returned url, or fall back to `href`), never an error to handle.
+async function openReview(href) {
+  const id = href.replace(/^\/review\//, '').replace(/\/+$/, '');
+  try {
+    const response = await fetch(`/api/review-open?id=${encodeURIComponent(id)}`);
+    if (!response.ok) return { url: null };
+    const body = await response.json();
+    return { url: typeof body.url === 'string' ? body.url : null };
+  } catch (err) {
+    return { url: null };
   }
 }
 
