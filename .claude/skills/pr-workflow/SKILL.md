@@ -47,8 +47,7 @@ recommendation to fall back on.
 
 The tiers share one gate schema, so a tier is just a different ordered `gates`
 array. The two new mechanics the rigorous tier introduces are executable
-procedure the dockmaster drives agent-style (and the optional runner drives the
-same way):
+procedure the dockmaster drives agent-style:
 
 - **dimension-parallel review** — instead of one generalist read, spawn one
   fresh reviewer per lens (`dimensions`: `correctness`, `security`,
@@ -256,16 +255,3 @@ computed it yet on first fetch); `gh pr merge`'s own failure is the backstop.
 behind the base, rebase it first so CI validates the actual combined state,
 not a stale diff against an older base (see `merge-conflict` if the rebase hits
 conflicts).
-
-## Optional: deterministic runner
-
-The default is to drive the gates above with ordinary `Agent` calls. For a
-hands-off run of the whole pipeline instead, `workflows/pr-pipeline.js` executes
-the same gates as a `Workflow` with zero-token idle between stages. It has a
-built-in gate list for each tier (`fast` | `default` | `rigorous`), selected by
-`tier:` when the caller passes no explicit `gates` — e.g. the `rigorous` tier
-(dimension-parallel review via `parallel()`, adversarial `verify-findings`, then
-fix → tests → verify → security → pr). It is opt-in and not wired to anything — invoke it via the
-Workflow tool only when the operator has asked for multi-agent orchestration, and
-a live **rigorous** run is a dockmaster/operator action. See `config/README.md`
-for which config fields it reads versus the agent-driven path.

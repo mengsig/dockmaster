@@ -299,13 +299,11 @@ coldstart review → fix → tests → merge-gate review → fix → tests → (
 ```
 
 then a **merge gate**: the operator merges on GitHub, or the dockmaster asks for
-approval and merges (`bin/dm-pr.sh merge`, never red). By default the gates are
-executed by the **dockmaster itself**, driving runtime-native review workers
-while following `pr-workflow`; nothing else runs them.
-`workflows/pr-pipeline.js` is an **optional** deterministic runner for hosts that
-expose its injected workflow API. It is not auto-discovered or wired to a `bin/`
-script. Adding a gate means documenting it in the `pr-workflow` skill and listing
-it in the config array. See `config/README.md` for executor coverage.
+approval and merges (`bin/dm-pr.sh merge`, never red). The gates are executed by
+the **dockmaster itself**, driving runtime-native review workers while following
+`pr-workflow`; nothing else runs them. Adding a gate means documenting it in the
+`pr-workflow` skill and listing it in the config array. See `config/README.md`
+for what reads the config.
 
 **Branch naming:** `<type>/<issue>/<slug>` — `type ∈ {feat,fix,bug,chore,refactor,docs,perf,test}`,
 `issue` = the issue number (or `x` when none), `slug` = a short kebab summary.

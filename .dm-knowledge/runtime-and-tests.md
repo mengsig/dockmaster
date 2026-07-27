@@ -14,8 +14,8 @@ Read before adding a skill or touching anything the test suite measures.
   two adapters in sync taxed every change and let runtime-neutral policy drift
   between them unnoticed.
 - **[pitfall]** `tests/smoke.sh` is offline: the PR path is covered only through
-  stubbed CLIs (not `workflows/pr-pipeline.js`), so no test hits real GitHub.
-  Under `set -euo pipefail`, piping output to `grep -q` SIGPIPEs the producer
+  stubbed CLIs, so no test hits real GitHub. Under `set -euo pipefail`, piping
+  output to `grep -q` SIGPIPEs the producer
   (exit 141) which pipefail reports as failure — capture once and match with a
   here-string (`grep -q pat <<<"$VAR"`).
 - **[pitfall]** Alternation in a smoke grep MUST use `grep -E` with a plain `|`.

@@ -2,8 +2,7 @@
 // tests/check-ci-graph.js - pins the SHAPE of .github/workflows/ci.yml.
 //
 // The workflow gates itself, so a PR that weakens the gate verifies itself
-// green. This catches that class the way check-gate-drift.js catches gate-list
-// drift: add a job and forget `ci-gate.needs`, flip predicate-quantifier back
+// green: add a job and forget `ci-gate.needs`, flip predicate-quantifier back
 // to the `some` default, grow the path-filter exclusion list, reword a
 // `changes` output expression, or drop a heavy leg's `if:` guard, and this
 // fails.
