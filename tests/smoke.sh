@@ -413,19 +413,28 @@ check "fast pipeline has one review pass" '[ "$(jq "[.gates[]|select(.gate==\"re
 check "fast pipeline keeps tests gate"    '[ "$(jq "[.gates[]|select(.gate==\"tests\")]|length" "$FAST")" -ge 1 ]'
 check "fast pipeline ends in pr gate"     '[ "$(jq -r ".gates[-1].gate" "$FAST")" = "pr" ]'
 
+echo "== standard pipeline config =="
+STD="$ROOT/config/pr-pipeline.standard.json"
+check "standard pipeline config exists"       '[ -f "$STD" ]'
+check "standard pipeline is valid JSON"       'jq -e . "$STD" >/dev/null'
+check "standard pipeline has one review pass" '[ "$(jq "[.gates[]|select(.gate==\"review\")]|length" "$STD")" = "1" ]'
+check "standard pipeline keeps tests gate"    '[ "$(jq "[.gates[]|select(.gate==\"tests\")]|length" "$STD")" -ge 1 ]'
+check "standard pipeline gate order is review,fix,tests,pr" '[ "$(jq -c "[.gates[].gate]" "$STD")" = "[\"review\",\"fix\",\"tests\",\"pr\"]" ]'
+
 echo "== rigorous pipeline config =="
 RIG="$ROOT/config/pr-pipeline.rigorous.json"
 check "rigorous pipeline config exists"        '[ -f "$RIG" ]'
 check "rigorous pipeline is valid JSON"        'jq -e . "$RIG" >/dev/null'
-# The rigorous tier's signature is the dimension-parallel review followed by the
-# adversarial verify-findings gate; assert both the shape and the gate order.
+# The rigorous tier's signature is the dimension-parallel review; the adversarial
+# verify-findings gate was cut (configured since it shipped, never once executed),
+# so assert the shape and the gate order without it.
 check "rigorous review is dimension-parallel"  '[ "$(jq "[.gates[]|select(.gate==\"review\")][0].dimensions|length" "$RIG")" -ge 1 ]'
-check "rigorous verify-findings has voters"    '[ "$(jq "[.gates[]|select(.gate==\"verify-findings\")][0].voters" "$RIG")" -ge 1 ]'
-check "rigorous starts review then verify-findings" '[ "$(jq -r ".gates[0].gate" "$RIG")" = "review" ] && [ "$(jq -r ".gates[1].gate" "$RIG")" = "verify-findings" ]'
+check "rigorous has no verify-findings gate"   '[ "$(jq "[.gates[]|select(.gate==\"verify-findings\")]|length" "$RIG")" = "0" ]'
+check "rigorous starts review then fix"        '[ "$(jq -r ".gates[0].gate" "$RIG")" = "review" ] && [ "$(jq -r ".gates[1].gate" "$RIG")" = "fix" ]'
 check "rigorous ends in pr gate"               '[ "$(jq -r ".gates[-1].gate" "$RIG")" = "pr" ]'
-# The three shipped tiers must share the same top-level shape (a consistent gate
+# The four shipped tiers must share the same top-level shape (a consistent gate
 # schema is what lets one runner drive any of them).
-check "all three tiers share the top-level shape" 'for f in default fast rigorous; do [ "$(jq -r "has(\"version\") and has(\"description\") and has(\"gates\")" "$ROOT/config/pr-pipeline.$f.json")" = "true" ] || exit 1; done'
+check "all four tiers share the top-level shape" 'for f in default fast standard rigorous; do [ "$(jq -r "has(\"version\") and has(\"description\") and has(\"gates\")" "$ROOT/config/pr-pipeline.$f.json")" = "true" ] || exit 1; done'
 
 echo "== lavish degradation (optional tool absent) =="
 # Simulate lavish-axi being absent: a PATH of symlinks to only the real tools

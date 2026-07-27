@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Removed
 
+- **The rigorous tier's adversarial `verify-findings` gate.** Cut from
+  `config/pr-pipeline.rigorous.json` and the `pr-workflow` skill: configured
+  since the tier shipped, it was never once executed — zero skeptic agents
+  across the measured record. The dimension-parallel cold review plus the
+  merge gate carried the load and caught real bugs without it. Rigorous gate
+  order is now `review (dimension-parallel) → fix → tests → verify → security
+  → pr`.
 - **The OpenAI Codex runtime adapter.** dockmaster is Claude-only. `.agents/`,
   `.codex/`, the capability matrix (`config/runtime-capabilities.json`,
   `docs/runtime-capabilities.md`), the dual-runtime validation snapshot
@@ -101,6 +108,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **`standard` PR-pipeline tier** (`config/pr-pipeline.standard.json`), the
+  fourth rigor tier between `fast` and `default`: one cold review pass → fix →
+  tests → pr, for small, low-blast-radius code changes — a single subsystem,
+  covered by tests, touching no state/concurrency/safety/security surface and
+  no public contract. Unlike `fast`, the lavish approval gate still applies.
+  Selection criteria and the `fast` < `standard` < `default` < `rigorous`
+  ladder (take the higher tier when unsure) are in the `pr-workflow` skill.
 - **`bin/dm-state.sh` — export, verify, and import the orchestration state.**
   `state/` was single-copy, gitignored local files with no backup path, so
   machine loss destroyed the registry, every task record, the backlog, and the
