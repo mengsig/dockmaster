@@ -163,11 +163,23 @@ park_discarded_head() {
 
 # Work not proven landed is about to be deleted. A detached worktree's reflog
 # dies with its directory, so park HEAD before anything is removed.
+#
+# An unreadable in-worktree HEAD (deleted/corrupt `.git` file) is NOT "no
+# commit": the clone's admin record still names the head, and the object is
+# still in the clone. Falling back to it is what stops a real commit from being
+# discarded with no recovery ref at all. Same lookup ORDER as
+# clear_missing_worktree: derived managed path first, stored path second.
 preserve_discarded_head() {
   local id="$1" wt="$2" dir="$3" head
   head="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null)" || head=""
+  if [ -z "$head" ]; then
+    head="$(dm_admin_worktree_head "$dir" "$DM_WT/$id")"
+    [ -n "$head" ] || head="$(dm_admin_worktree_head "$dir" "$wt")"
+    [ -z "$head" ] \
+      || dm_warn "cannot read HEAD inside $id's worktree; using the head git's own admin record still holds ($head)"
+  fi
   [ -n "$head" ] \
-    || { dm_warn "cannot read HEAD of $id's worktree; discarding with no recovery ref"; return 0; }
+    || { dm_warn "cannot read HEAD of $id's worktree, and git's admin record names none; discarding with no recovery ref"; return 0; }
   park_discarded_head "$id" "$dir" "$head"
 }
 

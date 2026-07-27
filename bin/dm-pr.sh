@@ -542,6 +542,11 @@ atomic_merge_pull() {
 # gh-axi takes the HTTP method positionally and has no --raw-field, gh needs
 # --method and --raw-field so the value is unambiguously a string. Both die on
 # failure — a comment that did not post must not be followed by a silent close.
+# The body is passed as `--field body=<text>`, and gh reads a value starting with
+# `@` as a FILE to read (`@-` is stdin) — the wrapper CLI has no --raw-field to
+# turn that off. Every caller here prefixes fixed text, which makes a leading `@`
+# impossible; that prefix is load-bearing, not decoration, and `close` also
+# refuses a reason that starts with one.
 comment_pr() {
   local slug="$1" n="$2" body="$3" cli path out
   local args=()
@@ -1037,6 +1042,12 @@ case "$cmd" in
     done
     [ -n "$reason" ] || dm_die "--reason is required: a PR closed unmerged must say why"
     dm_require_single_line "close reason" "$reason"
+    # Belt for the comment body's `@` hazard above: the fixed prefix already makes
+    # a leading `@` unreachable, so this refuses only a value that would rely on
+    # that prefix to be safe.
+    case "$reason" in
+      @*) dm_die "--reason must not start with '@': the GitHub CLI reads a field value beginning with @ as a file to read, and the wrapper CLI has no --raw-field to disable it" ;;
+    esac
     repo="$(dm_meta_get "$id" repo)"; [ -n "$repo" ] || dm_die "no such task: $id"
     url="$(dm_meta_get "$id" pr)"; [ -n "$url" ] || dm_die "no PR recorded for $id"
     dm_need gh
@@ -1240,8 +1251,24 @@ case "$cmd" in
         checks="$(dm_meta_get "$id" checks)"
         state="$(dm_meta_get "$id" pr_state)"
       else
-        dm_meta_set "$id" pr_state "$state"
-        dm_meta_set "$id" checks "$checks"
+        # Caching what GitHub just said is best-effort, in BOTH directions.
+        # (1) Between the enumeration above and this line the task can be archived
+        #     by teardown or trash; dm_meta_set refuses a task with no active
+        #     record and that refusal is an exit, so it runs where it cannot take
+        #     the whole sweep down with it.
+        # (2) It must never DOWNGRADE a terminal state someone else established
+        #     while this snapshot was in flight: `close` and `merge` write
+        #     CLOSED/MERGED, and writing a pre-close OPEN back over that would
+        #     resurrect a PR the record had already finished with.
+        cached_state="$(dm_meta_get "$id" pr_state)"
+        case "$cached_state" in
+          MERGED|CLOSED) : ;;
+          *)
+            write_out=""
+            if ! write_out="$( { dm_meta_set "$id" pr_state "$state"; dm_meta_set "$id" checks "$checks"; } 2>&1 )"; then
+              dm_warn "sweep: could not cache $id's PR state ($(dm_first_line "${write_out:-no detail}")); the row below is still what GitHub reported"
+            fi ;;
+        esac
       fi
       case "$checks" in
         failing) red=$((red + 1)) ;;

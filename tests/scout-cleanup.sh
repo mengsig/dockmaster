@@ -388,6 +388,32 @@ check "an illegal-ref id still parks its discarded commit" 'REACH="$(git -C "$DM
 check "the illegal-ref id records preservation, not a loss" 'grep -q "head $ODD_SHA kept at" "$DM_HOME/state/tasks/odd..id.status"'
 check "the illegal-ref commit survives an aggressive gc" 'git -C "$DM_HOME/repos/demo" gc --prune=now --quiet 2>/dev/null; git -C "$DM_HOME/repos/demo" cat-file -e "$ODD_SHA^{commit}"'
 
+echo "== trash reads git's admin record under a non-canonical root too =="
+# dm-trash.sh carries its OWN copy of the admin-record lookup, for the shape where
+# the recorded directory is already gone. Under a canonical root that lookup is
+# indistinguishable from a no-op, so it only earns its keep here: a symlinked root
+# plus a pre-upgrade (non-canonical) record — the exact pair that once reported a
+# real commit as nothing at risk.
+TRASH_WT="$(new_ship trash-legacy)"
+TRASH_SHA="$(commit_in "$TRASH_WT" "work behind a pre-upgrade record, trashed")"
+ln -s "$DM_HOME/state/worktrees" "$TMP/wt-alias-trash"
+record_worktree trash-legacy "$TMP/wt-alias-trash/trash-legacy"
+check "the planted trash record is non-canonical" '[ "$(b dm-task.sh get trash-legacy worktree)" != "$TRASH_WT" ]'
+rm -rf "$TRASH_WT"
+set +e
+TRASH_OUT="$(b dm-trash.sh trash-legacy --reason "deprecated intent" 2>"$TMP/trash-legacy.err")"
+TRASH_RC=$?
+set -e
+check "trash completes over a pre-upgrade record"  '[ "$TRASH_RC" -eq 0 ]'
+check "it names the head git's own record still held" 'grep -qx "head=$TRASH_SHA" <<<"$TRASH_OUT"'
+check "it reports the ref that really exists" \
+  'grep -qx "committed_work=refs/dm-discarded/trash-legacy/$TRASH_SHA" <<<"$TRASH_OUT"'
+check "it never claims nothing was committed" '! grep -q "nothing-committed" <<<"$TRASH_OUT"'
+check "the parked commit survives an aggressive gc" \
+  'git -C "$DM_HOME/repos/demo" gc --prune=now --quiet 2>/dev/null; git -C "$DM_HOME/repos/demo" cat-file -e "$TRASH_SHA^{commit}"'
+check "the records are archived, not left active" \
+  '[ -f "$DM_HOME/state/archive/trash-legacy.meta" ] && [ ! -f "$DM_HOME/state/tasks/trash-legacy.meta" ]'
+
 echo "== a refusal names the failure, not git's manual =="
 # git diff on a non-repo path exits 129 after ~130 lines of usage text. Pasting
 # that into the refusal buries the one line that says what is at risk.

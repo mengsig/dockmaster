@@ -860,12 +860,29 @@ dm_ref_component() { printf '%s' "${1//[!A-Za-z0-9_-]/_}"; }
 # does not take the commit with it — the object lives in the clone and the admin
 # record is its last reference, so this is the only way to name the head of a
 # worktree whose directory is already gone (and it must be read before a prune).
+#
+# awk reads to EOF and keeps only the FIRST match instead of `exit`-ing on it:
+# exiting early closes the pipe, git dies of SIGPIPE, and `pipefail` turns the
+# whole function into exit 141 — which, in a plain `head="$(...)"` assignment
+# under `set -e`, kills the caller. It only surfaces once git's output exceeds
+# the pipe buffer (many worktrees), so it is invisible in small fixtures.
 dm_admin_worktree_head() {
   local dir="$1" path="$2"
   git -C "$dir" worktree list --porcelain 2>/dev/null | awk -v p="$path" '
     $1 == "worktree" { in_entry = (substr($0, 10) == p) }
-    in_entry && $1 == "HEAD" { print $2; exit }
+    in_entry && $1 == "HEAD" && !found { print $2; found = 1 }
   '
+}
+
+# dm_squote <string> -> the string as a single-quoted shell word, safe to paste
+# into a command line. Used for paths in the recovery instructions this toolbelt
+# PRINTS for an operator to run: an unquoted path breaks on the first space, and
+# that instruction is sometimes the only route back to a discarded commit.
+dm_squote() {
+  local s="$1"
+  # Close the quote, emit an escaped quote, reopen — the only way to carry a
+  # single quote inside single quotes.
+  printf "'%s'" "$(printf '%s' "$s" | sed "s/'/'\\\\''/g")"
 }
 
 # dm_discard_ref <id> [<sha>] -> the ref a discarded head is parked on. With no

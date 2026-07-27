@@ -21,22 +21,29 @@
 # its local copy is there, terminal once it is gone).
 #
 #   1. refuse without a reason, on an unknown id, or on an already-terminal task
-#   2. refuse an unclosed PR unless --close-pr (never merges, never deletes a
-#      remote branch)
+#   2. refuse a PR not CONFIRMED closed against GitHub unless --close-pr (never
+#      merges, never deletes a remote branch)
 #   3. snapshot branch / head / dirty summary into the task record, with who,
 #      when and why
 #   4. close the PR (reversible: a closed PR can be reopened)
 #   5. remove the local copy under the recorded authority — dm-worktree.sh parks
-#      the discarded head at refs/dm-discarded/<id>/<sha> in the clone, and this
-#      flow VERIFIES that ref resolves before reporting the work recoverable
-#   6. resolve the backlog row, archive the records
+#      the discarded head at refs/dm-discarded/<id>/<sha> in the clone
+#   6. read the recovery verdict out of that ref NAMESPACE, never out of the
+#      pre-removal snapshot: the namespace is what a recovery would actually use
+#   7. resolve the backlog row, archive the records
+#
+# A task already recorded discarded BY THIS FLOW (it is the only writer of
+# `trashed_reason`) is RESUMABLE: a re-run skips every destructive step and
+# finishes only the bookkeeping tail, because a crash between the discard and the
+# archive would otherwise leave a task no command would touch again.
 #
 # What survives: every commit that was made (the parked ref, plus the pushed
 # branch when a PR existed — it is left alone on purpose). What does NOT:
 # uncommitted and untracked files. `git stash create` cannot capture untracked
 # files, so a partial snapshot would advertise recoverability it does not
 # deliver; instead the counts go on the record and the summary says plainly that
-# they are gone.
+# they are gone. An unreadable HEAD is never reported as "nothing committed" —
+# it is UNDETERMINED, and every recovery claim is verified before it is printed.
 #
 # Output is one `key=value` per line on stdout so a session can relay it; the
 # removal's own log and every warning go to stderr.
@@ -69,34 +76,44 @@ backlog_has_row() {
   printf '%s' "$doc" | jq -e --arg id "$1" 'any(.items[]; .id==$id)' >/dev/null
 }
 
+# parked_refs <clone-dir> <id> -> "<sha> <refname>", one line per recovery ref
+# this id has in the clone. The ref NAMESPACE is the ground truth for the
+# recovery verdict, not the pre-removal snapshot: a worker can commit in the
+# window between them, landedness can flip, and git's admin record may already
+# have been pruned — and the namespace is what a recovery would actually use.
+# The bare parent path matches every ref beneath it (a git prefix match), so a
+# legacy FLAT ref sitting at that path is reported too.
+parked_refs() {
+  git -C "$1" for-each-ref --format='%(objectname) %(refname)' "$(dm_discard_ref "$2")" 2>/dev/null || true
+}
+
 # snapshot_value <id> <meta-key> <fresh> -> what to record for one snapshot
 # field. A failed forced removal can leave the worktree unreadable, so a RETRY
-# reads "none"/"unknown" where the first attempt read a real value — and
-# `trashed_head` is the recovery key. So a non-answer never overwrites an answer
-# an earlier attempt already recorded; it only fills a field that has none.
+# reads a non-answer where the first attempt read a real value — and
+# `trashed_head` is the recovery key. So a recorded answer always wins over a
+# fresh non-answer, and one non-answer never replaces another (a recorded
+# `undetermined` must not decay into `none`, which the summary reads as a
+# definite "there was nothing").
 snapshot_value() {
   local fresh="$3" prev
   case "$fresh" in
-    none|unknown|undetermined) ;;
+    none|unknown|undetermined|no-local-copy) ;;
     *) printf '%s\n' "$fresh"; return 0 ;;
   esac
   prev="$(dm_meta_get "$1" "$2")"
-  case "$prev" in
-    ''|none|unknown|undetermined) printf '%s\n' "$fresh" ;;
-    *) printf '%s\n' "$prev" ;;
-  esac
+  if [ -n "$prev" ]; then printf '%s\n' "$prev"; else printf '%s\n' "$fresh"; fi
 }
 
-# A step failed AFTER the local copy was deleted. The task is already terminal,
-# so re-running this command is refused by design — name the two commands that
-# finish the job instead of leaving the operator to guess them.
+# A step failed AFTER the local copy was deleted. The task is terminal, so the
+# tail is what is left — name it. A re-run also finishes it (this flow resumes
+# its own discard), so both routes are given.
 die_after_removal() {
   local id="$1" reason="$2" what="$3" detail="$4"
   [ -z "$detail" ] || what="$what
 $detail"
   dm_die "$what
-$id's local copy is gone and the task is recorded discarded — that part is done and reconciles correctly. Finish the bookkeeping by hand:
-  dm-backlog.sh done $id --note \"trashed: $reason\"
+$id's local copy is gone and the task is recorded discarded — that part is done and reconciles correctly. Finish the bookkeeping by re-running this command, or by hand:
+  dm-backlog.sh done $id --note $(dm_squote "trashed: $reason")
   dm-task.sh archive $id"
 }
 
@@ -121,181 +138,291 @@ meta_file="$(dm_meta_path "$id")"
 repo="$(dm_meta_get "$id" repo)"
 [ -n "$repo" ] || dm_die "task '$id' records no repo, so neither its clone nor its recovery ref can be resolved; the record is incomplete — inspect $meta_file"
 
-# Reconciled, PR state refreshed live (dm-task.sh state refreshes an unmerged PR
-# from GitHub), so the guards below judge what is true now rather than what was
-# last written down.
-state_line="$("$BIN_DIR/dm-task.sh" state "$id")"
-state="${state_line%% · *}"; state="${state#state: }"
-case "$state" in
-  done|discarded)
-    dm_die "REFUSED: '$id' is already terminal ('$state'), so there is nothing in flight to discard. A landed task is teardown + archive (dm-worktree.sh remove / dm-task.sh archive); undoing work that landed is a revert (rollback skill)." ;;
-esac
-
-# --- the open-PR guard -------------------------------------------------------
-# Fail closed: only a PR provably CLOSED needs no --close-pr. Anything else —
-# OPEN, or a state we could not refresh — is treated as open, because leaving an
-# open PR behind a discarded task invites someone to merge abandoned work.
+# --- terminal, resumable, or live? -------------------------------------------
+# `trashed_reason` is written by nothing else, so a discarded task carrying one is
+# THIS flow's own unfinished work: a crash (or a kill) between the discard and the
+# archive must not leave a task that every command refuses. Resuming runs only the
+# bookkeeping tail — it can no longer destroy anything, because there is nothing
+# left to destroy, so it also needs no GitHub round-trip.
 pr="$(dm_meta_get "$id" pr)"
-pr_action=none
-if [ -n "$pr" ]; then
-  pr_state="$(dm_meta_get "$id" pr_state)"
-  case "$pr_state" in
-    # A belt: `dm-task.sh state` already reads a merged PR as terminal-done, so
-    # the guard above normally fires first. Kept so the refusal stays correct if
-    # that reconcile rule ever changes.
-    MERGED)
-      dm_die "REFUSED: $id's PR is MERGED ($pr) — its work LANDED. Trash discards unlanded work; undoing a landed change is a revert (rollback skill)." ;;
-    CLOSED) pr_action=already-closed ;;
-    *)
-      [ "$close_pr" -eq 1 ] \
-        || dm_die "REFUSED: $id has a PR that is not closed ($pr, state '${pr_state:-unknown}'). Trashing it would leave an open PR inviting a merge of discarded work. Re-run with --close-pr to close it unmerged with the reason on it, or close it on GitHub first."
-      pr_action=close ;;
-  esac
+recorded_reason="$(dm_meta_get "$id" trashed_reason)"
+state="$(reconciled_state "$id")"
+resume=0
+if [ "$state" = discarded ] && [ -n "$recorded_reason" ]; then resume=1; fi
+
+# The PR refresh happens HERE, and whether it SUCCEEDED is remembered: the guards
+# below may only trust a recorded CLOSED if GitHub confirmed it in this run. State
+# is then re-read offline, because the refresh itself can reveal a merge that
+# makes the task terminal.
+pr_confirmed=0
+if [ "$resume" -eq 0 ] && dm_should_refresh_pr_state "$id"; then
+  if "$BIN_DIR/dm-pr.sh" check "$id" >/dev/null 2>&1; then pr_confirmed=1; fi
+  state="$(reconciled_state "$id")"
 fi
 
+case "$state" in
+  discarded)
+    [ "$resume" -eq 1 ] \
+      || dm_die "REFUSED: '$id' is already terminal ('$state') and was not discarded by this flow, so there is nothing here to finish. Its records are archived with dm-task.sh archive $id."
+    if [ "$reason" != "$recorded_reason" ]; then
+      dm_warn "$id was already discarded on the recorded authority ($recorded_reason); finishing THAT trash rather than re-recording a new reason"
+    fi
+    reason="$recorded_reason" ;;
+  done)
+    dm_die "REFUSED: '$id' is already terminal ('$state') — its work LANDED. Teardown + archive end a landed task (dm-worktree.sh remove / dm-task.sh archive); undoing work that landed is a revert (rollback skill)." ;;
+esac
+
 # --- the running worker ------------------------------------------------------
-# This script cannot stop an agent — only the session that spawned it can — so
-# it says so loudly and continues. `failed` is the one state where the worker
-# itself reported that it stopped; every other state may still have a live agent
-# writing into the directory about to be deleted.
+# This script cannot stop an agent — only the session that spawned it can — so it
+# says so loudly, on stderr AND in the summary, and continues. A settled state is
+# the only one where the worker is known not to be writing any more.
 agent="$(dm_meta_get "$id" agent_id)"
-if [ -n "$agent" ] && [ "$state" != failed ]; then
+worker=none
+case "$state" in
+  failed|discarded|done) ;;
+  *) [ -z "$agent" ] || worker=RUNNING ;;
+esac
+if [ "$worker" = RUNNING ]; then
   dm_warn "STOP THE WORKER FIRST: $id records worker $agent and reconciles to '$state'. This command cannot stop an agent; the session that spawned it must. A worker still running will keep writing into the local copy this is about to delete."
 fi
 
-# --- snapshot what is about to be destroyed ----------------------------------
-# The clone, resolved TOLERANTLY and once: it is where a discarded head is
-# parked, so both the snapshot and the recovery check below need it — but an
-# unresolvable repo must not stop a trash (dm-worktree.sh remove --force can
-# still clean up, and pinning the task instead is the #119 mistake).
+# The clone, resolved TOLERANTLY and once: it holds the recovery refs, so both
+# the snapshot and the verdict need it — but an unresolvable repo must not stop a
+# trash (dm-worktree.sh remove --force can still clean up, and pinning the task
+# instead is the #119 mistake).
 clone_dir=""; clone_rc=0
 clone_out="$(dm_repo_dir_or_none "$repo" 2>&1)" || clone_rc=$?
 if [ "$clone_rc" -eq 0 ] && [ -d "$clone_out/.git" ]; then clone_dir="$clone_out"; fi
 
 wt="$(dm_meta_get "$id" worktree)"
 branch=none; head=none; tracked=none; untracked_count=none; landed=no-local-copy
-if [ -n "$wt" ] && [ -d "$wt" ]; then
-  branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  branch="$(dm_first_line "$branch")"
-  [ -n "$branch" ] || branch=unknown
-  # A crew worktree starts detached; "HEAD" is git's name for that, not a branch.
-  [ "$branch" != HEAD ] || branch=detached
-  head="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
-  [ -n "$head" ] || head=none
-  if ! tracked="$(dm_tracked_state "$wt")"; then
-    dm_warn "cannot tell whether $id has uncommitted changes ($(dm_first_line "$tracked")); the summary reports it as undetermined"
-    tracked=undetermined
-  fi
-  untracked_out=""
-  if untracked_out="$(dm_untracked "$wt")"; then
-    untracked_count="$(printf '%s\n' "$untracked_out" | grep -c . || true)"
-  else
-    untracked_count=undetermined
-    dm_warn "cannot inspect $id's untracked files ($(dm_first_line "$untracked_out")); the summary cannot say how many are being discarded"
-  fi
-  # Whether the commits are already in the base decides what "recoverable" means
-  # below: work that landed needs no parked ref, work that did not must have one.
-  landed_json=""; landed_rc=0
-  landed_json="$("$BIN_DIR/dm-worktree.sh" landed "$id" --json 2>/dev/null)" || landed_rc=$?
-  landed=undetermined
-  if [ "$landed_rc" -ne 0 ]; then
-    # --json answers `undetermined` for every question it CAN answer, so a
-    # nonzero here is the command itself failing. Say so; do not read the
-    # silence as "not landed".
-    dm_warn "could not ask whether $id's work landed; the summary reports it as undetermined"
-  elif [ -n "$landed_json" ]; then
-    landed="$(printf '%s' "$landed_json" | jq -r '.state // "undetermined"')"
-  fi
-elif [ -n "$wt" ]; then
-  # Recorded but already absent: the interrupted-cleanup shape. The directory is
-  # gone, but git's admin record still names its head — and the removal parks
-  # that head, so reading it here is what lets the summary report the work as
-  # recoverable instead of silently under-claiming. Same lookup ORDER as
-  # dm-worktree.sh's own: the derived managed path first (canonical by
-  # construction), the stored path only as a fallback (a record written before
-  # DM_HOME was canonicalized holds a symlinked path git never string-matches).
-  branch=unknown; landed=undetermined
-  if [ -n "$clone_dir" ]; then
-    head="$(dm_admin_worktree_head "$clone_dir" "$DM_WT/$id")"
-    [ -n "$head" ] || head="$(dm_admin_worktree_head "$clone_dir" "$wt")"
-    [ -n "$head" ] || head=none
-  fi
-fi
-
-# --- record the authority BEFORE destroying anything -------------------------
-# Every field is new; nothing existing is renamed or overwritten. They travel
-# with the records into state/archive/, so the snapshot outlives the task.
-# `trashed_by` is the account that RAN the command — the operator's word is
-# relayed by the session and cannot be verified here, so the field claims only
-# what it knows.
-trashed_by="$(id -un 2>/dev/null || true)"
-[ -n "$trashed_by" ] || trashed_by="${USER:-unknown}"
-branch="$(snapshot_value "$id" trashed_branch "$branch")"
-head="$(snapshot_value "$id" trashed_head "$head")"
-tracked="$(snapshot_value "$id" trashed_tracked "$tracked")"
-untracked_count="$(snapshot_value "$id" trashed_untracked "$untracked_count")"
-landed="$(snapshot_value "$id" trashed_landed "$landed")"
-dm_meta_set "$id" trashed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-dm_meta_set "$id" trashed_by "$trashed_by"
-dm_meta_set "$id" trashed_reason "$reason"
-dm_meta_set "$id" trashed_branch "$branch"
-dm_meta_set "$id" trashed_head "$head"
-dm_meta_set "$id" trashed_tracked "$tracked"
-dm_meta_set "$id" trashed_untracked "$untracked_count"
-dm_meta_set "$id" trashed_landed "$landed"
-# A non-terminal verb, appended before the destruction. `dm-task.sh state` reads
-# an unknown verb through its fallback as `working`, which is exactly right if
-# this flow dies next: the local copy is still there and its work still has not
-# landed. The terminal `discarded` line comes after, from the removal itself.
-dm_status_append "$id" trashed "operator discard authority, by $trashed_by: $reason"
-
-# --- close the PR: reversible, so it goes before the deletion ----------------
-if [ "$pr_action" = close ]; then
-  "$BIN_DIR/dm-pr.sh" close "$id" --reason "trashed: $reason" \
-    || dm_die "REFUSED: could not close $id's PR ($pr). Nothing has been deleted and the task is still live. Close it (or fix the cause above) and re-run: dm-trash.sh $id --reason \"$reason\""
-  pr_action=closed
-fi
-
-# --- remove the local copy under the recorded authority ----------------------
+pr_action=none
 worktree_result=absent
-if [ -n "$wt" ]; then
-  remove_out=""
-  remove_out="$("$BIN_DIR/dm-worktree.sh" remove "$id" --force 2>&1)" \
-    || dm_die "REFUSED: could not remove $id's local copy at $wt under discard authority; nothing was deleted.
+trashed_by=""
+
+if [ "$resume" -eq 1 ]; then
+  # Nothing to destroy and nothing to re-record: report what the record already
+  # says, then fall through to the tail.
+  branch="$(dm_meta_get "$id" trashed_branch)"; [ -n "$branch" ] || branch=unknown
+  head="$(dm_meta_get "$id" trashed_head)"; [ -n "$head" ] || head=none
+  tracked="$(dm_meta_get "$id" trashed_tracked)"; [ -n "$tracked" ] || tracked=undetermined
+  untracked_count="$(dm_meta_get "$id" trashed_untracked)"; [ -n "$untracked_count" ] || untracked_count=undetermined
+  landed="$(dm_meta_get "$id" trashed_landed)"; [ -n "$landed" ] || landed=undetermined
+  trashed_by="$(dm_meta_get "$id" trashed_by)"; [ -n "$trashed_by" ] || trashed_by=unknown
+  # `worktree` was cleared by the removal, so the recorded branch is the only
+  # thing left that says whether there ever was a local copy: it is `none` only
+  # for a task that never had one.
+  [ "$branch" = none ] || worktree_result=removed-earlier
+  case "$(dm_meta_get "$id" pr_state)" in
+    '') : ;;
+    CLOSED) pr_action=already-closed ;;
+    *) [ -z "$pr" ] || pr_action=recorded-open ;;
+  esac
+  printf 'resuming %s: its local copy is already gone, only the backlog row and the records are left\n' "$id" >&2
+else
+  # --- the open-PR guard ------------------------------------------------------
+  # Fail closed. A recorded CLOSED counts only if the refresh above CONFIRMED it
+  # against GitHub in this run: the refresh is best-effort, so a PR reopened
+  # since the last check would otherwise be trusted as closed and left open
+  # behind a discarded task, inviting a merge of abandoned work.
+  if [ -n "$pr" ]; then
+    pr_state="$(dm_meta_get "$id" pr_state)"
+    case "$pr_state" in
+      # Refused whether or not the refresh confirmed it: a cached MERGED is
+      # already enough to stop. `dm-task.sh state` normally catches it first.
+      MERGED)
+        dm_die "REFUSED: $id's PR is MERGED ($pr) — its work LANDED. Trash discards unlanded work; undoing a landed change is a revert (rollback skill)." ;;
+      CLOSED)
+        if [ "$pr_confirmed" -eq 1 ]; then
+          pr_action=already-closed
+        else
+          [ "$close_pr" -eq 1 ] \
+            || dm_die "REFUSED: $id records its PR as CLOSED ($pr) but that could not be confirmed against GitHub just now, so it may have been reopened. Re-run with --close-pr (a PR already closed is left alone), or confirm it on GitHub first."
+          pr_action=close
+        fi ;;
+      *)
+        [ "$close_pr" -eq 1 ] \
+          || dm_die "REFUSED: $id has a PR that is not closed ($pr, state '${pr_state:-unknown}'). Trashing it would leave an open PR inviting a merge of discarded work. Re-run with --close-pr to close it unmerged with the reason on it, or close it on GitHub first."
+        pr_action=close ;;
+    esac
+  elif [ "$close_pr" -eq 1 ]; then
+    printf 'note: --close-pr had nothing to do — %s records no PR\n' "$id" >&2
+  fi
+
+  # --- snapshot what is about to be destroyed --------------------------------
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    branch="$(dm_first_line "$branch")"
+    [ -n "$branch" ] || branch=unknown
+    # A crew worktree starts detached; "HEAD" is git's name for that, not a branch.
+    [ "$branch" != HEAD ] || branch=detached
+    head="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+    # An unreadable in-worktree HEAD (deleted or corrupt `.git` file) is NOT "no
+    # commit": the clone's admin record still names the head and the object is
+    # still there. dm-worktree.sh parks from the same fallback.
+    if [ -z "$head" ] && [ -n "$clone_dir" ]; then
+      head="$(dm_admin_worktree_head "$clone_dir" "$DM_WT/$id")"
+      [ -n "$head" ] || head="$(dm_admin_worktree_head "$clone_dir" "$wt")"
+      [ -z "$head" ] \
+        || dm_warn "cannot read HEAD inside $id's local copy; using the head git's own admin record still holds ($head)"
+    fi
+    [ -n "$head" ] || head=none
+    # Whether the commits are already in the base decides what "recoverable"
+    # means below: work that landed needs no parked ref.
+    landed_json=""; landed_rc=0
+    landed_json="$("$BIN_DIR/dm-worktree.sh" landed "$id" --json 2>/dev/null)" || landed_rc=$?
+    landed=undetermined
+    if [ "$landed_rc" -ne 0 ]; then
+      # --json answers `undetermined` for every question it CAN answer, so a
+      # nonzero here is the command itself failing. Say so; do not read the
+      # silence as "not landed".
+      dm_warn "could not ask whether $id's work landed; the summary reports it as undetermined"
+    elif [ -n "$landed_json" ]; then
+      landed="$(printf '%s' "$landed_json" | jq -r '.state // "undetermined"')"
+    fi
+  elif [ -n "$wt" ]; then
+    # Recorded but already absent: the interrupted-cleanup shape. The directory is
+    # gone, but git's admin record still names its head — and the removal parks
+    # that head, so reading it here is what lets the summary report the work as
+    # recoverable instead of silently under-claiming. Same lookup ORDER as
+    # dm-worktree.sh's own: the derived managed path first (canonical by
+    # construction), the stored path only as a fallback (a record written before
+    # DM_HOME was canonicalized holds a symlinked path git never string-matches).
+    branch=unknown; landed=undetermined
+    if [ -n "$clone_dir" ]; then
+      head="$(dm_admin_worktree_head "$clone_dir" "$DM_WT/$id")"
+      [ -n "$head" ] || head="$(dm_admin_worktree_head "$clone_dir" "$wt")"
+      [ -n "$head" ] || head=none
+    fi
+  fi
+
+  # --- record the authority BEFORE destroying anything -----------------------
+  # Every field is new; nothing existing is renamed or overwritten. They travel
+  # with the records into state/archive/, so the snapshot outlives the task.
+  # `trashed_by` is the account that RAN the command — the operator's word is
+  # relayed by the session and cannot be verified here, so the field claims only
+  # what it knows.
+  trashed_by="$(id -un 2>/dev/null || true)"
+  [ -n "$trashed_by" ] || trashed_by="${USER:-unknown}"
+  branch="$(snapshot_value "$id" trashed_branch "$branch")"
+  head="$(snapshot_value "$id" trashed_head "$head")"
+  landed="$(snapshot_value "$id" trashed_landed "$landed")"
+  dm_meta_set "$id" trashed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  dm_meta_set "$id" trashed_by "$trashed_by"
+  dm_meta_set "$id" trashed_reason "$reason"
+  dm_meta_set "$id" trashed_branch "$branch"
+  dm_meta_set "$id" trashed_head "$head"
+  dm_meta_set "$id" trashed_landed "$landed"
+  # A non-terminal verb, appended before the destruction. `dm-task.sh state` reads
+  # an unknown verb through its fallback as `working`, which is exactly right if
+  # this flow dies next: the local copy is still there and its work still has not
+  # landed. The terminal `discarded` line comes after, from the removal itself.
+  dm_status_append "$id" trashed "operator discard authority, by $trashed_by: $reason"
+
+  # --- close the PR: reversible, so it goes before the deletion --------------
+  if [ "$pr_action" = close ]; then
+    "$BIN_DIR/dm-pr.sh" close "$id" --reason "trashed: $reason" \
+      || dm_die "REFUSED: could not close $id's PR ($pr). Nothing has been deleted and the task is still live. Close it (or fix the cause above) and re-run: dm-trash.sh $id --reason $(dm_squote "$reason")"
+    pr_action=closed
+  fi
+
+  # --- the dirty summary, read as late as possible ---------------------------
+  # Immediately before the removal, not back at the snapshot: the PR close is a
+  # GitHub round-trip, and a count read before it would describe a tree that had
+  # time to change. Still recorded BEFORE anything is destroyed.
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    if ! tracked="$(dm_tracked_state "$wt")"; then
+      dm_warn "cannot tell whether $id has uncommitted changes ($(dm_first_line "$tracked")); the summary reports it as undetermined"
+      tracked=undetermined
+    fi
+    untracked_out=""
+    if untracked_out="$(dm_untracked "$wt")"; then
+      untracked_count="$(printf '%s\n' "$untracked_out" | grep -c . || true)"
+    else
+      untracked_count=undetermined
+      dm_warn "cannot inspect $id's untracked files ($(dm_first_line "$untracked_out")); the summary cannot say how many are being discarded"
+    fi
+  fi
+  tracked="$(snapshot_value "$id" trashed_tracked "$tracked")"
+  untracked_count="$(snapshot_value "$id" trashed_untracked "$untracked_count")"
+  dm_meta_set "$id" trashed_tracked "$tracked"
+  dm_meta_set "$id" trashed_untracked "$untracked_count"
+
+  # --- remove the local copy under the recorded authority --------------------
+  if [ -n "$wt" ]; then
+    remove_out=""; remove_rc=0
+    remove_out="$("$BIN_DIR/dm-worktree.sh" remove "$id" --force 2>&1)" || remove_rc=$?
+    if [ "$remove_rc" -ne 0 ]; then
+      # Do not ASSERT that nothing was deleted — look. A removal can fail after
+      # the directory is already gone, and claiming otherwise sends the operator
+      # looking for work that is not there.
+      if [ -d "$wt" ]; then left="the local copy is still at $wt"
+      else left="the local copy at $wt is ALREADY GONE — inspect the record and the parked refs before retrying"; fi
+      dm_die "REFUSED: could not remove $id's local copy under discard authority; $left.
 ${remove_out:-No detail from the removal.}
-The task is still live and reconciles as such; the trash intent is on its record. Fix the cause above, then re-run: dm-trash.sh $id --reason \"$reason\""
-  # The removal's own log and warnings ("head could NOT be preserved") are the
-  # evidence for the recovery claim below — never swallowed.
-  [ -z "$remove_out" ] || printf '%s\n' "$remove_out" >&2
-  worktree_result=removed
+The task still reconciles as live and the trash intent is on its record. Fix the cause above, then re-run: dm-trash.sh $id --reason $(dm_squote "$reason")"
+    fi
+    # The removal's own log and warnings ("head could NOT be preserved") are the
+    # evidence for the verdict below — never swallowed.
+    [ -z "$remove_out" ] || printf '%s\n' "$remove_out" >&2
+    worktree_result=removed
+  fi
 fi
 
-# --- verify the recovery claim instead of asserting it -----------------------
-# dm-worktree.sh parks the discarded head, warning rather than failing when it
-# cannot. So the ref is CHECKED here: this flow tells the operator work survived
-# only when the object is actually reachable by name.
-recoverable=nothing-committed; recover_cmd=""
-if [ "$landed" = landed ]; then
+# A recorded `branch` of `none` is only ever written for a task that never had a
+# local copy, so it survives the removal clearing `worktree` and is the signal a
+# resumed run can still trust.
+had_worktree=1
+[ "$branch" != none ] || had_worktree=0
+
+# --- the recovery verdict, read out of the ref namespace ---------------------
+# dm-worktree.sh parks the discarded head, WARNING rather than failing when it
+# cannot, so what actually exists is the only trustworthy source. Every ref found
+# is reported, whatever the verdict.
+parked_list=""
+[ -z "$clone_dir" ] || parked_list="$(parked_refs "$clone_dir" "$id")"
+parked_count=0
+[ -z "$parked_list" ] || parked_count="$(printf '%s\n' "$parked_list" | grep -c .)"
+head_ref=""
+if [ "$head" != none ] && [ -n "$parked_list" ]; then
+  head_ref="$(printf '%s\n' "$parked_list" | awk -v h="$head" '$1 == h && !f { print $2; f = 1 }')"
+fi
+
+recoverable=""; recover_cmd=""
+if [ -n "$head_ref" ]; then
+  recoverable="$head_ref"
+  recover_cmd="git -C $(dm_squote "$clone_dir") branch recovered-$(dm_ref_component "$id") $head"
+elif [ "$landed" = landed ]; then
   recoverable=already-in-base
+elif [ "$parked_count" -eq 1 ]; then
+  # A ref exists but not for the head we snapshotted: the admin record was
+  # already pruned, or the removal parked a commit made after the snapshot.
+  # Report the ref that EXISTS, and say it is not the head we recorded.
+  parked_sha="${parked_list%% *}"
+  recoverable="${parked_list#* }"
+  recover_cmd="git -C $(dm_squote "$clone_dir") branch recovered-$(dm_ref_component "$id") $parked_sha"
+  [ "$head" = none ] \
+    || dm_warn "$id's recovery ref holds $parked_sha, not the head this run recorded ($head); the work was preserved, but as a different commit"
+elif [ "$parked_count" -gt 1 ]; then
+  recoverable=parked-refs
+  dm_warn "$id has $parked_count recovery refs and none matches the head this run recorded (${head}); ids are reusable, so inspect the parked_ref lines before recovering"
+elif [ "$had_worktree" -eq 0 ]; then
+  recoverable=nothing-committed
+elif [ -z "$clone_dir" ]; then
+  recoverable=UNDETERMINED
+  dm_warn "cannot say whether $id's work survived: repo '$repo' does not resolve to a clone, so its recovery refs cannot be read"
 elif [ "$head" != none ]; then
   recoverable=NOT-PRESERVED
-  if [ -n "$clone_dir" ]; then
-    recover_ref="$(dm_discard_ref "$id" "$head")"
-    parked="$(git -C "$clone_dir" rev-parse --verify --quiet "$recover_ref" 2>/dev/null || true)"
-    if [ "$parked" = "$head" ]; then
-      recoverable="$recover_ref"
-      recover_cmd="git -C $clone_dir branch recovered-$id $head"
-    fi
-  fi
-  if [ "$recoverable" = NOT-PRESERVED ]; then
-    # The object itself almost certainly still exists — parking is what failed —
-    # so name the one command that saves it while that is still true.
-    if [ -n "$clone_dir" ]; then
-      dm_warn "$id's discarded head $head is NOT on a recovery ref. The commit is still in the clone until it is garbage-collected — preserve it NOW with: git -C $clone_dir branch recovered-$id $head"
-    else
-      dm_warn "$id's discarded head $head is NOT on a recovery ref, and repo '$repo' does not resolve to a clone to look for it in; the commit may already be unreachable"
-    fi
-  fi
+  # The object itself almost certainly still exists — parking is what failed — so
+  # name the one command that saves it while that is still true. The branch name
+  # is SANITIZED: a task id may legally contain characters git refuses in a ref,
+  # and this instruction is sometimes the operator's only route back.
+  dm_warn "$id's discarded head $head is NOT on a recovery ref. The commit is still in the clone until it is garbage-collected — preserve it NOW with: git -C $(dm_squote "$clone_dir") branch recovered-$(dm_ref_component "$id") $head"
+else
+  # A local copy existed but its head could never be determined. Never an
+  # all-clear: `nothing-committed` is reserved for a task that never had one.
+  recoverable=UNDETERMINED
+  dm_warn "$id had a local copy whose head could not be determined and no recovery ref exists; if it held commits, they are reachable only until the clone is garbage-collected"
 fi
 
 # Uncommitted and untracked files are the one thing this flow never keeps, so the
@@ -339,9 +466,15 @@ case "$row_rc" in
   *) die_after_removal "$id" "$reason" "REFUSED: the backlog could not be read, so $id's row was not resolved and its records were not archived." "" ;;
 esac
 
-archive_out=""
-archive_out="$("$BIN_DIR/dm-task.sh" archive "$id" 2>&1)" \
-  || die_after_removal "$id" "$reason" "REFUSED: could not archive $id's records." "$archive_out"
+# A concurrent run of this same flow may already have archived it. That is the
+# tail finishing, not a failure — but only when the records really are there.
+if [ ! -f "$meta_file" ] && [ -f "$DM_STATE/archive/$id.meta" ]; then
+  dm_warn "$id's records were archived by another run of this flow while this one was finishing"
+else
+  archive_out=""
+  archive_out="$("$BIN_DIR/dm-task.sh" archive "$id" 2>&1)" \
+    || die_after_removal "$id" "$reason" "REFUSED: could not archive $id's records." "$archive_out"
+fi
 
 printf 'task=%s\n' "$id"
 printf 'repo=%s\n' "$repo"
@@ -350,10 +483,18 @@ printf 'reason=%s\n' "$reason"
 printf 'authority=operator-discard by %s\n' "$trashed_by"
 printf 'local_copy=%s\n' "$worktree_result"
 printf 'pr=%s\n' "$pr_action"
+[ "$worker" = none ] || printf 'worker=%s\n' "$worker"
 printf 'branch=%s\n' "$branch"
 printf 'head=%s\n' "$head"
 printf 'committed_work=%s\n' "$recoverable"
 [ -z "$recover_cmd" ] || printf 'recover_cmd=%s\n' "$recover_cmd"
+# Every ref that exists for this id, whatever the verdict said — ids are
+# reusable, so an older discard's ref is visible rather than silently conflated.
+if [ -n "$parked_list" ]; then
+  printf '%s\n' "$parked_list" | while IFS= read -r pref; do
+    [ -z "$pref" ] || printf 'parked_ref=%s\n' "$pref"
+  done
+fi
 printf 'uncommitted_tracked=%s\n' "$tracked"
 printf 'untracked_paths=%s\n' "$untracked_count"
 printf 'uncommitted=%s\n' "$uncommitted"

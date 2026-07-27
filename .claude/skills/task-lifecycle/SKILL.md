@@ -283,22 +283,28 @@ with `trashed: <reason>`; archives the records. Output is `key=value` lines to
 relay.
 
 It **refuses** with no `--reason`, an unknown id, an already-terminal task, or a
-PR it cannot confirm closed without `--close-pr` — and a refusal destroyed
-nothing. If a step fails mid-flow the flow stops there and `dm-task.sh state`
-still reports the task truthfully; read the refusal, never work around it.
+PR it cannot **confirm** closed against GitHub without `--close-pr` (a stale
+record could have been reopened) — and a refusal destroyed nothing. If a step
+fails mid-flow the flow stops there and `dm-task.sh state` still reports the task
+truthfully; read the refusal, never work around it. A trash that died after the
+discard but before the bookkeeping is finished by **re-running the same command**
+— it resumes its own unfinished work rather than refusing as terminal.
 
 **What survives.** Committed work is parked at `refs/dm-discarded/<id>/<sha>` in
-the clone, and the command VERIFIES that ref before claiming it —
-`committed_work=` carries the ref plus a ready `recover_cmd=`.
-`committed_work=NOT-PRESERVED` means the commit is reachable only until the clone
-is garbage-collected: act on it now. **Uncommitted and untracked files do not
-survive** — they are counted on the record and reported gone, so copy the local
-copy aside first if the operator might want them.
+the clone, and the verdict is read back out of that ref namespace, never asserted
+— `committed_work=` carries the ref plus a ready `recover_cmd=`, and every ref
+the id has is listed as `parked_ref=`. Act immediately on
+`committed_work=NOT-PRESERVED` (reachable only until the clone is
+garbage-collected) or `UNDETERMINED` (the head could not be read — never read
+that as "there was nothing"). **Uncommitted and untracked files do not survive**
+— they are counted on the record and reported gone, so copy the local copy aside
+first if the operator might want them.
 
 This flow IS the packaging of prime directive 4's discard authority: never reach
 for `dm-worktree.sh remove --force` yourself instead, which records no authority
-and proves nothing about what survived. And it cannot stop a running worker — it
-says so loudly; stop the worker first (`stuck-worker` if unresponsive).
+and proves nothing about what survived. And it cannot stop a running worker —
+stopping it is the session's job, so the command only reports it (`worker=RUNNING`
+plus a loud warning). Stop the worker first (`stuck-worker` if unresponsive).
 
 ## Recovery
 
