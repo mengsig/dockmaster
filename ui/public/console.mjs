@@ -3,22 +3,71 @@
  *
  * The panels themselves are in views.mjs and every word is in dom.mjs. This file
  * owns the wiring and nothing about how the fleet is worded.
+ *
+ * Two things a control on this page may do, and no third: change what the page
+ * SHOWS (a filter, a fold, the theme - kept here, in the browser), or ENQUEUE a
+ * request as an ordinary operator message, which the dockmaster then carries out
+ * under its usual gates. Nothing here acts on the fleet.
  */
 'use strict';
 
 import { el, add, lamp, plural, clockTime, word, SOURCE_WORD } from './dom.mjs';
-import { VIEWS } from './views.mjs';
+import { VIEWS, needsWords } from './views.mjs';
 
 const shell = {
   state: null,
   current: location.hash.replace('#', '') || 'needs',
   refreshing: false,
   readAt: 0,
+  // The conversation, held here rather than inside the poll loop: the Updates
+  // panel reads the same messages as a feed, and one store means the two can
+  // never disagree about what was said.
+  chat: { messages: [], since: 0, pending: 0 },
 };
+
+// --- what the operator chose to see ------------------------------------------
+
+// Filters and folds are the operator's view of the page, not state about the
+// fleet, so they live in the browser and survive a reload. A corrupt blob must
+// not take the page down with it - it is discarded and the defaults stand.
+const UI_KEY = 'dm-console-view';
+const ui = { filter: 'all', folds: {} };
+
+function loadUi() {
+  let raw;
+  try {
+    raw = localStorage.getItem(UI_KEY);
+  } catch (err) {
+    return; // storage refused (private browsing); the defaults are fine
+  }
+  if (!raw) return;
+  try {
+    const saved = JSON.parse(raw);
+    if (saved && typeof saved === 'object') {
+      if (typeof saved.filter === 'string') ui.filter = saved.filter;
+      if (saved.folds && typeof saved.folds === 'object') ui.folds = saved.folds;
+    }
+  } catch (err) {
+    console.warn('console: the saved view settings could not be read; using the defaults');
+  }
+}
+
+function saveUi() {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify(ui));
+  } catch (err) {
+    // Not being able to remember a fold is not worth interrupting anyone over.
+  }
+}
 
 // --- chrome ------------------------------------------------------------------
 
 const byId = (id) => document.getElementById(id);
+
+// The rail is redrawn on every read, so a count that MOVED is flashed once -
+// otherwise a number quietly changing in the corner of the eye is the same as no
+// notification at all. Keyed by view id, kept across redraws.
+const railCounts = new Map();
 
 function renderRail() {
   const rail = byId('rail');
@@ -29,12 +78,18 @@ function renderRail() {
     if (view.group !== group) {
       group = view.group;
       container = add(rail, el('div', 'rail-group'));
+      add(container, el('span', 'rail-group-label eyebrow', group));
     }
     const button = el('button', 'rail-item');
     button.type = 'button';
     add(button, el('span', 'rail-label', view.label));
     const n = view.count(shell.state);
-    if (n !== null) add(button, el('span', `rail-count${view.urgent && n > 0 ? ' is-urgent' : ''}`, n));
+    if (n !== null) {
+      const moved = railCounts.has(view.id) && railCounts.get(view.id) !== n;
+      const badge = el('span', `rail-count${view.urgent && n > 0 ? ' is-urgent' : ''}${moved ? ' is-bumped' : ''}`, n);
+      add(button, badge);
+      railCounts.set(view.id, n);
+    }
     if (view.id === shell.current) button.setAttribute('aria-current', 'page');
     button.addEventListener('click', () => show(view.id));
     add(container, button);
@@ -69,6 +124,33 @@ function renderPulse() {
   for (const part of parts) add(pulse, el('span', 'sep', '·'), el('span', null, part));
 }
 
+// The beacon: what is at the top of the operator's queue, above every panel.
+// Worded by views.mjs, so it says exactly what the Needs-you row for the same
+// item says. Empty is not "hidden because we do not know" - the queue is
+// assembled from sources that name themselves when they fail, and the pulse and
+// the panel both carry that.
+function renderBeacon() {
+  const bar = byId('beacon');
+  const s = shell.state;
+  const items = s ? s.needs_you : [];
+  if (items.length === 0) { bar.hidden = true; bar.textContent = ''; return; }
+  bar.textContent = '';
+  bar.hidden = false;
+  const first = needsWords(items[0]);
+  add(bar,
+    add(el('div', 'beacon-lamp'), lamp('brass')),
+    add(el('div', 'beacon-body'),
+      el('p', 'beacon-head', first.head),
+      el('p', 'beacon-note', items.length === 1
+        ? 'This is stopped until you act.'
+        : `${plural(items.length - 1, 'other thing is', 'other things are')} waiting too.`)),
+    add(el('div', 'beacon-figure'), el('span', null, items.length)));
+  const go = el('button', 'btn btn-beacon', items.length === 1 ? 'Take me to it' : 'Show me all of it');
+  go.type = 'button';
+  go.addEventListener('click', () => show('needs'));
+  add(bar, go);
+}
+
 // A demo fleet the operator cannot tell from their own is the worst thing this
 // page can be. It says so on screen, and in the tab title for a window left open.
 function renderSource(source) {
@@ -77,17 +159,69 @@ function renderSource(source) {
   document.title = demo ? 'dockmaster — demo fleet' : 'dockmaster';
 }
 
-function show(id, keepScroll) {
+// Everything a panel is allowed to do that is not drawing itself. Rebuilt per
+// render, because the filter and the fold state it closes over are read, not
+// watched.
+function panelContext() {
+  return {
+    compose,
+    ask: postMessage,
+    filter: ui.filter,
+    setFilter(id) {
+      ui.filter = id;
+      saveUi();
+      show(shell.current, true, false);
+    },
+    fold(key, openByDefault) {
+      return Object.prototype.hasOwnProperty.call(ui.folds, key) ? ui.folds[key] : openByDefault;
+    },
+    setFold(key, open) {
+      ui.folds[key] = open;
+      saveUi();
+    },
+    setFolds(keys, open) {
+      for (const key of keys) ui.folds[key] = open;
+      saveUi();
+      show(shell.current, true, false);
+    },
+    // Only what the dockmaster said, newest first: the Updates panel is the
+    // conversation read as a log, off the same store.
+    updates: shell.chat.messages.filter((m) => m.from === 'dockmaster').slice().reverse(),
+  };
+}
+
+// show(id, keepScroll, animate) - draw a panel.
+//
+// `animate` is off for a background redraw: the entrance runs on a NAVIGATION,
+// where it explains that the content changed. Replaying it every 30 seconds under
+// a reader who did not ask for anything is the definition of gratuitous.
+function show(id, keepScroll, animate) {
   const view = VIEWS.find((v) => v.id === id) || VIEWS[0];
   shell.current = view.id;
   if (location.hash !== `#${view.id}`) history.replaceState(null, '', `#${view.id}`);
+  // A panel jump before the first read has landed records WHERE to go and stops:
+  // no panel can draw a fleet that has not been read yet, and the load in flight
+  // renders this one when it arrives.
+  if (!shell.state) return;
   const main = byId('view');
   const top = main.scrollTop;
   main.textContent = '';
-  add(main, view.render(shell.state, { compose }));
+  main.classList.toggle('is-entering', animate !== false);
+  add(main, view.render(shell.state, panelContext()));
   // A background refresh must not throw the operator back to the top of a list.
   main.scrollTop = keepScroll ? top : 0;
   renderRail();
+}
+
+// A confirm strip is mid-decision: the panel showing it must not be replaced out
+// from under the operator, and the pulse above it must not claim a freshness the
+// frozen panel does not have either - "as of just now" beside a strip quoting a
+// request from a minute ago is the page telling two different times at once.
+const hasOpenConfirm = () => Boolean(byId('view').querySelector('.ask-confirm'));
+
+function redraw() {
+  if (hasOpenConfirm()) return;
+  show(shell.current, true, false);
 }
 
 // The failure is worded HERE from the source token the server sent; the script
@@ -148,15 +282,22 @@ async function loadState(keepScroll, force) {
   shell.readAt = Date.now();
   setStale(null);
   renderSource(body.source);
-  renderPulse();
-  show(shell.current, keepScroll);
+  // A confirm strip freezes the panel (see redraw()); the pulse's "as of" and the
+  // beacon must freeze with it, or the bar above claims data fresher than what
+  // the operator is actually looking at.
+  if (!hasOpenConfirm()) { renderPulse(); renderBeacon(); }
+  if (keepScroll) redraw();
+  else show(shell.current, false, true);
 }
 
 async function refreshNow() {
   if (shell.refreshing) return;
   shell.refreshing = true;
   const button = byId('refresh');
-  button.classList.add('is-busy');
+  // The watch line under the top bar runs while this is out: re-reading the
+  // fleet takes seconds, and a control that looks like nothing happened is worse
+  // than a slow one.
+  document.body.classList.add('is-refreshing');
   button.disabled = true;
   try {
     await loadState(true, true);
@@ -165,21 +306,57 @@ async function refreshNow() {
     else showFailure(err);
   } finally {
     shell.refreshing = false;
-    button.classList.remove('is-busy');
+    document.body.classList.remove('is-refreshing');
     button.disabled = false;
   }
 }
 
 // --- conversation ------------------------------------------------------------
 
+// A dockmaster status line is one short line. It gets a feed row - a stamp and
+// the text - because twenty of those read as a log while twenty full messages
+// read as noise. Anything longer keeps its header and its own measure.
+const TERSE_MAX_CHARS = 140;
+const isTerse = (message) => message.from === 'dockmaster'
+  && message.text.indexOf('\n') === -1 && message.text.length <= TERSE_MAX_CHARS;
+
 function renderMessage(message, animate) {
-  const node = el('div', `msg msg-${message.from}${animate ? ' is-new' : ''}`);
+  const terse = isTerse(message);
+  const node = el('div', `msg msg-${message.from}${terse ? ' msg-terse' : ''}${animate ? ' is-new' : ''}`);
+  if (terse) {
+    add(node, el('span', 'msg-at', clockTime(message.at)), el('p', 'msg-text', message.text));
+    return node;
+  }
   const header = el('div', 'msg-head');
   add(header,
     el('span', 'msg-from', message.from === 'operator' ? 'You' : 'Dockmaster'),
     el('span', 'msg-at', clockTime(message.at)));
   add(node, header, el('p', 'msg-text', message.text));
   return node;
+}
+
+// How many messages stay in the open log. The rest folds into the archive above
+// it - still there, still readable, no longer a wall to scroll past.
+const LOG_OPEN = 40;
+
+// A tab left open for days must not grow this without bound: it is a
+// convenience feed of what happened in THIS tab, not the record of the
+// conversation - the transcript on disk is that. Past this the oldest are
+// dropped, from the store and from the archive alike.
+const MESSAGES_KEPT = 2000;
+
+// Two different jobs, and only the second one loses anything. Folding MOVES
+// nodes out of the open log into the archive - still on the page, still
+// readable. Trimming is what enforces MESSAGES_KEPT: without it the archive
+// would hold every node the tab ever rendered while the store behind it had
+// long since dropped them.
+function compactLog() {
+  const messages = byId('chat-messages');
+  const body = byId('chat-archive-body');
+  while (messages.children.length > LOG_OPEN) body.appendChild(messages.firstChild);
+  while (body.children.length > MESSAGES_KEPT - LOG_OPEN) body.removeChild(body.firstChild);
+  byId('chat-archive').hidden = body.children.length === 0;
+  byId('chat-archive-count').textContent = String(body.children.length);
 }
 
 // The pending row is the LIVE state of the conversation - how many messages are
@@ -192,12 +369,19 @@ function renderPending(count, unreadable) {
   if (unreadable > 0) parts.push(`${plural(unreadable, 'earlier line', 'earlier lines')} of this conversation could not be read.`);
   row.hidden = parts.length === 0;
   byId('chat-pending-text').textContent = parts.join(' ');
+  // With the conversation closed on a narrow deck, the toggle is the only place
+  // this can be said at all.
+  byId('chat-toggle').textContent = count > 0 ? `Chat · ${count}` : 'Chat';
 }
 
 function renderPendingError(message) {
   const row = byId('chat-pending');
   row.hidden = false;
   byId('chat-pending-text').textContent = `Not connected: ${message}. Retrying.`;
+  // The last known count is no longer a claim this page can stand behind - left
+  // up, it reads as still live. Drop it rather than show a number that might
+  // already be wrong.
+  byId('chat-toggle').textContent = 'Chat';
 }
 
 // A refused send is NOT transient - the message is back in the composer waiting
@@ -208,30 +392,49 @@ function setSendError(message) {
   row.textContent = message || '';
 }
 
-// One long-poll, forever: the request stays open until a message lands, so the
+// One long-poll, forever: the request stays open until something changes, so the
 // page is live without a busy loop. `since` survives an error, so a reconnect
 // never replays what is already on screen.
 async function pumpChat() {
   const log = byId('chat-log');
   const messages = byId('chat-messages');
-  let since = 0;
   let first = true;
   let backoff = 1000;
   for (;;) {
     try {
       // The FIRST read does not wait: an empty transcript would otherwise hold
       // the request open and leave the panel blank for the whole poll window.
-      const response = await fetch(`/api/chat?since=${since}${first ? '' : '&wait=1'}`);
+      //
+      // `pending` is what THIS page currently shows. Sending it is what makes the
+      // waiting count race-free: the server answers the moment reality differs
+      // from what is on screen, rather than from whatever it happened to read
+      // when the request arrived.
+      const response = await fetch(`/api/chat?since=${shell.chat.since}`
+        + `&pending=${shell.chat.pending}${first ? '' : '&wait=1'}`);
       const body = await response.json();
       // The server's message names files and scripts; the status does not.
       if (!response.ok) throw new Error(`the console answered ${response.status}`);
+      const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
       if (body.messages.length) {
         byId('chat-empty').hidden = true;
-        const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
-        body.messages.forEach((m) => add(messages, renderMessage(m, !first)));
-        if (atBottom || first) log.scrollTop = log.scrollHeight;
+        body.messages.forEach((m) => {
+          shell.chat.messages.push(m);
+          add(messages, renderMessage(m, !first));
+        });
+        if (shell.chat.messages.length > MESSAGES_KEPT) {
+          shell.chat.messages.splice(0, shell.chat.messages.length - MESSAGES_KEPT);
+        }
+        // Compacting moves nodes off the top, which shifts what a reader scrolled
+        // up is looking at. So it waits until they are back at the bottom.
+        if (atBottom || first) {
+          compactLog();
+          log.scrollTop = log.scrollHeight;
+        }
+        // The Updates panel is this same store read as a feed.
+        if (shell.state && shell.current === 'updates') redraw();
       }
-      since = body.total;
+      shell.chat.since = body.total;
+      shell.chat.pending = body.pending;
       first = false;
       renderPending(body.pending, body.unreadable || 0);
       backoff = 1000;
@@ -263,20 +466,11 @@ const SEND_REFUSAL = {
   500: 'the console could not store it. Ask the dockmaster to look into it.',
 };
 
-async function sendMessage(event) {
-  event.preventDefault();
-  const input = byId('chat-input');
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = '';
-  growComposer();
-  // The message goes back into the composer on any failure, so nothing the
-  // operator typed is lost to a refusal or a dropped connection.
-  const restore = (reason) => {
-    input.value = text;
-    growComposer();
-    setSendError(`Not sent: ${reason}`);
-  };
+// The ONE way anything leaves this page: as an operator message on the same queue
+// the composer uses. A cleanup or trash control goes through here too, so nothing
+// on the page has a shorter path to the dockmaster than a typed sentence does.
+// Rejects with an already-worded reason.
+async function postMessage(text) {
   let response;
   try {
     response = await fetch('/api/chat', {
@@ -285,14 +479,32 @@ async function sendMessage(event) {
       body: JSON.stringify({ text }),
     });
   } catch (err) {
-    return restore(`the console could not be reached (${err.message}).`);
+    throw new Error(`the console could not be reached (${err.message}).`);
   }
   // An unmapped status falls back to the number, which is honest and is not
   // internal vocabulary - never to the server's own sentence.
   if (!response.ok) {
-    return restore(SEND_REFUSAL[response.status] || `the console answered ${response.status}.`);
+    throw new Error(SEND_REFUSAL[response.status] || `the console answered ${response.status}.`);
   }
-  setSendError('');
+}
+
+async function sendMessage(event) {
+  event.preventDefault();
+  const input = byId('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  growComposer();
+  try {
+    await postMessage(text);
+    setSendError('');
+  } catch (err) {
+    // The message goes back into the composer on any failure, so nothing the
+    // operator typed is lost to a refusal or a dropped connection.
+    input.value = text;
+    growComposer();
+    setSendError(`Not sent: ${err.message}`);
+  }
 }
 
 // The composer grows with the message instead of making the operator write a
@@ -330,6 +542,7 @@ function setFocus(on) {
 }
 
 function wire() {
+  loadUi();
   // Shown until the first read proves otherwise, so an empty conversation reads
   // as an invitation rather than a blank panel.
   byId('chat-empty').hidden = false;
@@ -351,7 +564,10 @@ function wire() {
   byId('chat-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(e); }
   });
-  window.addEventListener('hashchange', () => show(location.hash.replace('#', '') || 'needs'));
+  window.addEventListener('hashchange', () => {
+    const id = location.hash.replace('#', '') || 'needs';
+    if (id !== shell.current) show(id, false, true);
+  });
 }
 
 // A background read is never silent about failing, but it must not blow away a
@@ -379,4 +595,4 @@ pumpChat();
 // Relative ages ("3d ago", "quiet 6h") are computed at render time, so a page
 // left open all afternoon would keep showing this morning's numbers without a
 // re-render. Cheap, and it keeps the one thing that silently rots honest.
-setInterval(() => { if (shell.state && !document.hidden) show(shell.current, true); }, 60000);
+setInterval(() => { if (shell.state && !document.hidden) redraw(); }, 60000);

@@ -23,6 +23,8 @@ const os = require('os')
 const path = require('path')
 
 const ROOT = process.env.DM_CHECK_ROOT ? path.resolve(process.env.DM_CHECK_ROOT) : path.join(__dirname, '..')
+const chat = require(path.join(ROOT, 'ui', 'chat.js'))
+const live = require(path.join(ROOT, 'ui', 'live.js'))
 const BOOT_TIMEOUT_MS = 15000
 const BOOT_ATTEMPTS = 3
 
@@ -157,6 +159,9 @@ async function checkCrossSiteWritesAreRefused(port, home) {
     ['/api/state', { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': 'image' }, 'an <img src> read'],
     ['/api/state', { 'sec-fetch-site': 'same-site' }, 'a read from another port of 127.0.0.1'],
     ['/api/state', { origin: 'https://evil.example' }, 'a read carrying a hostile Origin'],
+    // Opening a review session runs a dm-* script the same way /api/state does,
+    // so a hostile page must not be able to fire it either.
+    ['/api/review-open?id=x', { 'sec-fetch-site': 'cross-site' }, 'a cross-site session open'],
   ]
   for (const [urlPath, headers, what] of reads) {
     const res = await request(port, 'GET', urlPath, headers)
@@ -192,6 +197,46 @@ async function checkThePageItselfStillWorks(port, home) {
   equal(read.total, before + 2, 'the transcript reads back what was written')
   equal(read.pending, 2, 'the page is told how many are unpicked-up')
   console.log('ok   the page and a local tool can still post; both land exactly once')
+}
+
+// A message being PICKED UP adds nothing to the transcript, so a long poll that
+// only holds out for a new message left "1 message waiting for the dockmaster" on
+// screen for the whole 25s window after it had already been answered. The count
+// is live state, and the page has to learn when it changes.
+async function checkPickingUpAMessageRefreshesTheCount(port, home) {
+  await request(port, 'POST', '/api/chat',
+    { 'content-type': 'application/json' }, JSON.stringify({ text: 'waiting to be picked up' }))
+  const before = json(await request(port, 'GET', '/api/chat?since=0'))
+  ok(before.pending > 0, 'the message is queued for the dockmaster')
+
+  const waiting = request(port, 'GET', `/api/chat?since=${before.total}&wait=1`)
+  await sleep(200)
+  // Exactly what `dm-ui.sh poll` does: claim, deliver, acknowledge.
+  const claim = chat.claimOldest(home)
+  ok(claim !== null, 'the poll claims it')
+  claim.acknowledge()
+
+  const answered = await waiting
+  equal(answered.status, 200, 'the parked poll is answered')
+  const body = json(answered)
+  equal(body.messages.length, 0, 'with no new message - nothing was said')
+  equal(body.pending, before.pending - 1, 'and a count the page can trust')
+
+  // The race the page could actually see: the count moves while the page is
+  // BETWEEN polls, so a waiter that reads the count as it parks has nothing to
+  // report and the page holds a stale number for the whole 25s window. The page
+  // sends what it is showing, so a wait against an out-of-date view is answered
+  // at once rather than held.
+  await request(port, 'POST', '/api/chat',
+    { 'content-type': 'application/json' }, JSON.stringify({ text: 'queued while the page was not looking' }))
+  const now = json(await request(port, 'GET', '/api/chat?since=0'))
+  const stale = json(await request(port, 'GET',
+    `/api/chat?since=${now.total}&pending=${now.pending + 7}&wait=1`))
+  equal(stale.pending, now.pending, 'a wait against a stale count is answered immediately, with the real one')
+
+  const bad = await request(port, 'GET', '/api/chat?since=0&pending=-2')
+  equal(bad.status, 400, 'a nonsense count is refused, not guessed at')
+  console.log('ok   the waiting count is never stale: a pick-up wakes the page, a stale view is corrected at once')
 }
 
 // --- 2. bad input does not take the server down ------------------------------
@@ -319,6 +364,80 @@ async function checkReviewAssetsAtAnyDepth(port, home) {
   console.log('ok   a review page serves nested assets, and no path escapes its directory')
 }
 
+// --- 4. opening a review tries the lavish session, degrading honestly -------
+
+// Against the REAL dm-lavish.sh, no artifact behind the id: `open` refuses
+// before it ever touches lavish-axi, which is exactly the shape a real "no
+// session for this one" answer takes. The route must turn that into a plain
+// { url: null }, never a 500 - the page's fallback is what handles it.
+async function checkReviewOpenDegradesForAnUnknownId(port) {
+  const res = await request(port, 'GET', '/api/review-open?id=not-a-real-review')
+  equal(res.status, 200, 'an id with no artifact still answers 200')
+  equal(json(res).url, null, 'and says there is no session to open')
+
+  const missing = await request(port, 'GET', '/api/review-open')
+  equal(missing.status, 200, 'no id at all is handled the same way, not a 500')
+  equal(json(missing).url, null, 'and answers the same shape')
+  console.log('ok   opening a review with no session behind it degrades to { url: null }, not a crash')
+}
+
+// What the page's Open link actually hits. It is a real navigation, so the
+// answer has to be a redirect the browser can follow on its own - the operator
+// lands on the review either way, and never on a JSON body. `{ url: null }`
+// would be the bug here: the tab has already opened by the time this answers.
+async function checkTheOpenLinkRedirectsRatherThanAnswering(port) {
+  const res = await request(port, 'GET', '/api/review-open?id=not-a-real-review&redirect=1')
+  equal(res.status, 302, 'the link is answered with a redirect, not a document')
+  equal(res.headers.location, '/review/not-a-real-review/',
+    'and with no session to send it to, it falls back to the raw review page')
+  equal(res.text, '', 'a redirect carries no body for the browser to render')
+
+  // A link the page built without an id is a bug in the page, and saying so is
+  // how it gets found - a 302 to /review// would send the operator nowhere.
+  const missing = await request(port, 'GET', '/api/review-open?redirect=1')
+  equal(missing.status, 400, 'a redirect asked for with no id is refused outright')
+  console.log('ok   the review Open link is answered with a redirect, and degrades to the raw page')
+}
+
+// The route only WORDS what dm-lavish.sh said; the parsing itself is pinned
+// directly against a stand-in for it, so this does not depend on lavish-axi
+// being installed or spend a real session opening one.
+async function checkReviewOpenParsesTheRealScriptsShape() {
+  const stubBin = fs.mkdtempSync(path.join(os.tmpdir(), 'dm-lavish-stub-'))
+  const argvFile = path.join(stubBin, 'argv')
+  try {
+    fs.writeFileSync(path.join(stubBin, 'dm-lavish.sh'), '#!/usr/bin/env bash\n'
+      + `printf '%s\\n' "$*" > ${JSON.stringify(argvFile)}\n`
+      + 'printf \'session:\\n  file: /x/change.html\\n  url: "http://127.0.0.1:4387/session/abc123"\\n  status: opened\\n\'\n')
+    fs.chmodSync(path.join(stubBin, 'dm-lavish.sh'), 0o755)
+    const opened = await live.openReviewSession(stubBin, 'whatever')
+    equal(opened.url, 'http://127.0.0.1:4387/session/abc123', 'the session url is parsed off the real output shape')
+
+    // This call runs on the SERVER. The operator's browser is what must show
+    // the session; a tab opened here would land in whatever display the server
+    // process has, which is nobody's screen on a remote box and a stray window
+    // on a local one.
+    equal(fs.readFileSync(argvFile, 'utf8').trim(), 'open whatever --no-open',
+      'the console asks for the session without lavish-axi opening a browser itself')
+
+    // dm-lavish.sh's own degrade when lavish-axi is missing: exits 0, says
+    // nothing shaped like a session.
+    fs.writeFileSync(path.join(stubBin, 'dm-lavish.sh'), '#!/usr/bin/env bash\n'
+      + 'echo "lavish-axi not installed; the interactive review surface is unavailable." >&2\n')
+    const noTool = await live.openReviewSession(stubBin, 'whatever')
+    equal(noTool.url, null, 'no session line on stdout is unavailable, not a throw')
+
+    // A hard refusal (no artifact): exits nonzero.
+    fs.writeFileSync(path.join(stubBin, 'dm-lavish.sh'), '#!/usr/bin/env bash\n'
+      + 'echo "no artifact" >&2\nexit 1\n')
+    const failed = await live.openReviewSession(stubBin, 'whatever')
+    equal(failed.url, null, 'a nonzero exit degrades the same way, never throws')
+  } finally {
+    fs.rmSync(stubBin, { recursive: true, force: true })
+  }
+  console.log('ok   opening a review parses the real script\'s session line and degrades on anything else')
+}
+
 // --- run ---------------------------------------------------------------------
 
 async function main() {
@@ -330,10 +449,14 @@ async function main() {
   try {
     await checkCrossSiteWritesAreRefused(port, home)
     await checkThePageItselfStillWorks(port, home)
+    await checkPickingUpAMessageRefreshesTheCount(port, home)
     await checkATornTranscriptLineDoesNotKillIt(port, home)
     await checkBadRequestsAreRefusedNotCrashed(port)
     await checkReviewAssetsAtAnyDepth(port, home)
     await checkReviewFailuresAreWorded(port, home)
+    await checkReviewOpenDegradesForAnUnknownId(port)
+    await checkTheOpenLinkRedirectsRatherThanAnswering(port)
+    await checkReviewOpenParsesTheRealScriptsShape()
 
     // Every case above ran against ONE process. Had any of them killed it the
     // later ones would have failed; this states the property outright.

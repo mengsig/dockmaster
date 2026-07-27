@@ -44,6 +44,15 @@ const MEMORY_LINES = 14;
 // in-progress work is reported as quiet rather than moving.
 const QUIET_AFTER_HOURS = 4;
 
+// Every kind of cleanup request the page can send. The page owns the REQUEST
+// sentence for each one, the way it owns every other word the operator reads;
+// tests/check-console.js pins that none of them is missing a sentence. The
+// first two are rows this collector emits under `state.health.cleanup`, keyed
+// positionally below; `landed_backlog` is issued straight from
+// `state.backlog.done.length` in the view instead, but its sentence needs the
+// same coverage, so it is listed here too.
+const CLEANUP_KINDS = ['finished_copies', 'orphan_copies', 'landed_backlog'];
+
 // The task states that still have a live track worth drawing.
 const OPEN_STATES = [
   'in_progress', 'ready_for_review', 'queued', 'blocked', 'needs_decision', 'paused', 'failed', 'unknown',
@@ -469,19 +478,29 @@ function toReviews(rendered, tasks) {
     state: awaiting.has(item.id) ? 'awaiting' : 'archived',
     at: item.rendered_at || '',
     href: `/review/${encodeURIComponent(item.id)}/`,
+    // A real link, not a fetch: the tab this opens must come from the click's
+    // own user activation, so the server 302s it straight to the session (or
+    // to `href` above, when there is none) rather than the page choosing
+    // between them after an async round trip.
+    open_href: `/api/review-open?id=${encodeURIComponent(item.id)}&redirect=1`,
   }));
 }
 
 function toHealth(doctor, tasks, worktrees) {
   const closed = new Set(tasks.filter((t) => t.state === 'done' || t.state === 'dropped').map((t) => t.id));
   const known = new Set(tasks.map((t) => t.id));
+  // `kind` is the token the page keys its cleanup REQUEST off - the sentence the
+  // operator sends is written on the page, not here, like every other word they
+  // read. The label and note stay free text: they are already written for them.
   const cleanup = [
     {
+      kind: CLEANUP_KINDS[0],
       label: 'Local copies of finished work',
       count: (worktrees || []).filter((w) => closed.has(w.id)).length,
       note: 'Safe to clear.',
     },
     {
+      kind: CLEANUP_KINDS[1],
       label: 'Local copies with no work behind them',
       count: (worktrees || []).filter((w) => !known.has(w.id) || !w.exists).length,
       note: 'Left over; nothing depends on them.',
@@ -660,6 +679,34 @@ async function reviewDir(bin, id) {
   return { dir: row.path.replace(/\/[^/]*$/, ''), file: row.path };
 }
 
+// The line `dm-lavish.sh open <id>` prints when it actually opened a session:
+//   session:
+//     file: /path/to/change.html
+//     url: "http://127.0.0.1:4387/session/<token>"
+//     status: opened
+const SESSION_URL = /url:\s*"(https?:\/\/[^"]+)"/;
+
+// openReviewSession(bin, id) -> { url } for the annotatable lavish session, or
+// { url: null } when lavish-axi is not installed, the id has no artifact, or
+// the command failed for any other reason. Every one of those looks the same
+// from here: this is a courtesy on top of the raw review page, so nothing it
+// can fail at is treated as fatal - the caller falls back to the plain archive.
+//
+// --no-open: this call is SERVER-SIDE. The operator's own browser is the one
+// that must show the session, via the tab the console opens; a second tab
+// launched here, in whatever display the server process happens to have, is
+// not that - it is a stray window nobody asked for on this machine.
+async function openReviewSession(bin, id) {
+  let stdout;
+  try {
+    stdout = await run(bin, 'dm-lavish.sh', ['open', id, '--no-open']);
+  } catch (err) {
+    return { url: null };
+  }
+  const match = SESSION_URL.exec(stdout);
+  return { url: match ? match[1] : null };
+}
+
 module.exports = {
   collectLocal,
   collectPullRequests,
@@ -670,7 +717,9 @@ module.exports = {
   progressNote,
   memoryNotes,
   reviewDir,
+  openReviewSession,
   SOURCES,
   STATE_WORDS,
   QUIET_AFTER_HOURS,
+  CLEANUP_KINDS,
 };

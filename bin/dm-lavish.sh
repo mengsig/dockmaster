@@ -7,11 +7,14 @@
 # worktree) so it survives teardown and never dirties the worktree.
 #
 # Commands:
-#   list [--json]      every task with a rendered artifact, newest first
-#   path <id>          print (and create the dir for) the artifact path
-#   open <id>          open/resume the lavish session for the artifact
-#   poll <id>          long-poll for operator feedback (caller owns wake delivery)
-#   end  <id>          end the lavish session
+#   list [--json]         every task with a rendered artifact, newest first
+#   path <id>             print (and create the dir for) the artifact path
+#   open <id> [--no-open] open/resume the lavish session for the artifact.
+#                         --no-open ensures the session exists without lavish-axi
+#                         launching its own browser tab for it - for a caller (the
+#                         console) that opens its own tab to the session url.
+#   poll <id>             long-poll for operator feedback (caller owns wake delivery)
+#   end  <id>             end the lavish session
 #
 # lavish-axi is an OPTIONAL review tool: it drives the interactive browser
 # surface. The artifact (change.html) is written by the crewmate regardless, so
@@ -96,9 +99,17 @@ have_lavish() { command -v lavish-axi >/dev/null 2>&1; }
 case "${1:-}" in
   path) mkdir -p "$dir"; printf '%s\n' "$file" ;;
   open)
+    # open's only extra argument, read positionally rather than with a general
+    # flag loop - anything else there is a usage error, not silently ignored.
+    open_flag="${3:-}"
+    case "$open_flag" in
+      ''|--no-open) ;;
+      *) echo "usage: dm-lavish.sh open <id> [--no-open]" >&2; exit 2 ;;
+    esac
     [ -f "$file" ] || dm_die "no artifact at $file (the crewmate writes it first)"
     if have_lavish; then
-      lavish-axi "$file"
+      # shellcheck disable=SC2086 # $open_flag is empty or exactly --no-open (validated above)
+      lavish-axi "$file" $open_flag
     else
       dm_warn "lavish-axi not installed; the interactive review surface is unavailable."
       dm_info "Open the review artifact directly in a browser: $file"

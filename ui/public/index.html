@@ -31,6 +31,11 @@
   <span id="stale-text"></span>
 </p>
 
+<!-- The beacon. Something is stopped until the operator acts, so it is said
+     full width above every panel rather than only on the one panel they might
+     not be looking at. -->
+<div class="beacon" id="beacon" role="status" hidden></div>
+
 <div class="deck">
   <nav class="rail" id="rail" aria-label="Console sections"></nav>
 
@@ -47,6 +52,16 @@
         <p class="empty-note">Ask for work, answer a question, or ask what is going on.
           The dockmaster picks this up the next time it looks.</p>
       </div>
+      <!-- A day of status lines is a wall. The older ones fold away here rather
+           than being dropped, so the conversation stays readable and complete. -->
+      <details class="chat-archive" id="chat-archive" hidden>
+        <summary class="fold-head">
+          <span class="fold-mark"></span>
+          <span class="eyebrow">Earlier in this conversation</span>
+          <span class="fold-count" id="chat-archive-count">0</span>
+        </summary>
+        <div class="fold-body" id="chat-archive-body"></div>
+      </details>
       <div class="chat-messages" id="chat-messages"></div>
     </div>
     <p class="chat-pending" id="chat-pending" hidden>

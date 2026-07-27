@@ -154,6 +154,11 @@ jobs:
       - name: Check the console server's refusals
         run: node tests/check-console-http.js
 
+      # The operator message queue: nothing missed, nothing stuck. A poller that
+      # dies mid-claim, an abandoned claim, ordering, and the bounded drain.
+      - name: Check the console message queue
+        run: node tests/check-console-queue.js
+
       - name: Check runtime context-performance guardrails
         run: bash tests/runtime-performance.sh
 
@@ -170,6 +175,7 @@ jobs:
           node --check tests/check-ci-graph.js
           node --check tests/check-console.js
           node --check tests/check-console-http.js
+          node --check tests/check-console-queue.js
           node --check tests/runtime-performance.js
 
   # The suite as a contributor runs it: bash 5, GNU userland. Sharded across
@@ -326,6 +332,7 @@ jobs:
           node tests/check-skill-triggers.js
           node tests/check-console.js
           node tests/check-console-http.js
+          node tests/check-console-queue.js
           node tests/runtime-performance.js >/dev/null
 
   # The single required status for branch protection. `if: always()` so it runs

@@ -43,12 +43,20 @@ export function meta(...parts) {
   return line;
 }
 
+// Every link on the page is built here, so the new-tab rule is INHERITED rather
+// than remembered per call site: anything that leaves the console - a pull
+// request, a repo, an archived review page - opens in its own tab and never
+// navigates the console away from under the operator. An in-page anchor is the
+// one thing that stays, because a tab per panel jump would be a bug.
 export function link(href, text, className) {
   const node = el('a', className, text);
   node.href = href;
-  // Only an external destination opens away from the console; an in-page
-  // anchor that stole a tab would be a bug, not a convenience.
-  if (/^https?:/.test(href)) { node.target = '_blank'; node.rel = 'noreferrer'; }
+  if (String(href).charAt(0) !== '#') {
+    node.target = '_blank';
+    // noreferrer implies noopener in current browsers; both are named so the
+    // guarantee does not rest on that.
+    node.rel = 'noopener noreferrer';
+  }
   return node;
 }
 
@@ -71,6 +79,103 @@ export function section(label) {
   const node = el('section', 'section');
   add(node, el('span', 'eyebrow', label));
   return node;
+}
+
+// A group the operator can fold away. Native <details>, so the keyboard and
+// screen-reader behaviour comes for free and the count stays readable while it
+// is shut - folding is how a finished group stops crowding the page WITHOUT
+// hiding that it is there.
+export function foldable(label, count, open, onToggle) {
+  const node = el('details', 'fold');
+  node.open = open;
+  const summary = el('summary', 'fold-head');
+  add(summary, el('span', 'fold-mark'), el('span', 'eyebrow', label), el('span', 'fold-count', count));
+  const body = el('div', 'fold-body');
+  add(node, summary, body);
+  node.addEventListener('toggle', () => onToggle(node.open));
+  return { node, body };
+}
+
+// One row of mutually exclusive choices. `aria-pressed` carries the state, so the
+// selection is not colour-only.
+export function segmented(label, options, current, onPick) {
+  const wrap = el('div', 'segmented');
+  wrap.setAttribute('role', 'group');
+  wrap.setAttribute('aria-label', label);
+  for (const option of options) {
+    const button = el('button', 'seg');
+    button.type = 'button';
+    button.setAttribute('aria-pressed', String(option.id === current));
+    add(button, el('span', null, option.label));
+    if (option.count !== null && option.count !== undefined) {
+      add(button, el('span', 'seg-count', option.count));
+    }
+    button.addEventListener('click', () => onPick(option.id));
+    add(wrap, button);
+  }
+  return wrap;
+}
+
+// --- controls that ASK rather than do ----------------------------------------
+
+// The console's contract: no control on this page does anything destructive. A
+// cleanup or trash control ENQUEUES a request, which reaches the dockmaster as an
+// ordinary operator message and is run there under the usual gates.
+//
+// Two steps, always. The first click only STATES what will be asked and quotes
+// the request verbatim; nothing is sent until the second. Built here so every
+// call site inherits the same shape and the same promise.
+export function askControl(spec) {
+  const box = el('div', `ask${spec.kind === 'trash' ? ' ask-trash' : ''}`);
+
+  const idle = () => {
+    box.textContent = '';
+    box.classList.remove('is-open');
+    const button = el('button', 'btn btn-ask');
+    button.type = 'button';
+    add(button, el('span', null, spec.label));
+    button.addEventListener('click', () => confirm());
+    add(box, button);
+  };
+
+  const confirm = () => {
+    box.textContent = '';
+    // The layout around a confirm strip differs from the layout around a button;
+    // the class is what lets it say so without the caller knowing.
+    box.classList.add('is-open');
+    const panel = el('div', 'ask-confirm');
+    add(panel,
+      el('p', 'ask-what', spec.confirm),
+      el('p', 'ask-quote', spec.request),
+      el('p', 'ask-promise', 'This page sends the request. It does not carry it out.'));
+    const send = el('button', 'btn btn-send', 'Send the request');
+    send.type = 'button';
+    const cancel = el('button', 'btn btn-quiet', 'Cancel');
+    cancel.type = 'button';
+    cancel.addEventListener('click', idle);
+    send.addEventListener('click', () => {
+      send.disabled = true;
+      cancel.disabled = true;
+      spec.ask(spec.request).then(sent, (err) => {
+        send.disabled = false;
+        cancel.disabled = false;
+        add(panel, el('p', 'ask-failed', `Not sent: ${err.message}`));
+      });
+    });
+    add(panel, add(el('div', 'ask-actions'), send, cancel));
+    add(box, panel);
+  };
+
+  const sent = () => {
+    box.textContent = '';
+    box.classList.remove('is-open');
+    const done = el('p', 'ask-sent');
+    add(done, lamp('brass'), el('span', null, 'Asked. It is in the conversation, waiting to be picked up.'));
+    add(box, done);
+  };
+
+  idle();
+  return box;
 }
 
 export function head(title, note) {
@@ -223,6 +328,35 @@ export const SOURCE_WORD = {
   local_copies: 'the local copies',
   health: 'the health check',
 };
+
+// --- what the page ASKS FOR --------------------------------------------------
+//
+// These strings are not labels: each one is ENQUEUED as an operator message and
+// the dockmaster acts on it. So they are written as the operator would say it -
+// plain, specific, and carrying the condition that makes the request safe.
+// Keyed by the token the collector emits for each kind of clutter;
+// tests/check-console.js pins that every kind it can emit has a sentence here.
+export const CLEANUP_REQUEST = {
+  finished_copies: (n) => `Cleanup request: clear the local copies left behind by finished work — ${n} of them. Nothing unlanded may be discarded; stop and tell me if any of them still hold work.`,
+  orphan_copies: (n) => `Cleanup request: clear the ${n} leftover local copies that have no work behind them.`,
+  landed_backlog: (n) => `Cleanup request: clear the ${n} landed rows out of the backlog.`,
+};
+
+// A title reaches here as free text from the work's own record, not something
+// this page validated. Quoted verbatim inside the sentence, a stray newline or
+// quote mark would break the sentence out of its quotes, and an unbounded title
+// would make the transcript unreadable - so it is flattened and capped before
+// it goes anywhere near the message.
+const TITLE_MAX = 120;
+function sanitizeTitle(title) {
+  const flat = String(title).replace(/[\r\n"]+/g, ' ').trim();
+  return flat.length > TITLE_MAX ? `${flat.slice(0, TITLE_MAX - 1)}…` : flat;
+}
+
+// The work is named the way the OPERATOR sees it - title, repo, state - because a
+// task id is exactly what this seam keeps off the page. Unambiguous enough for
+// the dockmaster to resolve, and readable in the transcript afterwards.
+export const TRASH_REQUEST = (title, repo, stateWord) => `Trash request: drop the work "${sanitizeTitle(title)}" in ${repo} (currently ${String(stateWord).toLowerCase()}). It is deprecated — stop it, do not land it, and clear up after it. I authorize discarding it.`;
 
 // A pull request that came back from the sweep unreadable. Kept in the list on
 // purpose - one that vanished would read as a fleet with one less problem.

@@ -5914,6 +5914,22 @@ check "and the unreadable entries are set aside, not left to retry" \
 check "the set-aside entries are kept for inspection" \
   '[ -n "$(find "$DM_HOME/state/ui/claimed" -name "*torn.json")" ]'
 
+# One read takes EVERYTHING queued: a session that was away should not have to
+# poll once per backlogged message. Each claim is still its own atomic rename,
+# and the acknowledgement only happens once the text is written out, so a poll
+# killed mid-drain re-delivers rather than losing what it took.
+for UI_N in one two three; do
+  DM_UI_CHAT="$ROOT/ui/chat.js" node -e 'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", "backlog-" + process.argv[1])' "$UI_N" >/dev/null 2>&1
+done
+UI_DRAINED="$(b dm-ui.sh poll --timeout 8 2>/dev/null || true)"
+check "one poll drains the whole backlog" \
+  'grep -q "backlog-one" <<<"$UI_DRAINED" && grep -q "backlog-two" <<<"$UI_DRAINED" && grep -q "backlog-three" <<<"$UI_DRAINED"'
+check "and says how many records it handed over" \
+  'grep -q "^3 messages from the operator, oldest first\.$" <<<"$UI_DRAINED"'
+check "each record is numbered and stamped" 'grep -q "\[2/3\] .* operator:" <<<"$UI_DRAINED"'
+check "the drain empties the queue"          '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
+check "and leaves no claim in flight"        '[ -z "$(find "$DM_HOME/state/ui/claiming" -name "*.json")" ]'
+
 # tangle --json answers in the object and exits 0; the human form exits 1 to
 # report a tangle, which a machine reader cannot tell from the script failing.
 check "tangle emits json"          'b dm-worktree.sh tangle demo --json | jq -e "has(\"on\") and has(\"tangled\")" >/dev/null'
@@ -5990,6 +6006,7 @@ check "a degradation carries tokens, not script output" \
 # the server's refusals over real HTTP (cross-site writes, bad input, traversal).
 check "console checks pass"      'node "$ROOT/tests/check-console.js" >/dev/null 2>&1'
 check "console http checks pass" 'node "$ROOT/tests/check-console-http.js" >/dev/null 2>&1'
+check "console queue checks pass" 'node "$ROOT/tests/check-console-queue.js" >/dev/null 2>&1'
 
 echo "== trash: an operator-authorized discard with recoverable backend cleanup =="
 # The THIRD terminal path, and the one that was missing. Teardown is for work
