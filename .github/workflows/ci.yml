@@ -77,7 +77,7 @@ jobs:
             # cap), so a "docs-only" edit to them can genuinely fail a test.
 
   # Every check that costs no measurable time, in one always-on job. Split out
-  # so a syntax error, a drifted gate list or a broken skill trigger fails in
+  # so a syntax error, a drifted CI graph or a broken skill trigger fails in
   # well under a minute instead of behind a four-minute suite. Runs on every
   # event including a docs-only PR, so the aggregate gate is never vacuous.
   fast:

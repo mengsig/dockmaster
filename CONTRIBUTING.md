@@ -1,7 +1,7 @@
 # Contributing
 
 dockmaster is an agent distro: the tracked surface (`AGENTS.md`, `bin/`,
-`.claude/skills/`, `workflows/`, `config/` defaults, `docs/`) is the shared
+`.claude/skills/`, `config/` defaults, `docs/`) is the shared
 distro; `state/`, `repos/`, `data/`, and `.env` are operator-private and
 gitignored. Changes to the tracked surface go through this repo's own PR path.
 

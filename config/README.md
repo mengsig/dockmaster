@@ -37,6 +37,10 @@ terminal `pr` gate and never merges, so waiting for CI (`bin/dm-pr.sh
 await-checks`) belongs to the operator-mediated merge tail that runs after the
 PR is open — see `pr-workflow` ("Merge authority").
 
+The remaining gate fields — `effort`, `max_rounds`, `dimensions`, `voters`,
+`optional`, and `method` on `verify-findings`/`security` — are contract too;
+`pr-workflow` defines each.
+
 ## `note`
 
 Every gate may carry a free-form **`note`** — a human comment for whoever edits

@@ -333,7 +333,6 @@ docs/architecture.md     this file
 bin/                     portable helper scripts (repo/worktree/pr/backlog/merge/memory)
 .claude/skills/          the workflow skills
 .dm-knowledge/           this repo's own committed shared-memory notes
-workflows/               optional Workflow runner for the PR pipeline (opt-in)
 config/                  pipeline defaults + per-repo overrides (committed defaults)
 tests/                   lifecycle, runtime, and performance checks
 .github/                 CI workflow (smoke + syntax on ubuntu + macos)
@@ -353,5 +352,5 @@ operating contract plus an index into the notes. Recall still unions the legacy
 block for managed repos that have not migrated, so nothing is stranded.
 
 `state/`, `repos/`, `data/`, and `.env` are operator-private and gitignored. The
-tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `workflows/`, `config/`
+tracked surface (`AGENTS.md`, `bin/`, `.claude/skills/`, `config/`
 defaults, docs) is the shared distro and ships through this repo's own PR path.
