@@ -29,7 +29,7 @@
 //                   tangle_note, notes[], notes_hidden }
 //   backlog       { in_flight[], queued[], done[] }
 //   decisions     { open[], resolved[] }
-//   reviews[]     { title, repo, state, at, href }
+//   reviews[]     { title, repo, state, at, href, open_href }
 //   health        { verdict, checks[], cleanup[] }
 //
 // A stage `state` is done | active | ahead | unknown. `ahead` means the work has

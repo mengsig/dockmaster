@@ -1,16 +1,38 @@
 // chat.js - the durable operator <-> dockmaster message queue behind the console.
 //
-// Two files, one owner (this module). Nothing else reads or writes them.
+// Four files/directories, one owner (this module). Nothing else reads or writes them.
 //
 //   state/ui/chat.jsonl   append-only transcript, one JSON object per line.
 //                         Both sides append; the page renders it.
 //   state/ui/inbox/       one file per operator message the dockmaster has not
-//                         picked up yet. `dm-ui.sh poll` claims the oldest by
-//                         RENAMING it into claimed/ - a rename is atomic, so a
-//                         killed poll loses nothing and a re-poll finds it.
+//                         picked up yet.
+//   state/ui/claiming/    a message a poller has taken off the inbox but has NOT
+//                         yet delivered. Named `<pid>-<inbox name>`, so an entry
+//                         whose poller died is recognisable and is put back.
+//   state/ui/claimed/     terminal: delivered, or set aside as unreadable. Kept
+//                         for inspection; never re-delivered.
 //
-// The transcript is the display truth; the inbox is the delivery truth. They are
-// written in that order, so a crash can duplicate a delivery, never drop one.
+// DELIVERY IS THREE RENAMES, and every one of them is atomic:
+//
+//   inbox -> claiming     the claim. Only one rename off a given name can win,
+//                         so two concurrent pollers cannot both take a message.
+//   claiming -> claimed   the acknowledgement, made only AFTER the message is
+//                         out of the poller's stdout. Until then the message is
+//                         still owed, so a poller killed mid-delivery loses
+//                         nothing: the next poll finds the abandoned claim and
+//                         queues it again. The residual risk is the mirror
+//                         image - killed between the flush and the rename means
+//                         one duplicate delivery - and that is the direction to
+//                         err in, because a duplicate is visible and a drop is
+//                         not.
+//   claiming -> inbox     the recovery, for a claim whose poller is gone.
+//
+// The transcript is the display truth; the inbox is the delivery truth. An
+// operator message writes the transcript first, then the inbox, so a FAILED
+// inbox write is reported to the operator as "not sent" - which is true, and a
+// resend delivers exactly once. A hard kill between those two adjacent
+// synchronous writes leaves a message shown but never delivered; both writes are
+// synchronous and adjacent to keep that window as small as a two-file queue can.
 
 'use strict';
 
@@ -19,6 +41,17 @@ const path = require('node:path');
 
 const MAX_TEXT_BYTES = 64 * 1024;
 const SENDERS = ['operator', 'dockmaster'];
+
+// A claim lives for as long as one write to stdout takes. One this old belongs to
+// a poller whose pid has been recycled onto something else, so liveness lies -
+// this is the backstop that keeps such a message from being stuck forever.
+const STALE_CLAIM_MS = 10 * 60 * 1000;
+
+// Queue order is the FILENAME order, and two messages can land in the same
+// millisecond. This counter breaks that tie for messages from one process (the
+// server posts every message the page sends), which is the case that has an
+// order worth preserving.
+let sequence = 0;
 
 function uiDir(dmHome) {
   if (typeof dmHome !== 'string' || dmHome.length === 0) {
@@ -29,8 +62,9 @@ function uiDir(dmHome) {
 
 function ensureDirs(dmHome) {
   const dir = uiDir(dmHome);
-  fs.mkdirSync(path.join(dir, 'inbox'), { recursive: true });
-  fs.mkdirSync(path.join(dir, 'claimed'), { recursive: true });
+  for (const name of ['inbox', 'claiming', 'claimed']) {
+    fs.mkdirSync(path.join(dir, name), { recursive: true });
+  }
   return dir;
 }
 
@@ -52,7 +86,13 @@ function append(dmHome, from, text) {
   fs.appendFileSync(path.join(dir, 'chat.jsonl'), line, 'utf8');
 
   if (from === 'operator') {
-    const name = `${Date.now()}-${process.pid}-${Math.random().toString(36).slice(2, 8)}.json`;
+    sequence += 1;
+    // Widened past what any single process realistically sends: padStart never
+    // truncates, so once `sequence` outgrew the pad width, a same-millisecond
+    // tie between a 6-digit and a 7-digit sequence sorted by string length
+    // first ("999999" > "1000000" as text) rather than by count.
+    const seq = String(sequence).padStart(9, '0');
+    const name = `${Date.now()}-${seq}-${process.pid}-${Math.random().toString(36).slice(2, 8)}.json`;
     fs.writeFileSync(path.join(dir, 'inbox', name), line, 'utf8');
   }
   return message;
@@ -97,41 +137,131 @@ function read(dmHome) {
   return { messages, unreadable };
 }
 
-function inboxNames(dmHome) {
+function jsonNames(dir) {
   try {
-    return fs.readdirSync(path.join(uiDir(dmHome), 'inbox')).filter((n) => n.endsWith('.json')).sort();
+    return fs.readdirSync(dir).filter((n) => n.endsWith('.json')).sort();
   } catch (err) {
     if (err.code === 'ENOENT') return [];
     throw err;
   }
 }
 
-function pendingCount(dmHome) {
-  return inboxNames(dmHome).length;
+const inboxNames = (dmHome) => jsonNames(path.join(uiDir(dmHome), 'inbox'));
+
+// A pid we are not allowed to signal is alive under another user; only ESRCH -
+// no such process - means the poller that took this claim is gone.
+function pollerAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === 'EPERM';
+  }
 }
 
-// claimOldest(dmHome) -> the oldest undelivered operator message, or null.
-// The rename IS the claim: two concurrent pollers cannot both win it, because
-// only one rename off a given name succeeds.
+// A claim entry is `<pid>-<the inbox name it came from>`. Anything else in
+// claiming/ was not written by this module and is left alone rather than guessed
+// at: putting an unrecognised file into the inbox would deliver whatever it is.
+function parseClaim(entry) {
+  const dash = entry.indexOf('-');
+  if (dash <= 0) return null;
+  const pid = Number(entry.slice(0, dash));
+  const name = entry.slice(dash + 1);
+  if (!Number.isInteger(pid) || pid <= 0 || !name.endsWith('.json')) return null;
+  return { pid, name };
+}
+
+function claimIsStale(file) {
+  let stat;
+  try {
+    stat = fs.statSync(file);
+  } catch (err) {
+    // Gone means another poller already recovered or acknowledged it.
+    if (err.code === 'ENOENT') return false;
+    throw err;
+  }
+  return Date.now() - stat.mtimeMs > STALE_CLAIM_MS;
+}
+
+// abandonedClaims(dir) -> [{ entry, name }] for every claim whose poller will
+// never deliver it. READ-ONLY: the page's pending count uses this too, and a GET
+// must not move the queue around.
+function abandonedClaims(dir) {
+  const claiming = path.join(dir, 'claiming');
+  const abandoned = [];
+  for (const entry of jsonNames(claiming)) {
+    const claim = parseClaim(entry);
+    if (!claim) continue;
+    // Our own claim is the one being delivered right now.
+    if (claim.pid === process.pid) continue;
+    if (pollerAlive(claim.pid) && !claimIsStale(path.join(claiming, entry))) continue;
+    abandoned.push({ entry, name: claim.name });
+  }
+  return abandoned;
+}
+
+// What the dockmaster still owes an answer to: the inbox, plus every message a
+// dead poller took and never delivered. Leaving the second group out was the
+// reassuring half of the count - the page said nothing was waiting while a
+// message sat undeliverable in claiming/.
+function pendingCount(dmHome) {
+  const dir = uiDir(dmHome);
+  return inboxNames(dmHome).length + abandonedClaims(dir).length;
+}
+
+// Put every abandoned claim back on the inbox. The rename IS the handover, so
+// two pollers recovering at once cannot both take the same message.
+function recoverAbandoned(dir) {
+  for (const { entry, name } of abandonedClaims(dir)) {
+    try {
+      fs.renameSync(path.join(dir, 'claiming', entry), path.join(dir, 'inbox', name));
+    } catch (err) {
+      if (err.code === 'ENOENT') continue; // another poller got there first
+      throw err;
+    }
+    process.stderr.write('console: chat: a poller stopped before delivering a message; it is queued again\n');
+  }
+}
+
+// claimOldest(dmHome) -> { message, acknowledge } for the oldest undelivered
+// operator message, or null. The caller MUST call acknowledge() only once the
+// message has actually left its stdout; until then the claim is recoverable.
 //
-// An entry that will not parse is QUARANTINED, not thrown: the rename has
-// already taken it out of the inbox, so it cannot be retried and cannot loop -
-// and throwing here killed the poller, which is the dockmaster's whole wake
+// An entry that will not parse is SET ASIDE, not thrown: the rename has already
+// taken it out of the inbox, so it cannot be retried and cannot loop - and
+// throwing here killed the poller, which is the dockmaster's whole wake
 // mechanism. It is reported loudly and the next message is delivered.
 function claimOldest(dmHome) {
   const dir = ensureDirs(dmHome);
+  recoverAbandoned(dir);
   for (const name of inboxNames(dmHome)) {
     const from = path.join(dir, 'inbox', name);
-    const to = path.join(dir, 'claimed', name);
+    const claim = path.join(dir, 'claiming', `${process.pid}-${name}`);
+    const settled = path.join(dir, 'claimed', name);
     try {
-      fs.renameSync(from, to);
+      fs.renameSync(from, claim);
     } catch (err) {
       if (err.code === 'ENOENT') continue; // another poller took it; try the next
       throw err;
     }
-    const message = readClaimed(to);
-    if (message) return message;
-    process.stderr.write(`console: chat: ${to} is not a readable operator message; it was set aside\n`);
+    // rename() carries the inbox mtime across, not the claim time - the stale
+    // rule measures how long THIS CLAIM has sat unacknowledged, so it must be
+    // stamped now or an old message is stolen back the instant it is claimed.
+    //
+    // A failed stamp costs at most one duplicate delivery of THIS message; a
+    // throw here costs every message after it, because it kills the poller the
+    // dockmaster wakes on. So it is reported and the delivery goes ahead.
+    try {
+      const now = new Date();
+      fs.utimesSync(claim, now, now);
+    } catch (err) {
+      process.stderr.write('console: chat: could not stamp the claim time on '
+        + `${claim} (${err.message}); this message may be delivered twice\n`);
+    }
+    const message = readClaimed(claim);
+    if (message) return { message, acknowledge: () => fs.renameSync(claim, settled) };
+    fs.renameSync(claim, settled);
+    process.stderr.write(`console: chat: ${settled} is not a readable operator message; it was set aside\n`);
   }
   return null;
 }
@@ -150,4 +280,6 @@ function readClaimed(file) {
   return parsed;
 }
 
-module.exports = { uiDir, ensureDirs, append, read, pendingCount, claimOldest };
+module.exports = {
+  uiDir, ensureDirs, append, read, pendingCount, claimOldest, abandonedClaims, STALE_CLAIM_MS,
+};

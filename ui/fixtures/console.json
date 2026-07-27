@@ -1196,56 +1196,64 @@
       "repo": "harbourmaster",
       "state": "awaiting",
       "at": "2026-01-15T06:00:00.000Z",
-      "href": "/review/demo-empty-states"
+      "href": "/review/demo-empty-states",
+      "open_href": "/api/review-open?id=demo-empty-states&redirect=1"
     },
     {
       "title": "Contributor guide rewrite",
       "repo": "lantern",
       "state": "awaiting",
       "at": "2026-01-15T03:00:00.000Z",
-      "href": "/review/demo-contributor-guide"
+      "href": "/review/demo-contributor-guide",
+      "open_href": "/api/review-open?id=demo-contributor-guide&redirect=1"
     },
     {
       "title": "Search returns deleted records after deletion",
       "repo": "tidebook",
       "state": "awaiting",
       "at": "2026-01-14T22:00:00.000Z",
-      "href": "/review/demo-search-tombstones"
+      "href": "/review/demo-search-tombstones",
+      "open_href": "/api/review-open?id=demo-search-tombstones&redirect=1"
     },
     {
       "title": "Timezone-aware digest emails",
       "repo": "tidebook",
       "state": "archived",
       "at": "2026-01-14T07:00:00.000Z",
-      "href": "/review/demo-digest-emails"
+      "href": "/review/demo-digest-emails",
+      "open_href": "/api/review-open?id=demo-digest-emails&redirect=1"
     },
     {
       "title": "Drop the unused analytics bundle",
       "repo": "harbourmaster",
       "state": "archived",
       "at": "2026-01-13T17:00:00.000Z",
-      "href": "/review/demo-analytics-bundle"
+      "href": "/review/demo-analytics-bundle",
+      "open_href": "/api/review-open?id=demo-analytics-bundle&redirect=1"
     },
     {
       "title": "Colour contrast pass on the dark theme",
       "repo": "harbourmaster",
       "state": "archived",
       "at": "2026-01-12T17:00:00.000Z",
-      "href": "/review/demo-contrast-pass"
+      "href": "/review/demo-contrast-pass",
+      "open_href": "/api/review-open?id=demo-contrast-pass&redirect=1"
     },
     {
       "title": "Structured logs on every worker",
       "repo": "beacon",
       "state": "archived",
       "at": "2026-01-11T17:00:00.000Z",
-      "href": "/review/demo-structured-logs"
+      "href": "/review/demo-structured-logs",
+      "open_href": "/api/review-open?id=demo-structured-logs&redirect=1"
     },
     {
       "title": "Getting-started page rewrite",
       "repo": "lantern",
       "state": "archived",
       "at": "2026-01-10T19:00:00.000Z",
-      "href": "/review/demo-getting-started"
+      "href": "/review/demo-getting-started",
+      "open_href": "/api/review-open?id=demo-getting-started&redirect=1"
     }
   ],
   "health": {
@@ -1284,11 +1292,13 @@
     ],
     "cleanup": [
       {
+        "kind": "finished_copies",
         "label": "Local copies of finished work",
         "count": 6,
         "note": "Safe to clear."
       },
       {
+        "kind": "orphan_copies",
         "label": "Local copies with no work behind them",
         "count": 2,
         "note": "Left over; nothing depends on them."

@@ -9,7 +9,10 @@ these are the constraints that are not obvious from the code you are editing.
   scaffold; `dm-status` read-only snapshot; `dm-repo` registry+memory;
   `dm-worktree` isolation; `dm-task` meta + on-demand state reconcile +
   dispatch distribution (`sizing`);
-  `dm-brief`; `dm-branch-name`; `dm-pr` open/check/merge; `dm-merge` FF local
+  `dm-brief`; `dm-branch-name`; `dm-trash` operator-authorized discard of an
+  in-flight task (records the authority, then drives the existing removal/close/
+  archive owners — it writes no format of its own);
+  `dm-pr` open/check/merge/close; `dm-merge` FF local
   land + rebase; `dm-sync` FF clone refresh; `dm-backlog`; `dm-lavish` review
   artifact; `dm-test` tests gate; `dm-verify` verify gate (per-task app boot +
   isolated browser); `dm-evidence` collects each gate's `evidence <id>` block

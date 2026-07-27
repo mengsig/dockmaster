@@ -1849,6 +1849,54 @@ check "the cached sweep line is unchanged, to the byte" \
 check "the missing-clone sweep line is unchanged, to the byte" \
   'grep -qxF "  sweep-noclone  (repo unregistered or clone missing: sweepnoclone — skipped)  https://github.com/o/r/pull/9" <<<"$SWEEP2"'
 
+echo "== pr-sweep: the cache write-back never clobbers, never aborts =="
+# The ONLINE write-back is where two races meet, and both were untested: between
+# the enumeration and the write, (1) another command can establish a TERMINAL PR
+# state that this pre-close snapshot would overwrite, and (2) the task can be
+# archived out from under it, which used to abort the whole sweep — a live path,
+# since the console refresh runs it. The stub creates each race deterministically
+# by acting on the record WHILE it answers.
+b dm-repo.sh add sweepguard "$TMP/origin.git" --mode pipeline --no-memory >/dev/null 2>&1
+git -C "$DM_HOME/repos/sweepguard" remote set-url origin o/r.git
+b dm-task.sh new sweep-race-closed  --kind ship --repo sweepguard >/dev/null
+b dm-task.sh new sweep-race-archive --kind ship --repo sweepguard >/dev/null
+( . "$ROOT/bin/dm-lib.sh"
+  dm_meta_set sweep-race-closed  pr "https://github.com/o/r/pull/51"
+  dm_meta_set sweep-race-closed  pr_state OPEN
+  dm_meta_set sweep-race-archive pr "https://github.com/o/r/pull/52"
+  dm_meta_set sweep-race-archive pr_state OPEN ) >/dev/null 2>&1
+SWGSTUB="$TMP/sweep-guard-stub"; mkdir -p "$SWGSTUB"
+cat > "$SWGSTUB/gh" <<STUB
+#!/usr/bin/env bash
+# Answers OPEN for both PRs, but first does what a concurrent command would:
+# pull/51's task gets closed, pull/52's task gets archived.
+case "\$*" in
+  *number=51*)
+    ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set sweep-race-closed pr_state CLOSED ) >/dev/null 2>&1 ;;
+  *number=52*)
+    mkdir -p "$DM_HOME/state/archive"
+    mv "$DM_HOME/state/tasks/sweep-race-archive.meta" "$DM_HOME/state/archive/sweep-race-archive.meta"
+    mv "$DM_HOME/state/tasks/sweep-race-archive.status" "$DM_HOME/state/archive/sweep-race-archive.status" ;;
+esac
+cat <<'JSON'
+{"data":{"repository":{"pullRequest":{"merged":false,"state":"OPEN",
+ "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]},
+ "reviews":{"nodes":[],"pageInfo":{"hasNextPage":false}},
+ "headRefOid":"abc123","title":"race","createdAt":"2026-01-01T00:00:00Z"}}}}
+JSON
+STUB
+chmod +x "$SWGSTUB/gh"
+SWGRC=0
+SWGOUT="$(PATH="$SWGSTUB:$NOAXI_PATH" b dm-pr.sh sweep 2>&1)" || SWGRC=$?
+check "the sweep survives a task archived mid-walk"   '[ "$SWGRC" -eq 0 ]'
+check "and still reports the rest of the fleet"       'grep -q "open PR(s)" <<<"$SWGOUT"'
+check "a terminal CLOSED is not downgraded to OPEN" \
+  '[ "$(b dm-task.sh get sweep-race-closed pr_state)" = "CLOSED" ]'
+check "the vanished task's write-back is named, not swallowed" \
+  'grep -q "could not cache sweep-race-archive" <<<"$SWGOUT"'
+check "no archived record was resurrected as active" \
+  '[ ! -f "$DM_HOME/state/tasks/sweep-race-archive.meta" ]'
+
 echo "== pr-sweep: status surfaces the open-PRs section (#26) =="
 STATUS_PR="$(b dm-status.sh 2>&1 || true)"
 check "status shows the open-PRs section"  'grep -q "OPEN PRs" <<<"$STATUS_PR"'
@@ -5866,6 +5914,22 @@ check "and the unreadable entries are set aside, not left to retry" \
 check "the set-aside entries are kept for inspection" \
   '[ -n "$(find "$DM_HOME/state/ui/claimed" -name "*torn.json")" ]'
 
+# One read takes EVERYTHING queued: a session that was away should not have to
+# poll once per backlogged message. Each claim is still its own atomic rename,
+# and the acknowledgement only happens once the text is written out, so a poll
+# killed mid-drain re-delivers rather than losing what it took.
+for UI_N in one two three; do
+  DM_UI_CHAT="$ROOT/ui/chat.js" node -e 'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", "backlog-" + process.argv[1])' "$UI_N" >/dev/null 2>&1
+done
+UI_DRAINED="$(b dm-ui.sh poll --timeout 8 2>/dev/null || true)"
+check "one poll drains the whole backlog" \
+  'grep -q "backlog-one" <<<"$UI_DRAINED" && grep -q "backlog-two" <<<"$UI_DRAINED" && grep -q "backlog-three" <<<"$UI_DRAINED"'
+check "and says how many records it handed over" \
+  'grep -q "^3 messages from the operator, oldest first\.$" <<<"$UI_DRAINED"'
+check "each record is numbered and stamped" 'grep -q "\[2/3\] .* operator:" <<<"$UI_DRAINED"'
+check "the drain empties the queue"          '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
+check "and leaves no claim in flight"        '[ -z "$(find "$DM_HOME/state/ui/claiming" -name "*.json")" ]'
+
 # tangle --json answers in the object and exits 0; the human form exits 1 to
 # report a tangle, which a machine reader cannot tell from the script failing.
 check "tangle emits json"          'b dm-worktree.sh tangle demo --json | jq -e "has(\"on\") and has(\"tangled\")" >/dev/null'
@@ -5942,6 +6006,539 @@ check "a degradation carries tokens, not script output" \
 # the server's refusals over real HTTP (cross-site writes, bad input, traversal).
 check "console checks pass"      'node "$ROOT/tests/check-console.js" >/dev/null 2>&1'
 check "console http checks pass" 'node "$ROOT/tests/check-console-http.js" >/dev/null 2>&1'
+check "console queue checks pass" 'node "$ROOT/tests/check-console-queue.js" >/dev/null 2>&1'
+
+echo "== trash: an operator-authorized discard with recoverable backend cleanup =="
+# The THIRD terminal path, and the one that was missing. Teardown is for work
+# that LANDED; `dm-task.sh close` is for a task where nothing was BUILT (it
+# refuses on any recorded local copy). Trash is built-but-discarded on the
+# operator's word: the authority is recorded BEFORE anything is destroyed, the
+# forced removal happens INSIDE the flow, and the recovery ref is VERIFIED
+# rather than claimed.
+
+# trash_task <id> [dirty] -> a task on its own branch with one commit. `dirty`
+# also leaves an uncommitted tracked edit and one untracked file — the two
+# things a discard genuinely cannot keep.
+trash_task() {
+  local id="$1" extra="${2:-}" wt
+  b dm-task.sh new "$id" --kind ship --repo demo --title "trash probe $id" >/dev/null
+  wt="$(b dm-worktree.sh create "$id" demo | tail -n1)"
+  git -C "$wt" checkout -q -b "work/$id"
+  printf 'committed\n' > "$wt/$id.txt"
+  git -C "$wt" add -A >/dev/null
+  git -C "$wt" commit -qm "work for $id" >/dev/null
+  if [ "$extra" = dirty ]; then
+    printf 'uncommitted\n' >> "$wt/src/calc.py"
+    printf 'stray\n' > "$wt/$id-stray.txt"
+  fi
+  printf '%s\n' "$wt"
+}
+
+# --- the refusal matrix: every one of these must destroy nothing --------------
+TRWT="$(trash_task tr-refuse)"
+check "trash refuses without a reason"          '! b dm-trash.sh tr-refuse >/dev/null 2>&1'
+check "trash refuses an empty reason"           '! b dm-trash.sh tr-refuse --reason "" >/dev/null 2>&1'
+check "trash refuses a multi-line reason"       '! b dm-trash.sh tr-refuse --reason "$(printf "a\nb")" >/dev/null 2>&1'
+check "trash refuses an unknown id"             '! b dm-trash.sh tr-no-such-task --reason "x" >/dev/null 2>&1'
+check "trash refuses an unknown flag"           '! b dm-trash.sh tr-refuse --reason x --wat >/dev/null 2>&1'
+check "trash refuses a second positional id"    '! b dm-trash.sh tr-refuse tr-other --reason x >/dev/null 2>&1'
+check "no refusal touched the local copy"       '[ -d "$TRWT" ]'
+check "no refusal recorded any authority"       '! grep -q "^trashed_" "$DM_HOME/state/tasks/tr-refuse.meta"'
+
+b dm-task.sh new tr-terminal --kind ship --repo demo >/dev/null
+b dm-task.sh close tr-terminal --reason "nothing to build" >/dev/null
+TRTERM="$(b dm-trash.sh tr-terminal --reason "again" 2>&1 || true)"
+check "trash refuses an already-terminal task"  'grep -q "already terminal" <<<"$TRTERM"'
+check "that refusal names what does end such a task" \
+  'grep -q "dm-task.sh archive tr-terminal" <<<"$TRTERM"'
+
+# --- the open-PR guard: fail closed on anything not provably closed -----------
+TRPRWT="$(trash_task tr-openpr)"
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set tr-openpr pr "https://github.com/o/r/pull/41"
+  dm_meta_set tr-openpr pr_state OPEN ) >/dev/null 2>&1
+TROPEN="$(DM_NO_FETCH=1 b dm-trash.sh tr-openpr --reason "superseded" 2>&1 || true)"
+check "trash refuses an open PR without --close-pr" 'grep -q "not closed" <<<"$TROPEN"'
+check "that refusal names the flag that would close it" 'grep -q -- "--close-pr" <<<"$TROPEN"'
+check "the open-PR refusal destroyed nothing"       '[ -d "$TRPRWT" ]'
+check "the open-PR refusal recorded no authority"   '! grep -q "^trashed_" "$DM_HOME/state/tasks/tr-openpr.meta"'
+# A CLOSED RECORD is not a closed PR: the refresh is best-effort, so a PR reopened
+# since the last check would be trusted as closed and left open behind a discarded
+# task. Only a live confirmation counts (offline here, so there is none).
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set tr-openpr pr_state CLOSED ) >/dev/null 2>&1
+TRCLOSED="$(DM_NO_FETCH=1 b dm-trash.sh tr-openpr --reason "superseded" 2>&1 || true)"
+check "an unconfirmable CLOSED record still refuses" \
+  'grep -q "could not be confirmed against GitHub" <<<"$TRCLOSED"'
+check "that refusal also destroyed nothing"         '[ -d "$TRPRWT" ]'
+
+# --- the full flow: cleanup, verified recovery, honest loss ------------------
+TRFULLWT="$(trash_task tr-full dirty)"
+TRHEAD="$(git -C "$TRFULLWT" rev-parse HEAD)"
+TRREF="refs/dm-discarded/tr-full/$TRHEAD"
+b dm-backlog.sh add tr-full "trash probe" --repo demo --status inflight >/dev/null
+TROUT="$(b dm-trash.sh tr-full --reason "plan superseded" 2>/dev/null)"
+check "trash removes the local copy"            '[ ! -d "$TRFULLWT" ]'
+check "the discarded head is parked in the clone" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "$TRREF" || true)" = "$TRHEAD" ]'
+check "the summary names the VERIFIED recovery ref" 'grep -qx "committed_work=$TRREF" <<<"$TROUT"'
+TRRECOVER="$(sed -n 's/^recover_cmd=//p' <<<"$TROUT")"
+[ -z "$TRRECOVER" ] || eval "$TRRECOVER" >/dev/null 2>&1 || true
+check "the printed recovery command really recovers the commit" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet recovered-tr-full || true)" = "$TRHEAD" ]'
+git -C "$DM_HOME/repos/demo" branch -D recovered-tr-full >/dev/null 2>&1 || true
+check "uncommitted and untracked work is reported LOST, not kept" \
+  'grep -qx "uncommitted_tracked=dirty" <<<"$TROUT" && grep -qx "untracked_paths=1" <<<"$TROUT" \
+   && grep -qx "uncommitted=DISCARDED" <<<"$TROUT"'
+check "every summary line is key=value, so a session can relay it" \
+  '! grep -qvE "^[a-z_]+=" <<<"$TROUT"'
+check "the records are archived, not left active" \
+  '[ -f "$DM_HOME/state/archive/tr-full.meta" ] && [ ! -f "$DM_HOME/state/tasks/tr-full.meta" ]'
+check "the archived record carries who, when and why" \
+  'grep -q "^trashed_reason=plan superseded$" "$DM_HOME/state/archive/tr-full.meta" \
+   && grep -q "^trashed_by=." "$DM_HOME/state/archive/tr-full.meta" \
+   && grep -q "^trashed_at=20" "$DM_HOME/state/archive/tr-full.meta"'
+check "the archived record carries the recovery snapshot" \
+  'grep -q "^trashed_head=$TRHEAD$" "$DM_HOME/state/archive/tr-full.meta" \
+   && grep -q "^trashed_branch=work/tr-full$" "$DM_HOME/state/archive/tr-full.meta" \
+   && grep -q "^trashed_tracked=dirty$" "$DM_HOME/state/archive/tr-full.meta" \
+   && grep -q "^trashed_untracked=1$" "$DM_HOME/state/archive/tr-full.meta"'
+check "the authority is logged BEFORE the discard, not after" \
+  '[ "$(grep -n " trashed: " "$DM_HOME/state/archive/tr-full.status" | head -1 | cut -d: -f1)" -lt \
+     "$(grep -n " discarded: " "$DM_HOME/state/archive/tr-full.status" | head -1 | cut -d: -f1)" ]'
+check "trash never claims the work landed" \
+  '! grep -qE "^[^ ]+ merged: " "$DM_HOME/state/archive/tr-full.status"'
+check "the backlog row is resolved with the reason" \
+  'b dm-backlog.sh list --json \
+   | jq -e --arg id tr-full "any(.items[]; .id==\$id and .status==\"done\" and (.note|startswith(\"trashed: plan superseded\")))" >/dev/null'
+# The verdict is READ OUT of the ref namespace, so every ref that exists for the
+# id is reported whatever the verdict says.
+check "every recovery ref that exists is listed" \
+  'grep -qx "parked_ref=$TRHEAD $TRREF" <<<"$TROUT"'
+
+# A clean local copy must not raise the alarm the dirty one does.
+TRCLEANWT="$(trash_task tr-clean)"
+TRCLEAN="$(b dm-trash.sh tr-clean --reason "clean discard" 2>/dev/null)"
+check "a clean discard reports nothing lost, not a false alarm" \
+  'grep -qx "uncommitted=none" <<<"$TRCLEAN" && grep -qx "untracked_paths=0" <<<"$TRCLEAN" \
+   && grep -qx "uncommitted_tracked=clean" <<<"$TRCLEAN"'
+
+# Commits already in the base need no parked ref, and must not be alarmed about.
+b dm-task.sh new tr-inbase --kind ship --repo demo >/dev/null
+b dm-worktree.sh create tr-inbase demo >/dev/null
+TRINBASE="$(b dm-trash.sh tr-inbase --reason "nothing to keep" 2>"$TMP/tr-inbase.err")"
+check "work already in the base is said so, not alarmed about" \
+  'grep -qx "committed_work=already-in-base" <<<"$TRINBASE"'
+check "and no NOT-PRESERVED alarm is raised for it" \
+  '! grep -q "NOT on a recovery ref" "$TMP/tr-inbase.err"'
+
+# An id git cannot spell verbatim: the ref path, the printed rescue branch name
+# and the ref that really exists must all agree, or the operator's only route
+# back is a command that fails.
+TRODDWT="$(trash_task tr.odd.id)"
+TRODDHEAD="$(git -C "$TRODDWT" rev-parse HEAD)"
+TRODD="$(b dm-trash.sh tr.odd.id --reason "odd id" 2>/dev/null)"
+check "an odd id parks under a sanitized ref path" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/tr_odd_id/$TRODDHEAD" || true)" = "$TRODDHEAD" ]'
+check "the summary names that same sanitized ref" \
+  'grep -qx "committed_work=refs/dm-discarded/tr_odd_id/$TRODDHEAD" <<<"$TRODD"'
+check "the printed rescue command is a legal branch name" \
+  'TRODDCMD="$(sed -n "s/^recover_cmd=//p" <<<"$TRODD")"; eval "$TRODDCMD" >/dev/null 2>&1 \
+   && [ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet recovered-tr_odd_id || true)" = "$TRODDHEAD" ]'
+git -C "$DM_HOME/repos/demo" branch -D recovered-tr_odd_id >/dev/null 2>&1 || true
+check "the emitted path is quoted, so a spaced path survives it" \
+  'grep -q "^recover_cmd=git -C .[^ ]*repos/demo. branch " <<<"$TRODD"'
+
+# A local copy whose head cannot be read ANYWHERE is never an all-clear:
+# nothing-committed is reserved for a task that never had one.
+TRUNWT="$(trash_task tr-undet)"
+rm -f "$TRUNWT/.git"
+rm -rf "$DM_HOME/repos/demo/.git/worktrees/tr-undet"
+TRUNDET="$(b dm-trash.sh tr-undet --reason "dropped" 2>"$TMP/tr-undet.err")"
+check "an undeterminable head is UNDETERMINED, never nothing-committed" \
+  'grep -qx "committed_work=UNDETERMINED" <<<"$TRUNDET" \
+   && ! grep -q "nothing-committed" <<<"$TRUNDET"'
+check "and it says so on stderr too" \
+  'grep -q "head could not be determined" "$TMP/tr-undet.err"'
+
+# A broken `.git` file in the local copy is NOT "no commit": git's own admin
+# record still names the head, and the commit must still be preserved.
+TRADMWT="$(trash_task tr-admin)"
+TRADMHEAD="$(git -C "$TRADMWT" rev-parse HEAD)"
+rm -f "$TRADMWT/.git"
+TRADM="$(b dm-trash.sh tr-admin --reason "dropped" 2>"$TMP/tr-admin.err")"
+check "an unreadable local HEAD falls back to git's admin record" \
+  'grep -qx "head=$TRADMHEAD" <<<"$TRADM"'
+check "and the commit is really parked, not written off" \
+  'grep -qx "committed_work=refs/dm-discarded/tr-admin/$TRADMHEAD" <<<"$TRADM" \
+   && [ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/tr-admin/$TRADMHEAD" || true)" = "$TRADMHEAD" ]'
+check "the commit survives an aggressive gc" \
+  'git -C "$DM_HOME/repos/demo" gc --prune=now --quiet 2>/dev/null; \
+   git -C "$DM_HOME/repos/demo" cat-file -e "$TRADMHEAD^{commit}"'
+
+# --- a REUSED id must never inherit an earlier discard's commit --------------
+# refs/dm-discarded/* is keyed by sha exactly so reusing an id cannot clobber the
+# first discard. That means the namespace can hold refs from a PREVIOUS task of
+# the same name, and with no head to tie a ref to this run, naming one would hand
+# the operator someone else's commit while the one actually at risk goes
+# unmentioned. Both shapes below were reproduced.
+TRRWT="$(trash_task tr-reuse)"
+TRRSHA1="$(git -C "$TRRWT" rev-parse HEAD)"
+b dm-trash.sh tr-reuse --reason "first discard" >/dev/null 2>&1
+check "the first discard of a reusable id is parked" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/tr-reuse/$TRRSHA1" || true)" = "$TRRSHA1" ]'
+# Second task, same id, never dispatched: nothing was built, so nothing can be
+# recoverable — least of all the previous task's commit.
+b dm-task.sh new tr-reuse --kind ship --repo demo --title "reused id" >/dev/null
+TRREUSE="$(b dm-trash.sh tr-reuse --reason "nothing built this time" 2>/dev/null)"
+check "a reused id with nothing built reports nothing-committed" \
+  'grep -qx "committed_work=nothing-committed" <<<"$TRREUSE"'
+check "it never names the earlier discard as this task's work" \
+  '! grep -q "committed_work=refs/dm-discarded/tr-reuse/$TRRSHA1" <<<"$TRREUSE" \
+   && ! grep -q "^recover_cmd=" <<<"$TRREUSE"'
+check "the inherited ref is still LISTED, just not claimed" \
+  'grep -qx "parked_ref=$TRRSHA1 refs/dm-discarded/tr-reuse/$TRRSHA1" <<<"$TRREUSE"'
+
+# Same reuse, but the second task DID build and its head cannot be read: the
+# verdict must be UNDETERMINED and must not offer the earlier sha as the rescue.
+TRR2WT="$(trash_task tr-reuse2)"
+TRR2SHA1="$(git -C "$TRR2WT" rev-parse HEAD)"
+b dm-trash.sh tr-reuse2 --reason "first discard" >/dev/null 2>&1
+TRR2WT2="$(trash_task tr-reuse2)"
+TRR2SHA2="$(git -C "$TRR2WT2" rev-parse HEAD)"
+rm -f "$TRR2WT2/.git"
+rm -rf "$DM_HOME/repos/demo/.git/worktrees/tr-reuse2"
+TRREUSE2="$(b dm-trash.sh tr-reuse2 --reason "second discard" 2>"$TMP/tr-reuse2.err")"
+check "a reused id with an unreadable head is UNDETERMINED" \
+  'grep -qx "committed_work=UNDETERMINED" <<<"$TRREUSE2"'
+check "it offers no rescue command at all" '! grep -q "^recover_cmd=" <<<"$TRREUSE2"'
+check "and never presents the earlier sha as this run's work" \
+  '! grep -q "committed_work=.*$TRR2SHA1" <<<"$TRREUSE2"'
+check "the warning says the refs found are an earlier discard's" \
+  'grep -q "EARLIER discard of this reusable id" "$TMP/tr-reuse2.err"'
+check "the two discards are genuinely different commits" '[ "$TRR2SHA1" != "$TRR2SHA2" ]'
+
+# --- a directory this run never saw is not a clean bill of health ------------
+# The vanished-local-copy branch can read nothing about the TREE, so reporting
+# uncommitted=none there would be a definite all-clear over work that may well
+# have been dirty.
+TRGDWT="$(trash_task tr-ghost-dirty dirty)"
+rm -rf "$TRGDWT"
+TRGDIRTY="$(b dm-trash.sh tr-ghost-dirty --reason "worker died" 2>/dev/null)"
+check "a vanished local copy never reports uncommitted=none" \
+  '! grep -qx "uncommitted=none" <<<"$TRGDIRTY"'
+check "it reports the tree as undetermined, in every field" \
+  'grep -qx "uncommitted=undetermined" <<<"$TRGDIRTY" \
+   && grep -qx "uncommitted_tracked=undetermined" <<<"$TRGDIRTY" \
+   && grep -qx "untracked_paths=undetermined" <<<"$TRGDIRTY"'
+
+# The worker signal is reported, never acted on: stopping an agent is the
+# session's job, and this command cannot do it.
+TRWKWT="$(trash_task tr-worker)"
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set tr-worker agent_id agent-smoke-1 ) >/dev/null 2>&1
+TRWORKER="$(b dm-trash.sh tr-worker --reason "dropped" 2>"$TMP/tr-worker.err")"
+check "a recorded worker is reported in the summary"  'grep -qx "worker=RUNNING" <<<"$TRWORKER"'
+check "and warned about on stderr"                    'grep -q "STOP THE WORKER FIRST" "$TMP/tr-worker.err"'
+check "but it never blocks the discard"               'grep -qx "records=archived" <<<"$TRWORKER"'
+TRWK2WT="$(trash_task tr-worker-failed)"
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set tr-worker-failed agent_id agent-smoke-2 ) >/dev/null 2>&1
+b dm-task.sh event tr-worker-failed failed "gave up" >/dev/null
+TRWORKER2="$(b dm-trash.sh tr-worker-failed --reason "dropped" 2>/dev/null)"
+check "a worker that reported failure is not called running" \
+  '! grep -q "^worker=" <<<"$TRWORKER2"'
+
+# A task nobody ever dispatched has nothing built; trash still ends it, and says
+# so rather than implying a commit was preserved.
+b dm-task.sh new tr-nowt --kind ship --repo demo --title "never dispatched" >/dev/null
+TRNOWT="$(b dm-trash.sh tr-nowt --reason "intent deprecated" 2>/dev/null)"
+check "a task with no local copy still reaches terminal" \
+  'grep -qx "state=discarded" <<<"$TRNOWT" && grep -qx "local_copy=absent" <<<"$TRNOWT"'
+check "nothing committed is said plainly, never as recoverable" \
+  'grep -qx "committed_work=nothing-committed" <<<"$TRNOWT" && grep -qx "uncommitted=none" <<<"$TRNOWT"'
+
+# The interrupted-cleanup shape: the directory is already gone, so the head can
+# only come from git's own admin record. Reading it there is what lets the
+# summary report the work recoverable instead of silently under-claiming.
+TRGWT="$(trash_task tr-ghost)"
+TRGHEAD="$(git -C "$TRGWT" rev-parse HEAD)"
+rm -rf "$TRGWT"
+TRGOUT="$(b dm-trash.sh tr-ghost --reason "worker died, plan dropped" 2>/dev/null)"
+check "a vanished local copy's head still comes from git's own record" \
+  'grep -qx "head=$TRGHEAD" <<<"$TRGOUT"'
+check "and it is parked, so the recovery claim is true" \
+  'grep -qx "committed_work=refs/dm-discarded/tr-ghost/$TRGHEAD" <<<"$TRGOUT" \
+   && [ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/tr-ghost/$TRGHEAD" || true)" = "$TRGHEAD" ]'
+
+# --- a step that fails mid-flow must stop it, and stay readable --------------
+# The removal is made to refuse the root-proof way: point the record at a copy
+# outside the managed path, which dm-worktree.sh refuses before deleting.
+TRHALTWT="$(trash_task tr-halt)"
+TRHALTHEAD="$(git -C "$TRHALTWT" rev-parse HEAD)"
+cp -R "$TRHALTWT" "$TMP/tr-halt-elsewhere"
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set tr-halt worktree "$TMP/tr-halt-elsewhere" ) >/dev/null 2>&1
+TRHALT="$(b dm-trash.sh tr-halt --reason "dropped" 2>&1 || true)"
+check "a removal that cannot proceed stops the whole flow" 'grep -q "could not remove" <<<"$TRHALT"'
+check "the halted trash archived nothing" \
+  '[ ! -f "$DM_HOME/state/archive/tr-halt.meta" ] && [ -f "$DM_HOME/state/tasks/tr-halt.meta" ]'
+check "the halted trash reconciles as LIVE, never as finished" \
+  'grep -q "^state: working" <<<"$(DM_NO_FETCH=1 b dm-task.sh state tr-halt)"'
+check "the halted trash still recorded its authority and snapshot" \
+  'grep -q "^trashed_reason=dropped$" "$DM_HOME/state/tasks/tr-halt.meta" \
+   && grep -q "^trashed_head=$TRHALTHEAD$" "$DM_HOME/state/tasks/tr-halt.meta"'
+# Retry with the record restored, but the worktree's git link broken: the head is
+# now unreadable, so the snapshot from the first attempt is what must be reported
+# — and recoverability must be reported as NOT preserved, loudly, not assumed.
+( . "$ROOT/bin/dm-lib.sh"; dm_meta_set tr-halt worktree "$TRHALTWT" ) >/dev/null 2>&1
+# Both routes to the head are destroyed — the in-worktree `.git` AND the clone's
+# admin record — because either one alone is now enough to preserve the commit.
+rm -f "$TRHALTWT/.git"
+rm -rf "$DM_HOME/repos/demo/.git/worktrees/tr-halt"
+TRHALT2="$(b dm-trash.sh tr-halt --reason "dropped" 2>"$TMP/tr-halt2.err")" || true
+check "a retry completes the trash"            'grep -qx "records=archived" <<<"$TRHALT2"'
+check "the retry reports the head the first attempt recorded" \
+  'grep -qx "head=$TRHALTHEAD" <<<"$TRHALT2"'
+check "an unparkable head is reported NOT PRESERVED, never as recoverable" \
+  'grep -qx "committed_work=NOT-PRESERVED" <<<"$TRHALT2" && ! grep -q "^recover_cmd=" <<<"$TRHALT2"'
+check "the warning names the commit and how to save it now" \
+  'grep -q "NOT on a recovery ref" "$TMP/tr-halt2.err" \
+   && grep -q "branch recovered-tr-halt $TRHALTHEAD" "$TMP/tr-halt2.err"'
+rm -rf "$TMP/tr-halt-elsewhere"
+
+# A bookkeeping step failing AFTER the deletion cannot be hidden: the task is
+# terminal (so reconcile is truthful) and the refusal names what is left to do.
+TRAWT="$(trash_task tr-archfail)"
+mkdir -p "$DM_HOME/state/archive"
+mv "$DM_HOME/state/archive" "$TMP/tr-archive-aside"
+printf 'not a directory\n' > "$DM_HOME/state/archive"
+TRARCH="$(b dm-trash.sh tr-archfail --reason "dropped" 2>&1 || true)"
+rm -f "$DM_HOME/state/archive"
+mv "$TMP/tr-archive-aside" "$DM_HOME/state/archive"
+check "a failed archive is never swallowed"     'grep -q "could not archive" <<<"$TRARCH"'
+check "it names the two commands that finish the job" \
+  'grep -q "dm-backlog.sh done tr-archfail" <<<"$TRARCH" \
+   && grep -q "dm-task.sh archive tr-archfail" <<<"$TRARCH"'
+check "the half-finished trash is terminal, not healthy-looking" \
+  'grep -q "^state: discarded" <<<"$(DM_NO_FETCH=1 b dm-task.sh state tr-archfail)"'
+check "and its local copy really is gone"       '[ ! -d "$TRAWT" ]'
+b dm-task.sh archive tr-archfail >/dev/null
+check "the commands it named do finish the job"  '[ -f "$DM_HOME/state/archive/tr-archfail.meta" ]'
+
+# The other route out of that state: re-running the command. A trash killed after
+# the discard but before the bookkeeping would otherwise leave a task every
+# command refuses as terminal — so it RESUMES its own unfinished work, and only
+# the tail is left to run.
+TRRESWT="$(trash_task tr-resume)"
+TRRESHEAD="$(git -C "$TRRESWT" rev-parse HEAD)"
+mkdir -p "$DM_HOME/state/archive"
+mv "$DM_HOME/state/archive" "$TMP/tr-resume-aside"
+printf 'not a directory\n' > "$DM_HOME/state/archive"
+b dm-trash.sh tr-resume --reason "first attempt" >/dev/null 2>&1 || true
+rm -f "$DM_HOME/state/archive"
+mv "$TMP/tr-resume-aside" "$DM_HOME/state/archive"
+check "the killed trash left the task terminal with its authority recorded" \
+  'grep -q "^state: discarded" <<<"$(DM_NO_FETCH=1 b dm-task.sh state tr-resume)" \
+   && grep -q "^trashed_reason=first attempt$" "$DM_HOME/state/tasks/tr-resume.meta"'
+TRRESUME="$(b dm-trash.sh tr-resume --reason "second attempt" 2>"$TMP/tr-resume.err")"
+check "re-running it resumes instead of refusing as terminal" \
+  'grep -qx "records=archived" <<<"$TRRESUME" && [ -f "$DM_HOME/state/archive/tr-resume.meta" ]'
+check "the resumed run keeps the ORIGINAL recorded authority" \
+  'grep -qx "reason=first attempt" <<<"$TRRESUME" \
+   && grep -q "already discarded on the recorded authority" "$TMP/tr-resume.err"'
+check "it says the local copy went earlier, not that there never was one" \
+  'grep -qx "local_copy=removed-earlier" <<<"$TRRESUME" \
+   && ! grep -q "committed_work=nothing-committed" <<<"$TRRESUME"'
+check "and it still reports the verified recovery ref" \
+  'grep -qx "committed_work=refs/dm-discarded/tr-resume/$TRRESHEAD" <<<"$TRRESUME"'
+check "the resumed run appended no second authority line" \
+  '[ "$(grep -c " trashed: " "$DM_HOME/state/archive/tr-resume.status")" = 1 ]'
+# A task that is terminal but was NOT discarded by this flow has nothing to
+# resume, so it stays refused.
+b dm-task.sh new tr-notmine --kind ship --repo demo >/dev/null
+b dm-task.sh close tr-notmine --reason "nothing to build" >/dev/null
+TRNOTMINE="$(b dm-trash.sh tr-notmine --reason "x" 2>&1 || true)"
+check "a terminal task this flow did not discard stays refused" \
+  'grep -q "was not discarded by this flow" <<<"$TRNOTMINE"'
+
+# The same shape one step earlier, and fail-CLOSED: a backlog that cannot be read
+# must never pass for "no row to resolve" and let the flow report a clean finish.
+TRBWT="$(trash_task tr-backlogfail)"
+cp "$DM_HOME/state/backlog.json" "$TMP/tr-backlog-good.json"
+printf 'not json\n' > "$DM_HOME/state/backlog.json"
+TRBOUT="$(b dm-trash.sh tr-backlogfail --reason "dropped" 2>&1 || true)"
+cp "$TMP/tr-backlog-good.json" "$DM_HOME/state/backlog.json"
+check "an unreadable backlog is never read as an absent row" \
+  'grep -q "backlog could not be read" <<<"$TRBOUT"'
+check "it says the records were NOT archived" \
+  'grep -q "records were not archived" <<<"$TRBOUT" && [ ! -f "$DM_HOME/state/archive/tr-backlogfail.meta" ]'
+check "and that task is terminal too, never live-looking" \
+  'grep -q "^state: discarded" <<<"$(DM_NO_FETCH=1 b dm-task.sh state tr-backlogfail)"'
+check "its local copy is gone as well"          '[ ! -d "$TRBWT" ]'
+b dm-task.sh archive tr-backlogfail >/dev/null
+
+b dm-task.sh new tr-verb --kind ship --repo demo >/dev/null
+check "a crewmate cannot log a trash itself" \
+  '! b dm-task.sh event tr-verb trashed "forged" >/dev/null 2>&1'
+# A flag with nothing to do says so — on stderr, because stdout is the relayable
+# record and every line of it is key=value.
+TRNOPRWT="$(trash_task tr-nopr)"
+TRNOPR="$(b dm-trash.sh tr-nopr --reason "dropped" --close-pr 2>"$TMP/tr-nopr.err")"
+check "--close-pr with no PR is noted, not silently ignored" \
+  'grep -q "close-pr had nothing to do" "$TMP/tr-nopr.err" && grep -qx "pr=none" <<<"$TRNOPR"'
+check "that note never lands on the relayable stdout" \
+  '! grep -qvE "^[a-z_]+=" <<<"$TRNOPR"'
+check "the dispatcher lists trash with a purpose" \
+  'grep -qE "^  trash +[A-Za-z]" <<<"$(b dm help)"'
+
+echo "== trash with a PR: closed unmerged, never merged, branch left alone =="
+# The PR half needs GitHub, so it runs against a stub gh and a clone whose origin
+# looks like a GitHub slug. gh-axi is filtered off PATH so the argv shape under
+# test is the one plain gh gets.
+# Its own bare origin: this block rewrites the clone's origin url to a
+# GitHub-looking slug and pushes branches, neither of which should reach the
+# shared fixture origin every other case reads.
+git init -q --bare -b main "$TMP/trashpr-origin.git"
+git -C "$TMP/seed" push -q "$TMP/trashpr-origin.git" main
+b dm-repo.sh add trashpr "$TMP/trashpr-origin.git" --mode pipeline --no-memory >/dev/null 2>&1
+git -C "$DM_HOME/repos/trashpr" remote set-url origin o/r.git
+TRSTUB="$TMP/trash-ghstub"; mkdir -p "$TRSTUB"
+# The stub is per-PR and MODELS the close: a real refresh after a close reports
+# `closed`, and `remove --force` does refresh on its way through, so a stub stuck
+# on "open" would overwrite the recorded state and hide it from the assertion.
+cat > "$TRSTUB/gh" <<STUB
+#!/bin/sh
+D="$TRSTUB"
+printf '%s\n' "\$*" >> "\$D/calls"
+n="\$(printf '%s' "\$*" | sed -n 's#.*pulls/\([0-9][0-9]*\).*#\1#p')"
+case "\$*" in
+  *check-runs*) printf '{"total_count":0,"check_runs":[]}\n'; exit 0 ;;
+  *commits*status*) printf '{"total_count":0}\n'; exit 0 ;;
+  *"--method POST"*) [ -f "\$D/comment-fail" ] && exit 1; exit 0 ;;
+  *"--method PATCH"*)
+    sed 's/"state":"open"/"state":"closed"/' "\$D/pr-\$n.json" > "\$D/pr-\$n.tmp" \
+      && mv "\$D/pr-\$n.tmp" "\$D/pr-\$n.json"
+    exit 0 ;;
+esac
+cat "\$D/pr-\$n.json"
+STUB
+chmod +x "$TRSTUB/gh"
+tr_stub_pr() {
+  printf '{"state":"open","merged":false,"head":{"sha":"abc123","ref":"work/%s","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' \
+    "$2" > "$TRSTUB/pr-$1.json"
+}
+tr_stub_pr 41 tr-pr
+tr_stub_pr 42 tr-pr-silent
+
+# pr_trash_task <id> <pr-number> -> a task with a pushed branch and a recorded
+# PR whose state is DELIBERATELY unrecorded: "not provably closed" must be
+# treated as open.
+pr_trash_task() {
+  local id="$1" n="$2" wt
+  b dm-task.sh new "$id" --kind ship --repo trashpr >/dev/null
+  wt="$(b dm-worktree.sh create "$id" trashpr | tail -n1)"
+  git -C "$wt" checkout -q -b "work/$id"
+  printf 'x\n' > "$wt/$id.txt"
+  git -C "$wt" add -A >/dev/null
+  git -C "$wt" commit -qm "work for $id" >/dev/null
+  git -C "$wt" push -q "$TMP/trashpr-origin.git" "work/$id"
+  ( . "$ROOT/bin/dm-lib.sh"; dm_meta_set "$id" pr "https://github.com/o/r/pull/$n" ) >/dev/null 2>&1
+  printf '%s\n' "$wt"
+}
+TRPRWT2="$(pr_trash_task tr-pr 41)"
+check "close refuses without a reason" \
+  '! PATH="$TRSTUB:$NOAXI_PATH" b dm-pr.sh close tr-pr >/dev/null 2>&1'
+check "close refuses a task with no PR recorded" \
+  '! PATH="$TRSTUB:$NOAXI_PATH" b dm-pr.sh close tr-verb --reason x >/dev/null 2>&1'
+check "trash refuses a PR whose state it could not confirm closed" \
+  '! DM_NO_FETCH=1 b dm-trash.sh tr-pr --reason "x" >/dev/null 2>&1'
+TRPROUT="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr --reason "plan superseded" --close-pr 2>&1)"
+check "the PR is closed as part of the flow"    'grep -qx "pr=closed" <<<"$TRPROUT"'
+check "the reason was commented BEFORE the close" \
+  '[ "$(grep -n "issues/41/comments" "$TRSTUB/calls" | head -1 | cut -d: -f1)" -lt \
+     "$(grep -n "PATCH /repos/o/r/pulls/41" "$TRSTUB/calls" | head -1 | cut -d: -f1)" ]'
+check "the comment carries the reason"          'grep -q "plan superseded" "$TRSTUB/calls"'
+check "closing never merges"                    '! grep -q "pulls/41/merge" "$TRSTUB/calls"'
+check "the PR branch is left at origin, never deleted" \
+  'git -C "$TMP/trashpr-origin.git" rev-parse --verify --quiet refs/heads/work/tr-pr >/dev/null'
+check "the closed state is recorded on the task" \
+  'grep -q "^pr_state=CLOSED$" "$DM_HOME/state/archive/tr-pr.meta"'
+check "the local copy went with it"             '[ ! -d "$TRPRWT2" ]'
+# A comment that cannot be posted must leave the PR OPEN and stop the flow: a PR
+# closed with no stated reason is the artifact the comment-first order prevents.
+: > "$TRSTUB/comment-fail"
+TRPRWT3="$(pr_trash_task tr-pr-silent 42)"
+TRPRFAIL="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-silent --reason "dropped" --close-pr 2>&1 || true)"
+rm -f "$TRSTUB/comment-fail"
+check "a failed comment leaves the PR open and halts the trash" \
+  'grep -q "could not comment" <<<"$TRPRFAIL" && grep -q "leaving it OPEN" <<<"$TRPRFAIL"'
+check "no PATCH closed it anyway"               '! grep -q "PATCH /repos/o/r/pulls/42" "$TRSTUB/calls"'
+check "and the local copy survived the halt"    '[ -d "$TRPRWT3" ]'
+PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-silent --reason "dropped" --close-pr >/dev/null 2>&1 || true
+check "the retry closes it once commenting works" 'grep -q "PATCH /repos/o/r/pulls/42" "$TRSTUB/calls"'
+# Closing is not a way to walk back a merge: GitHub accepts state=closed on a
+# merged PR without complaint, which would record abandoned work over a change
+# that landed.
+pr_trash_task tr-pr-merged 43 >/dev/null
+printf '{"state":"closed","merged":true,"head":{"sha":"abc123","ref":"work/tr-pr-merged","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$TRSTUB/pr-43.json"
+: > "$TRSTUB/calls"
+TRMERGED="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-pr.sh close tr-pr-merged --reason "trashed" 2>&1 || true)"
+check "close refuses a merged PR"                'grep -q "already MERGED" <<<"$TRMERGED"'
+check "it routes the caller to rollback"         'grep -q "rollback skill" <<<"$TRMERGED"'
+check "and issues no close mutation at all"      '! grep -q "PATCH /repos/o/r/pulls/43" "$TRSTUB/calls"'
+check "the merged state stays on the record"     '[ "$(b dm-task.sh get tr-pr-merged pr_state)" = "MERGED" ]'
+check "trash refuses that task too, naming rollback" \
+  'TRM2="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-merged --reason x --close-pr 2>&1 || true)"; \
+   grep -q "rollback skill" <<<"$TRM2"'
+# A second close is not an error: the flow may run over a PR someone already
+# closed, and that must not fail the trash. (A fresh task — the ones above are
+# archived by their own trash.)
+pr_trash_task tr-pr-again 44 >/dev/null
+printf '{"state":"closed","merged":false,"head":{"sha":"abc123","ref":"work/tr-pr-again","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$TRSTUB/pr-44.json"
+: > "$TRSTUB/calls"
+check "closing an already-closed PR exits 0 and says so" \
+  'TRRE="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-pr.sh close tr-pr-again --reason "again" 2>&1)"; grep -q "already closed" <<<"$TRRE"'
+check "and it issues no close mutation for it"     '! grep -q "PATCH" "$TRSTUB/calls"'
+check "close refuses a reason that would be read as a file" \
+  '! PATH="$TRSTUB:$NOAXI_PATH" b dm-pr.sh close tr-pr-again --reason "@/etc/passwd" >/dev/null 2>&1'
+# A PR can be REOPENED (or even merged) between the discard and a resume, so the
+# resume re-checks rather than filing the recorded state. It still never closes
+# anything: that authority belonged to the run that discarded the work.
+tr_stub_pr 45 tr-pr-resume
+pr_trash_task tr-pr-resume 45 >/dev/null
+mkdir -p "$DM_HOME/state/archive"
+mv "$DM_HOME/state/archive" "$TMP/tr-pr-resume-aside"
+printf 'not a directory\n' > "$DM_HOME/state/archive"
+PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-resume --reason "superseded" --close-pr >/dev/null 2>&1 || true
+rm -f "$DM_HOME/state/archive"
+mv "$TMP/tr-pr-resume-aside" "$DM_HOME/state/archive"
+check "the killed trash had closed the PR before it died" \
+  '[ "$(b dm-task.sh get tr-pr-resume pr_state)" = "CLOSED" ]'
+tr_stub_pr 45 tr-pr-resume            # reopened on GitHub
+: > "$TRSTUB/calls"
+TRPRRES="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-resume --reason "superseded" 2>"$TMP/tr-pr-resume.err")"
+check "a resume re-checks the PR instead of trusting the record" \
+  'grep -qx "pr=STILL-OPEN" <<<"$TRPRRES" && ! grep -q "already-closed" <<<"$TRPRRES"'
+check "it names the command that closes it, and closes nothing itself" \
+  'grep -q "dm-pr.sh close tr-pr-resume" "$TMP/tr-pr-resume.err" \
+   && ! grep -q "PATCH /repos/o/r/pulls/45" "$TRSTUB/calls"'
+check "the resume still finishes the bookkeeping"  'grep -qx "records=archived" <<<"$TRPRRES"'
+# The same window can end in a MERGE, which must be labelled as one rather than
+# read as just "not closed".
+tr_stub_pr 46 tr-pr-landed
+pr_trash_task tr-pr-landed 46 >/dev/null
+mkdir -p "$DM_HOME/state/archive"
+mv "$DM_HOME/state/archive" "$TMP/tr-pr-landed-aside"
+printf 'not a directory\n' > "$DM_HOME/state/archive"
+PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-landed --reason "superseded" --close-pr >/dev/null 2>&1 || true
+rm -f "$DM_HOME/state/archive"
+mv "$TMP/tr-pr-landed-aside" "$DM_HOME/state/archive"
+printf '{"state":"closed","merged":true,"head":{"sha":"abc123","ref":"work/tr-pr-landed","repo":{"full_name":"o/r"}},"base":{"ref":"main","repo":{"default_branch":"main"}},"mergeable_state":"clean"}\n' > "$TRSTUB/pr-46.json"
+TRPRLANDED="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-landed --reason "superseded" 2>"$TMP/tr-pr-landed.err")"
+check "a PR merged after the discard is labelled MERGED" \
+  'grep -qx "pr=MERGED" <<<"$TRPRLANDED"'
+check "and the resume says the landed change is rollback territory" \
+  'grep -q "rollback skill" "$TMP/tr-pr-landed.err"'
+
+# The confirmed-CLOSED path: with the live check succeeding, no --close-pr needed.
+TRCONF="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-again --reason "already closed upstream" 2>/dev/null)"
+check "a CONFIRMED closed PR needs no --close-pr"  'grep -qx "pr=already-closed" <<<"$TRCONF"'
 
 # shard:epilogue
 echo

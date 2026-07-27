@@ -215,8 +215,9 @@ bin/dm-worktree.sh remove <id>
 ```
 
 A refusal ("unlanded work") is a **stop-and-investigate** signal, never an
-obstacle to force past. `--force` requires explicit operator discard authority.
-A scout worktree may be removed once `data/<id>/report.md` exists and any
+obstacle to force past. `--force` requires explicit operator discard authority —
+and when the operator gives it, the way to exercise it is §8, not `--force` by
+hand. A scout worktree may be removed once `data/<id>/report.md` exists and any
 operator decision it surfaced is recorded (load `decision-hold`).
 
 After teardown, record completion, archive the landed task's records, and
@@ -263,6 +264,48 @@ It refuses while a local copy is still present (teardown is what inspects the
 work) and refuses a task that is already terminal. Report the conclusion and the
 reason to the operator; a decision only they can make goes through
 `decision-hold` first.
+
+## 8. Throwing built work away — trash
+
+The operator abandons a task that WAS built but must not land: deprecated intent,
+superseded plan. That is neither §7 (nothing was built — `close` refuses on any
+recorded local copy) nor teardown (work that landed). One command, on the
+operator's explicit word:
+
+```
+bin/dm-trash.sh <id> --reason "<why they discarded it>" [--close-pr]
+```
+
+It records who/when/why plus the branch, head SHA and dirty summary on the task
+**before** destroying anything; closes the PR when `--close-pr` (comments the
+reason, never merges, never deletes the remote branch); removes the local copy
+under that recorded authority; ends the task terminal; resolves the backlog row
+with `trashed: <reason>`; archives the records. Output is `key=value` lines to
+relay.
+
+It **refuses** with no `--reason`, an unknown id, an already-terminal task, or a
+PR it cannot **confirm** closed against GitHub without `--close-pr` (a stale
+record could have been reopened) — and a refusal destroyed nothing. If a step
+fails mid-flow the flow stops there and `dm-task.sh state` still reports the task
+truthfully; read the refusal, never work around it. A trash that died after the
+discard but before the bookkeeping is finished by **re-running the same command**
+— it resumes its own unfinished work rather than refusing as terminal.
+
+**What survives.** Committed work is parked at `refs/dm-discarded/<id>/<sha>` in
+the clone, and the verdict is read back out of that ref namespace, never asserted
+— `committed_work=` carries the ref plus a ready `recover_cmd=`, and every ref
+the id has is listed as `parked_ref=`. Act immediately on
+`committed_work=NOT-PRESERVED` (reachable only until the clone is
+garbage-collected) or `UNDETERMINED` (the head could not be read — never read
+that as "there was nothing"). **Uncommitted and untracked files do not survive**
+— they are counted on the record and reported gone, so copy the local copy aside
+first if the operator might want them.
+
+This flow IS the packaging of prime directive 4's discard authority: never reach
+for `dm-worktree.sh remove --force` yourself instead, which records no authority
+and proves nothing about what survived. And it cannot stop a running worker —
+stopping it is the session's job, so the command only reports it (`worker=RUNNING`
+plus a loud warning). Stop the worker first (`stuck-worker` if unresponsive).
 
 ## Recovery
 

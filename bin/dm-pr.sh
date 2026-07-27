@@ -44,6 +44,10 @@
 #                                 (a `none` rollup keeps polling, not terminal,
 #                                 when the repo has CI configured)
 #   merge <id> [--method squash|merge|rebase] [--delete-branch]
+#   close <id> --reason R         close a PR WITHOUT merging, commenting the
+#                                 reason on it first. Refuses an already-merged
+#                                 PR and never deletes the remote branch; the
+#                                 trash flow (dm-trash.sh) is its caller
 #   sweep [--json]                read-only fleet sweep: every task with an open
 #                                 PR, its CI rollup + whether a review requests
 #                                 changes (offline under DM_NO_FETCH: cached only)
@@ -534,6 +538,43 @@ atomic_merge_pull() {
     || dm_die "REFUSED: atomic merge failed; PR head changed or GitHub rejected the merge: ${out:-no response}"
 }
 
+# The two mutations `close` needs. Split by CLI exactly as atomic_merge_pull is:
+# gh-axi takes the HTTP method positionally and has no --raw-field, gh needs
+# --method and --raw-field so the value is unambiguously a string. Both die on
+# failure — a comment that did not post must not be followed by a silent close.
+# The body is passed as `--field body=<text>`, and gh reads a value starting with
+# `@` as a FILE to read (`@-` is stdin) — the wrapper CLI has no --raw-field to
+# turn that off. Every caller here prefixes fixed text, which makes a leading `@`
+# impossible; that prefix is load-bearing, not decoration, and `close` also
+# refuses a reason that starts with one.
+comment_pr() {
+  local slug="$1" n="$2" body="$3" cli path out
+  local args=()
+  path="/repos/$slug/issues/$n/comments"
+  cli="$(dm_require_github_cli)"
+  if [ "$cli" = "gh-axi" ]; then
+    args=(api POST "$path" --field "body=$body")
+  else
+    args=(api --method POST "$path" --raw-field "body=$body")
+  fi
+  out="$("$cli" "${args[@]}" 2>&1)" \
+    || dm_die "REFUSED: could not comment the reason on PR #$n; leaving it OPEN: ${out:-no response}"
+}
+
+close_pull() {
+  local slug="$1" n="$2" cli path out
+  local args=()
+  path="/repos/$slug/pulls/$n"
+  cli="$(dm_require_github_cli)"
+  if [ "$cli" = "gh-axi" ]; then
+    args=(api PATCH "$path" --field "state=closed")
+  else
+    args=(api --method PATCH "$path" --raw-field "state=closed")
+  fi
+  out="$("$cli" "${args[@]}" 2>&1)" \
+    || dm_die "could not close PR #$n: ${out:-no response}"
+}
+
 delete_merged_head() {
   local repo="$1" slug="$2" head_repo="$3" head_ref="$4" merged_head="$5" dir lease out
   if ! same_repo "$slug" "$head_repo"; then
@@ -982,6 +1023,59 @@ case "$cmd" in
     dm_sync_reaction "$repo" "$sync_out" warn
     ;;
 
+  close)
+    # Close a PR WITHOUT merging, saying why on the PR itself. Its caller is the
+    # trash flow (dm-trash.sh): a discarded task must not leave an open PR
+    # inviting someone to merge work the operator abandoned. It never merges and
+    # never deletes the remote branch — that branch is the copy of the work that
+    # lives outside the clone, so deleting it would narrow recovery to the
+    # parked ref alone.
+    id="${1:-}"; shift || true
+    [ -n "$id" ] || dm_die "usage: dm-pr.sh close <id> --reason \"<why it is not being merged>\""
+    dm_require_id "$id"
+    reason=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --reason) [ "$#" -ge 2 ] || dm_die "--reason requires a value"; reason="$2"; shift 2 ;;
+        *) dm_die "unknown flag: $1" ;;
+      esac
+    done
+    [ -n "$reason" ] || dm_die "--reason is required: a PR closed unmerged must say why"
+    dm_require_single_line "close reason" "$reason"
+    # Belt for the comment body's `@` hazard above: the fixed prefix already makes
+    # a leading `@` unreachable, so this refuses only a value that would rely on
+    # that prefix to be safe.
+    case "$reason" in
+      @*) dm_die "--reason must not start with '@': the GitHub CLI reads a field value beginning with @ as a file to read, and the wrapper CLI has no --raw-field to disable it" ;;
+    esac
+    repo="$(dm_meta_get "$id" repo)"; [ -n "$repo" ] || dm_die "no such task: $id"
+    url="$(dm_meta_get "$id" pr)"; [ -n "$url" ] || dm_die "no PR recorded for $id"
+    dm_need gh
+    # Refresh before deciding: the recorded state may predate an out-of-band
+    # merge, and GitHub accepts `state=closed` on a merged PR without complaint —
+    # the merge stays, the PR reads closed, and the record now says the change was
+    # abandoned. Only a confirmed-OPEN PR is closed here.
+    close_check=""
+    close_check="$("$0" check "$id" --snapshot 2>&1)" \
+      || dm_die "REFUSED: check refresh failed for $url: ${close_check:-unknown error}"
+    load_check_snapshot_json "$close_check" \
+      || dm_die "REFUSED: check returned an invalid state snapshot: $url"
+    case "$PR_SNAPSHOT_STATE" in
+      OPEN) : ;;
+      MERGED) dm_die "REFUSED: $url is already MERGED; closing it would record abandoned work over a change that landed. Undoing a landed change is a revert (rollback skill), not a close." ;;
+      CLOSED) dm_info "pr already closed: $url"; exit 0 ;;
+      *) dm_die "REFUSED: PR state is not confirmed OPEN ($PR_SNAPSHOT_STATE): $url" ;;
+    esac
+    n="$(pr_number_from_url "$url")"
+    slug="$(repo_slug "$repo")"
+    # Comment first, and refuse if it fails: a PR closed with no stated reason is
+    # exactly the artifact this command exists to avoid.
+    comment_pr "$slug" "$n" "Closed without merging: $reason"
+    close_pull "$slug" "$n"
+    dm_meta_set "$id" pr_state CLOSED
+    dm_info "closed without merging: $url"
+    ;;
+
   security-scan)
     # Advisory only: grep the task's diff for security-surface signals and print
     # whether `security-review` should run, so the optional security gate is a
@@ -1157,8 +1251,24 @@ case "$cmd" in
         checks="$(dm_meta_get "$id" checks)"
         state="$(dm_meta_get "$id" pr_state)"
       else
-        dm_meta_set "$id" pr_state "$state"
-        dm_meta_set "$id" checks "$checks"
+        # Caching what GitHub just said is best-effort, in BOTH directions.
+        # (1) Between the enumeration above and this line the task can be archived
+        #     by teardown or trash; dm_meta_set refuses a task with no active
+        #     record and that refusal is an exit, so it runs where it cannot take
+        #     the whole sweep down with it.
+        # (2) It must never DOWNGRADE a terminal state someone else established
+        #     while this snapshot was in flight: `close` and `merge` write
+        #     CLOSED/MERGED, and writing a pre-close OPEN back over that would
+        #     resurrect a PR the record had already finished with.
+        cached_state="$(dm_meta_get "$id" pr_state)"
+        case "$cached_state" in
+          MERGED|CLOSED) : ;;
+          *)
+            write_out=""
+            if ! write_out="$( { dm_meta_set "$id" pr_state "$state"; dm_meta_set "$id" checks "$checks"; } 2>&1 )"; then
+              dm_warn "sweep: could not cache $id's PR state ($(dm_first_line "${write_out:-no detail}")); the row below is still what GitHub reported"
+            fi ;;
+        esac
       fi
       case "$checks" in
         failing) red=$((red + 1)) ;;
@@ -1236,5 +1346,5 @@ case "$cmd" in
     dm_meta_get "$id" pr ;;
 
   *)
-    echo "usage: dm-pr.sh {open|adopt|check|await-checks|merge|sweep|pipeline|security-scan|url} ..." >&2; exit 2 ;;
+    echo "usage: dm-pr.sh {open|adopt|check|await-checks|merge|close|sweep|pipeline|security-scan|url} ..." >&2; exit 2 ;;
 esac
