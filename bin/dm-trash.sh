@@ -171,6 +171,7 @@ resolve_decision_holds() {
   fi
   keys="$(printf '%s' "$holds_json" | jq -r --arg pfx "$id-decision-" --arg path "data/$id/" '
     .[] | select(.status=="open") |
+    select((.key|contains("\n"))|not) |
     select((.key|startswith($pfx)) or ((.origin//"")|contains($path))) |
     .key')" \
     || { dm_warn "could not parse $id's decision holds; none were resolved as part of this trash"; return 0; }

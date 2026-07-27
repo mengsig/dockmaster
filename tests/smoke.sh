@@ -6441,6 +6441,24 @@ check "the key-near-miss hold is still open after trashing" \
 check "the origin-near-miss hold is still open after trashing" \
   'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"boundary-review\" and .status==\"open\")" >/dev/null'
 
+# --- a newline-bearing key must not smuggle a second, unrelated key ---------
+# hold never validates its key argument, so a caller (or a bug upstream) can
+# hand it a key with an embedded newline. jq -r would emit that as two lines,
+# and the naive `while read` loop would treat the second line as its own key
+# — silently resolving an unrelated open hold while leaving the malformed one
+# (and the real task hold) untouched. The fix excludes any key containing a
+# newline before the match; it must stay open, and so must the victim.
+TRNLWT="$(trash_task tr-nlkey)"
+b dm-backlog.sh hold "victim-decision-key" "an unrelated hold that must not be touched" >/dev/null
+b dm-backlog.sh hold "$(printf 'tr-nlkey-decision-p\nvictim-decision-key')" "malformed multi-line key" >/dev/null
+TRNLOUT="$(b dm-trash.sh tr-nlkey --reason "plan dropped" 2>/dev/null)"
+check "the unrelated victim hold is not reported resolved" \
+  '! grep -q "resolved_hold=victim-decision-key" <<<"$TRNLOUT"'
+check "the unrelated victim hold is still open after trashing" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"victim-decision-key\" and .status==\"open\")" >/dev/null'
+check "the malformed multi-line hold is still open after trashing" \
+  'b dm-backlog.sh decisions --json | jq -e "any(.[]; (.key|contains(\"tr-nlkey-decision-p\")) and .status==\"open\")" >/dev/null'
+
 # --- a hold that fails to resolve must still surface on stdout --------------
 # stdout is THE relayable key=value record; a resolve failure must not be
 # stderr-only. Force exactly one resolve call to fail with a throwaway copy of
