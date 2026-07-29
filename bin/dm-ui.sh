@@ -30,12 +30,15 @@
 #   say "<text>" | say --file <p>  post the dockmaster's reply into the page
 #   ask <key> "<question>"         ask the operator a question through the PAGE
 #       [--options "A | B"]        rather than the terminal. Records it as a
-#                                  decision hold (durable: it outlives this
+#       [--origin <path>]          decision hold (durable: it outlives this
 #                                  session and the console) so the Needs-you
 #                                  panel holds it open, and posts it into the
 #                                  conversation. The answer comes back on `poll`
 #                                  as an ordinary operator message - no second
-#                                  transport, and nothing to resume.
+#                                  transport, and nothing to resume. --origin
+#                                  ties the question to a task's data/<id>/
+#                                  report, the backlink dm-trash.sh resolves
+#                                  that task's open holds through.
 #                                  <key> must be UNUSED: it will not write over
 #                                  a decision already on the board, and two asks
 #                                  racing on one key cannot both write. A question
@@ -226,11 +229,17 @@ case "$cmd" in
     # ordinary operator message, so poll's contract is untouched.
     key="${1:-}"; question="${2:-}"; shift 2 2>/dev/null || true
     [ -n "$key" ] && [ -n "$question" ] \
-      || dm_die "usage: dm-ui.sh ask <key> \"<question>\" [--options \"A | B\"]"
-    options=""
+      || dm_die "usage: dm-ui.sh ask <key> \"<question>\" [--options \"A | B\"] [--origin <path>]"
+    options=""; origin=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --options) options="${2:-}"; shift 2 || dm_die "console: --options needs a value" ;;
+        # A question about a specific task's data/<id>/ report: passed straight
+        # through to the hold's --origin, the backlink dm-trash.sh resolves that
+        # task's open holds through. Without it, an ask's free-form key matches
+        # neither of dm-trash.sh's two conventions (<id>-decision-* key prefix,
+        # or this origin), and trashing the task leaves the question open forever.
+        --origin) origin="${2:-}"; shift 2 || dm_die "console: --origin needs a value" ;;
         *) dm_die "console: unexpected argument '$1'" ;;
       esac
     done
@@ -262,16 +271,22 @@ case "$cmd" in
     # was that race, and each collision cost a question. dm-backlog.sh owns the
     # verdict; this only words it for the operator, and reports anything else that
     # went wrong as itself rather than as a taken key.
+    hold_cmd=(hold "$key" "$question")
+    [ -n "$options" ] && hold_cmd=(hold "$key" "$question" --options "$options")
+    [ -n "$origin" ] && hold_cmd=("${hold_cmd[@]}" --origin "$origin")
+    hold_cmd=("${hold_cmd[@]}" --only-if-free)
     hold_rc=0
-    if [ -n "$options" ]; then
-      hold_err="$("$BIN_DIR/dm-backlog.sh" hold "$key" "$question" --options "$options" --only-if-free 2>&1 >/dev/null)" || hold_rc=$?
-    else
-      hold_err="$("$BIN_DIR/dm-backlog.sh" hold "$key" "$question" --only-if-free 2>&1 >/dev/null)" || hold_rc=$?
-    fi
+    hold_err="$("$BIN_DIR/dm-backlog.sh" "${hold_cmd[@]}" 2>&1 >/dev/null)" || hold_rc=$?
     if [ "$hold_rc" -ne 0 ]; then
+      # Matched on the FIXED tail of dm-backlog.sh's own wording, not the
+      # `dm:hold-taken`/`dm:hold-answered` token: the token sits right next to the
+      # caller-chosen key in that message, so a key that happens to contain the
+      # OTHER token as literal text (e.g. a key of "dm:hold-taken-mykey" that is
+      # actually answered) used to match the first `case` arm on that substring
+      # alone and report the wrong reason. The tail phrase carries no key text.
       case "$hold_err" in
-        *dm:hold-taken*) dm_die "console: '$key' already holds a different open decision - asking under it would erase that question. Use a new key." ;;
-        *dm:hold-answered*) dm_die "console: '$key' is already answered - a new question needs a new key" ;;
+        *"is already answered"*) dm_die "console: '$key' is already answered - a new question needs a new key" ;;
+        *"already holds a different open decision"*) dm_die "console: '$key' already holds a different open decision - asking under it would erase that question. Use a new key." ;;
         *) printf '%s\n' "$hold_err" >&2
            dm_die "console: the decision hold for '$key' could not be recorded, so nothing was asked" ;;
       esac

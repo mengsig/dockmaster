@@ -516,6 +516,18 @@ b dm-backlog.sh hold demo-1-decision-scope "ship v1 or v2?" --options "v1 | v2" 
 check "hold is open"     'OUT="$(b dm-backlog.sh list)"; grep -q "demo-1-decision-scope" <<<"$OUT"'
 b dm-backlog.sh resolve demo-1-decision-scope "v1" >/dev/null
 check "hold resolved"    'OUT="$(b dm-backlog.sh list)"; CTX="$(grep -A2 "demo-1-decision-scope" <<<"$OUT")"; grep -q "answer: v1" <<<"$CTX"'
+# PLAIN hold (no --only-if-free) is an upsert: re-holding an OPEN key must
+# OVERWRITE its question, options and origin, not refuse or merely coexist.
+# Every other plain-hold check here uses a fresh key, so nothing pins this - a
+# mutation that made --only-if-free's compare-and-set fire unconditionally
+# (killing the plain path's own upsert) would make every OTHER check here still
+# pass, and only bite a caller re-holding an existing open key: exactly what
+# the decision-hold skill does refining a question or adding --origin later.
+b dm-backlog.sh hold ovr-decision-key "first question?" --options "a | b" --origin "data/first/report.md" >/dev/null
+b dm-backlog.sh hold ovr-decision-key "second question?" --options "c | d" --origin "data/second/report.md" >/dev/null
+check "plain hold overwrites question, options and origin on a re-hold" \
+  '[ "$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"ovr-decision-key\") | [.question,.options,.origin] | @tsv")" \
+     = "$(printf "second question?\tc | d\tdata/second/report.md")" ]'
 
 echo "== dm dispatcher (additive convenience entrypoint) =="
 DM="$ROOT/bin/dm"
@@ -5771,10 +5783,18 @@ wait "$UI_RACE_A" || UI_RACE_A_RC=$?
 wait "$UI_RACE_B" || UI_RACE_B_RC=$?
 check "concurrent asks on one key: exactly one succeeds" \
   '[ $(( (UI_RACE_A_RC == 0) + (UI_RACE_B_RC == 0) )) -eq 1 ]'
-check "concurrent asks on one key: one hold, not one overwriting the other" \
-  '[ "$(b dm-backlog.sh decisions --json | jq "[.[] | select(.key==\"race-key\")] | length")" = "1" ]'
-# The loser must leave NOTHING behind - a question in the conversation that no
-# panel is holding open is one that scrolls away unanswered.
+# A THIRD check used to sit here asserting "exactly one hold record for
+# race-key" on its own. Dropped: it carried no independent weight - a plain
+# upsert racing on one key ALSO ends at exactly one record (last writer wins),
+# so that assertion alone cannot tell a real compare-and-set from a check-
+# then-act upsert (confirmed: mutating the CAS to a plain upsert left it green
+# while 10 others went red). Its only real job - proving there is a SINGLE
+# winning record to read - is already load-bearing for the check below: it
+# selects .question by key and compares it to exactly one literal answer,
+# which breaks the moment two records (or a garbled merge of both) exist under
+# that key. The loser must also leave NOTHING behind - a question in the
+# conversation that no panel is holding open is one that scrolls away
+# unanswered.
 check "and only the question that was recorded reached the conversation" \
   'UI_RACE_WON="$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"race-key\") | .question")"; \
    UI_RACE_LOST="Race question B?"; \
@@ -5807,6 +5827,25 @@ check "the answer arrives on the ordinary poll queue" \
   'grep -q "Answer — Panel or plain page?" <<<"$UI_ANSWER" && grep -q "plain page" <<<"$UI_ANSWER"'
 b dm-backlog.sh resolve ui-embed "plain page" >/dev/null 2>&1
 check "answering closes the hold"              '! b dm-backlog.sh decisions | grep -q "ui-embed"'
+# Re-asking the SAME question, unchanged, on a now-ANSWERED key must still be
+# refused - AS ANSWERED, not treated as "identical to what's already open" (it
+# is not open) and not silently reposted. A version of `hold` that checked
+# equality BEFORE checking status would let an identical re-ask through the
+# equality clause and re-post the question with the hold already resolved: the
+# question would show in the conversation a second time while the Needs-you
+# panel stays empty, since nothing holds it open. The check below on a
+# DIFFERENT question cannot catch that - a different question falls through to
+# "already holds a different open decision" either way and still refuses, for
+# the wrong reason.
+UI_REASK_SAME_BEFORE="$(grep -c "Panel or plain page?" "$DM_HOME/state/ui/chat.jsonl")"
+UI_REASK_SAME_RC=0
+UI_REASK_SAME_ERR="$(b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain page" 2>&1 >/dev/null)" || UI_REASK_SAME_RC=$?
+check "re-asking the identical question on an answered key is refused" \
+  '[ "$UI_REASK_SAME_RC" -ne 0 ]'
+check "and refused as ANSWERED, not as a mismatched hold" \
+  'grep -q "already answered" <<<"$UI_REASK_SAME_ERR"'
+check "and no second copy of the question reached the conversation" \
+  '[ "$(grep -c "Panel or plain page?" "$DM_HOME/state/ui/chat.jsonl")" = "$UI_REASK_SAME_BEFORE" ]'
 # `hold` upserts and KEEPS the answer, so reusing an answered key would post a
 # question into the conversation with nothing holding it open. Refused instead.
 check "reusing an answered key is refused, not silently closed" \
@@ -6346,6 +6385,21 @@ check "the resolution is recorded as DROPPED, not answered" \
    | jq -e "any(.[]; .key==\"review-tr-holds\" and .status==\"resolved\" and (.answer|startswith(\"trashed:\")))" >/dev/null'
 check "the unrelated hold is untouched, still open" \
   'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"other-task-decision-unrelated\" and .status==\"open\")" >/dev/null'
+
+# `ask`'s keys are free-form and it never set --origin, so an ask-created hold
+# matched NEITHER of trash's two conventions and stayed open forever once its
+# task was gone. `ask` now takes --origin, forwarded straight to the hold, so a
+# question filed against a task can be found and resolved the same as any
+# decision-hold-skill hold.
+TRASKWT="$(trash_task tr-ask-origin)"
+b dm-ui.sh ask tr-ask-free-key "ship the change now or wait?" --options "now | wait" \
+  --origin "data/tr-ask-origin/report.md" >/dev/null 2>&1
+TRASKOUT="$(b dm-trash.sh tr-ask-origin --reason "plan dropped" 2>/dev/null)"
+check "trashing the task resolves an ask hold carrying that task's origin" \
+  'grep -qx "resolved_hold=tr-ask-free-key" <<<"$TRASKOUT"'
+check "the ask hold is recorded as trashed, not left open" \
+  'b dm-backlog.sh decisions --json \
+   | jq -e "any(.[]; .key==\"tr-ask-free-key\" and .status==\"resolved\" and (.answer|startswith(\"trashed:\")))" >/dev/null'
 
 # The "no holds" case, on a run that actually went through this trash and this
 # section — not a reuse of an unrelated earlier $TROUT capture (that task never

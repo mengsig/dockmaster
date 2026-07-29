@@ -253,10 +253,17 @@ EOF
             error("dm:hold-taken \($k) already holds a different open decision")
           end'
     else
-      # idempotent on key: upsert, preserving status/answer if the hold already exists
+      # idempotent on key: upsert, preserving status/answer if the hold already exists.
+      # The seed literal's field order matches the --only-if-free branch's
+      # (key,question,options,origin,status,answer,ts) so a FRESH key produces the
+      # same shape either way a hold is opened - no consumer reads by position
+      # (all go by name), so this is cosmetic, but there is no reason for the two
+      # producers to disagree. An EXISTING record keeps whatever order it already
+      # has; only its .question/.options/.origin values move.
       bwrite --arg k "$key" --arg q "$question" --arg o "$options" --arg og "$origin" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
         (.decisions | map(select(.key==$k)) | .[0]) as $existing
-        | (($existing // {key:$k, status:"open", answer:"", ts:$ts}) | .question=$q | .options=$o | .origin=$og) as $upd
+        | (($existing // {key:$k, question:$q, options:$o, origin:$og, status:"open", answer:"", ts:$ts})
+           | .question=$q | .options=$o | .origin=$og) as $upd
         | .decisions = ((.decisions | map(select(.key!=$k))) + [$upd])'
     fi
     render; dm_info "backlog: decision hold '$key' open"
