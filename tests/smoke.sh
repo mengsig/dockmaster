@@ -2311,6 +2311,7 @@ check "the distro fixture has no registry entry (as production has none)" \
   '[ "$(jq -r ".repos | keys | length" "$DISTRO_HOME/state/repos.json")" = 0 ]'
 check "the distro fixture is genuinely behind its origin" \
   'git -C "$DISTRO_HOME" fetch -q origin main && [ "$(git -C "$DISTRO_HOME" rev-parse origin/main)" != "$DISTRO_HEAD" ]'
+ORIGIN_HEAD="$(git -C "$DISTRO_HOME" rev-parse origin/main)"
 
 # A typo must still die at the resolver — the #119 fix, unchanged.
 check "a typo'd name does not resolve to the distro root" '! dlib dm_repo_dir dockmastr >/dev/null 2>&1'
@@ -2326,10 +2327,35 @@ check "the reserved name is refused as a new repo"    '! d dm-repo.sh add dockma
 RESERVEOUT="$(d dm-repo.sh add dockmaster "$DISTRO_ORIGIN" --no-memory 2>&1 || true)"
 check "the reserved-name refusal says why"            'grep -q "reserved for the dockmaster distro" <<<"$RESERVEOUT"'
 d dm-task.sh new self-1 --kind ship --repo dockmaster --mode local-only >/dev/null
-check "worktree create works for the distro's own task" 'd dm-worktree.sh create self-1 dockmaster feat/x/self-1 >/dev/null 2>&1'
+# THE REGRESSION (#dm-distro-stale-base): capture the operator's clone -
+# HEAD, tracked-file status, and current branch - before cutting the
+# worktree, so "untouched" below is verified, not assumed.
+DISTRO_STATUS_BEFORE="$(git -C "$DISTRO_HOME" status --porcelain)"
+DISTRO_BRANCH_BEFORE="$(git -C "$DISTRO_HOME" rev-parse --abbrev-ref HEAD)"
+if SELFCREATE_OUT="$(d dm-worktree.sh create self-1 dockmaster feat/x/self-1 2>&1)"; then SELFCREATE_RC=0; else SELFCREATE_RC=$?; fi
+check "worktree create works for the distro's own task" '[ "$SELFCREATE_RC" = 0 ]'
 SELFDIR="$DISTRO_HOME/state/worktrees/self-1"
 check "the distro worktree is real and isolated" \
   '[ -d "$SELFDIR" ] && [ "$(git -C "$SELFDIR" rev-parse --show-toplevel)" = "$SELFDIR" ] && [ "$(git -C "$SELFDIR" rev-parse --abbrev-ref HEAD)" = "feat/x/self-1" ]'
+# THE FIX: the worktree is cut from the fetched origin/main, not the stale
+# local main - branching off DISTRO_HEAD would silently drop "upstream
+# advance" (exactly what cost a whole task's work in production).
+check "the distro worktree bases off origin/main, not the stale local main" \
+  '[ "$(git -C "$SELFDIR" rev-parse HEAD)" = "$ORIGIN_HEAD" ] && [ "$(git -C "$SELFDIR" rev-parse HEAD)" != "$DISTRO_HEAD" ]'
+check "the distro worktree carries the upstream commit the stale base lacked" \
+  '[ "$(git -C "$SELFDIR" log --oneline -1 --format=%s)" = "upstream advance" ]'
+# THE REPORTING FIX: the base actually used is stated plainly (not a "may be
+# stale" warning easy to read past) and names the real ref and sha.
+check "create states the base plainly, naming origin/main and its sha" \
+  'grep -qF "base: origin/main @$(git -C "$DISTRO_HOME" rev-parse --short "$ORIGIN_HEAD")" <<<"$SELFCREATE_OUT"'
+check "create never claims the base may be stale" '! grep -qi "base may be stale" <<<"$SELFCREATE_OUT"'
+# THE SAFETY PROPERTY: cutting the worktree touched NOTHING in the operator's
+# clone - not just HEAD (already covered below), but its branch and its
+# tracked-file status too.
+check "cutting the worktree left the clone's branch untouched" \
+  '[ "$(git -C "$DISTRO_HOME" rev-parse --abbrev-ref HEAD)" = "$DISTRO_BRANCH_BEFORE" ]'
+check "cutting the worktree left the clone's tracked-file status untouched" \
+  '[ "$(git -C "$DISTRO_HOME" status --porcelain)" = "$DISTRO_STATUS_BEFORE" ]'
 check "assert accepts the distro worktree as isolated" 'd dm-worktree.sh assert "$SELFDIR" dockmaster >/dev/null 2>&1'
 printf 'self work\n' > "$SELFDIR/self.txt"
 git -C "$SELFDIR" -c user.email=c@c.co -c user.name=c add -A >/dev/null
@@ -2374,6 +2400,47 @@ check "worktree create refuses a hand-edited distro path"     '! d dm-worktree.s
 check "that refusal names the distro, not the reserved name"  'grep -q "dockmaster distro itself" <<<"$HANDOUT"'
 check "no worktree was cut off the distro"                    '[ ! -e "$DISTRO_HOME/state/worktrees/hand-1" ]'
 check "the distro head survived the class-guard sequence"     '[ "$(git -C "$DISTRO_HOME" rev-parse main)" = "$DISTRO_HEAD" ]'
+
+echo "== distro worktree base: a FAILED fetch fails closed, never falls back to stale (#dm-distro-stale-base) =="
+# A separate, fresh distro fixture whose origin goes UNREACHABLE right before
+# create, reproducing an offline/auth failure. The old behavior (a
+# dm_warn "base may be stale" nobody read) is exactly the bug that cost a
+# whole task's work in one day - this must now refuse outright, not warn.
+DISTRO2_ORIGIN="$TMP/distro2-origin.git"
+DISTRO2_HOME="$TMP/distro2-home"
+git init -q --bare -b main "$DISTRO2_ORIGIN"
+git init -q -b main "$DISTRO2_HOME"
+( cd "$DISTRO2_HOME"; git config user.email d2@d.co; git config user.name d2
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro2 init"
+  git remote add origin "$DISTRO2_ORIGIN"; git push -q origin main ) >/dev/null 2>&1
+d2() { DM_HOME="$DISTRO2_HOME" "$ROOT/bin/$@"; }
+d2 dm-doctor.sh >/dev/null
+DISTRO2_HEAD="$(git -C "$DISTRO2_HOME" rev-parse main)"
+d2 dm-task.sh new self-broken --kind ship --repo dockmaster --mode local-only >/dev/null
+# Break the remote AFTER setup (doctor/task-new need no network) so it fails
+# exactly at the fetch this fix adds.
+git -C "$DISTRO2_HOME" remote set-url origin "$TMP/no-such-remote.git"
+BROKEN_STATUS_BEFORE="$(git -C "$DISTRO2_HOME" status --porcelain)"
+BROKEN_BRANCH_BEFORE="$(git -C "$DISTRO2_HOME" rev-parse --abbrev-ref HEAD)"
+if BROKENOUT="$(d2 dm-worktree.sh create self-broken dockmaster feat/x/self-broken 2>&1)"; then BROKEN_RC=0; else BROKEN_RC=$?; fi
+check "a failed fetch refuses to create the distro's own worktree" '[ "$BROKEN_RC" -ne 0 ]'
+check "the refusal names the failure, not a soft warning" \
+  'grep -qi "could not fetch" <<<"$BROKENOUT" && ! grep -qi "base may be stale" <<<"$BROKENOUT"'
+check "no worktree was cut off an unverifiable base"        '[ ! -e "$DISTRO2_HOME/state/worktrees/self-broken" ]'
+check "the failed fetch left the clone's head untouched"    '[ "$(git -C "$DISTRO2_HOME" rev-parse main)" = "$DISTRO2_HEAD" ]'
+check "the failed fetch left the clone's branch untouched"  '[ "$(git -C "$DISTRO2_HOME" rev-parse --abbrev-ref HEAD)" = "$BROKEN_BRANCH_BEFORE" ]'
+check "the failed fetch left the clone's status untouched"  '[ "$(git -C "$DISTRO2_HOME" status --porcelain)" = "$BROKEN_STATUS_BEFORE" ]'
+
+echo "== distro worktree base: DM_NO_FETCH still bypasses the guard, same convention as every other repo =="
+# DM_NO_FETCH=1 is the offline/smoke escape hatch (dm-status, this suite) -
+# never set by production dispatch. It must keep behaving like the non-distro
+# path below: no network, best-effort on whatever ref is already local, never
+# a hard failure.
+git -C "$DISTRO2_HOME" remote set-url origin "$DISTRO2_ORIGIN"
+d2 dm-task.sh new self-nf --kind ship --repo dockmaster --mode local-only >/dev/null
+check "DM_NO_FETCH bypasses the distro fetch guard too" \
+  'DM_NO_FETCH=1 d2 dm-worktree.sh create self-nf dockmaster feat/x/self-nf >/dev/null 2>&1'
+check "DM_NO_FETCH create actually produced a distro worktree" '[ -d "$DISTRO2_HOME/state/worktrees/self-nf" ]'
 
 # shard:split
 echo "== teardown honesty: 'could not determine' is not 'unlanded' (#119) =="
@@ -4614,7 +4681,7 @@ check "an unknown field is still refused"   '! b dm-repo.sh set demo app_nonsens
 
 echo "== verify gate: does the gate fire? =="
 b dm-task.sh new vrf1 --kind ship --repo demo --title "verify gate" >/dev/null
-VWT="$(b dm-worktree.sh create vrf1 demo)"
+VWT="$(b dm-worktree.sh create vrf1 demo | tail -n1)"
 mkdir -p "$VWT/frontend"; printf 'console.log(1)\n' > "$VWT/frontend/app.js"
 # A user-facing surface moved but the repo cannot be booted. That is UNAVAILABLE
 # (exit 3) and must never read as a pass or a quiet skip.

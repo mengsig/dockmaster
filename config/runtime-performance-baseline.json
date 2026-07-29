@@ -3,7 +3,7 @@
   "base_commit": "#177",
   "shared_agents_bytes": 13126,
   "claude_settings_bytes": 1579,
-  "claude_skill_bytes": 107555,
+  "claude_skill_bytes": 107926,
   "claude_skill_description_bytes": 5264,
   "claude_files_sha256": {
     ".claude/agents/crew-high.md": "6ba9373cd62f942dfeae79ca3b7c1e26f29d71b51362862860b5943131f77001",
@@ -24,7 +24,7 @@
     ".claude/skills/post-pr-review/SKILL.md": "c27cc2123399e48c8bf4a084016c10715c42f3c26e405c275d9f8f48250b1f11",
     ".claude/skills/pr-workflow/SKILL.md": "710df373e6ea7003d931d14b9cb4ae18d99e33b8042636cd8790473a5e2279db",
     ".claude/skills/project-management/SKILL.md": "7bc3f66ab7229ddc4cfd2f022ac179db06c3d544f5dee2d5e1a98fc8caa92cfe",
-    ".claude/skills/repo-sync/SKILL.md": "a8dac0bdae8d3ee31b0631940aeaf8239ada0aebd2008ad3232a521503bce638",
+    ".claude/skills/repo-sync/SKILL.md": "f8c3edd63a261f5ad093894753e1f60fb241c2b743c5f81c47f0b8ed97a40364",
     ".claude/skills/rollback/SKILL.md": "6b6f4b1b4289362b5c50a5b195b19ca4ad01a24e0dd361eef99bd94682ddd284",
     ".claude/skills/secondmate/SKILL.md": "de070f494e3c27d54bcd4f8b6dccbf3a13dccf6e7a599bf793dfc5e8457d32d4",
     ".claude/skills/stuck-worker/SKILL.md": "d65b1d4e716cc11ca4caa6539a3ef37fd6aafc3d735a71611caf18cfc267453d",

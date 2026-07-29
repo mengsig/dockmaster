@@ -360,6 +360,7 @@ case "$cmd" in
     fi
     wt="$DM_WT/$id"
     [ -e "$wt" ] && dm_die "worktree already exists: $wt"
+    base_label=""
     if [ -n "$base_ref" ]; then
       # PARENT-AWARE freshness: a sub-PR child branches off a PARENT branch, not
       # the clone's default branch, so the base that must be current is the
@@ -373,6 +374,38 @@ case "$cmd" in
       # branch (a parent not yet pushed).
       base="$(git -C "$dir" rev-parse --verify --quiet "origin/$base_ref" 2>/dev/null || git -C "$dir" rev-parse --verify --quiet "$base_ref" 2>/dev/null)" \
         || dm_die "parent ref not found (checked origin/$base_ref and $base_ref): $base_ref"
+      base_label="$base_ref"
+    elif [ "$repo" = "$DM_DISTRO_REPO" ]; then
+      # The distro's own clone is the one case dm-sync.sh REFUSES to touch (the
+      # control plane is the operator's checkout; moving it unattended is the
+      # exact thing that must never happen) -- so its local default branch only
+      # advances when the operator pulls by hand, and the FF-sync guard below is
+      # a permanent no-op here. `fetch` updates ONLY the remote-tracking ref
+      # origin/<def>; it never touches the checked-out branch, index, or working
+      # tree, so basing a NEW worktree on origin/<def> gets a current base
+      # WITHOUT working around the refusal -- the refusal still holds, in full.
+      def="$(dm_default_branch "$dir")"
+      if [ "${DM_NO_FETCH:-0}" != "1" ]; then
+        # A failed fetch must not silently fall back to local main: that
+        # silence (a `dm_warn "base may be stale"` nobody read) is exactly what
+        # let three tasks branch off a base six commits stale in one day. Fail
+        # closed instead of warning and continuing.
+        git -C "$dir" fetch --quiet origin "$def" \
+          || dm_die "could not fetch origin/$def for the distro's own worktree (offline, no remote, or auth failure). Refusing to cut a worktree off a base that cannot be verified current -- retry once network/auth is restored."
+        base_label="origin/$def"
+      else
+        # DM_NO_FETCH=1 (offline/smoke): no network is permitted here either, so
+        # freshness cannot be verified -- same escape hatch as the non-distro
+        # path below. Prefer a previously-fetched origin/<def>; fall back to the
+        # local branch only if nothing was ever fetched.
+        if git -C "$dir" rev-parse --verify --quiet "origin/$def" >/dev/null 2>&1; then
+          base_label="origin/$def"
+        else
+          base_label="$def"
+        fi
+      fi
+      base="$(git -C "$dir" rev-parse --verify --quiet "$base_label")" \
+        || dm_die "$base_label does not resolve in $dir; cannot determine a base for the distro's own worktree"
     else
       if [ "${DM_NO_FETCH:-0}" != "1" ]; then
         # Bring the clone's default branch current BEFORE cutting a worktree base
@@ -384,7 +417,9 @@ case "$cmd" in
         # unexpectedly (under set -e that would otherwise crash this command with
         # a raw git failure instead of failing closed through the STUCK path below).
         # dm_sync_reaction (dm-lib.sh) turns STUCK into dm_die here and SKIP into
-        # "base may be stale" (a warn, not fail-closed — no divergence was found).
+        # "base may be stale" (a warn, not fail-closed — no divergence was found;
+        # the repo isn't the distro, so a SKIP here means no origin remote, an
+        # unborn branch, etc., not the control-plane refusal above).
         sync_out="$("$(dirname "${BASH_SOURCE[0]}")/dm-sync.sh" one "$repo")" || sync_out="STUCK: sync failed unexpectedly"
         dm_sync_reaction "$repo" "$sync_out" die
       fi
@@ -392,6 +427,7 @@ case "$cmd" in
       # Branch from the LOCAL default: it holds local-only landings and is kept
       # fast-forwarded to origin for PR repos by dm-sync. Fall back to origin.
       base="$(git -C "$dir" rev-parse --verify --quiet "$def" 2>/dev/null || git -C "$dir" rev-parse "origin/$def")"
+      base_label="$def"
     fi
     if [ -n "$branch" ]; then
       git -C "$dir" worktree add -b "$branch" "$wt" "$base" >/dev/null
@@ -406,6 +442,10 @@ case "$cmd" in
     # it (the "main PR" this child stacks on). Not a landing field: it carries
     # no forge risk analogous to pr/pr_state/merge_state.
     [ -n "$base_ref" ] && dm_meta_set "$id" base "$base_ref"
+    # State the actual base PLAINLY. A warning read past ("base may be stale")
+    # is exactly how three tasks silently branched off a stale base in one day
+    # -- this line, not a softened warning, is the fix for that half of the bug.
+    dm_info "base: $base_label @$(git -C "$dir" rev-parse --short "$base")"
     dm_info "$wt"
     ;;
 

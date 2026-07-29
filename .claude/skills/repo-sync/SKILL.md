@@ -33,6 +33,11 @@ report it and let a human resolve the clone; do not force past it.
   worktree's base, and fails closed (never cuts a stale base) if the clone can't
   fast-forward. Under `DM_NO_FETCH=1` (offline/smoke) it skips the sync and does
   not block.
+- **The distro's own clone is the one exception** — `dm-sync.sh` refuses to
+  touch it at all (the control plane is the operator's checkout). `create`
+  instead fetches `origin/<default>` directly (remote-tracking ref only, the
+  clone itself never moves) and bases the worktree on that; a failed fetch
+  fails closed instead of warning and continuing on a stale base.
 - **After any merge** — `dm-pr.sh merge` now FF-syncs the clone automatically,
   best-effort, right after a successful merge. After an OUT-OF-BAND merge (the
   operator merged on GitHub directly, or a `local-only` landing happened outside
