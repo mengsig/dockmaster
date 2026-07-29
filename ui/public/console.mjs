@@ -11,7 +11,10 @@
  */
 'use strict';
 
-import { el, add, lamp, plural, clockTime, word, storedTheme, THEME_KEY, SOURCE_WORD } from './dom.mjs';
+import {
+  el, add, lamp, plural, clockTime, word, storedTheme, THEME_KEY, SOURCE_WORD,
+  ANSWER_HEADER, ANSWER_MESSAGE,
+} from './dom.mjs';
 import { VIEWS, needsWords } from './views.mjs';
 // The one writer of the wire format: a console-served review page (review.mjs)
 // shares this same module, so the composer and every enqueue-only control on
@@ -27,7 +30,33 @@ const shell = {
   // panel reads the same messages as a feed, and one store means the two can
   // never disagree about what was said.
   chat: { messages: [], since: 0, pending: 0 },
+  // Answers this page has SENT but not yet seen come back on the poll. The
+  // transcript below is the record; this covers only the fraction of a second
+  // between the POST resolving and the poll returning the message, in which a
+  // rebuild would otherwise offer the buttons again. Keyed by ANSWER_HEADER.
+  answeredHere: new Map(),
 };
+
+// The answer already given to this question, or null. The transcript is the one
+// place an answer is durably recorded - the hold stays OPEN until the dockmaster
+// resolves it, so the panel's own data cannot say - and both sides compose the
+// header with the same ANSWER_HEADER, so the match is exact rather than fuzzy.
+//
+// Newest wins: the operator may answer from the row and then say something else
+// in the conversation. Bounded by MESSAGES_KEPT, so an answer that scrolled out
+// of the kept transcript reads as unanswered again - which is the honest thing
+// for a question still open two thousand messages later.
+function answeredAlready(question) {
+  const header = ANSWER_HEADER(question);
+  if (shell.answeredHere.has(header)) return shell.answeredHere.get(header);
+  for (let i = shell.chat.messages.length - 1; i >= 0; i -= 1) {
+    const message = shell.chat.messages[i];
+    if (message.from !== 'operator') continue;
+    const text = String(message.text || '');
+    if (text.startsWith(header)) return text.slice(header.length).trim() || 'in your own words';
+  }
+  return null;
+}
 
 // --- what the operator chose to see ------------------------------------------
 
@@ -170,6 +199,14 @@ function panelContext() {
   return {
     compose,
     ask: postMessage,
+    answered: answeredAlready,
+    // An answer to an open question. Posted like any other message, and
+    // remembered here the instant it lands so the row it came from cannot offer
+    // the buttons again before the poll carries it back.
+    sendAnswer(question, answer) {
+      return postMessage(ANSWER_MESSAGE(question, answer))
+        .then((sent) => { shell.answeredHere.set(ANSWER_HEADER(question), answer); return sent; });
+    },
     filter: ui.filter,
     setFilter(id) {
       ui.filter = id;

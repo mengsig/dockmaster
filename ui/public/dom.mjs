@@ -381,19 +381,21 @@ export const CLEANUP_REQUEST = {
 };
 
 // A title or a question reaches here as free text from a record, not something
-// this page validated. Quoted verbatim inside the sentence, a stray newline or
-// quote mark would break the sentence out of its quotes, and an unbounded one
-// would make the transcript unreadable - so it is flattened and capped before
-// it goes anywhere near the message.
+// this page validated: unbounded or multi-line it would make the transcript
+// unreadable, so it is flattened onto one line and capped before it goes
+// anywhere near a message.
 const TITLE_MAX = 120;
 // A question is longer than a title by nature, and it is what the dockmaster
 // matches the answer back to, so it is cut later.
 const QUESTION_MAX = 300;
 function flatten(text, max) {
-  const flat = String(text).replace(/[\r\n"]+/g, ' ').trim();
+  const flat = String(text).replace(/[\r\n]+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
-const sanitizeTitle = (title) => flatten(title, TITLE_MAX);
+// A title is quoted INSIDE a sentence, so a quote mark in it would break out of
+// those quotes. A question is not - it stands on its own line (ANSWER_HEADER),
+// and stripping quotes there only made the echo stop matching what was asked.
+const sanitizeTitle = (title) => flatten(title, TITLE_MAX).replace(/"/g, ' ').replace(/\s+/g, ' ').trim();
 
 // The work is named the way the OPERATOR sees it - title, repo, state - because a
 // task id is exactly what this seam keeps off the page. Unambiguous enough for
@@ -414,8 +416,21 @@ export const REVISION_REQUEST = (title, repo, notes) =>
 // still lands in the transcript and several questions can be open at once, so
 // it carries the question it answers. That is what the dockmaster resolves the
 // hold by; the key behind it is internal and stays off the page.
+//
+// The header is its own export because it is also an IDENTITY: the page finds an
+// answer it already sent by matching this exact prefix in the transcript (see
+// console.mjs answeredAlready), which is the only durable record either side
+// has. One definition, so the writer and the reader cannot drift.
+//
+// What that identity does NOT survive: a question asked through `dm-ui.sh ask`
+// is one line and echoes back byte-for-byte, but a hold recorded any other way
+// may be longer than QUESTION_MAX or multi-line, and two such questions
+// identical up to the cut are indistinguishable here. That degrades into the
+// dockmaster asking which one - visible, not silent - so the key stays off the
+// page rather than being shown to close it.
+export const ANSWER_HEADER = (question) => `Answer — ${flatten(question, QUESTION_MAX)}`;
 export const ANSWER_MESSAGE = (question, answer) =>
-  `Answer — ${flatten(question, QUESTION_MAX)}\n\n${flatten(answer, QUESTION_MAX)}`;
+  `${ANSWER_HEADER(question)}\n\n${flatten(answer, QUESTION_MAX)}`;
 
 // A pull request that came back from the sweep unreadable. Kept in the list on
 // purpose - one that vanished would read as a fleet with one less problem.

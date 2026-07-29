@@ -16,6 +16,7 @@
 // Pure functions and the committed fixture only - no server, no toolbelt, no
 // network, so this runs anywhere the rest of the suite does.
 
+const fs = require('fs')
 const path = require('path')
 
 const ROOT = process.env.DM_CHECK_ROOT ? path.resolve(process.env.DM_CHECK_ROOT) : path.join(__dirname, '..')
@@ -787,6 +788,24 @@ async function checkAReviewOpensTheConsolesOwnPageFirst() {
   console.log(`ok   ${doc.reviews.length} review rows open the console's own page first, the original second`)
 }
 
+// A panel only ever reaches the shell through `ctx`, and the two files are
+// tested apart - every case here hands the panels a ctx of its own, so a member
+// views.mjs started using and console.mjs never supplied would go green here and
+// throw in the browser on the operator's first click.
+async function checkTheShellSuppliesEveryCtxMemberThePanelsUse() {
+  const read = (file) => fs.readFileSync(path.join(ROOT, 'ui', 'public', file), 'utf8')
+  const used = new Set(Array.from(read('views.mjs').matchAll(/\bctx\.([A-Za-z]+)/g), (m) => m[1]))
+  ok(used.size > 5, `the panels use a ctx worth checking (${used.size} members)`)
+  // panelContext()'s object literal: `name,` `name:` `name(` are the three
+  // shapes it is written in.
+  const shell = read('console.mjs')
+  const body = shell.slice(shell.indexOf('function panelContext()'))
+  const supplied = new Set(Array.from(body.matchAll(/^\s{4}([A-Za-z]+)\s*[,:(]/gm), (m) => m[1]))
+  const missing = Array.from(used).filter((name) => !supplied.has(name)).sort()
+  equal(missing.join(', '), '', 'every ctx member a panel uses is one the shell supplies')
+  console.log(`ok   the shell supplies all ${used.size} ctx members the panels reach for`)
+}
+
 // #218: a question the dockmaster asked through the page is answerable in ONE
 // click, and the answer leaves as an ordinary operator message - the same queue
 // a typed sentence uses, no second transport and no action carried out here.
@@ -801,8 +820,21 @@ async function checkADecisionIsAnsweredInOneClick() {
   }
   const sent = []
   const drafted = []
+  // The page's own answered-check, standing in for console.mjs's: an answer is
+  // recognised by the transcript carrying its header.
+  const transcript = []
   const ctx = {
-    ask: (text) => { sent.push(text); return Promise.resolve() },
+    answered: (q) => {
+      const header = dom.ANSWER_HEADER(q)
+      const hit = transcript.filter((t) => t.startsWith(header)).pop()
+      return hit === undefined ? null : hit.slice(header.length).trim()
+    },
+    sendAnswer: (q, a) => {
+      const text = dom.ANSWER_MESSAGE(q, a)
+      sent.push(text)
+      transcript.push(text)
+      return Promise.resolve()
+    },
     compose: (text) => { drafted.push(text) },
     fold: () => true,
     setFold() {},
@@ -830,6 +862,24 @@ async function checkADecisionIsAnsweredInOneClick() {
     ok(drafted[0].includes(question), 'with the question already in it')
   })
   console.log('ok   a question is answered in one click, as an ordinary message on the same queue')
+
+  // THE REBUILD. The hold stays open until the dockmaster resolves it, and this
+  // panel is rebuilt from scratch every 30 seconds - which used to bring the
+  // buttons back with no trace of the answer, so a second click could queue a
+  // contradictory one behind the first.
+  await withCapturingDocument(() => {
+    const rebuilt = views.viewNeedsYou(doc, ctx)
+    equal(collectByClass(rebuilt, 'choice').length, 0,
+      'a question already answered offers no buttons to answer it again')
+    const said = collectByClass(rebuilt, 'choice-answered')
+    equal(said.length, 1, 'the rebuilt row says it was answered')
+    ok(said[0].textContent.includes(options[0]),
+      `and says with what: ${said[0].textContent}`)
+    ok(/conversation/i.test(said[0].textContent),
+      'and where to go to change it')
+  })
+  equal(sent.length, 1, 'nothing was re-sent by the rebuild itself')
+  console.log('ok   the answer survives the panel being rebuilt, and cannot be sent twice')
 }
 
 // The answer lands in the transcript the operator reads, so it is worded for
@@ -844,11 +894,20 @@ async function checkTheAnswerMessageNamesTheQuestion() {
 
   // Free text out of the decision log: unbounded or multi-line, it would make
   // the transcript unreadable and break the answer out of its own message.
-  const messy = dom.ANSWER_MESSAGE(`a "quoted"\nquestion ${'x'.repeat(500)}`, 'fine')
-  ok(!messy.includes('"'), 'a quote in the question cannot break the message open')
+  const messy = dom.ANSWER_MESSAGE(`a question\nover two lines ${'x'.repeat(500)}`, 'fine')
   equal(messy.split('\n\n').length, 2, 'a newline in the question cannot fake a second paragraph')
   ok(messy.length < 400, 'and an unbounded question is capped')
-  console.log('ok   an answer names its question, bounded and flattened')
+
+  // The header IS the identity the page matches an answer back by, so it must
+  // be a byte-for-byte echo of what was asked. Stripping quote marks out of it
+  // - which a title needs, because a title is quoted inside a sentence - broke
+  // that for every question containing one.
+  const quoted = 'Rename "berth" to "card" across the console?'
+  equal(dom.ANSWER_HEADER(quoted), `Answer — ${quoted}`,
+    'a one-line question is echoed exactly as it was asked')
+  ok(dom.ANSWER_MESSAGE(quoted, 'yes').startsWith(dom.ANSWER_HEADER(quoted)),
+    'and the message the page sends opens with that same header')
+  console.log('ok   an answer echoes its question exactly, bounded and on one line')
 }
 
 async function main() {
@@ -872,6 +931,7 @@ async function main() {
   await checkRecentlyFinishedSortsNewestFirst()
   await checkRecentlyFinishedIsSortedInTheRenderedPanel()
   await checkAReviewOpensTheConsolesOwnPageFirst()
+  await checkTheShellSuppliesEveryCtxMemberThePanelsUse()
   await checkADecisionIsAnsweredInOneClick()
   await checkTheAnswerMessageNamesTheQuestion()
   checkShapeRefusesAHalfDocument()

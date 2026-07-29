@@ -5723,10 +5723,32 @@ check "ask puts the question in the conversation" \
 # The question is the dockmaster speaking; only the ANSWER is queued back.
 check "ask queues nothing for the dockmaster to pick up" \
   '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json" 2>/dev/null)" ]'
-# Asking the same thing twice must not stack up two open holds on the panel.
+# Asking the same thing twice must not stack up two open holds on the panel:
+# the identical ask is the retry after a failed post, and writes nothing away.
 b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain page" >/dev/null 2>&1
 check "asking again is the same hold, not a second one" \
   '[ "$(b dm-backlog.sh decisions --json | jq "[.[] | select(.key==\"ui-embed\")] | length")" = "1" ]'
+# THE KEY IS NOT A SCRATCHPAD. `hold` upserts: it keeps status/answer but
+# overwrites question, options and the --origin backlink dm-trash.sh resolves
+# holds through. Keys are invented per question, so an ask under a key another
+# task already holds would destroy that decision with no trace at all.
+b dm-backlog.sh hold cross-task "Land the importer tonight or Monday?" \
+  --options "tonight | Monday" --origin "data/other-task/report.md" >/dev/null 2>&1
+check "an ask cannot take over another decision's key" \
+  '! b dm-ui.sh ask cross-task "Bump the node floor?" >/dev/null 2>&1'
+check "and the decision it would have erased is untouched" \
+  '[ "$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"cross-task\") | \
+       [.question, .options, .origin] | @tsv")" \
+     = "$(printf "Land the importer tonight or Monday?\ttonight | Monday\tdata/other-task/report.md")" ]'
+check "nor was the question it refused to ask put in the conversation" \
+  '! grep -q "Bump the node floor?" "$DM_HOME/state/ui/chat.jsonl"'
+# Same key, same question, DIFFERENT options is still an overwrite.
+check "changing only the options under a held key is refused too" \
+  '! b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain | neither" >/dev/null 2>&1'
+# One line per hold is what `decisions` and dm-status.sh print; a newline in the
+# question shreds both, and the answer echoes it back on one line as well.
+check "a multi-line question is refused" \
+  '! b dm-ui.sh ask multiline "$(printf "first line\nsecond line")" >/dev/null 2>&1'
 # What the page sends back: an ordinary operator message. Poll's contract is
 # untouched by any of this - it is the same drain, quoting the question.
 DM_UI_CHAT="$ROOT/ui/chat.js" node -e 'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", "Answer — Panel or plain page?\n\nplain page")' \

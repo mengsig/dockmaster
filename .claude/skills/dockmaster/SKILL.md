@@ -54,9 +54,11 @@ runtime's terminal prompt reaches a window they are not looking at.
 
 It opens a `decision-hold` under that key — so the question is durable and the
 Needs-you panel holds it open across a restart of either side — and posts it
-into the conversation. An option is answered in ONE click; the answer arrives on
-`poll` as an ordinary operator message quoting the question. Resolve the hold
-with `decision-hold` as always.
+into the conversation. The key must be FRESH: it refuses rather than write over a
+decision already on the board. One line, and `|` separates options. An option is
+answered in ONE click; the answer arrives on `poll` as an ordinary operator
+message quoting the question. The page shows the row answered until you resolve
+the hold with `decision-hold`, as always.
 
 A one-line `say` renders as a log row rather than a message, and the Updates panel
 is every line you have posted, newest first. That surface is for terse, timestamped

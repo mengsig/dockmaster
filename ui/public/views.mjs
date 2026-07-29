@@ -458,7 +458,22 @@ function reviewRow(sub, ctx) {
 // REQUEST that changes the fleet, and an answer is a message. It still leaves
 // this page the only way anything does - as an ordinary operator message on the
 // same queue as a typed sentence.
+//
+// A DECIDED question does not offer the buttons again. The hold stays open until
+// the dockmaster picks the answer up and resolves it, so the row outlives the
+// answer by minutes, and this panel is rebuilt from scratch every 30 seconds -
+// which used to put live buttons back with no sign anything had been sent. A
+// second click would then queue a second, possibly contradictory answer behind
+// the first, and nothing anywhere says which of the two wins. `ctx.answered`
+// reads the transcript, the one place the answer is durably recorded, so the
+// acknowledgement survives the rebuild, a reload and a restart of the console.
 function choices(item, ctx) {
+  const already = ctx.answered(item.question);
+  if (already !== null) {
+    return add(el('div'), el('p', 'choice-status choice-answered',
+      `Answered: ${already} — waiting for the dockmaster to pick it up. `
+      + 'Say so in the conversation if you need to change it.'));
+  }
   const box = el('div', 'choices');
   const status = el('p', 'choice-status');
   status.hidden = true;
@@ -473,7 +488,7 @@ function choices(item, ctx) {
       setDisabled(true);
       status.hidden = false;
       status.textContent = 'Sending…';
-      ctx.ask(ANSWER_MESSAGE(item.question, item.options[i])).then(() => {
+      ctx.sendAnswer(item.question, item.options[i]).then(() => {
         status.textContent = 'Answered. It is in the conversation, waiting to be picked up.';
       }, (err) => {
         // The answer was NOT sent, so the buttons come back: a row that looks

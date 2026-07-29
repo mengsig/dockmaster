@@ -1,10 +1,23 @@
 /* review.mjs - the small script beside a console-served review page.
  *
- * The archived artifact renders in the iframe next to this; that document is
- * still served through reviewCsp() and cannot reach the network by any means
- * (see server.js). This script is the only thing on the OUTER page allowed to
- * reach the API, and it follows the same enqueue-only contract as console.mjs:
- * Approve and Request changes only ever put an ordinary message on the queue.
+ * The archived artifact renders in the iframe next to this. It cannot reach the
+ * network - measured in a browser, not assumed - but reviewCsp() is only half of
+ * why, so do not read that policy alone as the guarantee:
+ *   fetch / XHR            connect-src 'none'          (reviewCsp)
+ *   img, style, font, script  scoped to /review/       (reviewCsp)
+ *   form submit            form-action 'none'          (reviewCsp)
+ *   top.location, window.open  sandbox="allow-scripts" with neither
+ *                          allow-top-navigation nor allow-popups
+ *   NAVIGATING ITS OWN FRAME - the one channel no CSP directive on the artifact
+ *                          governs - frame-src 'self' on the SHELL, which is
+ *                          enforced on every later navigation of that frame,
+ *                          and frame-ancestors 'none' on every console response,
+ *                          which stops it framing the API even same-origin.
+ * The last line is why reviewShellCsp()'s frame-src must stay exactly 'self'.
+ *
+ * This script is the only thing on the OUTER page allowed to reach the API, and
+ * it follows the same enqueue-only contract as console.mjs: Approve and Request
+ * changes only ever put an ordinary message on the queue.
  */
 'use strict';
 

@@ -36,6 +36,11 @@
 #                                  conversation. The answer comes back on `poll`
 #                                  as an ordinary operator message - no second
 #                                  transport, and nothing to resume.
+#                                  <key> must be UNUSED: it will not write over
+#                                  a decision already on the board. A question is
+#                                  one line, and options split on '|', which is
+#                                  therefore not expressible inside one - reword
+#                                  the option.
 #
 # Port: 4877 by default (DM_UI_PORT overrides). Chosen clear of lavish (4387),
 # chrome-devtools (9224), and the verify gate's app/bridge/CDP ranges
@@ -59,7 +64,7 @@ PORT="${DM_UI_PORT:-4877}"
 URL="http://127.0.0.1:$PORT/"
 BOOT_TIMEOUT_SPINS=100   # 100 x 0.1s
 
-usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,47p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # running_pid - print the pid the file names, and return WHICH of three states
 # it is in. Callers must distinguish all three:
@@ -221,13 +226,34 @@ case "$cmd" in
         *) dm_die "console: unexpected argument '$1'" ;;
       esac
     done
-    # `hold` is an upsert that KEEPS an existing answer, so reusing an answered
-    # key would post a question into the conversation with nothing holding it
-    # open - the exact failure this command exists to prevent, and silent.
+    # A question is ONE line. The decision log prints one line per hold
+    # (dm-backlog.sh decisions, dm-status.sh), and the answer echoes the question
+    # as a single header line, so a newline here shreds both surfaces.
+    case "$question" in
+      *$'\n'*) dm_die "console: a question must be one line - the decision log and the answer both print it on one" ;;
+    esac
+    # `hold` is an UPSERT keyed on `key`: it preserves status and answer but
+    # overwrites question, options and origin. Keys are free-form and invented
+    # per question, so reusing one silently destroys whatever decision was
+    # already open under it - its question, its options and the --origin backlink
+    # dm-trash.sh resolves holds through - with nothing left to say it happened.
+    # So `ask` writes only where it can write nothing away: no hold at all, or a
+    # hold that is byte-for-byte the one this same ask would write (a retry after
+    # a failed post). Anything else is refused and needs a new key.
     dm_need jq
-    answered="$("$BIN_DIR/dm-backlog.sh" decisions --json \
-      | jq -r --arg k "$key" '.[] | select(.key==$k and .status=="resolved") | .key')"
-    [ -z "$answered" ] || dm_die "console: '$key' is already answered - a new question needs a new key"
+    verdict="$("$BIN_DIR/dm-backlog.sh" decisions --json | jq -r \
+      --arg k "$key" --arg q "$question" --arg o "$options" '
+        ([.[] | select(.key==$k)] | .[0]) as $held
+        | if   $held == null        then "free"
+          elif $held.status != "open" then "answered"
+          elif ($held.question == $q and $held.options == $o and $held.origin == "") then "retry"
+          else "taken" end')"
+    case "$verdict" in
+      free|retry) ;;
+      answered) dm_die "console: '$key' is already answered - a new question needs a new key" ;;
+      taken) dm_die "console: '$key' already holds a different open decision - asking under it would erase that question. Use a new key." ;;
+      *) dm_die "console: could not read the decision log for '$key'" ;;
+    esac
     # Recorded before it is said. A question in the conversation that no panel
     # is holding open is the one that scrolls away unanswered.
     if [ -n "$options" ]; then

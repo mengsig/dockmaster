@@ -455,6 +455,12 @@ details[open] > .fold-body { animation: rise 240ms ease-out; }
    UA's `[hidden]` rule, so this carries its own. */
 .choice-status { margin: 0.5rem 0 0; font-size: 0.8125rem; color: var(--fg-dim); }
 .choice-status[hidden] { display: none; }
+/* An answer already given, redrawn from the transcript: it replaces the options
+   rather than sitting under them, so it carries the row's own left edge. */
+.choice-answered {
+  margin-top: 0.75rem; padding-left: 0.75rem;
+  border-left: 2px solid var(--brass); color: var(--fg);
+}
 
 /* One row per task behind an aggregated "N changes are waiting for your
  * review" beacon - see berth()/reviewRow() in views.mjs. */
