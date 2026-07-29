@@ -344,6 +344,213 @@ async function checkEveryCleanupKindHasARequest() {
   console.log(`ok   ${live.CLEANUP_KINDS.length} cleanup kinds and the trash request are worded on the page`)
 }
 
+// The approve and revision-request sentences follow the same rule as the trash
+// request: named by title and repo, never a task id, so the operator can tell
+// the dockmaster which task without this page carrying one.
+async function checkApproveAndRevisionRequestsAreWorded() {
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  const approve = dom.APPROVE_REQUEST('Fix the login redirect', 'harbourmaster')
+  ok(approve.includes('Fix the login redirect') && approve.includes('harbourmaster'),
+    'an approval names the work and its repo')
+  ok(/approve/i.test(approve), 'and says what it approves')
+
+  const revision = dom.REVISION_REQUEST('Fix the login redirect', 'harbourmaster', 'please add a regression test')
+  ok(revision.includes('Fix the login redirect') && revision.includes('harbourmaster'),
+    'a revision request names the work and its repo too')
+  ok(revision.includes('please add a regression test'), "and carries the operator's own notes verbatim")
+
+  // A title is flattened and capped the same way the trash request's is - one
+  // sentence, not whatever newlines and quotes happened to be in the title.
+  const messy = dom.APPROVE_REQUEST('Two\nlines and a "quote"', 'harbourmaster')
+  ok(!messy.includes('\n'), 'an approval request is a single line even over a multi-line title')
+  console.log('ok   the approve and revision-request sentences name the work, never a task id')
+}
+
+// An awaiting-review item is the only place Approve/Request changes may show -
+// showing them anywhere else would let the page word a request for a task that
+// is not actually stopped on the operator's review. And even there, both
+// controls require a rendered artifact behind `review_href`: the artifact IS
+// the approval gate, so a task with nothing to review must not offer a button
+// that would word an approval or a revision request for it anyway.
+async function checkApproveAndChangesControlsShowOnlyWhenAwaitingReview() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const row = (title, state, reviewHref) => ({
+    title, repo: 'harbourmaster', kind: 'change', state,
+    since: '2026-01-01T00:00:00Z', last_signal_at: '2026-01-01T00:00:00Z', note: '', track: null,
+    review_href: reviewHref,
+  })
+  const docState = {
+    degraded: [],
+    work: [
+      row('Fix the login redirect', 'ready_for_review', '/review/a/'),
+      row('Add the retry budget', 'in_progress', '/review/b/'),
+      row('Nothing rendered yet', 'ready_for_review', ''),
+    ],
+  }
+  const ctx = { filter: 'all', setFilter() {}, fold: () => false, setFold() {}, ask: () => Promise.resolve() }
+
+  await withCapturingDocument(() => {
+    const frag = views.viewInFlight(docState, ctx)
+    const cards = collectByClass(frag, 'voyage')
+    equal(cards.length, 3, 'all three pieces of work render a card')
+    const labelled = (card, label) => collectByClass(card, 'btn-ask')
+      .some((b) => b.children.some((c) => c.textContent === label))
+    // Grouped by state (CARD_GROUPS), not by array order - found by title rather
+    // than by position so the assertion does not depend on that grouping order.
+    const cardTitled = (title) => cards.find((c) => collectByClass(c, 'voyage-title')[0].textContent === title)
+
+    const waiting = cardTitled('Fix the login redirect')
+    ok(labelled(waiting, 'Approve'), 'an awaiting-review card with a rendered artifact shows Approve')
+    ok(labelled(waiting, 'Request changes'), 'and Request changes')
+
+    const running = cardTitled('Add the retry budget')
+    ok(!labelled(running, 'Approve'), 'a card that is not awaiting review shows neither')
+    ok(!labelled(running, 'Request changes'), 'not Request changes either')
+
+    const noArtifact = cardTitled('Nothing rendered yet')
+    ok(!labelled(noArtifact, 'Approve'), 'an awaiting-review card with NO rendered artifact shows no Approve')
+    ok(!labelled(noArtifact, 'Request changes'), 'nor Request changes - there is nothing to review yet')
+  })
+  console.log('ok   Approve and Request changes show only on a card actually awaiting review with a rendered artifact')
+}
+
+// review.mjs reads the operator's stored theme through dom.mjs's storedTheme(),
+// so the two browser globals that needs are stubbed around it: the store the
+// console shell writes the choice into, and the system-preference fallback used
+// when nothing is stored.
+async function withStoredTheme(theme, fn) {
+  const had = { storage: 'localStorage' in global, window: 'window' in global }
+  const previous = { storage: global.localStorage, window: global.window }
+  const reads = []
+  global.localStorage = {
+    getItem(key) { reads.push(key); return key === 'dm-console-theme' ? theme : null },
+    setItem() {},
+  }
+  global.window = { matchMedia: () => ({ matches: false }) }
+  try {
+    return await fn(reads)
+  } finally {
+    if (had.storage) global.localStorage = previous.storage; else delete global.localStorage
+    if (had.window) global.window = previous.window; else delete global.window
+  }
+}
+
+// The console-served review page is a SECOND document carrying the same two
+// controls, and review.mjs - not views.mjs - decides whether to draw them there.
+// It must hold the same invariant: the review archive keeps an artifact after the
+// work lands or is dropped and links to it, so this page is reachable for work
+// there is nothing left to decide about, and offering Approve there would enqueue
+// an instruction about a finished change. The server states the case as data
+// (server.js reviewShellHtml -> `awaiting`); this pins that the page obeys it.
+//
+// It also pins the theme: the shell is served with the console's own default, so
+// the page has to apply the operator's stored choice or a light-theme operator
+// gets a dark review page.
+async function checkTheReviewShellOnlyOffersApproveWhileAwaitingReview() {
+  const cases = [
+    [{ ok: true, title: 'Fix the login redirect', repo: 'harbourmaster', awaiting: true },
+      true, 'work actually awaiting review'],
+    [{ ok: true, title: 'Fix the login redirect', repo: 'harbourmaster', awaiting: false },
+      false, 'work whose review is over'],
+    [{ ok: false, title: '', repo: '', awaiting: false },
+      false, 'a review whose task record is gone'],
+  ]
+  for (const [data, offers, what] of cases) {
+    await withCapturingDocument(async () => {
+      const panel = global.document.createElement('div')
+      const block = global.document.createElement('script')
+      block.textContent = JSON.stringify(data)
+      const nodes = { 'review-panel': panel, 'review-data': block }
+      global.document.getElementById = (id) => nodes[id] || null
+      global.document.documentElement = { dataset: {} }
+      await withStoredTheme('light', async (reads) => {
+        // A fresh module instance per case: review.mjs renders on load, and the
+        // import cache would otherwise hand back the first case's run.
+        await import(`file://${path.join(ROOT, 'ui', 'public', 'review.mjs')}?case=${encodeURIComponent(what)}`)
+        equal(global.document.documentElement.dataset.theme, 'light',
+          `${what}: the review page follows the stored theme, not a hardcoded dark`)
+        ok(reads.includes('dm-console-theme'),
+          `${what}: and reads it from the same key the console shell writes`)
+      })
+      const labelled = (label) => collectByClass(panel, 'btn-ask')
+        .some((b) => b.children.some((c) => c.textContent === label))
+      equal(labelled('Approve'), offers, `${what}: Approve shown = ${offers}`)
+      equal(labelled('Request changes'), offers, `${what}: Request changes shown = ${offers}`)
+      if (!offers) {
+        equal(collectByClass(panel, 'review-missing').length, 1,
+          `${what}: the page says why there is nothing to decide instead of going quiet`)
+      }
+    })
+  }
+  console.log('ok   the review page offers Approve only while the work awaits review, and follows the stored theme')
+}
+
+// The Needs-you row for "N changes are waiting for your review" aggregates the
+// HEADLINE, but each underlying task still gets its own Approve/Request changes -
+// this pins that both the rows and the enqueued text are per-task, not the
+// aggregate's own words. It also pins the confirm-before-send shape end to end:
+// nothing is quoted, let alone sent, before the operator has actually asked.
+async function checkNeedsYouReviewRowsActPerTaskAndEnqueueTheRightText() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  const state = {
+    degraded: [],
+    needs_you: [{
+      lamp: 'brass', kind: 'review', count: 2,
+      repos: ['harbourmaster', 'signalworks'],
+      href: '#flight', at: '2026-01-01T00:00:00Z',
+      items: [
+        { title: 'Fix the login redirect', repo: 'harbourmaster', review_href: '/review/a/' },
+        { title: 'Add the retry budget', repo: 'signalworks', review_href: '/review/b/' },
+      ],
+    }],
+  }
+  const asked = []
+  const ctx = { compose() {}, ask: (text) => { asked.push(text); return Promise.resolve() } }
+
+  await withCapturingDocument(async () => {
+    const frag = views.viewNeedsYou(state, ctx)
+    const rows = collectByClass(frag, 'review-item')
+    equal(rows.length, 2, 'one row per task actually waiting, not one row for the whole count')
+    const findAsk = (node, label) => collectByClass(node, 'btn-ask')
+      .find((b) => b.children.some((c) => c.textContent === label))
+
+    // Approve: a canned sentence, sent on confirmation.
+    const approve = findAsk(rows[0], 'Approve')
+    ok(approve, 'the first task shows Approve')
+    approve.listeners.click()
+    const quote1 = collectByClass(rows[0], 'ask-quote')[0]
+    ok(quote1, 'confirming shows the exact text before it is sent')
+    equal(quote1.textContent, dom.APPROVE_REQUEST('Fix the login redirect', 'harbourmaster'),
+      "the quoted text names THIS task, not the aggregate's own words")
+    collectByClass(rows[0], 'btn-send')[0].listeners.click()
+    equal(asked[0], quote1.textContent, 'sending enqueues exactly what was quoted')
+    // ctx.ask's own resolution runs its confirmation through a microtask
+    // (see askControl's `spec.ask(request).then(sent, ...)`); wait for it
+    // rather than tear the stub document down while that is still pending.
+    await Promise.resolve()
+
+    // Request changes: nothing is quoted until the operator has written notes.
+    const changes = findAsk(rows[1], 'Request changes')
+    ok(changes, 'the second task shows Request changes')
+    const textarea = collectByClass(rows[1], 'ask-notes-input')[0]
+    ok(textarea, 'a notes field is offered first')
+    changes.listeners.click()
+    equal(collectByClass(rows[1], 'ask-quote').length, 0, 'empty notes confirm nothing')
+    textarea.value = 'please add a test for the retry budget'
+    changes.listeners.click()
+    const quote2 = collectByClass(rows[1], 'ask-quote')[0]
+    ok(quote2, 'notes in hand, the exact text is quoted')
+    equal(quote2.textContent,
+      dom.REVISION_REQUEST('Add the retry budget', 'signalworks', 'please add a test for the retry budget'),
+      "and it carries the operator's own notes for THIS task")
+    collectByClass(rows[1], 'btn-send')[0].listeners.click()
+    equal(asked[1], quote2.textContent, 'sending enqueues exactly what was quoted, for the right task')
+    await Promise.resolve()
+  })
+  console.log('ok   each awaiting-review task in Needs-you gets its own controls, and the right text is sent')
+}
+
 // The document deliberately carries NO task id, which is why the trash request
 // names work by title and repo. If an id is ever added here it must be a decision,
 // not a field that slipped through into a page the operator reads.
@@ -354,6 +561,12 @@ async function checkTheDocumentCarriesNoTaskId() {
   }
   for (const item of doc.needs_you) {
     ok(!('id' in item), 'a needs-you row carries no task id')
+    // review_href legitimately embeds the id as a URL, the same pre-existing
+    // pattern voyage cards use (item.review_href above) - only the bare `id`
+    // key is what must never appear, on an items[] sub-row same as the parent.
+    for (const sub of item.items || []) {
+      ok(!('id' in sub), 'a needs-you review sub-item carries no task id')
+    }
   }
   console.log('ok   no task id crosses to the page')
 }
@@ -444,29 +657,56 @@ async function checkRecentlyFinishedSortsNewestFirst() {
 }
 
 // A minimal stand-in for `document`: every node it hands back is the same
-// plain shape (children captured in order, classList/setAttribute/addEventListener
-// as no-ops), which is all views.mjs and dom.mjs ever call. This is what lets the
-// test walk the ACTUAL rendered tree rather than trust that the sort helper it
-// pins above is still wired into the panel that renders it.
-function withCapturingDocument(fn) {
+// plain shape (children captured in order, classList/setAttribute as no-ops),
+// which is all views.mjs and dom.mjs ever call. This is what lets the test walk
+// the ACTUAL rendered tree rather than trust that the sort helper it pins above
+// is still wired into the panel that renders it.
+//
+// `addEventListener` is captured, not a no-op, and `textContent` is a real
+// setter that clears `children` - a fair recreation of the one DOM behaviour
+// askControl's own idle/confirm/sent cycle depends on: `box.textContent = ''`
+// throws away whatever was rendered before, then the caller appends the next
+// state fresh. Without that, a test walking through Approve or Request changes
+// would see every stage's markup piled on top of the last one instead of the
+// page's actual current state.
+// `fn` may be async: askControl's own send button resolves through a real
+// microtask (`spec.ask(request).then(sent, ...)`), and that continuation must
+// still find `document` in place when it runs `sent()`'s own `el()` calls -
+// tearing the stub down the instant the synchronous part of `fn` returns would
+// leave that continuation crashing against a document that is already gone.
+async function withCapturingDocument(fn) {
   const had = 'document' in global
   const previous = global.document
-  const makeNode = (tag) => ({
-    tag,
-    className: '',
-    textContent: '',
-    children: [],
-    classList: { add() {}, remove() {} },
-    setAttribute() {},
-    addEventListener() {},
-    appendChild(child) { this.children.push(child); return child },
-  })
+  const makeNode = (tag) => {
+    const node = {
+      tag,
+      className: '',
+      value: '',
+      placeholder: '',
+      rows: 0,
+      type: '',
+      disabled: false,
+      children: [],
+      listeners: {},
+      classList: { add() {}, remove() {} },
+      setAttribute() {},
+      focus() {},
+      addEventListener(type, handler) { this.listeners[type] = handler },
+      appendChild(child) { this.children.push(child); return child },
+    }
+    let text = ''
+    Object.defineProperty(node, 'textContent', {
+      get() { return text },
+      set(value) { text = value; this.children = [] },
+    })
+    return node
+  }
   global.document = {
     createElement: makeNode,
     createDocumentFragment: () => makeNode('fragment'),
   }
   try {
-    return fn()
+    return await fn()
   } finally {
     if (had) global.document = previous
     else delete global.document
@@ -506,7 +746,7 @@ async function checkRecentlyFinishedIsSortedInTheRenderedPanel() {
     ],
   }
   const ctx = { filter: 'all', setFilter() {}, fold: () => false, setFold() {} }
-  withCapturingDocument(() => {
+  await withCapturingDocument(() => {
     const frag = views.viewInFlight(state, ctx)
     const titles = collectByClass(frag, 'cell-title')
       .map((td) => td.children[0].textContent)
@@ -535,6 +775,10 @@ async function main() {
   await checkEveryTokenHasAWord()
   await checkEveryOutboundLinkOpensAway()
   await checkEveryCleanupKindHasARequest()
+  await checkApproveAndRevisionRequestsAreWorded()
+  await checkApproveAndChangesControlsShowOnlyWhenAwaitingReview()
+  await checkTheReviewShellOnlyOffersApproveWhileAwaitingReview()
+  await checkNeedsYouReviewRowsActPerTaskAndEnqueueTheRightText()
   await checkTheDocumentCarriesNoTaskId()
   await checkFixtureIsNeutral()
   await checkRecentlyFinishedSortsNewestFirst()

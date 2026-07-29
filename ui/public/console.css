@@ -446,6 +446,18 @@ details[open] > .fold-body { animation: rise 240ms ease-out; }
 .choice { font-family: var(--sans); letter-spacing: 0; }
 .choice:hover { border-color: var(--brass); color: var(--brass); }
 
+/* One row per task behind an aggregated "N changes are waiting for your
+ * review" beacon - see berth()/reviewRow() in views.mjs. */
+.review-items { display: grid; gap: 0.625rem; margin-top: 0.875rem; }
+.review-item {
+  padding: 0.75rem 0.875rem;
+  border: 1px solid var(--line-soft); border-radius: var(--r);
+  background: var(--raise);
+}
+.review-item-what { margin: 0 0 0.5rem; font-weight: 500; }
+.review-item-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: flex-start; }
+.review-item-actions .row-action { margin-top: 0.3125rem; }
+
 /* --- in flight: the card and its track ----------------------------------- */
 
 .voyages { margin-top: 0.5rem; display: grid; gap: 0.625rem; }
@@ -478,9 +490,11 @@ details[open] > .fold-body { animation: rise 240ms ease-out; }
   flex-wrap: wrap; gap: 0.75rem; margin-top: 0.875rem;
 }
 .voyage-foot:empty { display: none; }
-/* The trash control sits at the far end of the footer, away from the action the
- * operator actually came for. */
-.voyage-foot .ask { margin-left: auto; }
+/* Three controls can share this footer: the review link, Approve/Request changes
+ * stay grouped right after it, and only Trash is pushed to the far end, away
+ * from the action the operator actually came for - `.ask-trash` is the class
+ * askControl() gives that one kind alone. */
+.voyage-foot .ask-trash { margin-left: auto; }
 .voyage-foot .row-action { margin-top: 0; }
 /* Once it is open the confirm strip owns the footer, rather than being squeezed
  * into a corner of it. */
@@ -604,6 +618,20 @@ details[open] > .fold-body { animation: rise 240ms ease-out; }
   color: var(--fg-dim); font-size: 0.8125rem;
   animation: settle 220ms ease-out;
 }
+
+/* A control whose request is free text (Request changes) grows a field before
+ * the same confirm step every other ask uses - nothing is quoted until the
+ * operator has written something to quote. */
+.ask-notes-input {
+  display: block; width: 100%; resize: vertical;
+  min-height: 3.5rem; margin-bottom: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  background: var(--hull); color: var(--fg);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-family: var(--sans); font-size: 0.8125rem;
+}
+.ask-notes-input:focus { border-color: var(--fg-mute); }
+.ask-notes-input::placeholder { color: var(--fg-mute); }
 
 /* --- the update feed ----------------------------------------------------- */
 
@@ -862,6 +890,33 @@ td:last-child, th:last-child { padding-right: 0; }
   .feed-line { grid-template-columns: max-content minmax(0, 1fr); }
   .feed-ago { display: none; }
 }
+
+/* --- the review page the console serves on its own ------------------------ */
+
+/* A separate document from the console shell above (server.js's reviewShellCsp
+ * wrapper around an archived artifact), so it reverts the fixed,
+ * overflow-hidden layout that assumes the rail/deck/chat structure this page
+ * does not have. */
+/* A flex column filling the viewport: the frame takes whatever height the panel
+ * below it does not need, so a long change is reviewed through something close
+ * to the whole screen rather than a fixed 70vh window - no calc() against the
+ * panel's own height needed, since flex does that distribution for free. `body`
+ * still grows past 100vh (min-height, not height) and scrolls if the panel's
+ * own content ever needs more room than that leaves it. */
+body.review-shell {
+  display: flex; flex-direction: column; min-height: 100vh; overflow: auto;
+  max-width: 72rem; margin: 0 auto; padding: 1.5rem;
+}
+.review-frame {
+  flex: 1 1 auto; min-height: 60vh;
+  border: 1px solid var(--line); border-radius: var(--r);
+  overflow: hidden; margin-bottom: 1.5rem; background: var(--raise);
+}
+.review-frame iframe { display: block; width: 100%; height: 100%; border: 0; }
+.review-panel { max-width: 40rem; }
+.review-panel-head { margin: 0 0 0.75rem; font-size: 0.9375rem; font-weight: 500; }
+.review-panel .ask { margin-top: 0.75rem; }
+.review-missing { color: var(--fg-dim); max-width: 40rem; }
 
 /* One switch for every animation and transition in the file. */
 @media (prefers-reduced-motion: reduce) {

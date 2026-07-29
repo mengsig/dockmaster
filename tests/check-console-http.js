@@ -15,7 +15,7 @@
 // Node stdlib, the committed fixture, a temp home, an ephemeral port. No
 // network, no shell.
 
-const { spawn } = require('child_process')
+const { spawn, spawnSync } = require('child_process')
 const fs = require('fs')
 const http = require('http')
 const net = require('net')
@@ -291,11 +291,16 @@ async function checkBadRequestsAreRefusedNotCrashed(port) {
   console.log(`ok   ${cases.length + 2} bad requests refused with a status, not a crash`)
 }
 
+// Nothing served under /review/ may show a script name, an errno or a path -
+// whether it is a worded failure or a page that rendered fine. Shared so the
+// success case below is held to the exact same bar as the failure cases here.
+const INTERNAL_LEAK = /dm-[a-z]+\.sh|--json|exit \d|ENOENT|ENOTDIR|EACCES|\/tmp\/|jq/
+
 // A /review/ address is a same-tab navigation: whatever comes back IS the page.
 // There is no script layer to word a failure, so the failure has to arrive
 // already worded - not as the script name, argv and stderr behind it.
 async function checkReviewFailuresAreWorded(port, home) {
-  const internal = /dm-[a-z]+\.sh|--json|exit \d|ENOENT|ENOTDIR|EACCES|\/tmp\/|jq/
+  const internal = INTERNAL_LEAK
   const cases = [
     [`/review/nothing-here/`, 404, 'an unknown review page'],
     [`/review/%zz/`, 400, 'a malformed address'],
@@ -325,8 +330,11 @@ async function checkReviewAssetsAtAnyDepth(port, home) {
   fs.writeFileSync(path.join(dir, 'shots', 'top.png'), 'top')
   fs.writeFileSync(path.join(dir, 'shots', 'run-1', 'deep.png'), 'deep')
 
-  const page = await request(port, 'GET', `/review/${id}/`)
-  equal(page.status, 200, 'the review page itself is served')
+  // The archived artifact itself - the console's own WRAPPER around it, at the
+  // index address, is a separate document and is checked in the next test.
+  // This one must be exactly as isolated as it always was.
+  const page = await request(port, 'GET', `/review/${id}/change.html`)
+  equal(page.status, 200, 'the archived artifact is served')
   const csp = page.headers['content-security-policy']
   ok(csp.includes("connect-src 'none'"), 'an archived review may not reach the network')
   // A review page is SAME-ORIGIN, so the cross-site refusal cannot stop it
@@ -348,6 +356,35 @@ async function checkReviewAssetsAtAnyDepth(port, home) {
   equal(deep.status, 200, 'a screenshot two directories down is served')
   equal(deep.headers['content-type'], 'image/png', 'with the type its extension implies')
 
+  // THE SHAPE THE SANDBOX ACTUALLY PRODUCES. The artifact renders in
+  // `sandbox="allow-scripts"`, so its document sits in an OPAQUE origin and
+  // every subresource it requests carries `sec-fetch-site: cross-site` - the
+  // browser has no choice about that. A cross-site refusal applied to the whole
+  // /review/ prefix therefore 403d every screenshot in every review page, which
+  // the assertions above missed by sending no fetch-metadata headers at all.
+  for (const [urlPath, dest, what] of [
+    [`/review/${id}/shots/top.png`, 'image', 'a screenshot the sandboxed artifact <img>s'],
+    [`/review/${id}/shots/run-1/deep.png`, 'image', 'one nested deeper'],
+    [`/review/${id}/change.html`, 'style', 'a stylesheet-shaped subresource'],
+  ]) {
+    const res = await request(port, 'GET', urlPath,
+      { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': dest, 'sec-fetch-mode': 'no-cors' })
+    equal(res.status, 200, `${what} is served, not refused as cross-site`)
+  }
+
+  // What the refusal is actually FOR is unaffected: a hostile page framing
+  // either document under /review/ still gets nothing. The shell is the one with
+  // the Approve controls on it; the artifact is refused too, so a hostile framing
+  // cannot use the console's own origin as a canvas.
+  for (const [urlPath, dest, what] of [
+    [`/review/${id}/`, 'iframe', 'the review shell framed cross-site'],
+    [`/review/${id}/`, 'document', 'the review shell navigated to from another site'],
+    [`/review/${id}/change.html`, 'iframe', 'the raw artifact framed cross-site'],
+  ]) {
+    const res = await request(port, 'GET', urlPath, { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': dest })
+    equal(res.status, 403, `${what} is refused`)
+  }
+
   // Depth is allowed; escaping is not. The URL parser normalises some of these
   // away before the route sees them, so the assertion is that nothing outside
   // the review directory is ever reachable - not one fixed status code.
@@ -361,7 +398,224 @@ async function checkReviewAssetsAtAnyDepth(port, home) {
     const res = await request(port, 'GET', attack)
     equal(res.status, status, `${why}: ${attack}`)
   }
-  console.log('ok   a review page serves nested assets, and no path escapes its directory')
+  console.log('ok   a review page serves nested assets under the sandbox\'s own cross-site headers, refuses a framing of either document, and no path escapes its directory')
+}
+
+// The index address used to BE the archived artifact; the console now serves
+// its own wrapper there instead, so "Open the review page" works with no
+// lavish session server running. The artifact keeps rendering - now inside an
+// iframe at the asset address pinned above - and the wrapper is the only part
+// of the response allowed to reach the API, because it is the console's own
+// markup, not the artifact's.
+async function checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home) {
+  const id = 'demo-review-shell'
+  const dir = path.join(home, 'data', id, 'lavish')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'change.html'), '<p>the change</p>')
+  const created = spawnSync(path.join(ROOT, 'bin', 'dm-task.sh'),
+    ['new', id, '--kind', 'ship', '--repo', 'dockmaster', '--title', 'A demo change under review'],
+    { env: Object.assign({}, process.env, { DM_HOME: home }), encoding: 'utf8' })
+  equal(created.status, 0, `the task fixture behind the review is created: ${created.stderr}`)
+
+  const shell = await request(port, 'GET', `/review/${id}/`)
+  equal(shell.status, 200, 'the console serves its own wrapper at the review address')
+  const shellCsp = shell.headers['content-security-policy']
+  ok(shellCsp.includes("script-src 'self'"), 'the wrapper may run its own script')
+  ok(shellCsp.includes("connect-src 'self'"), 'and reach the API - unlike the artifact it wraps')
+  ok(!/unsafe-inline/.test(shellCsp), 'and needs no inline script or style to do either')
+
+  // The task record crosses as DATA, not prose - review.mjs is what decides how
+  // to say it, and only ever from this shape.
+  ok(shell.text.includes('"ok":true'), 'the task record behind this review was found')
+  ok(shell.text.includes('"title":"A demo change under review"'), 'its title crosses as data')
+  ok(shell.text.includes('"repo":"dockmaster"'), 'and its repo crosses as data')
+  ok(shell.text.includes('<iframe'), 'the artifact renders inside the wrapper, not standing alone')
+  ok(shell.text.includes('change.html'), 'pointed at the real artifact file')
+  // The isolation guarantee is this sandbox, not the CSP below: no
+  // allow-same-origin means the artifact renders into an OPAQUE origin,
+  // cross-origin to the wrapper. window.parent is still there (a cross-origin
+  // WindowProxy - postMessage and nothing else), but parent.document throws and
+  // parent.fetch is unreachable, so the artifact's inline scripts cannot use this
+  // wrapper's connect-src 'self' fetch or click its Approve/Send buttons.
+  ok(/<iframe[^>]*\bsandbox="allow-scripts"/.test(shell.text),
+    'the artifact iframe is sandboxed, with no allow-same-origin')
+  ok(!INTERNAL_LEAK.test(shell.text), 'the wrapper shows no script name, path or internal detail')
+  ok(!shell.text.includes(home), 'and does not print the state directory')
+
+  // The artifact the wrapper embeds is unaffected: same address, same CSP. This
+  // is the artifact's OWN defense-in-depth, not the isolation guarantee - that
+  // is the sandbox attribute asserted above.
+  const nested = await request(port, 'GET', `/review/${id}/change.html`)
+  equal(nested.status, 200, 'the artifact the wrapper embeds is still served on its own')
+  ok(nested.headers['content-security-policy'].includes("connect-src 'none'"),
+    "the artifact's own CSP still blocks it from reaching the network directly")
+
+  // An artifact whose task record is gone (archived, discarded) still renders -
+  // it just cannot safely name the work, so it says so as data rather than
+  // inventing a title.
+  const orphanId = 'demo-review-orphan'
+  const orphanDir = path.join(home, 'data', orphanId, 'lavish')
+  fs.mkdirSync(orphanDir, { recursive: true })
+  fs.writeFileSync(path.join(orphanDir, 'change.html'), '<p>orphaned</p>')
+  const orphan = await request(port, 'GET', `/review/${orphanId}/`)
+  equal(orphan.status, 200, 'a review still renders when its task record cannot be found')
+  ok(orphan.text.includes('"ok":false'), 'and says so as data instead of inventing a title')
+
+  console.log('ok   the console wraps an archived artifact in its own shell, and the artifact stays isolated')
+}
+
+// The shell's Approve/Request-changes controls hold the same invariant the fleet
+// page's cards do (views.mjs approveControl): only while the work is ACTUALLY
+// awaiting review. The artifact outlives the work by design - the Reviews panel
+// keeps landed and dropped reviews and links to them, through
+// /api/review-open?...&redirect=1, whose fallback is this very address - so the
+// shell is reachable for work there is nothing left to decide about. The state
+// crosses as data; what review.mjs renders from it is pinned in check-console.js.
+async function checkTheShellOffersApproveOnlyWhileAwaitingReview(port, home) {
+  const id = 'demo-review-gated'
+  const dir = path.join(home, 'data', id, 'lavish')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'change.html'), '<p>the change</p>')
+  const task = (...args) => spawnSync(path.join(ROOT, 'bin', 'dm-task.sh'), args,
+    { env: Object.assign({}, process.env, { DM_HOME: home }), encoding: 'utf8' })
+  const created = task('new', id, '--kind', 'ship', '--repo', 'dockmaster', '--title', 'A change to gate')
+  equal(created.status, 0, `the task fixture behind the gated review is created: ${created.stderr}`)
+
+  const before = await request(port, 'GET', `/review/${id}/`)
+  equal(before.status, 200, 'the shell renders for work that has not reached review')
+  ok(before.text.includes('"awaiting":false'), 'and offers nothing to approve yet')
+
+  const ready = task('event', id, 'review-ready', 'rendered for the operator')
+  equal(ready.status, 0, `the work reaches review: ${ready.stderr}`)
+  const awaiting = await request(port, 'GET', `/review/${id}/`)
+  ok(awaiting.text.includes('"awaiting":true'), 'once it is awaiting review, the shell may offer the controls')
+
+  // And once the work is over it may not again. `close` is how a dropped task
+  // reaches terminal; a LANDED one gets there the same way, through
+  // dm-task.sh state - which is why the shell asks that rather than reading a
+  // meta field or inferring it from the artifact's existence.
+  const closed = task('close', id, '--reason', 'the operator dropped it')
+  equal(closed.status, 0, `the work ends: ${closed.stderr}`)
+  const after = await request(port, 'GET', `/review/${id}/`)
+  equal(after.status, 200, 'the archived review still renders afterwards')
+  ok(after.text.includes('"ok":true'), 'and still names the work it was')
+  ok(after.text.includes('"awaiting":false'), 'but offers nothing to approve - that decision is over')
+  console.log('ok   the review shell offers Approve only while the work is awaiting review, not before and not after')
+}
+
+// A cross-site page framing either the console shell or a review page can stage
+// a decoy atop the real Approve button and turn a click meant for the decoy
+// into one that reaches this document (clickjacking). Two independent layers
+// close it: frame-ancestors 'none' on both documents' CSPs (a browser must
+// refuse to render either inside ANY frame), and crossSiteRefusal on the GET
+// navigation itself, so a browser that ignored the CSP still gets a 403.
+async function checkClickjackDefenses(port, home) {
+  const index = await request(port, 'GET', '/')
+  equal(index.status, 200, 'the console shell loads normally')
+  ok(index.headers['content-security-policy'].includes("frame-ancestors 'none'"),
+    'the console shell refuses to be framed by anyone')
+
+  const framedShell = await request(port, 'GET', '/', { 'sec-fetch-site': 'cross-site' })
+  equal(framedShell.status, 403, 'a cross-site attempt to load the shell as a frame is refused outright')
+  // GET / is a navigation: the refusal renders as the tab, so it has to be a
+  // worded page, not the JSON `fail()` writes. It also fires on innocent shapes
+  // (a console URL pasted into another page; a link from another 127.0.0.1 port,
+  // which is same-site rather than same-origin), so the text has to explain
+  // itself rather than read as an accusation.
+  ok(/^text\/html/.test(framedShell.headers['content-type'] || ''),
+    'the refusal renders as a page, not a JSON blob in the tab')
+  ok(/console only opens as a tab of its own/.test(framedShell.text),
+    `the refusal says what happened: ${framedShell.text.slice(0, 200)}`)
+  ok(framedShell.text.includes(`http://127.0.0.1:${port}/`), 'and how to open it properly')
+
+  const id = 'demo-review-clickjack'
+  const dir = path.join(home, 'data', id, 'lavish')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'change.html'), '<p>the change</p>')
+  const created = spawnSync(path.join(ROOT, 'bin', 'dm-task.sh'),
+    ['new', id, '--kind', 'ship', '--repo', 'dockmaster', '--title', 'A clickjack fixture'],
+    { env: Object.assign({}, process.env, { DM_HOME: home }), encoding: 'utf8' })
+  equal(created.status, 0, `the task fixture behind the clickjack review is created: ${created.stderr}`)
+
+  const shell = await request(port, 'GET', `/review/${id}/`)
+  equal(shell.status, 200, 'the review shell loads normally')
+  ok(shell.headers['content-security-policy'].includes("frame-ancestors 'none'"),
+    'the review shell - where Approve actually lives - refuses to be framed too')
+
+  const framedReview = await request(port, 'GET', `/review/${id}/`, { 'sec-fetch-site': 'cross-site' })
+  equal(framedReview.status, 403, 'a cross-site attempt to load the review shell as a frame is refused outright')
+
+  // Same-origin navigation (an operator opening the review page themselves)
+  // still works - the refusal is about CROSS-site framing, not framing at all.
+  const sameOrigin = await request(port, 'GET', `/review/${id}/`, { 'sec-fetch-site': 'same-origin' })
+  equal(sameOrigin.status, 200, 'a same-origin request for the review shell is unaffected')
+  console.log('ok   both the console shell and a review page refuse to be framed cross-site, by CSP and by refusal')
+}
+
+// dm-task.sh allows a titleless task (--title is optional); the wrapper used to
+// null the whole record only when BOTH title and repo were empty, so a
+// titleless task's real record slipped through with an empty title and an
+// Approval would have named no work at all ("Approval: the work "" in ..."). It
+// must fall back to the SAME '(untitled)' word live.js:392 uses for the exact
+// same case, not treat the record as gone (repo, required at creation, is what
+// actually means gone).
+async function checkTitlelessTaskGetsTheSameUntitledFallback(port, home) {
+  const id = 'demo-review-titleless'
+  const dir = path.join(home, 'data', id, 'lavish')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'change.html'), '<p>the change</p>')
+  const created = spawnSync(path.join(ROOT, 'bin', 'dm-task.sh'),
+    ['new', id, '--kind', 'ship', '--repo', 'dockmaster'],
+    { env: Object.assign({}, process.env, { DM_HOME: home }), encoding: 'utf8' })
+  equal(created.status, 0, `the titleless task fixture is created: ${created.stderr}`)
+
+  const shell = await request(port, 'GET', `/review/${id}/`)
+  equal(shell.status, 200, 'the shell still renders for a titleless task')
+  ok(shell.text.includes('"ok":true'), 'the task record was found, even with no title')
+  ok(shell.text.includes('"title":"(untitled)"'),
+    'an empty title falls back to the same word live.js uses, not a blank Approval')
+  console.log('ok   a titleless task gets the same (untitled) fallback the fleet page uses, not a blank name')
+}
+
+// The task title crosses into the wrapper as JSON inside a literal
+// <script type="application/json"> block (reviewShellHtml). A title containing
+// `</script>` could otherwise close that tag early and inject markup/script
+// into the wrapper document - reviewShellHtml escapes every `<` in the block to
+// its JSON unicode escape (the exact form the last assertion below names) for
+// that reason, so no raw `<` of any kind survives to start a tag. This pins it
+// against a REAL hostile title, through the real server, not just the escaping
+// helper in isolation.
+async function checkHostileTitleCannotBreakOutOfTheDataBlock(port, home) {
+  const id = 'demo-review-hostile-title'
+  const dir = path.join(home, 'data', id, 'lavish')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'change.html'), '<p>the change</p>')
+  const hostileTitle = '</script><script>alert(1)</script>'
+  const created = spawnSync(path.join(ROOT, 'bin', 'dm-task.sh'),
+    ['new', id, '--kind', 'ship', '--repo', 'dockmaster', '--title', hostileTitle],
+    { env: Object.assign({}, process.env, { DM_HOME: home }), encoding: 'utf8' })
+  equal(created.status, 0, `the task fixture behind the hostile-title review is created: ${created.stderr}`)
+
+  const shell = await request(port, 'GET', `/review/${id}/`)
+  equal(shell.status, 200, 'the wrapper still renders for a hostile title')
+  const dataBlock = shell.text.match(/<script type="application\/json" id="review-data">([^]*?)<\/script>/)
+  ok(dataBlock, 'the data block is present and still ends where a script tag ends')
+  ok(!dataBlock[1].includes('</script'), 'no raw </script inside the data block, escaped or otherwise')
+  ok(!dataBlock[1].includes('<'), 'no raw < of any kind inside the JSON string')
+  ok(dataBlock[1].includes('\\u003c'), 'the hostile `<` crosses escaped as \\u003c instead')
+  console.log('ok   a hostile task title cannot break out of the review data block')
+}
+
+// The two static files the wrapper's own script needs: the notes-box logic and
+// the shared postMessage() the composer also uses.
+async function checkReviewScriptsAreServed(port) {
+  const script = await request(port, 'GET', '/review.mjs')
+  equal(script.status, 200, 'the review page script is served')
+  equal(script.headers['content-type'], 'text/javascript; charset=utf-8', 'as a module script')
+  const api = await request(port, 'GET', '/api.mjs')
+  equal(api.status, 200, 'the shared postMessage helper is served too')
+  equal(api.headers['content-type'], 'text/javascript; charset=utf-8', 'as a module script')
+  console.log('ok   the review page\'s own script and the shared postMessage helper are served')
 }
 
 // --- 4. opening a review tries the lavish session, degrading honestly -------
@@ -453,6 +707,12 @@ async function main() {
     await checkATornTranscriptLineDoesNotKillIt(port, home)
     await checkBadRequestsAreRefusedNotCrashed(port)
     await checkReviewAssetsAtAnyDepth(port, home)
+    await checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home)
+    await checkTheShellOffersApproveOnlyWhileAwaitingReview(port, home)
+    await checkClickjackDefenses(port, home)
+    await checkTitlelessTaskGetsTheSameUntitledFallback(port, home)
+    await checkHostileTitleCannotBreakOutOfTheDataBlock(port, home)
+    await checkReviewScriptsAreServed(port)
     await checkReviewFailuresAreWorded(port, home)
     await checkReviewOpenDegradesForAnUnknownId(port)
     await checkTheOpenLinkRedirectsRatherThanAnswering(port)

@@ -11,8 +11,12 @@
  */
 'use strict';
 
-import { el, add, lamp, plural, clockTime, word, SOURCE_WORD } from './dom.mjs';
+import { el, add, lamp, plural, clockTime, word, storedTheme, THEME_KEY, SOURCE_WORD } from './dom.mjs';
 import { VIEWS, needsWords } from './views.mjs';
+// The one writer of the wire format: a console-served review page (review.mjs)
+// shares this same module, so the composer and every enqueue-only control on
+// either page post through the exact same function.
+import { postMessage } from './api.mjs';
 
 const shell = {
   state: null,
@@ -455,39 +459,10 @@ function compose(text) {
   growComposer();
 }
 
-// Why a message was refused, worded here. The server's own text names files and
-// scripts, so the status is what crosses - 403/415 mean the request did not
-// come from this page at all, which the operator cannot cause and cannot fix.
-const SEND_REFUSAL = {
-  400: 'the console would not accept it. If it is very long, try a shorter one.',
-  413: 'it is too long to send.',
-  403: 'the console refused it — that request did not come from this page.',
-  415: 'the console refused it — that request did not come from this page.',
-  500: 'the console could not store it. Ask the dockmaster to look into it.',
-};
-
-// The ONE way anything leaves this page: as an operator message on the same queue
-// the composer uses. A cleanup or trash control goes through here too, so nothing
-// on the page has a shorter path to the dockmaster than a typed sentence does.
-// Rejects with an already-worded reason.
-async function postMessage(text) {
-  let response;
-  try {
-    response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
-  } catch (err) {
-    throw new Error(`the console could not be reached (${err.message}).`);
-  }
-  // An unmapped status falls back to the number, which is honest and is not
-  // internal vocabulary - never to the server's own sentence.
-  if (!response.ok) {
-    throw new Error(SEND_REFUSAL[response.status] || `the console answered ${response.status}.`);
-  }
-}
-
+// The composer's submit handler - posts the typed text as an ordinary operator
+// message and clears the input once it lands. Every other control (cleanup,
+// trash, approve, request changes) enqueues the same way, straight through
+// ctx.ask, without passing through here at all.
 async function sendMessage(event) {
   event.preventDefault();
   const input = byId('chat-input');
@@ -521,7 +496,7 @@ function growComposer() {
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   byId('theme-toggle').textContent = theme === 'dark' ? 'Light' : 'Dark';
-  localStorage.setItem('dm-console-theme', theme);
+  localStorage.setItem(THEME_KEY, theme);
 }
 
 function setChatOpen(open) {
@@ -546,8 +521,7 @@ function wire() {
   // Shown until the first read proves otherwise, so an empty conversation reads
   // as an invitation rather than a blank panel.
   byId('chat-empty').hidden = false;
-  applyTheme(localStorage.getItem('dm-console-theme')
-    || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'));
+  applyTheme(storedTheme());
   setFocus(localStorage.getItem('dm-console-focus') === '1');
   byId('theme-toggle').addEventListener('click', () => {
     applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');

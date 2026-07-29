@@ -51,15 +51,20 @@ status — write it that way.
 
 ## What it will not do
 
-No control on the page carries anything out. The cleanup and trash controls
-**enqueue a request**: it arrives as an ordinary operator message on the same
-queue as the composer, opening `Cleanup request:` or `Trash request:`, and you run
-it here under the usual gates. So the merge authority in `AGENTS.md` §3 is
-untouched by anything the operator clicks — and a confirmed trash request IS the
-operator's explicit discard authority for directive 4, for the item it names: the
-confirm strip quotes the exact request text before it is sent, which is the
+No control on the page carries anything out. The cleanup, trash, and
+awaiting-review controls all **enqueue a request**: it arrives as an ordinary
+operator message on the same queue as the composer, opening `Cleanup request:`,
+`Trash request:`, `Approval:`, or `Revision request:`, and you run it here under
+the usual gates. So the merge authority in `AGENTS.md` §3 is untouched by
+anything the operator clicks — and a confirmed trash request IS the operator's
+explicit discard authority for directive 4, for the item it names: the confirm
+strip quotes the exact request text before it is sent, which is the
 informed-consent step the directive asks for. That authority covers only what the
 request names — anything a discard would touch beyond it still stops and escalates.
+`Approval:` is explicitly NOT the merge word directive 3 requires — it feeds
+`change-review`'s lavish approval gate, and merge authority is decided separately,
+same as always. `Revision request:` routes back into `change-review` as the
+operator's own feedback, relayed to the crewmate.
 
 A request names work by **title and repo**, never a task id — the document behind
 the page deliberately carries none. Resolve it yourself, and ask if two pieces of

@@ -12,7 +12,7 @@ import {
   plural, lookup, word, ago, clockTime, hoursSince,
   WORK_STATE, CHECKS, REVIEW_VERDICT, AUTHORITY, KIND, CHECK_STATUS, MODE,
   STAGE_LABEL, STAGE_STATE, SOURCE_WORD, PR_UNREADABLE, TESTS_RESULT,
-  CLEANUP_REQUEST, TRASH_REQUEST,
+  CLEANUP_REQUEST, TRASH_REQUEST, APPROVE_REQUEST, REVISION_REQUEST,
 } from './dom.mjs';
 
 // What a fold is remembered under. One owner for the format: the Tidy panel
@@ -184,6 +184,36 @@ function trashControl(item, ctx) {
   });
 }
 
+// The two awaiting-review affordances. Same enqueue-only pattern as the trash
+// control above: each one only ever puts an ordinary message on the queue, and
+// the dockmaster is the one that reads it and acts. Neither shows outside
+// `ready_for_review`, and neither shows without a rendered artifact behind
+// `review_href` - the artifact IS the approval gate, so approving or asking for
+// changes with nothing to review is not a request this page can even word.
+function approveControl(item, ctx) {
+  if (item.state !== 'ready_for_review' || !item.review_href) return null;
+  return askControl({
+    kind: 'approve',
+    label: 'Approve',
+    confirm: "Ask the dockmaster to approve this change. Landing still follows the repo's own merge authority.",
+    request: APPROVE_REQUEST(item.title, item.repo),
+    ask: ctx.ask,
+  });
+}
+
+function changesControl(item, ctx) {
+  if (item.state !== 'ready_for_review' || !item.review_href) return null;
+  return askControl({
+    kind: 'changes',
+    label: 'Request changes',
+    confirm: 'Send the dockmaster your notes on what needs to change.',
+    notes: true,
+    placeholder: 'What needs to change?',
+    buildRequest: (notes) => REVISION_REQUEST(item.title, item.repo, notes),
+    ask: ctx.ask,
+  });
+}
+
 function voyage(item, ctx) {
   const [lampKind, stateWord] = lookup(WORK_STATE, item.state);
   const card = el('article', `voyage is-${item.state}`);
@@ -207,6 +237,8 @@ function voyage(item, ctx) {
   if (note) add(card, el('p', 'voyage-note', note));
   const foot = el('div', 'voyage-foot');
   if (item.review_href) add(foot, link(item.review_href, 'Open the review page', 'row-action'));
+  add(foot, approveControl(item, ctx));
+  add(foot, changesControl(item, ctx));
   add(foot, trashControl(item, ctx));
   add(card, foot);
   return card;
@@ -397,6 +429,29 @@ export function needsWords(item) {
   return { head: item.title || 'Something is waiting on you', detail: item.detail || '' };
 }
 
+// One row per task behind an aggregated "N changes are waiting for your
+// review" beacon - the headline stays aggregated, but each task underneath it
+// is still a single piece of work the operator can act on without leaving this
+// panel for In-flight. Built from `approveControl`/`changesControl` so the
+// wording and the enqueue-only contract are the same ones the In-flight card
+// uses, never a second copy of either.
+function reviewRow(sub, ctx) {
+  const row = el('div', 'review-item');
+  add(row, el('p', 'review-item-what', `${sub.title} — ${sub.repo}`));
+  const actions = el('div', 'review-item-actions');
+  if (sub.review_href) add(actions, link(sub.review_href, 'Open the review page', 'row-action'));
+  // `state` is synthesized, always 'ready_for_review' - approveControl's/
+  // changesControl's own gate on it is vacuous here. The real guarantee is
+  // upstream: live.js only ever maps a task actually awaiting review into
+  // this items[] array in the first place. `review_href` crosses through
+  // unchanged, so the artifact-rendered gate still applies to this row too.
+  const stand = { state: 'ready_for_review', title: sub.title, repo: sub.repo, review_href: sub.review_href };
+  add(actions, approveControl(stand, ctx));
+  add(actions, changesControl(stand, ctx));
+  add(row, actions);
+  return row;
+}
+
 function berth(item, ctx) {
   const words = needsWords(item);
   const row = el('div', 'row');
@@ -405,6 +460,11 @@ function berth(item, ctx) {
   const when = item.at ? ago(item.at) : '';
   if (where || when) add(body, meta(where, when));
   add(body, el('p', 'row-head', words.head), el('p', 'row-detail', words.detail));
+  if (item.kind === 'review' && item.items && item.items.length) {
+    const list = el('div', 'review-items');
+    item.items.forEach((sub) => add(list, reviewRow(sub, ctx)));
+    add(body, list);
+  }
   if (item.options && item.options.length) {
     const choices = el('div', 'choices');
     // The answer goes into the composer rather than straight out: the operator
@@ -417,7 +477,13 @@ function berth(item, ctx) {
     }
     add(body, choices);
   }
-  if (item.href && words.action) add(body, link(item.href, words.action, 'row-action'));
+  // A single awaiting review already got its own "Open the review page" link
+  // in the row above - repeating it here would be the same link twice. Several
+  // still get the jump to In-flight, which the per-task rows do not replace.
+  const oneReviewAlready = item.kind === 'review' && item.items && item.items.length === 1;
+  if (item.href && words.action && !oneReviewAlready) {
+    add(body, link(item.href, words.action, 'row-action'));
+  }
   return add(row, lamp(item.lamp), body);
 }
 

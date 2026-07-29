@@ -30,10 +30,12 @@ const ROUTES = {
   '/console.mjs': ['console.mjs', 'text/javascript; charset=utf-8'],
   '/views.mjs': ['views.mjs', 'text/javascript; charset=utf-8'],
   '/dom.mjs': ['dom.mjs', 'text/javascript; charset=utf-8'],
+  '/api.mjs': ['api.mjs', 'text/javascript; charset=utf-8'],
+  '/review.mjs': ['review.mjs', 'text/javascript; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
 };
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-  + "connect-src 'self'; base-uri 'none'; form-action 'none'";
+  + "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const MAX_BODY_BYTES = 64 * 1024;
 const LONG_POLL_MS = 25000;
 // A review page ships beside its screenshots. One path segment, no slashes and
@@ -90,12 +92,12 @@ function fail(res, status, message, detail) {
   sendJson(res, status, { error: message });
 }
 
-// A /review/ address is a same-tab NAVIGATION: there is no page script to word
-// a failure, so the browser renders whatever comes back as the body. It gets a
-// worded page rather than a JSON blob.
-function failReview(res, status, message, detail) {
-  process.stderr.write(`console: review: ${message}${detail ? ` — ${detail}` : ''}\n`);
-  const body = `<!doctype html><html lang="en"><head><meta charset="utf-8">`
+// Both GET NAVIGATIONS this server answers - `/` and `/review/...` - are
+// same-tab loads: there is no page script to word a failure, so the browser
+// renders whatever comes back as the body. They get a worded page rather than a
+// JSON blob in the tab.
+function wordedPage(heading, lines) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1">`
     + `<meta name="color-scheme" content="dark light"><title>dockmaster</title>`
     + `<style>body{margin:0;display:grid;place-items:center;min-height:100vh;`
@@ -103,10 +105,30 @@ function failReview(res, status, message, detail) {
     + `div{max-width:32rem;padding:2rem;border-left:2px solid #c8a15c}`
     + `p{margin:.5rem 0;color:#93a6b1}b{color:#e6edf1;font-weight:600}`
     + `@media(prefers-color-scheme:light){body{background:#fff;color:#0a1014}p{color:#46585f}b{color:#0a1014}}`
-    + `</style></head><body><div><p><b>This review page could not be opened.</b></p>`
-    + `<p>${escapeHtml(message)}</p>`
-    + `<p>Ask the dockmaster to look into it.</p></div></body></html>`;
-  send(res, status, 'text/html; charset=utf-8', body);
+    + `</style></head><body><div><p><b>${escapeHtml(heading)}</b></p>`
+    + lines.map((line) => `<p>${escapeHtml(line)}</p>`).join('')
+    + `</div></body></html>`;
+}
+
+function failReview(res, status, message, detail) {
+  process.stderr.write(`console: review: ${message}${detail ? ` — ${detail}` : ''}\n`);
+  send(res, status, 'text/html; charset=utf-8',
+    wordedPage('This review page could not be opened.', [message, 'Ask the dockmaster to look into it.']));
+}
+
+// The cross-site refusal on GET / (see handle()). It is a navigation like a
+// review page is, so it must not answer a tab with JSON either.
+//
+// This fires on innocent shapes as well as hostile ones: a console URL pasted
+// into some other page, or a link from another port on 127.0.0.1 - which is
+// same-SITE, not same-origin, and refused just the same. So the page says what
+// happened and how to get in, rather than accusing the operator of an attack.
+function refuseConsolePage(res, port, detail) {
+  process.stderr.write(`console: refused the console page: ${detail}\n`);
+  send(res, 403, 'text/html; charset=utf-8', wordedPage('The console did not open from there.', [
+    'Another page asked for it - a link, a frame, or another port on this machine - and the console only opens as a tab of its own.',
+    `Open http://127.0.0.1:${port}/ yourself and it will load.`,
+  ]));
 }
 
 const escapeHtml = (text) => String(text).replace(/[&<>"']/g,
@@ -125,13 +147,84 @@ function hostIsLocal(req, port) {
 // loop through an <img>, a <link rel=stylesheet> or an @font-face. That request
 // drives a fleet-wide sweep which writes and takes the task lock, and the
 // cross-site refusal cannot stop it because a review page IS same-origin.
-// Together with connect-src 'none' and form-action 'none', the API is
-// unreachable from an archived review by any means.
+// connect-src 'none' and form-action 'none' hold the artifact to that, but a CSP
+// is a per-document restriction the artifact's own inline script obeys - it is
+// defense-in-depth, not the isolation boundary. The boundary is the sandbox
+// attribute on the iframe this CSP is served into (see reviewShellHtml): without
+// it, same-origin framing hands the artifact window.parent and it could call
+// parent.fetch, or simply click the wrapper's own buttons, regardless of what
+// this CSP says.
 function reviewCsp(port) {
   const own = localHosts(port).map((host) => `http://${host}/review/`).join(' ');
   return `default-src 'none'; script-src ${own} 'unsafe-inline'; style-src ${own} 'unsafe-inline'; `
     + `img-src ${own} data:; font-src ${own} data:; `
     + "connect-src 'none'; base-uri 'none'; form-action 'none'";
+}
+
+// The wrapper this console puts AROUND an archived artifact, at the same
+// /review/<id>/ address the raw artifact used to answer at directly. It is OUR
+// OWN markup - server-templated, nothing the artifact or the request supplies
+// reaches it unescaped - so it is trusted the same way index.html is, not the
+// way the artifact is: 'self' scripts and a same-origin fetch, so the notes box
+// can enqueue a message. The artifact keeps rendering inside an iframe, at the
+// SAME asset address the non-index branch of serveReview already answers,
+// still behind the unchanged, unforgiving reviewCsp() above. What actually keeps
+// this shell safe from the artifact is `sandbox="allow-scripts"` on that iframe
+// (reviewShellHtml, below): no allow-same-origin means the artifact renders into
+// an OPAQUE origin, cross-origin to this document. It still gets a window.parent
+// - a cross-origin WindowProxy, so parent.postMessage is reachable and this
+// shell simply has no message listener - but nothing that crosses the origin:
+// no DOM access (parent.document throws, contentDocument reads back null), no
+// parent.fetch, no reach into this shell's Approve/Send buttons or its
+// connect-src 'self' fetch. The CSP above is defense-in-depth on the artifact's
+// own document; the sandbox is the isolation guarantee.
+// frame-ancestors 'none' - nothing may frame the SHELL itself. A hostile page
+// that could frame it could overlay a decoy atop the real Approve button and
+// turn a click meant for the decoy into one that reaches this document instead
+// (classic clickjacking) - the shell's own iframe of the artifact is unaffected,
+// since frame-ancestors governs who may frame THIS document, not what it frames.
+function reviewShellCsp() {
+  return "default-src 'none'; script-src 'self'; style-src 'self'; frame-src 'self'; "
+    + "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+}
+
+// reviewShellHtml(basename, info) - `info` is `{ title, repo, state }` when the
+// task record behind this review could still be read, or `null` when it could
+// not (archived, discarded, or the read itself failed) - carried into the page as
+// data, never as prose, so review.mjs decides how to say it exactly once.
+function reviewShellHtml(basename, info) {
+  const data = JSON.stringify({
+    ok: Boolean(info),
+    title: info ? info.title : '',
+    repo: info ? info.repo : '',
+    // The same invariant views.mjs holds on the fleet page: Approve and Request
+    // changes exist only while the work is ACTUALLY awaiting review. The Reviews
+    // panel's archive rows link here for landed and dropped work too (through
+    // /api/review-open?...&redirect=1, which falls back to this address), so
+    // without this the shell offered to approve a change that shipped weeks ago.
+    // The state is decided here, on the reconciled record, so the page cannot
+    // decide it from something softer like "there is an artifact".
+    awaiting: Boolean(info) && info.state === 'ready_for_review',
+  }).replace(/</g, '\\u003c');
+  // `basename` is a real file `reviewDir` already resolved, not request input -
+  // encoded and escaped anyway, on the same principle as every other href this
+  // page writes: composed, never trusted verbatim.
+  const iframeSrc = escapeHtml(encodeURIComponent(basename));
+  // data-theme is the same pre-script default index.html carries; the operator's
+  // stored choice is in their browser, not on this server, so review.mjs applies
+  // it on load. It cannot be applied any earlier: this document's CSP allows no
+  // inline script, which is the only thing that would run before first paint.
+  return `<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+    + `<meta name="color-scheme" content="dark light"><title>dockmaster — review</title>`
+    + `<link rel="stylesheet" href="/console.css"></head>`
+    + `<body class="review-shell">`
+    + `<script type="application/json" id="review-data">${data}</script>`
+    + `<div class="review-frame"><iframe src="${iframeSrc}" title="The change" `
+    + `sandbox="allow-scripts"></iframe></div>`
+    + `<div class="review-panel" id="review-panel"></div>`
+    + `<script type="module" src="/review.mjs"></script>`
+    + `</body></html>`;
 }
 
 // A header value is only ever echoed back bounded: it is attacker-controlled,
@@ -144,6 +237,14 @@ const shown = (value) => String(value).slice(0, 40).replace(/[^\x20-\x7e]/g, '?'
 // attack. It does nothing about a cross-site request that CHANGES something: a
 // hostile page can aim one straight at this literal loopback URL, and the
 // browser sets the Host header itself, so it arrives looking local.
+//
+// Also applied to the GET / and GET /review/ navigations (below), alongside
+// frame-ancestors 'none' on both CSPs: a hostile page framing this console (or
+// a review page) to stage a clickjacked click is a cross-site NAVIGATION, and
+// Sec-Fetch-Site on it says so - refusing it here is defense-in-depth should a
+// browser ever ignore frame-ancestors. Under /review/ that covers DOCUMENT loads
+// only (isDocumentLoad below), because the sandboxed artifact's own subresources
+// are same-origin requests a browser is obliged to label cross-site.
 //
 //   Sec-Fetch-Site  the browser sets it and page script cannot forge it (it is
 //                   a forbidden header name); anything but same-origin/none is
@@ -164,6 +265,30 @@ function crossSiteRefusal(req, port) {
     return { status: 403, message: 'refused a request from another origin' };
   }
   return null;
+}
+
+// The Sec-Fetch-Dest values that name a DOCUMENT-level load - a navigation or a
+// framing. Anything else (image, style, script, font, ...) is a subresource of a
+// document that is already loaded.
+const DOCUMENT_DESTS = ['document', 'iframe', 'frame', 'embed', 'object'];
+
+// Whether this request is loading a DOCUMENT rather than a subresource of one.
+//
+// It exists for /review/, where the two are not the same origin: the artifact
+// renders in `sandbox="allow-scripts"`, i.e. an OPAQUE origin, so every
+// screenshot, stylesheet and font it asks for arrives with `sec-fetch-site:
+// cross-site` even though the shell that framed it is ours. Applying the
+// cross-site refusal to those refused every image in a review page that ships
+// screenshots. Refusing only document loads keeps the refusal exactly where it
+// pays off (a hostile framing of the shell, or of the artifact) and gives up
+// nothing: the artifact document has no controls on it and connect-src 'none'.
+//
+// A missing Sec-Fetch-Dest counts as a document: every browser that sends
+// Sec-Fetch-Site sends Sec-Fetch-Dest with it, so an unrecognised client cannot
+// use the omission to slip a framing past the refusal.
+function isDocumentLoad(req) {
+  const dest = req.headers['sec-fetch-dest'];
+  return dest === undefined || DOCUMENT_DESTS.includes(String(dest));
 }
 
 // A posted message becomes an operator INSTRUCTION the dockmaster acts on, so
@@ -237,7 +362,33 @@ async function serveReview(res, cfg, pathname) {
   }
   const found = await live.reviewDir(cfg.bin, id);
   if (!found) return failReview(res, 404, 'There is no review page for that work.');
-  const file = isIndex ? found.file : path.join(found.dir, ...rest);
+
+  if (isIndex) {
+    // A wrapper this console builds itself, not the archived artifact: it
+    // renders the artifact in an iframe (still served, unchanged, by the
+    // branch below) and adds the notes box - see reviewShellCsp() for why that
+    // split is what keeps the artifact's own isolation intact.
+    let info = null;
+    try {
+      info = await live.taskInfo(cfg.bin, id);
+      // `repo` is required at creation (dm-task.sh new --repo); missing it means
+      // the record itself is gone. A title alone may legitimately be empty
+      // (dm-task.sh allows titleless tasks) - the old `&&` here let an empty
+      // title through as-is, so an Approval could name no work at all. Falling
+      // back to the same '(untitled)' live.js:392 uses instead of nulling the
+      // whole record keeps this page and the fleet page agreeing on what a
+      // titleless task looks like.
+      if (!info.repo) info = null;
+      else if (!info.title) info.title = '(untitled)';
+    } catch (err) {
+      process.stderr.write(`console: review: could not read the task record for this review: ${err.message}\n`);
+    }
+    const basename = path.basename(found.file);
+    return send(res, 200, 'text/html; charset=utf-8', reviewShellHtml(basename, info),
+      { 'content-security-policy': reviewShellCsp() });
+  }
+
+  const file = path.join(found.dir, ...rest);
   let body;
   try {
     body = fs.readFileSync(file);
@@ -352,6 +503,18 @@ function handle(req, res, cfg, watchers) {
   if (!hostIsLocal(req, cfg.port)) return fail(res, 403, `refused a request for host '${req.headers.host}'`);
   const url = new URL(req.url, `http://127.0.0.1:${cfg.port}`);
 
+  // The console shell itself is the page a clickjack overlays: framed, its own
+  // Approve-style controls would not exist yet (this is the shell, not the
+  // review page), but it is the top-level navigation the attack loads before
+  // deep-linking into a review, so it gets the same refusal as that below.
+  // Unconditional here, unlike /review/ below: nothing but the shell document
+  // itself is served at this address, so there are no subresources of it to
+  // mistake for a cross-site attempt.
+  if (req.method === 'GET' && url.pathname === '/') {
+    const refusal = crossSiteRefusal(req, cfg.port);
+    if (refusal) return refuseConsolePage(res, cfg.port, refusal.message);
+    return serveStatic(res, url.pathname);
+  }
   if (req.method === 'GET' && Object.prototype.hasOwnProperty.call(ROUTES, url.pathname)) {
     return serveStatic(res, url.pathname);
   }
@@ -376,6 +539,16 @@ function handle(req, res, cfg, watchers) {
       });
   }
   if (req.method === 'GET' && url.pathname.startsWith('/review/')) {
+    // The review shell is where a clickjacked click actually pays off - it is
+    // the document with the Approve/Request-changes controls on it - so a
+    // cross-site DOCUMENT load of anything under /review/ is refused: the shell,
+    // and the artifact document too, which a hostile page could otherwise frame.
+    // Its SUBRESOURCES are a different matter and must not be refused; see
+    // isDocumentLoad() for why they arrive looking cross-site at all.
+    if (isDocumentLoad(req)) {
+      const refusal = crossSiteRefusal(req, cfg.port);
+      if (refusal) return failReview(res, refusal.status, refusal.message);
+    }
     return serveReview(res, cfg, url.pathname)
       .catch((err) => failReview(res, 500, 'The review archive could not be read.', err.message));
   }
