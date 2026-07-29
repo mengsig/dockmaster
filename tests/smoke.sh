@@ -2424,8 +2424,17 @@ BROKEN_STATUS_BEFORE="$(git -C "$DISTRO2_HOME" status --porcelain)"
 BROKEN_BRANCH_BEFORE="$(git -C "$DISTRO2_HOME" rev-parse --abbrev-ref HEAD)"
 if BROKENOUT="$(d2 dm-worktree.sh create self-broken dockmaster feat/x/self-broken 2>&1)"; then BROKEN_RC=0; else BROKEN_RC=$?; fi
 check "a failed fetch refuses to create the distro's own worktree" '[ "$BROKEN_RC" -ne 0 ]'
-check "the refusal names the failure, not a soft warning" \
-  'grep -qi "could not fetch" <<<"$BROKENOUT" && ! grep -qi "base may be stale" <<<"$BROKENOUT"'
+# Assert the LEVEL, not just the words. `grep -qi "could not fetch"` alone is
+# satisfied by dm_warn's output as happily as dm_die's, so downgrading the guard
+# back to warn-and-continue -- the exact pre-fix behavior this task removed --
+# left the suite fully green. dm_die prints "error: ", dm_warn prints "warning: ".
+check "the refusal is an error, not a soft warning" \
+  'grep -q "^error: could not fetch" <<<"$BROKENOUT" && ! grep -q "^warning:" <<<"$BROKENOUT"'
+# And assert it stopped HERE. A warn-and-continue reaches the base read below
+# and dies there instead, which keeps the exit code non-zero and every other
+# check green -- but only by accident of what is already in the ref store.
+check "the refusal stops at the fetch guard, never reaching the base read" \
+  '! grep -q "did not resolve" <<<"$BROKENOUT" && ! grep -qi "base may be stale" <<<"$BROKENOUT"'
 check "no worktree was cut off an unverifiable base"        '[ ! -e "$DISTRO2_HOME/state/worktrees/self-broken" ]'
 check "the failed fetch left the clone's head untouched"    '[ "$(git -C "$DISTRO2_HOME" rev-parse main)" = "$DISTRO2_HEAD" ]'
 check "the failed fetch left the clone's branch untouched"  '[ "$(git -C "$DISTRO2_HOME" rev-parse --abbrev-ref HEAD)" = "$BROKEN_BRANCH_BEFORE" ]'
@@ -2477,10 +2486,11 @@ check "the diverged local head survived the refusal" \
   '[ "$(git -C "$DISTRO3_HOME" rev-parse main)" = "$DISTRO3_HEAD" ]'
 
 echo "== distro worktree base: a narrowed refspec leaving origin/<def> stale is still caught (F2) =="
-# `git fetch --quiet origin main` returning 0 only proves FETCH_HEAD advanced.
-# With a hand-narrowed remote.origin.fetch refspec, the remote-tracking ref
-# origin/main is never actually touched by that fetch. Resolving the base from
-# FETCH_HEAD (not by re-resolving origin/<def>) is what closes this.
+# A successful `git fetch origin main` does not prove the remote-tracking ref
+# moved: with a hand-narrowed remote.origin.fetch refspec, origin/main is never
+# touched by that fetch. Fetching into an explicit private destination
+# (refs/dm/base/<def>) and reading THAT ref -- rather than re-resolving
+# origin/<def> -- is what closes this.
 DISTRO4_ORIGIN="$TMP/distro4-origin.git"
 DISTRO4_HOME="$TMP/distro4-home"
 git init -q --bare -b main "$DISTRO4_ORIGIN"
@@ -2506,6 +2516,136 @@ check "the narrowed-refspec fixture actually left origin/main stale (fixture san
   '[ "$(git -C "$DISTRO4_HOME" rev-parse origin/main)" = "$DISTRO4_STALE_TRACKING" ]'
 check "the new distro worktree bases on the FETCHED tip, not the stale tracking ref (F2)" \
   '[ "$(git -C "$DISTRO4_HOME/state/worktrees/self-narrow" rev-parse HEAD)" = "$DISTRO4_NEW_TIP" ]'
+
+echo "== distro worktree base: a CONCURRENT fetch cannot substitute the base (F3) =="
+# FETCH_HEAD is ONE scratch file per clone that ANY fetch rewrites, so reading
+# the base from it is a read of shared mutable state with no lock. A second
+# fetch landing between our fetch and our read hands back an unrelated branch
+# tip wearing an "origin/main" label -- and `create --base`, dm-merge's
+# stacked-child rebase, and the operator's own `git fetch origin some-branch`
+# all fetch non-default refs against this very clone. Fetching into a private
+# refs/dm/base/<def> makes the ref we read the ref this fetch wrote.
+DISTRO5_ORIGIN="$TMP/distro5-origin.git"
+DISTRO5_HOME="$TMP/distro5-home"
+git init -q --bare -b main "$DISTRO5_ORIGIN"
+git init -q -b main "$DISTRO5_HOME"
+( cd "$DISTRO5_HOME"; git config user.email d5@d.co; git config user.name d5
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro5 init"
+  git remote add origin "$DISTRO5_ORIGIN"; git push -q origin main ) >/dev/null 2>&1
+git -C "$TMP" clone -q "$DISTRO5_ORIGIN" distro5-pusher
+( cd "$TMP/distro5-pusher"; git config user.email p5@p.co; git config user.name p5
+  printf 'advance\n' >> AGENTS.md; git commit -qam "TRUE MAIN TIP"; git push -q origin main
+  git checkout -q -b unrelated
+  printf 'unrelated\n' >> AGENTS.md; git commit -qam "UNRELATED BRANCH TIP"
+  git push -q origin unrelated ) >/dev/null 2>&1
+DISTRO5_MAIN_TIP="$(git -C "$TMP/distro5-pusher" rev-parse main)"
+DISTRO5_UNRELATED_TIP="$(git -C "$TMP/distro5-pusher" rev-parse unrelated)"
+# The race made deterministic: a `git` shim fires the competing fetch the
+# instant the distro arm's own fetch returns -- the exact window.
+RACE_SHIM="$TMP/race-shim"
+mkdir -p "$RACE_SHIM"
+RACE_REAL_GIT="$(command -v git)"
+cat > "$RACE_SHIM/git" <<RACESHIM
+#!/usr/bin/env bash
+REAL="$RACE_REAL_GIT"
+if [ "\${DM_RACE_SHIM_ACTIVE:-0}" != "1" ] && [ "\$1" = "-C" ] && [ "\$3" = "fetch" ]; then
+  racedir="\$2"; racerc=0
+  "\$REAL" "\$@" || racerc=\$?
+  case " \$* " in
+    *main*) DM_RACE_SHIM_ACTIVE=1 "\$REAL" -C "\$racedir" fetch --quiet origin unrelated >/dev/null 2>&1 || true ;;
+  esac
+  exit \$racerc
+fi
+exec "\$REAL" "\$@"
+RACESHIM
+chmod +x "$RACE_SHIM/git"
+d5() { DM_HOME="$DISTRO5_HOME" "$ROOT/bin/$@"; }
+d5 dm-doctor.sh >/dev/null
+d5 dm-task.sh new self-race --kind ship --repo dockmaster --mode local-only >/dev/null
+RACEOUT="$(PATH="$RACE_SHIM:$PATH" d5 dm-worktree.sh create self-race dockmaster feat/x/self-race 2>&1)"
+check "the shim really did land a competing fetch (fixture sanity)" \
+  '[ "$(git -C "$DISTRO5_HOME" rev-parse FETCH_HEAD)" = "$DISTRO5_UNRELATED_TIP" ]'
+check "a concurrent fetch cannot substitute the worktree's base (F3)" \
+  '[ "$(git -C "$DISTRO5_HOME/state/worktrees/self-race" rev-parse HEAD)" = "$DISTRO5_MAIN_TIP" ]'
+check "the stated base names the commit the worktree actually got (F3)" \
+  'grep -qF "base: origin/main @$(git -C "$DISTRO5_HOME" rev-parse --short "$DISTRO5_MAIN_TIP")" <<<"$RACEOUT"'
+# The companion guard: a fetch that reports success but leaves the ref it was
+# told to write missing must be refused BY NAME, not left to fail as a raw
+# `git worktree add ""`. No real git does this, which is why it needs a shim -
+# and why the refusal is otherwise indistinguishable from working code.
+VANISH_SHIM="$TMP/vanish-shim"
+mkdir -p "$VANISH_SHIM"
+cat > "$VANISH_SHIM/git" <<VANISHSHIM
+#!/usr/bin/env bash
+REAL="$RACE_REAL_GIT"
+if [ "\$1" = "-C" ] && [ "\$3" = "fetch" ]; then
+  vanishdir="\$2"; vanishrc=0
+  "\$REAL" "\$@" || vanishrc=\$?
+  "\$REAL" -C "\$vanishdir" update-ref -d refs/dm/base/main >/dev/null 2>&1 || true
+  exit \$vanishrc
+fi
+exec "\$REAL" "\$@"
+VANISHSHIM
+chmod +x "$VANISH_SHIM/git"
+d5 dm-task.sh new self-vanish --kind ship --repo dockmaster --mode local-only >/dev/null
+if VANISHOUT="$(PATH="$VANISH_SHIM:$PATH" d5 dm-worktree.sh create self-vanish dockmaster feat/x/self-vanish 2>&1)"; then VANISH_RC=0; else VANISH_RC=$?; fi
+check "a fetch reporting success but writing no base ref creates nothing (F3)" \
+  '[ "$VANISH_RC" -ne 0 ] && [ ! -e "$DISTRO5_HOME/state/worktrees/self-vanish" ]'
+check "that refusal is an error naming the missing base ref (F3)" \
+  'grep -q "^error: fetch of origin/main succeeded but refs/dm/base/main did not resolve" <<<"$VANISHOUT"'
+
+echo "== distro worktree base: a TAG named after the default branch cannot shadow it (F4) =="
+# `git rev-parse main` searches refs/tags/ BEFORE refs/heads/, so the divergence
+# guard asked its question about a tag and let the operator's unpushed commits
+# through. Address the branch by its full refs/heads/ path, as dm-sync.sh does.
+DISTRO6_ORIGIN="$TMP/distro6-origin.git"
+DISTRO6_HOME="$TMP/distro6-home"
+git init -q --bare -b main "$DISTRO6_ORIGIN"
+git init -q -b main "$DISTRO6_HOME"
+( cd "$DISTRO6_HOME"; git config user.email d6@d.co; git config user.name d6
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro6 init"
+  git remote add origin "$DISTRO6_ORIGIN"; git push -q origin main
+  # a tag named after the default branch, pinned to the PUSHED commit ...
+  git tag main
+  # ... and an unpushed hand commit on the real branch, which the guard exists
+  # to protect. `rev-parse main` answers with the tag, not this commit.
+  printf 'hand edit\n' >> AGENTS.md; git commit -qam "unpushed hand commit" ) >/dev/null 2>&1
+DISTRO6_BRANCH_HEAD="$(git -C "$DISTRO6_HOME" rev-parse refs/heads/main)"
+d6() { DM_HOME="$DISTRO6_HOME" "$ROOT/bin/$@"; }
+d6 dm-doctor.sh >/dev/null
+d6 dm-task.sh new self-tag --kind ship --repo dockmaster --mode local-only >/dev/null
+check "the tag really does shadow the branch (fixture sanity)" \
+  '[ "$(git -C "$DISTRO6_HOME" rev-parse main 2>/dev/null)" != "$DISTRO6_BRANCH_HEAD" ]'
+if TAGOUT="$(d6 dm-worktree.sh create self-tag dockmaster feat/x/self-tag 2>&1)"; then TAG_RC=0; else TAG_RC=$?; fi
+check "a tag named after the default branch does not shadow it in the guard (F4)" \
+  '[ "$TAG_RC" -ne 0 ] && grep -q "carries commits not on origin" <<<"$TAGOUT"'
+check "no worktree was cut off a base that would drop the hand commit (F4)" \
+  '[ ! -e "$DISTRO6_HOME/state/worktrees/self-tag" ]'
+check "the unpushed hand commit survived the refusal (F4)" \
+  '[ "$(git -C "$DISTRO6_HOME" rev-parse refs/heads/main)" = "$DISTRO6_BRANCH_HEAD" ]'
+
+# The DM_NO_FETCH fallback resolves a ref too, so it carries the same tag hazard.
+DISTRO7_ORIGIN="$TMP/distro7-origin.git"
+DISTRO7_HOME="$TMP/distro7-home"
+git init -q --bare -b main "$DISTRO7_ORIGIN"
+git init -q -b main "$DISTRO7_HOME"
+( cd "$DISTRO7_HOME"; git config user.email d7@d.co; git config user.name d7
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro7 init"
+  git remote add origin "$DISTRO7_ORIGIN"; git push -q origin main
+  git tag main
+  printf 'local work\n' >> AGENTS.md; git commit -qam "local commit"
+  # nothing was ever FETCHED: drop the tracking ref push created, so the offline
+  # arm falls through to the local branch -- the one a tag can shadow.
+  git update-ref -d refs/remotes/origin/main ) >/dev/null 2>&1
+DISTRO7_BRANCH_HEAD="$(git -C "$DISTRO7_HOME" rev-parse refs/heads/main)"
+d7() { DM_HOME="$DISTRO7_HOME" "$ROOT/bin/$@"; }
+d7 dm-doctor.sh >/dev/null
+d7 dm-task.sh new self-tag-nf --kind ship --repo dockmaster --mode local-only >/dev/null
+TAGNFOUT="$(DM_NO_FETCH=1 d7 dm-worktree.sh create self-tag-nf dockmaster feat/x/self-tag-nf 2>&1)"
+check "the DM_NO_FETCH fallback bases on the BRANCH, not a tag shadowing it (F4)" \
+  '[ "$(git -C "$DISTRO7_HOME/state/worktrees/self-tag-nf" rev-parse HEAD)" = "$DISTRO7_BRANCH_HEAD" ]'
+check "that fallback still names the local branch as the base (F4)" \
+  'grep -qF "base: main @$(git -C "$DISTRO7_HOME" rev-parse --short refs/heads/main)" <<<"$TAGNFOUT"'
 
 # shard:split
 echo "== teardown honesty: 'could not determine' is not 'unlanded' (#119) =="

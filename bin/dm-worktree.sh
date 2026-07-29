@@ -384,25 +384,31 @@ case "$cmd" in
       # control plane is the operator's checkout; moving it unattended is the
       # exact thing that must never happen) -- so its local default branch only
       # advances when the operator pulls by hand, and the FF-sync guard below is
-      # a permanent no-op here. `fetch` updates ONLY the remote-tracking ref
-      # origin/<def>; it never touches the checked-out branch, index, or working
-      # tree, so basing a NEW worktree on origin/<def> gets a current base
-      # WITHOUT working around the refusal -- the refusal still holds, in full.
+      # a permanent no-op here. `fetch` only writes refs; it never touches the
+      # checked-out branch, index, or working tree, so fetching origin's <def>
+      # and cutting a NEW worktree off that commit gets a current base WITHOUT
+      # working around the refusal -- the refusal still holds, in full.
       def="$(dm_default_branch "$dir")"
       if [ "${DM_NO_FETCH:-0}" != "1" ]; then
         # A failed fetch must not silently fall back to local main: that
         # silence (a `dm_warn "base may be stale"` nobody read) is exactly what
         # let three tasks branch off a base several commits stale in one day.
         # Fail closed instead of warning and continuing.
-        git -C "$dir" fetch --quiet origin "$def" \
+        #
+        # Fetch into a PRIVATE ref and read the base back from THAT ref, so the
+        # ref read is the ref this fetch wrote. Both alternatives can lie:
+        # origin/<def> is left stale by a hand-narrowed remote.origin.fetch even
+        # when the explicit fetch succeeds, and FETCH_HEAD is one scratch file
+        # per clone that ANY fetch rewrites -- `create --base`, dm-merge's
+        # stacked-child rebase and the operator's own `git fetch origin
+        # some-branch` all target this same clone, and one landing between the
+        # fetch and the read hands back an unrelated branch tip labelled
+        # origin/<def> (reproduced, not theorised). refs/dm/ is not a branch, a
+        # tag or a remote-tracking ref, so nothing in the checkout moves.
+        git -C "$dir" fetch --quiet origin "+refs/heads/$def:refs/dm/base/$def" \
           || dm_die "could not fetch origin/$def for the distro's own worktree (offline, no remote, or auth failure). Refusing to cut a worktree off a base that cannot be verified current -- retry once network/auth is restored."
-        # Resolve the fetched commit from FETCH_HEAD, not by re-resolving
-        # origin/<def>: fetch exit 0 only proves FETCH_HEAD advanced. A
-        # hand-narrowed remote.origin.fetch refspec can leave the
-        # remote-tracking ref itself stale even after a successful explicit
-        # fetch, which would silently defeat this whole guard.
-        base="$(git -C "$dir" rev-parse --verify --quiet FETCH_HEAD)" \
-          || dm_die "fetch of origin/$def succeeded but FETCH_HEAD did not resolve; cannot verify a fetched commit for the distro's own worktree"
+        base="$(git -C "$dir" rev-parse --verify --quiet "refs/dm/base/$def")" \
+          || dm_die "fetch of origin/$def succeeded but refs/dm/base/$def did not resolve; cannot verify a fetched commit for the distro's own worktree"
         base_label="origin/$def"
         # A successful, current fetch only proves origin/<def> is known --
         # it says nothing about whether the operator's LOCAL <def> already
@@ -411,8 +417,13 @@ case "$cmd" in
         # them: the same loss class this fix exists to prevent, running the
         # other way. Refuse rather than warn -- a warning nobody reads is
         # exactly the failure mode this task replaced.
-        if git -C "$dir" rev-parse --verify --quiet "$def" >/dev/null 2>&1 \
-          && ! git -C "$dir" merge-base --is-ancestor "$def" "$base" 2>/dev/null; then
+        #
+        # Name the branch by its full refs/heads/ path, the same way dm-sync.sh
+        # does: `rev-parse main` searches refs/tags/ BEFORE refs/heads/, so a tag
+        # named after the default branch answers this question about the tag and
+        # lets the operator's unpushed commits through unprotected.
+        if git -C "$dir" show-ref --verify --quiet "refs/heads/$def" \
+          && ! git -C "$dir" merge-base --is-ancestor "refs/heads/$def" "$base" 2>/dev/null; then
           dm_die "$repo: local '$def' carries commits not on origin/$def (diverged or ahead of origin) -- cutting a worktree off origin/$def would silently drop them. Reconcile '$def' with origin by hand (push, rebase, or fast-forward), then retry."
         fi
       else
@@ -420,13 +431,17 @@ case "$cmd" in
         # neither the freshness fetch nor the divergence check above can run --
         # same escape hatch as the non-distro path below. Prefer a
         # previously-fetched origin/<def>; fall back to the local branch only
-        # if nothing was ever fetched.
-        if git -C "$dir" rev-parse --verify --quiet "origin/$def" >/dev/null 2>&1; then
+        # if nothing was ever fetched. Both are addressed by full ref path for
+        # the same reason as the divergence guard above -- a tag named after the
+        # default branch must not decide where a worktree gets cut.
+        if git -C "$dir" show-ref --verify --quiet "refs/remotes/origin/$def"; then
           base_label="origin/$def"
+          base_ref_path="refs/remotes/origin/$def"
         else
           base_label="$def"
+          base_ref_path="refs/heads/$def"
         fi
-        base="$(git -C "$dir" rev-parse --verify --quiet "$base_label")" \
+        base="$(git -C "$dir" rev-parse --verify --quiet "$base_ref_path")" \
           || dm_die "$base_label does not resolve in $dir; cannot determine a base for the distro's own worktree"
       fi
     else
