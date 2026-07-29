@@ -19,6 +19,10 @@
 #                                    Refuses a <repo> resolving to the distro root;
 #                                    the reserved name `dockmaster` is the one
 #                                    exemption, for its own PR path (#119).
+#                                    Prints exactly two stdout lines: `base: <ref>
+#                                    @<sha>` then the worktree path. Every caller
+#                                    consumes only the LAST line -- treat that as
+#                                    the contract, not just today's convention.
 #   assert <path> <repo>            verify <path> is a real worktree root distinct
 #                                    from the primary clone (isolation invariant)
 #   landed <id> [--json]            is the worktree's committed work landed?
@@ -388,24 +392,43 @@ case "$cmd" in
       if [ "${DM_NO_FETCH:-0}" != "1" ]; then
         # A failed fetch must not silently fall back to local main: that
         # silence (a `dm_warn "base may be stale"` nobody read) is exactly what
-        # let three tasks branch off a base six commits stale in one day. Fail
-        # closed instead of warning and continuing.
+        # let three tasks branch off a base several commits stale in one day.
+        # Fail closed instead of warning and continuing.
         git -C "$dir" fetch --quiet origin "$def" \
           || dm_die "could not fetch origin/$def for the distro's own worktree (offline, no remote, or auth failure). Refusing to cut a worktree off a base that cannot be verified current -- retry once network/auth is restored."
+        # Resolve the fetched commit from FETCH_HEAD, not by re-resolving
+        # origin/<def>: fetch exit 0 only proves FETCH_HEAD advanced. A
+        # hand-narrowed remote.origin.fetch refspec can leave the
+        # remote-tracking ref itself stale even after a successful explicit
+        # fetch, which would silently defeat this whole guard.
+        base="$(git -C "$dir" rev-parse --verify --quiet FETCH_HEAD)" \
+          || dm_die "fetch of origin/$def succeeded but FETCH_HEAD did not resolve; cannot verify a fetched commit for the distro's own worktree"
         base_label="origin/$def"
+        # A successful, current fetch only proves origin/<def> is known --
+        # it says nothing about whether the operator's LOCAL <def> already
+        # carries commits origin doesn't have (a hand commit, a local merge).
+        # Basing the worktree on the fetched commit would then silently drop
+        # them: the same loss class this fix exists to prevent, running the
+        # other way. Refuse rather than warn -- a warning nobody reads is
+        # exactly the failure mode this task replaced.
+        if git -C "$dir" rev-parse --verify --quiet "$def" >/dev/null 2>&1 \
+          && ! git -C "$dir" merge-base --is-ancestor "$def" "$base" 2>/dev/null; then
+          dm_die "$repo: local '$def' carries commits not on origin/$def (diverged or ahead of origin) -- cutting a worktree off origin/$def would silently drop them. Reconcile '$def' with origin by hand (push, rebase, or fast-forward), then retry."
+        fi
       else
         # DM_NO_FETCH=1 (offline/smoke): no network is permitted here either, so
-        # freshness cannot be verified -- same escape hatch as the non-distro
-        # path below. Prefer a previously-fetched origin/<def>; fall back to the
-        # local branch only if nothing was ever fetched.
+        # neither the freshness fetch nor the divergence check above can run --
+        # same escape hatch as the non-distro path below. Prefer a
+        # previously-fetched origin/<def>; fall back to the local branch only
+        # if nothing was ever fetched.
         if git -C "$dir" rev-parse --verify --quiet "origin/$def" >/dev/null 2>&1; then
           base_label="origin/$def"
         else
           base_label="$def"
         fi
+        base="$(git -C "$dir" rev-parse --verify --quiet "$base_label")" \
+          || dm_die "$base_label does not resolve in $dir; cannot determine a base for the distro's own worktree"
       fi
-      base="$(git -C "$dir" rev-parse --verify --quiet "$base_label")" \
-        || dm_die "$base_label does not resolve in $dir; cannot determine a base for the distro's own worktree"
     else
       if [ "${DM_NO_FETCH:-0}" != "1" ]; then
         # Bring the clone's default branch current BEFORE cutting a worktree base
@@ -443,8 +466,9 @@ case "$cmd" in
     # no forge risk analogous to pr/pr_state/merge_state.
     [ -n "$base_ref" ] && dm_meta_set "$id" base "$base_ref"
     # State the actual base PLAINLY. A warning read past ("base may be stale")
-    # is exactly how three tasks silently branched off a stale base in one day
-    # -- this line, not a softened warning, is the fix for that half of the bug.
+    # is exactly how several tasks silently branched off a stale base in one
+    # day -- this line, not a softened warning, is the fix for that half of
+    # the bug.
     dm_info "base: $base_label @$(git -C "$dir" rev-parse --short "$base")"
     dm_info "$wt"
     ;;

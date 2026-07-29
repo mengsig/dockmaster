@@ -2437,10 +2437,75 @@ echo "== distro worktree base: DM_NO_FETCH still bypasses the guard, same conven
 # path below: no network, best-effort on whatever ref is already local, never
 # a hard failure.
 git -C "$DISTRO2_HOME" remote set-url origin "$DISTRO2_ORIGIN"
+# Populate a cached origin/main BEFORE the DM_NO_FETCH arm runs, so the arm has
+# something previously-fetched to prefer. Without this, origin/main was never
+# resolvable locally and the "prefer cached origin/<def>" branch of the offline
+# fallback was never actually exercised (F5).
+git -C "$DISTRO2_HOME" fetch -q origin main
 d2 dm-task.sh new self-nf --kind ship --repo dockmaster --mode local-only >/dev/null
-check "DM_NO_FETCH bypasses the distro fetch guard too" \
-  'DM_NO_FETCH=1 d2 dm-worktree.sh create self-nf dockmaster feat/x/self-nf >/dev/null 2>&1'
-check "DM_NO_FETCH create actually produced a distro worktree" '[ -d "$DISTRO2_HOME/state/worktrees/self-nf" ]'
+SELF_NF_OUT="$(DM_NO_FETCH=1 d2 dm-worktree.sh create self-nf dockmaster feat/x/self-nf 2>&1)"
+check "DM_NO_FETCH bypasses the distro fetch guard too" '[ -d "$DISTRO2_HOME/state/worktrees/self-nf" ]'
+check "DM_NO_FETCH prefers the previously-fetched origin/<def>, not bare local main (F5)" \
+  'grep -q "^base: origin/main @" <<<"$SELF_NF_OUT"'
+
+echo "== distro worktree base: a DIVERGED local main is refused, never silently dropped (F1) =="
+# The fetch-and-verify guard above only proves origin/<def> is known; it never
+# looked at whether the operator's local <def> carries commits origin doesn't
+# have (a hand commit, a local merge). Basing the new worktree on the fetched
+# commit would then silently drop them - the same loss class this task exists
+# to prevent, running the other way.
+DISTRO3_ORIGIN="$TMP/distro3-origin.git"
+DISTRO3_HOME="$TMP/distro3-home"
+git init -q --bare -b main "$DISTRO3_ORIGIN"
+git init -q -b main "$DISTRO3_HOME"
+( cd "$DISTRO3_HOME"; git config user.email d3@d.co; git config user.name d3
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro3 init"
+  git remote add origin "$DISTRO3_ORIGIN"; git push -q origin main
+  # a hand commit on main that was never pushed - exactly the loss class F1 exists to catch
+  printf 'hand edit\n' >> AGENTS.md; git commit -qam "local-only hand commit" ) >/dev/null 2>&1
+d3() { DM_HOME="$DISTRO3_HOME" "$ROOT/bin/$@"; }
+d3 dm-doctor.sh >/dev/null
+DISTRO3_HEAD="$(git -C "$DISTRO3_HOME" rev-parse main)"
+d3 dm-task.sh new self-diverged --kind ship --repo dockmaster --mode local-only >/dev/null
+if DIVERGEDOUT="$(d3 dm-worktree.sh create self-diverged dockmaster feat/x/self-diverged 2>&1)"; then DIVERGED_RC=0; else DIVERGED_RC=$?; fi
+check "a diverged local main refuses to create the distro's own worktree (F1)" '[ "$DIVERGED_RC" -ne 0 ]'
+check "the refusal names the divergence, not a soft warning" \
+  'grep -qi "carries commits not on origin" <<<"$DIVERGEDOUT"'
+check "no worktree was cut off a base that would drop the hand commit" \
+  '[ ! -e "$DISTRO3_HOME/state/worktrees/self-diverged" ]'
+check "the diverged local head survived the refusal" \
+  '[ "$(git -C "$DISTRO3_HOME" rev-parse main)" = "$DISTRO3_HEAD" ]'
+
+echo "== distro worktree base: a narrowed refspec leaving origin/<def> stale is still caught (F2) =="
+# `git fetch --quiet origin main` returning 0 only proves FETCH_HEAD advanced.
+# With a hand-narrowed remote.origin.fetch refspec, the remote-tracking ref
+# origin/main is never actually touched by that fetch. Resolving the base from
+# FETCH_HEAD (not by re-resolving origin/<def>) is what closes this.
+DISTRO4_ORIGIN="$TMP/distro4-origin.git"
+DISTRO4_HOME="$TMP/distro4-home"
+git init -q --bare -b main "$DISTRO4_ORIGIN"
+git init -q -b main "$DISTRO4_HOME"
+( cd "$DISTRO4_HOME"; git config user.email d4@d.co; git config user.name d4
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro4 init"
+  git remote add origin "$DISTRO4_ORIGIN"; git push -q origin main
+  git fetch -q origin main
+  # narrow the refspec so an explicit `fetch origin main` no longer updates origin/main
+  git config --unset-all remote.origin.fetch
+  git config remote.origin.fetch '+refs/heads/dm-narrow-sentinel:refs/remotes/origin/dm-narrow-sentinel' ) >/dev/null 2>&1
+DISTRO4_STALE_TRACKING="$(git -C "$DISTRO4_HOME" rev-parse origin/main)"
+git -C "$TMP" clone -q "$DISTRO4_ORIGIN" distro4-pusher
+( cd "$TMP/distro4-pusher"; git config user.email p4@p.co; git config user.name p4
+  printf 'origin advanced\n' >> AGENTS.md; git commit -qam "advance origin" )
+git -C "$TMP/distro4-pusher" push -q origin main
+DISTRO4_NEW_TIP="$(git -C "$TMP/distro4-pusher" rev-parse main)"
+d4() { DM_HOME="$DISTRO4_HOME" "$ROOT/bin/$@"; }
+d4 dm-doctor.sh >/dev/null
+d4 dm-task.sh new self-narrow --kind ship --repo dockmaster --mode local-only >/dev/null
+NARROWOUT="$(d4 dm-worktree.sh create self-narrow dockmaster feat/x/self-narrow 2>&1)"
+check "the narrowed-refspec fixture actually left origin/main stale (fixture sanity)" \
+  '[ "$(git -C "$DISTRO4_HOME" rev-parse origin/main)" = "$DISTRO4_STALE_TRACKING" ]'
+check "the new distro worktree bases on the FETCHED tip, not the stale tracking ref (F2)" \
+  '[ "$(git -C "$DISTRO4_HOME/state/worktrees/self-narrow" rev-parse HEAD)" = "$DISTRO4_NEW_TIP" ]'
 
 # shard:split
 echo "== teardown honesty: 'could not determine' is not 'unlanded' (#119) =="
