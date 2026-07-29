@@ -45,6 +45,24 @@ printing and recording it.
 Poll it the way you already wait on work: run it in the background and let the
 completion wake you (see `supervision`). Do not busy-loop it.
 
+## Ask through the page, never the terminal
+
+While the console is running, a question for the operator goes to the PAGE. Your
+runtime's terminal prompt reaches a window they are not looking at.
+
+    bin/dm-ui.sh ask <key> "<question>" [--options "A | B"] [--origin <path>]
+
+It opens a `decision-hold` under that key — so the question is durable and the
+Needs-you panel holds it open across a restart of either side — and posts it
+into the conversation. The key must be FRESH: it refuses rather than write over a
+decision already on the board. If the question belongs to a specific task, pass
+`--origin data/<id>/report.md` — that is the backlink `dm-trash.sh` resolves a
+trashed task's open holds through; without it, trashing that task leaves the
+question open forever. One line, and `|` separates options. An option is
+answered in ONE click; the answer arrives on `poll` as an ordinary operator
+message quoting the question. The page shows the row answered until you resolve
+the hold with `decision-hold`, as always.
+
 A one-line `say` renders as a log row rather than a message, and the Updates panel
 is every line you have posted, newest first. That surface is for terse, timestamped
 status — write it that way.
@@ -74,8 +92,8 @@ Filters and folded groups are page-side only, stored in the operator's browser.
 They hide nothing from you and nothing from the fleet, so "I tidied that away" on
 the page is not a request to clean anything up.
 
-A decision answered from the page arrives as an ordinary message; record the
-resolution with `decision-hold` exactly as before.
+A decision answered from the page arrives as an ordinary message opening
+`Answer — <the question>`; record the resolution with `decision-hold` as before.
 
 It is not read-only, though. Refreshing runs `dm-pr.sh sweep`, which RECORDS
 each PR's state and checks on the work it sweeps and takes the task lock to do

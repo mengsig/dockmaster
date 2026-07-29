@@ -12,7 +12,7 @@ import {
   plural, lookup, word, ago, clockTime, hoursSince,
   WORK_STATE, CHECKS, REVIEW_VERDICT, AUTHORITY, KIND, CHECK_STATUS, MODE,
   STAGE_LABEL, STAGE_STATE, SOURCE_WORD, PR_UNREADABLE, TESTS_RESULT,
-  CLEANUP_REQUEST, TRASH_REQUEST, APPROVE_REQUEST, REVISION_REQUEST,
+  CLEANUP_REQUEST, TRASH_REQUEST, APPROVE_REQUEST, REVISION_REQUEST, ANSWER_MESSAGE,
 } from './dom.mjs';
 
 // What a fold is remembered under. One owner for the format: the Tidy panel
@@ -404,7 +404,7 @@ const NEEDS = {
   decision: (item) => ({
     head: item.question,
     detail: item.options && item.options.length
-      ? 'Only you can answer this. Pick one to draft the reply, or write your own.'
+      ? 'Only you can answer this. One click sends the answer, or write your own.'
       : 'Only you can answer this. Write the answer in the conversation.',
   }),
   pr_red: (item) => ({ head: item.title, detail: 'Checks are failing on this pull request.', action: 'Open on GitHub' }),
@@ -427,6 +427,22 @@ export function needsWords(item) {
   const words = NEEDS[item.kind];
   if (words) return words(item);
   return { head: item.title || 'Something is waiting on you', detail: item.detail || '' };
+}
+
+// Which arrivals on the conversation change what a PANEL says, so the shell
+// knows when a redraw is owed. Two of them, and no third:
+//   - the Updates panel IS the conversation read as a feed, so any message does;
+//   - an OPERATOR message may be the answer to a question a row is still
+//     offering buttons for - sent from this tab or from a second one. Without
+//     this, a tab that had not sent the answer itself went on offering live
+//     buttons until the 30-second refresh, and a click there queued a second,
+//     contradictory answer.
+// Everything else deliberately leaves the panel alone: rebuilding it on every
+// dockmaster status line would drop whatever the operator had half-typed into a
+// revision note.
+export function panelNeedsRedraw(messages, view) {
+  if (messages.length === 0) return false;
+  return view === 'updates' || messages.some((m) => m.from === 'operator');
 }
 
 // One row per task behind an aggregated "N changes are waiting for your
@@ -452,6 +468,75 @@ function reviewRow(sub, ctx) {
   return row;
 }
 
+// Answering a question the dockmaster asked, in ONE click.
+//
+// No confirm strip, unlike the cleanup and trash controls: those enqueue a
+// REQUEST that changes the fleet, and an answer is a message. It still leaves
+// this page the only way anything does - as an ordinary operator message on the
+// same queue as a typed sentence.
+//
+// A DECIDED question does not offer the buttons again. The hold stays open until
+// the dockmaster picks the answer up and resolves it, so the row outlives the
+// answer by minutes, and this panel is rebuilt from scratch every 30 seconds -
+// which used to put live buttons back with no sign anything had been sent. A
+// second click would then queue a second, possibly contradictory answer behind
+// the first, and nothing anywhere says which of the two wins. `ctx.answered`
+// reads the transcript, the one place the answer is durably recorded, so the
+// acknowledgement survives the rebuild, a reload and a restart of the console.
+//
+// It says only what it knows. The transcript arrives on its own request, so
+// until that has landed there is no answer to be found and NOT FINDING one is
+// not evidence: a button offered in that window is how an already-answered
+// question gets a second, contradictory answer. So the row waits instead, and
+// the read redraws it (see panelNeedsRedraw).
+function choices(item, ctx) {
+  if (!ctx.transcriptRead()) {
+    return add(el('div'), el('p', 'choice-status',
+      'Reading the conversation to see whether this was already answered.'));
+  }
+  const already = ctx.answered(item.question);
+  if (already !== null) {
+    // What happens to it next is the dockmaster's, and this row cannot see the
+    // pick-up queue - only that the answer is in the conversation.
+    return add(el('div'), el('p', 'choice-status choice-answered',
+      `Answered: ${already} — it is in the conversation. This stays here until the `
+      + 'dockmaster closes it; say so in the conversation if you need to change it.'));
+  }
+  const box = el('div', 'choices');
+  const status = el('p', 'choice-status');
+  status.hidden = true;
+  const buttons = item.options.map((option) => {
+    const button = el('button', 'btn choice', option);
+    button.type = 'button';
+    return button;
+  });
+  const setDisabled = (disabled) => buttons.forEach((b) => { b.disabled = disabled; });
+  buttons.forEach((button, i) => {
+    button.addEventListener('click', () => {
+      setDisabled(true);
+      status.hidden = false;
+      status.textContent = 'Sending…';
+      ctx.sendAnswer(item.question, item.options[i]).then(() => {
+        status.textContent = 'Answered. It is in the conversation.';
+      }, (err) => {
+        // The answer was NOT sent, so the buttons come back: a row that looks
+        // answered when nothing left the page is the one failure that matters.
+        setDisabled(false);
+        status.textContent = `Not sent: ${err.message}`;
+      });
+    });
+    add(box, button);
+  });
+  // Anything that is not one of the options: the question is drafted into the
+  // composer for the operator to finish, which is what "or write your own"
+  // means. It sends nothing.
+  const own = el('button', 'btn btn-quiet choice', 'Write my own');
+  own.type = 'button';
+  own.addEventListener('click', () => ctx.compose(ANSWER_MESSAGE(item.question, '')));
+  add(box, own);
+  return add(el('div'), box, status);
+}
+
 function berth(item, ctx) {
   const words = needsWords(item);
   const row = el('div', 'row');
@@ -465,18 +550,7 @@ function berth(item, ctx) {
     item.items.forEach((sub) => add(list, reviewRow(sub, ctx)));
     add(body, list);
   }
-  if (item.options && item.options.length) {
-    const choices = el('div', 'choices');
-    // The answer goes into the composer rather than straight out: the operator
-    // confirms or edits it, and the reply is an ordinary message.
-    for (const option of item.options) {
-      const button = el('button', 'btn choice', option);
-      button.type = 'button';
-      button.addEventListener('click', () => ctx.compose(`${item.question} — ${option}`));
-      add(choices, button);
-    }
-    add(body, choices);
-  }
+  if (item.options && item.options.length) add(body, choices(item, ctx));
   // A single awaiting review already got its own "Open the review page" link
   // in the row above - repeating it here would be the same link twice. Several
   // still get the jump to In-flight, which the per-task rows do not replace.
@@ -679,7 +753,9 @@ export function viewRepos(state) {
 
 export function viewReviews(state, ctx) {
   const frag = document.createDocumentFragment();
-  add(frag, head('Reviews', 'Every review page the crew has produced. They stay openable after the work lands.'));
+  add(frag, head('Reviews', 'Every review page the crew has produced. They stay openable after the work lands. '
+    + 'Open shows the page the console keeps; the original is the annotatable session it was rendered in, '
+    + 'which is not always still open.'));
   const lost = lostHere(state, 'reviews');
   add(frag, lost);
   if (state.reviews.length === 0) {
@@ -695,10 +771,13 @@ export function viewReviews(state, ctx) {
       cell('mono nowrap', el('span', null, r.repo || '—')),
       cell('nowrap', stateCell(awaiting ? 'brass' : 'neutral', awaiting ? 'Waiting for you' : 'Reviewed')),
       cell('mono nowrap', el('span', null, ago(r.at))),
-      // A REAL link, so opening the tab is the click's own gesture: the server
-      // redirects it to the annotatable session - the same surface it was
-      // reviewed in - or to this row's raw page when there is no session.
-      cell('nowrap', link(r.open_href, 'Open')));
+      // The console's own page first, because it is the one that is always
+      // there; the annotatable session second, for annotating. Both are REAL
+      // links, so the tab is the click's own gesture.
+      cell('nowrap', add(el('div', 'review-open'),
+        link(r.href, 'Open'),
+        el('span', 'review-or', '·'),
+        link(r.session_href, 'the original', 'row-action'))));
   });
   // Waiting and reviewed are two different jobs: one is a queue, the other an
   // archive. The archive folds away; the queue never does.

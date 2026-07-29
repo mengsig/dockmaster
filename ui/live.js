@@ -477,12 +477,15 @@ function toReviews(rendered, tasks) {
     repo: repoOf.get(item.id) || '',
     state: awaiting.has(item.id) ? 'awaiting' : 'archived',
     at: item.rendered_at || '',
+    // The PRIMARY destination: the console's own copy of the review page. It is
+    // here whether or not lavish-axi is installed and whether or not a session
+    // was ever opened, so it is what "open the review" means.
     href: `/review/${encodeURIComponent(item.id)}/`,
-    // A real link, not a fetch: the tab this opens must come from the click's
-    // own user activation, so the server 302s it straight to the session (or
-    // to `href` above, when there is none) rather than the page choosing
-    // between them after an async round trip.
-    open_href: `/api/review-open?id=${encodeURIComponent(item.id)}&redirect=1`,
+    // The secondary: the annotatable session the crew rendered it in. A real
+    // link, not a fetch - the tab must come from the click's own user
+    // activation, so the server 302s it on rather than the page choosing after
+    // an async round trip. It says so when there is no session to reach.
+    session_href: `/api/review-open?id=${encodeURIComponent(item.id)}&redirect=1`,
   }));
 }
 
