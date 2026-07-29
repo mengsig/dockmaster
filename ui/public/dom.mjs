@@ -386,8 +386,11 @@ export const CLEANUP_REQUEST = {
 // anywhere near a message.
 const TITLE_MAX = 120;
 // A question is longer than a title by nature, and it is what the dockmaster
-// matches the answer back to, so it is cut later.
-const QUESTION_MAX = 300;
+// matches the answer back to, so it is cut later. Exported because `dm-ui.sh
+// ask` refuses a question this cut would shorten - two questions identical up to
+// the cut would produce indistinguishable answers - and the two numbers must be
+// the same one (tests/check-console.js pins them equal).
+export const QUESTION_MAX = 300;
 function flatten(text, max) {
   const flat = String(text).replace(/[\r\n]+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
@@ -418,19 +421,50 @@ export const REVISION_REQUEST = (title, repo, notes) =>
 // hold by; the key behind it is internal and stays off the page.
 //
 // The header is its own export because it is also an IDENTITY: the page finds an
-// answer it already sent by matching this exact prefix in the transcript (see
-// console.mjs answeredAlready), which is the only durable record either side
-// has. One definition, so the writer and the reader cannot drift.
+// answer it already sent by matching this line in the transcript, which is the
+// only durable record either side has. `answerTo` below is the reader, kept
+// beside the writer so the two cannot drift.
 //
-// What that identity does NOT survive: a question asked through `dm-ui.sh ask`
-// is one line and echoes back byte-for-byte, but a hold recorded any other way
-// may be longer than QUESTION_MAX or multi-line, and two such questions
-// identical up to the cut are indistinguishable here. That degrades into the
-// dockmaster asking which one - visible, not silent - so the key stays off the
-// page rather than being shown to close it.
+// What that identity does NOT survive: two questions identical up to
+// QUESTION_MAX produce byte-identical headers and nothing here can tell their
+// answers apart. `dm-ui.sh ask` - the only writer of a hold meant to be answered
+// from this page - refuses a question that long for exactly that reason, so the
+// gap is confined to a hold recorded some other way; the answer to one of those
+// may be read as the answer to the other, silently.
 export const ANSWER_HEADER = (question) => `Answer — ${flatten(question, QUESTION_MAX)}`;
 export const ANSWER_MESSAGE = (question, answer) =>
   `${ANSWER_HEADER(question)}\n\n${flatten(answer, QUESTION_MAX)}`;
+
+// answerTo(messages, question, sentHere) -> the answer already given to this
+// question, or null. The transcript is the one place an answer is durably
+// recorded - the hold stays OPEN until the dockmaster resolves it, so a panel's
+// own data cannot say - and `sentHere` covers the fraction of a second between
+// an answer's POST resolving and the poll carrying it back.
+//
+// The match is the FIRST LINE, whole: ANSWER_MESSAGE puts the header on its own
+// line, and a prefix match instead let an answer to a LONGER question satisfy a
+// SHORTER one whose text it starts with. Two open questions were enough - the
+// shorter one rendered as answered, quoting the other's tail, and became
+// unanswerable from the only surface offering its options.
+//
+// Newest wins: the operator may answer from the row and then say something else
+// in the conversation. Bounded by whatever the caller keeps, so an answer that
+// scrolled out of the kept transcript reads as unanswered again - the honest
+// thing for a question still open two thousand messages later.
+export function answerTo(messages, question, sentHere) {
+  const header = ANSWER_HEADER(question);
+  if (sentHere && sentHere.has(header)) return sentHere.get(header);
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.from !== 'operator') continue;
+    const text = String(message.text || '');
+    const cut = text.indexOf('\n');
+    const firstLine = cut === -1 ? text : text.slice(0, cut);
+    if (firstLine.trim() !== header) continue;
+    return text.slice(firstLine.length).trim() || 'in your own words';
+  }
+  return null;
+}
 
 // A pull request that came back from the sweep unreadable. Kept in the list on
 // purpose - one that vanished would read as a fleet with one less problem.

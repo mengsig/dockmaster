@@ -5745,10 +5745,59 @@ check "nor was the question it refused to ask put in the conversation" \
 # Same key, same question, DIFFERENT options is still an overwrite.
 check "changing only the options under a held key is refused too" \
   '! b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain | neither" >/dev/null 2>&1'
+# ORIGIN IS PART OF THE DECISION. Same key, same question, same options - only the
+# --origin backlink differs, and rewriting it to "" would sever the link
+# dm-trash.sh resolves that task's holds through. So origin alone must be enough
+# to refuse; without this case the refusal is always reached on the question, and
+# the origin clause could be deleted with the suite still green.
+b dm-backlog.sh hold origin-owned "Land the importer tonight or Monday?" \
+  --options "tonight | Monday" --origin "data/origin-task/report.md" >/dev/null 2>&1
+check "an ask is refused when ONLY the origin differs" \
+  '! b dm-ui.sh ask origin-owned "Land the importer tonight or Monday?" --options "tonight | Monday" >/dev/null 2>&1'
+check "and the backlink dm-trash.sh resolves that hold through survives" \
+  '[ "$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"origin-owned\") | .origin")" \
+     = "data/origin-task/report.md" ]'
+# THE RACE. `ask` used to READ the decision log and then write, with nothing
+# holding the backlog lock across the pair: two asks on one key both passed the
+# read, both posted their question, and the loser's hold was destroyed with no
+# trace. The write is a compare-and-set inside dm-backlog.sh now, decided in the
+# same locked pass that writes, so exactly one of them can win.
+UI_RACE_A_RC=0; UI_RACE_B_RC=0
+b dm-ui.sh ask race-key "Race question A?" --options "yes | no" >/dev/null 2>&1 &
+UI_RACE_A=$!
+b dm-ui.sh ask race-key "Race question B?" --options "20 | 22" >/dev/null 2>&1 &
+UI_RACE_B=$!
+wait "$UI_RACE_A" || UI_RACE_A_RC=$?
+wait "$UI_RACE_B" || UI_RACE_B_RC=$?
+check "concurrent asks on one key: exactly one succeeds" \
+  '[ $(( (UI_RACE_A_RC == 0) + (UI_RACE_B_RC == 0) )) -eq 1 ]'
+check "concurrent asks on one key: one hold, not one overwriting the other" \
+  '[ "$(b dm-backlog.sh decisions --json | jq "[.[] | select(.key==\"race-key\")] | length")" = "1" ]'
+# The loser must leave NOTHING behind - a question in the conversation that no
+# panel is holding open is one that scrolls away unanswered.
+check "and only the question that was recorded reached the conversation" \
+  'UI_RACE_WON="$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"race-key\") | .question")"; \
+   UI_RACE_LOST="Race question B?"; \
+   [ "$UI_RACE_WON" = "Race question A?" ] || UI_RACE_LOST="Race question A?"; \
+   grep -qF "$UI_RACE_WON" "$DM_HOME/state/ui/chat.jsonl" \
+     && ! grep -qF "$UI_RACE_LOST" "$DM_HOME/state/ui/chat.jsonl"'
 # One line per hold is what `decisions` and dm-status.sh print; a newline in the
-# question shreds both, and the answer echoes it back on one line as well.
+# question shreds both, and the answer echoes it back on one line as well. A TAB
+# survives both but breaks `decisions`' own tab-separated columns.
 check "a multi-line question is refused" \
   '! b dm-ui.sh ask multiline "$(printf "first line\nsecond line")" >/dev/null 2>&1'
+check "a question containing a tab is refused" \
+  '! b dm-ui.sh ask tabbed "$(printf "before\tafter")" >/dev/null 2>&1'
+# The page identifies an answer by the question echoed in its header, cut at 300
+# characters. Two questions identical up to that cut produce byte-identical
+# answers and neither the page nor the dockmaster could say which was answered,
+# so a question that long is refused rather than asked ambiguously.
+UI_LONG_Q="AAAAAAAAAA"
+while [ "${#UI_LONG_Q}" -lt 301 ]; do UI_LONG_Q="$UI_LONG_Q$UI_LONG_Q"; done
+check "a question past the page's answer identity is refused" \
+  '! b dm-ui.sh ask toolong "$UI_LONG_Q" >/dev/null 2>&1'
+check "and one exactly at it is still asked" \
+  'b dm-ui.sh ask atcap "${UI_LONG_Q:0:300}" >/dev/null 2>&1'
 # What the page sends back: an ordinary operator message. Poll's contract is
 # untouched by any of this - it is the same drain, quoting the question.
 DM_UI_CHAT="$ROOT/ui/chat.js" node -e 'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", "Answer — Panel or plain page?\n\nplain page")' \

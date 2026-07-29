@@ -20,8 +20,14 @@
 # repo) so it can be tracked and reported as a unit; see the fleet-change skill.
 #
 # Operator decisions (used by the decision-hold skill):
-#   hold <key> "<question>" [--options "A | B"] [--origin <path>]
+#   hold <key> "<question>" [--options "A | B"] [--origin <path>] [--only-if-free]
 #   resolve <key> "<answer>"
+#
+# `hold` upserts on <key>: it keeps status and answer but overwrites question,
+# options and origin. --only-if-free is the compare-and-set for a caller that
+# invents its key per question and must not write over a decision already open
+# under it — it writes only where nothing is written away, refuses otherwise, and
+# decides inside the same locked pass, so two concurrent callers cannot both win.
 #
 # A decision hold stays open until resolved; completing/tearing down the task
 # that surfaced it never closes it — the one exception is dm-trash.sh, which
@@ -212,14 +218,47 @@ EOF
     ;;
   hold)
     key="${1:-}"; question="${2:-}"; shift 2 2>/dev/null || true
-    [ -n "$key" ] && [ -n "$question" ] || dm_die "usage: dm-backlog.sh hold <key> \"<question>\" [--options \"A | B\"] [--origin <path>]"
-    options=""; origin=""
-    while [ "$#" -gt 0 ]; do case "$1" in --options) options="${2:-}"; shift 2;; --origin) origin="${2:-}"; shift 2;; *) dm_die "unknown flag: $1";; esac; done
-    # idempotent on key: upsert, preserving status/answer if the hold already exists
-    bwrite --arg k "$key" --arg q "$question" --arg o "$options" --arg og "$origin" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-      (.decisions | map(select(.key==$k)) | .[0]) as $existing
-      | (($existing // {key:$k, status:"open", answer:"", ts:$ts}) | .question=$q | .options=$o | .origin=$og) as $upd
-      | .decisions = ((.decisions | map(select(.key!=$k))) + [$upd])'
+    [ -n "$key" ] && [ -n "$question" ] || dm_die "usage: dm-backlog.sh hold <key> \"<question>\" [--options \"A | B\"] [--origin <path>] [--only-if-free]"
+    options=""; origin=""; only_if_free=0
+    while [ "$#" -gt 0 ]; do case "$1" in
+      --options) options="${2:-}"; shift 2;;
+      --origin) origin="${2:-}"; shift 2;;
+      --only-if-free) only_if_free=1; shift;;
+      *) dm_die "unknown flag: $1";; esac; done
+    if [ "$only_if_free" -eq 1 ]; then
+      # Compare-and-set, for a caller that invents its key per question and so
+      # must never write over a decision already open under it. Refusing that by
+      # READING the log and then calling the plain upsert below is check-then-act:
+      # two callers racing on one key both pass the read and the second erases the
+      # first's question, options and --origin backlink with nothing left to say
+      # it happened. Here the decision is made inside dm_json_update's own lock,
+      # in the same jq pass that writes, so exactly one of them can win.
+      #
+      # It writes in two cases only: no hold under this key, or a hold that is
+      # already byte-for-byte what this call would write (the caller's retry after
+      # a failed follow-up). jq's error aborts the pass before anything is
+      # committed, so a refusal leaves the file untouched. The `dm:hold-` tokens
+      # are how a caller words its own refusal - an exit status cannot tell the
+      # two apart, and both are the caller's to explain, not this script's.
+      bwrite --arg k "$key" --arg q "$question" --arg o "$options" --arg og "$origin" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        (.decisions | map(select(.key==$k)) | .[0]) as $held
+        | if $held == null then
+            .decisions += [{key:$k, question:$q, options:$o, origin:$og, status:"open", answer:"", ts:$ts}]
+          elif ($held.status // "") != "open" then
+            error("dm:hold-answered \($k) is already answered")
+          elif (($held.question // "") == $q and ($held.options // "") == $o
+                and ($held.origin // "") == $og) then
+            .
+          else
+            error("dm:hold-taken \($k) already holds a different open decision")
+          end'
+    else
+      # idempotent on key: upsert, preserving status/answer if the hold already exists
+      bwrite --arg k "$key" --arg q "$question" --arg o "$options" --arg og "$origin" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        (.decisions | map(select(.key==$k)) | .[0]) as $existing
+        | (($existing // {key:$k, status:"open", answer:"", ts:$ts}) | .question=$q | .options=$o | .origin=$og) as $upd
+        | .decisions = ((.decisions | map(select(.key!=$k))) + [$upd])'
+    fi
     render; dm_info "backlog: decision hold '$key' open"
     ;;
   resolve)

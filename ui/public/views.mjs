@@ -429,6 +429,22 @@ export function needsWords(item) {
   return { head: item.title || 'Something is waiting on you', detail: item.detail || '' };
 }
 
+// Which arrivals on the conversation change what a PANEL says, so the shell
+// knows when a redraw is owed. Two of them, and no third:
+//   - the Updates panel IS the conversation read as a feed, so any message does;
+//   - an OPERATOR message may be the answer to a question a row is still
+//     offering buttons for - sent from this tab or from a second one. Without
+//     this, a tab that had not sent the answer itself went on offering live
+//     buttons until the 30-second refresh, and a click there queued a second,
+//     contradictory answer.
+// Everything else deliberately leaves the panel alone: rebuilding it on every
+// dockmaster status line would drop whatever the operator had half-typed into a
+// revision note.
+export function panelNeedsRedraw(messages, view) {
+  if (messages.length === 0) return false;
+  return view === 'updates' || messages.some((m) => m.from === 'operator');
+}
+
 // One row per task behind an aggregated "N changes are waiting for your
 // review" beacon - the headline stays aggregated, but each task underneath it
 // is still a single piece of work the operator can act on without leaving this
@@ -467,12 +483,24 @@ function reviewRow(sub, ctx) {
 // the first, and nothing anywhere says which of the two wins. `ctx.answered`
 // reads the transcript, the one place the answer is durably recorded, so the
 // acknowledgement survives the rebuild, a reload and a restart of the console.
+//
+// It says only what it knows. The transcript arrives on its own request, so
+// until that has landed there is no answer to be found and NOT FINDING one is
+// not evidence: a button offered in that window is how an already-answered
+// question gets a second, contradictory answer. So the row waits instead, and
+// the read redraws it (see panelNeedsRedraw).
 function choices(item, ctx) {
+  if (!ctx.transcriptRead()) {
+    return add(el('div'), el('p', 'choice-status',
+      'Reading the conversation to see whether this was already answered.'));
+  }
   const already = ctx.answered(item.question);
   if (already !== null) {
+    // What happens to it next is the dockmaster's, and this row cannot see the
+    // pick-up queue - only that the answer is in the conversation.
     return add(el('div'), el('p', 'choice-status choice-answered',
-      `Answered: ${already} — waiting for the dockmaster to pick it up. `
-      + 'Say so in the conversation if you need to change it.'));
+      `Answered: ${already} — it is in the conversation. This stays here until the `
+      + 'dockmaster closes it; say so in the conversation if you need to change it.'));
   }
   const box = el('div', 'choices');
   const status = el('p', 'choice-status');
@@ -489,7 +517,7 @@ function choices(item, ctx) {
       status.hidden = false;
       status.textContent = 'Sending…';
       ctx.sendAnswer(item.question, item.options[i]).then(() => {
-        status.textContent = 'Answered. It is in the conversation, waiting to be picked up.';
+        status.textContent = 'Answered. It is in the conversation.';
       }, (err) => {
         // The answer was NOT sent, so the buttons come back: a row that looks
         // answered when nothing left the page is the one failure that matters.

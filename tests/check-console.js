@@ -797,13 +797,27 @@ async function checkTheShellSuppliesEveryCtxMemberThePanelsUse() {
   const used = new Set(Array.from(read('views.mjs').matchAll(/\bctx\.([A-Za-z]+)/g), (m) => m[1]))
   ok(used.size > 5, `the panels use a ctx worth checking (${used.size} members)`)
   // panelContext()'s object literal: `name,` `name:` `name(` are the three
-  // shapes it is written in.
+  // shapes it is written in. The slice STOPS at the function's closing brace -
+  // run to end-of-file it swept up every later top-level declaration, so a panel
+  // reaching for `ctx.add` matched dom.mjs's `add` import and passed a check that
+  // exists precisely to catch that throw on the operator's first click.
   const shell = read('console.mjs')
-  const body = shell.slice(shell.indexOf('function panelContext()'))
+  const start = shell.indexOf('function panelContext()')
+  ok(start > 0, 'the shell has a panelContext() to read')
+  const end = shell.indexOf('\n}\n', start)
+  ok(end > start, 'and its closing brace is found, so the slice is bounded')
+  const body = shell.slice(start, end)
   const supplied = new Set(Array.from(body.matchAll(/^\s{4}([A-Za-z]+)\s*[,:(]/gm), (m) => m[1]))
   const missing = Array.from(used).filter((name) => !supplied.has(name)).sort()
   equal(missing.join(', '), '', 'every ctx member a panel uses is one the shell supplies')
-  console.log(`ok   the shell supplies all ${used.size} ctx members the panels reach for`)
+  // The bound, asserted rather than assumed: these are declared elsewhere in
+  // console.mjs and are not ctx members, so their presence would mean the slice
+  // has run past the literal and the check above has gone vacuous.
+  for (const outsider of ['applyTheme', 'growComposer', 'setSendError', 'setFocus', 'el', 'add']) {
+    ok(!supplied.has(outsider),
+      `the read stops at panelContext()'s own members - '${outsider}' is not one of them`)
+  }
+  console.log(`ok   the shell supplies all ${used.size} ctx members the panels reach for, read off ${supplied.size} it actually offers`)
 }
 
 // #218: a question the dockmaster asked through the page is answerable in ONE
@@ -820,19 +834,17 @@ async function checkADecisionIsAnsweredInOneClick() {
   }
   const sent = []
   const drafted = []
-  // The page's own answered-check, standing in for console.mjs's: an answer is
-  // recognised by the transcript carrying its header.
+  // THE REAL MATCHER, not a stand-in. A local re-implementation of it here left
+  // dom.mjs's own `answerTo` - the function the browser actually runs - covered by
+  // nothing: `return null` as its first statement kept every check green.
   const transcript = []
   const ctx = {
-    answered: (q) => {
-      const header = dom.ANSWER_HEADER(q)
-      const hit = transcript.filter((t) => t.startsWith(header)).pop()
-      return hit === undefined ? null : hit.slice(header.length).trim()
-    },
+    transcriptRead: () => true,
+    answered: (q) => dom.answerTo(transcript, q, new Map()),
     sendAnswer: (q, a) => {
       const text = dom.ANSWER_MESSAGE(q, a)
       sent.push(text)
-      transcript.push(text)
+      transcript.push({ from: 'operator', text })
       return Promise.resolve()
     },
     compose: (text) => { drafted.push(text) },
@@ -880,6 +892,144 @@ async function checkADecisionIsAnsweredInOneClick() {
   })
   equal(sent.length, 1, 'nothing was re-sent by the rebuild itself')
   console.log('ok   the answer survives the panel being rebuilt, and cannot be sent twice')
+}
+
+// An answer belongs to the ONE question it names. The match used to be a prefix
+// of the message, so an answer to a longer question satisfied every shorter
+// question whose text it started with: that row went quiet, quoted the other
+// question's tail as its own answer, and became unanswerable from the only
+// surface offering its options - through a reload and the 30-second refresh.
+async function checkAnAnswerBelongsToOneQuestionOnly() {
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const SHORT = 'Ship the importer?'
+  const LONG = 'Ship the importer? Tonight or Monday?'
+  const transcript = [{ from: 'operator', text: dom.ANSWER_MESSAGE(LONG, 'tonight') }]
+
+  equal(dom.answerTo(transcript, LONG, new Map()), 'tonight',
+    'the question that was answered reads as answered, with its own answer')
+  equal(dom.answerTo(transcript, SHORT, new Map()), null,
+    'and a DIFFERENT question the answer merely starts with is still unanswered')
+
+  // The other ways the identity must hold.
+  equal(dom.answerTo([{ from: 'dockmaster', text: dom.ANSWER_MESSAGE(SHORT, 'yes') }], SHORT, new Map()), null,
+    'only the operator can answer: the same text from the dockmaster is not an answer')
+  equal(dom.answerTo([{ from: 'operator', text: dom.ANSWER_HEADER(SHORT) }], SHORT, new Map()),
+    'in your own words', 'a header with nothing under it still counts as answered')
+  equal(dom.answerTo([
+    { from: 'operator', text: dom.ANSWER_MESSAGE(SHORT, 'yes') },
+    { from: 'operator', text: dom.ANSWER_MESSAGE(SHORT, 'no') },
+  ], SHORT, new Map()), 'no', 'the newest answer wins')
+  equal(dom.answerTo([], SHORT, new Map([[dom.ANSWER_HEADER(SHORT), 'just sent']])), 'just sent',
+    'an answer this page sent but has not seen come back counts too')
+
+  // And at the panel, which is where it cost the operator a decision.
+  const doc = {
+    degraded: [], fleet: { in_flight: 0 },
+    needs_you: [
+      { lamp: 'brass', kind: 'decision', question: SHORT, options: ['yes', 'no'] },
+      { lamp: 'brass', kind: 'decision', question: LONG, options: ['tonight', 'Monday'] },
+    ],
+  }
+  const ctx = {
+    transcriptRead: () => true,
+    answered: (q) => dom.answerTo(transcript, q, new Map()),
+    sendAnswer: () => Promise.resolve(),
+    compose() {},
+    fold: () => true,
+    setFold() {},
+  }
+  await withCapturingDocument(() => {
+    const rows = collectByClass(views.viewNeedsYou(doc, ctx), 'row')
+    equal(rows.length, 2, 'both open questions render a row')
+    const rowFor = (q) => rows.find((r) => collectByClass(r, 'row-head')[0].textContent === q)
+    const still = collectByClass(rowFor(SHORT), 'choice').map((b) => b.textContent)
+    equal(still.join(', '), 'yes, no, Write my own',
+      'the unanswered question still offers every way of answering it')
+    equal(collectByClass(rowFor(SHORT), 'choice-answered').length, 0,
+      'and does not claim an answer that was given to something else')
+    equal(collectByClass(rowFor(LONG), 'choice').length, 0, 'the answered one offers no buttons')
+    const said = collectByClass(rowFor(LONG), 'choice-answered')
+    equal(said.length, 1, 'and says it was answered')
+    ok(said[0].textContent.includes('tonight'),
+      `with its own answer, not another question's text: ${said[0].textContent}`)
+  })
+  console.log('ok   an answer marks only the question it names, not every shorter one it starts with')
+}
+
+// The transcript is the only durable record of an answer and it arrives on its
+// own request, concurrently with the fleet. NOT FINDING an answer before that
+// request has landed is not evidence there is none - and a live button offered in
+// that window is how an already-answered question gets a second, contradictory
+// answer. Reproduced on a real page: 2 of 3 fresh loads put live buttons under an
+// answered question and left them live for seconds.
+async function checkAQuestionIsNotOfferedBeforeTheTranscriptIsRead() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const doc = {
+    degraded: [], fleet: { in_flight: 0 },
+    needs_you: [{ lamp: 'brass', kind: 'decision', question: 'Ship it?', options: ['yes', 'no'] }],
+  }
+  const base = { answered: () => null, sendAnswer: () => Promise.resolve(), compose() {}, fold: () => true, setFold() {} }
+  await withCapturingDocument(() => {
+    const unread = views.viewNeedsYou(doc, Object.assign({}, base, { transcriptRead: () => false }))
+    equal(collectByClass(unread, 'choice').length, 0,
+      'before the conversation has been read once, no way of answering is offered')
+    const saying = collectByClass(unread, 'choice-status')
+    equal(saying.length, 1, 'the row says what it is doing instead of going blank')
+    ok(/conversation/i.test(saying[0].textContent),
+      `and says it is reading the conversation: ${saying[0].textContent}`)
+
+    const read = views.viewNeedsYou(doc, Object.assign({}, base, { transcriptRead: () => true }))
+    equal(collectByClass(read, 'choice').length, 3,
+      'and once it has been read the buttons are there')
+  })
+  console.log('ok   a question is not answerable until the conversation behind the answer has been read')
+}
+
+// A second tab is the same question on two screens. One tab answered; the other
+// went on offering live buttons for up to 30 seconds, and a click there wrote a
+// SECOND, possibly contradictory answer with no stated tiebreak. What closes it
+// is redrawing on the arrival that can change what a row claims.
+async function checkTheArrivalsThatChangeAPanelAreTheOnesThatRedrawIt() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const operator = [{ from: 'operator', text: 'Answer — Ship it?\n\nyes' }]
+  const dockmaster = [{ from: 'dockmaster', text: 'still working on it' }]
+  ok(views.panelNeedsRedraw(operator, 'needs'),
+    'an operator message may be the answer to a question a row is offering buttons for, so the panel is redrawn')
+  ok(views.panelNeedsRedraw(operator, 'flight'), 'on whichever panel is showing, not just one of them')
+  ok(!views.panelNeedsRedraw(dockmaster, 'needs'),
+    'a dockmaster status line changes nothing a row claims, so it does not rebuild it under a half-typed note')
+  ok(views.panelNeedsRedraw(dockmaster, 'updates'),
+    'except on Updates, which IS the conversation read as a feed')
+  ok(!views.panelNeedsRedraw([], 'updates'), 'and a poll that carried no message redraws nothing')
+
+  // The wiring, so the predicate cannot be right and unused: the shell asks it on
+  // every poll, and on the FIRST read as well - which is the moment the answered
+  // state becomes knowable at all (see the transcript-read check above).
+  const shell = fs.readFileSync(path.join(ROOT, 'ui', 'public', 'console.mjs'), 'utf8')
+  ok(/panelNeedsRedraw\s*\(body\.messages,\s*shell\.current\)/.test(shell),
+    'the shell asks panelNeedsRedraw about the messages the poll just carried')
+  ok(/\(first \|\| panelNeedsRedraw/.test(shell),
+    'and redraws on the first read too, when the transcript first becomes readable')
+  console.log('ok   an answer sent in one tab closes the question in every other tab, and nothing else rebuilds the panel')
+}
+
+// `dm-ui.sh ask` refuses a question longer than the cut the page's answer header
+// applies, because past that cut two questions share one identity and their
+// answers are byte-identical. That only holds while the two numbers are the same
+// number.
+async function checkTheAskCapMatchesThePagesAnswerIdentity() {
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  const script = fs.readFileSync(path.join(ROOT, 'bin', 'dm-ui.sh'), 'utf8')
+  const declared = /^ASK_QUESTION_MAX=(\d+)$/m.exec(script)
+  ok(declared, 'dm-ui.sh declares the longest question it will ask')
+  equal(Number(declared[1]), dom.QUESTION_MAX,
+    "the cap `ask` enforces is the cut the page's answer header applies")
+  // And the cut is real: two questions differing only past it are one identity.
+  const stem = 'A'.repeat(dom.QUESTION_MAX)
+  equal(dom.ANSWER_HEADER(`${stem}one`), dom.ANSWER_HEADER(`${stem}two`),
+    'past the cut two questions produce the same answer header, which is why ask refuses to get there')
+  console.log(`ok   ask refuses at ${dom.QUESTION_MAX} characters, exactly where the page's answer identity stops`)
 }
 
 // The answer lands in the transcript the operator reads, so it is worded for
@@ -933,6 +1083,10 @@ async function main() {
   await checkAReviewOpensTheConsolesOwnPageFirst()
   await checkTheShellSuppliesEveryCtxMemberThePanelsUse()
   await checkADecisionIsAnsweredInOneClick()
+  await checkAnAnswerBelongsToOneQuestionOnly()
+  await checkAQuestionIsNotOfferedBeforeTheTranscriptIsRead()
+  await checkTheArrivalsThatChangeAPanelAreTheOnesThatRedrawIt()
+  await checkTheAskCapMatchesThePagesAnswerIdentity()
   await checkTheAnswerMessageNamesTheQuestion()
   checkShapeRefusesAHalfDocument()
   console.log(`\nconsole checks passed (${checks} assertions)`)

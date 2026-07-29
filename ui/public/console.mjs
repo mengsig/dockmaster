@@ -13,9 +13,9 @@
 
 import {
   el, add, lamp, plural, clockTime, word, storedTheme, THEME_KEY, SOURCE_WORD,
-  ANSWER_HEADER, ANSWER_MESSAGE,
+  ANSWER_HEADER, ANSWER_MESSAGE, answerTo,
 } from './dom.mjs';
-import { VIEWS, needsWords } from './views.mjs';
+import { VIEWS, needsWords, panelNeedsRedraw } from './views.mjs';
 // The one writer of the wire format: a console-served review page (review.mjs)
 // shares this same module, so the composer and every enqueue-only control on
 // either page post through the exact same function.
@@ -28,35 +28,16 @@ const shell = {
   readAt: 0,
   // The conversation, held here rather than inside the poll loop: the Updates
   // panel reads the same messages as a feed, and one store means the two can
-  // never disagree about what was said.
-  chat: { messages: [], since: 0, pending: 0 },
+  // never disagree about what was said. `read` is false until the first poll has
+  // landed: before that this page cannot say whether a question was already
+  // answered, and a panel offering an answer button says so instead of guessing.
+  chat: { messages: [], since: 0, pending: 0, read: false },
   // Answers this page has SENT but not yet seen come back on the poll. The
-  // transcript below is the record; this covers only the fraction of a second
-  // between the POST resolving and the poll returning the message, in which a
-  // rebuild would otherwise offer the buttons again. Keyed by ANSWER_HEADER.
+  // transcript is the record; this covers only the fraction of a second between
+  // the POST resolving and the poll returning the message, in which a rebuild
+  // would otherwise offer the buttons again. Keyed by ANSWER_HEADER.
   answeredHere: new Map(),
 };
-
-// The answer already given to this question, or null. The transcript is the one
-// place an answer is durably recorded - the hold stays OPEN until the dockmaster
-// resolves it, so the panel's own data cannot say - and both sides compose the
-// header with the same ANSWER_HEADER, so the match is exact rather than fuzzy.
-//
-// Newest wins: the operator may answer from the row and then say something else
-// in the conversation. Bounded by MESSAGES_KEPT, so an answer that scrolled out
-// of the kept transcript reads as unanswered again - which is the honest thing
-// for a question still open two thousand messages later.
-function answeredAlready(question) {
-  const header = ANSWER_HEADER(question);
-  if (shell.answeredHere.has(header)) return shell.answeredHere.get(header);
-  for (let i = shell.chat.messages.length - 1; i >= 0; i -= 1) {
-    const message = shell.chat.messages[i];
-    if (message.from !== 'operator') continue;
-    const text = String(message.text || '');
-    if (text.startsWith(header)) return text.slice(header.length).trim() || 'in your own words';
-  }
-  return null;
-}
 
 // --- what the operator chose to see ------------------------------------------
 
@@ -199,7 +180,14 @@ function panelContext() {
   return {
     compose,
     ask: postMessage,
-    answered: answeredAlready,
+    // Has the transcript been read at all yet? A panel offering to answer a
+    // question must not do so before it can see an answer already in there:
+    // /api/state and the chat poll run concurrently, and the panel used to win
+    // that race and put live buttons under an answered question.
+    transcriptRead: () => shell.chat.read,
+    // The reader of the answer identity dom.mjs writes; `answeredHere` is only
+    // the gap between a POST resolving and the poll carrying it back.
+    answered: (question) => answerTo(shell.chat.messages, question, shell.answeredHere),
     // An answer to an open question. Posted like any other message, and
     // remembered here the instant it lands so the row it came from cannot offer
     // the buttons again before the poll carries it back.
@@ -471,13 +459,17 @@ async function pumpChat() {
           compactLog();
           log.scrollTop = log.scrollHeight;
         }
-        // The Updates panel is this same store read as a feed.
-        if (shell.state && shell.current === 'updates') redraw();
       }
       shell.chat.since = body.total;
       shell.chat.pending = body.pending;
-      first = false;
+      shell.chat.read = true;
       renderPending(body.pending, body.unreadable || 0);
+      // Two moments change what a panel CLAIMS: this read landing (`first` - the
+      // answered state becomes knowable at all), and a message arriving that a
+      // panel reads. Anything else leaves the panel alone, so a dockmaster status
+      // line does not rebuild it under a half-typed revision note.
+      if (shell.state && (first || panelNeedsRedraw(body.messages, shell.current))) redraw();
+      first = false;
       backoff = 1000;
     } catch (err) {
       // Losing the server is a state the operator must see, not a silent stall.
