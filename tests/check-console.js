@@ -772,7 +772,7 @@ async function checkAReviewOpensTheConsolesOwnPageFirst() {
   const doc = await state.collect('fixture')
   ok(doc.reviews.length > 0, 'the demo fleet has review pages to open')
   const ctx = { fold: () => true, setFold() {} }
-  withCapturingDocument(() => {
+  await withCapturingDocument(() => {
     const cells = collectByClass(views.viewReviews(doc, ctx), 'review-open')
     equal(cells.length, doc.reviews.length, 'every review row offers both ways in')
     for (const node of cells) {
@@ -785,6 +785,70 @@ async function checkAReviewOpensTheConsolesOwnPageFirst() {
     }
   })
   console.log(`ok   ${doc.reviews.length} review rows open the console's own page first, the original second`)
+}
+
+// #218: a question the dockmaster asked through the page is answerable in ONE
+// click, and the answer leaves as an ordinary operator message - the same queue
+// a typed sentence uses, no second transport and no action carried out here.
+async function checkADecisionIsAnsweredInOneClick() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  const question = 'Ship the importer as one change or split it per adapter?'
+  const options = ['one change', 'split per adapter']
+  const doc = {
+    degraded: [], fleet: { in_flight: 1 },
+    needs_you: [{ lamp: 'brass', kind: 'decision', question, options, at: '2026-01-14T14:00:00Z' }],
+  }
+  const sent = []
+  const drafted = []
+  const ctx = {
+    ask: (text) => { sent.push(text); return Promise.resolve() },
+    compose: (text) => { drafted.push(text) },
+    fold: () => true,
+    setFold() {},
+  }
+  await withCapturingDocument(() => {
+    const buttons = collectByClass(views.viewNeedsYou(doc, ctx), 'choice')
+    equal(buttons.length, options.length + 1,
+      'each option is its own control, plus one for writing your own')
+    const click = (button) => button.listeners.click()
+
+    // One click, and the answer is out. Not drafted into the composer: the row
+    // promises the operator that picking one answers the question.
+    click(buttons[0])
+    equal(sent.length, 1, 'one click sent exactly one message')
+    equal(drafted.length, 0, 'and nothing was left sitting in the composer')
+    equal(sent[0], dom.ANSWER_MESSAGE(question, options[0]),
+      'the message is the answer, naming the question it answers')
+    ok(buttons.slice(0, options.length).every((b) => b.disabled),
+      'the options close the moment one is picked, so the same question is not answered twice')
+
+    // "Or write your own" has to be true too - and it must SEND nothing.
+    click(buttons[options.length])
+    equal(sent.length, 1, 'writing your own sends nothing on its own')
+    equal(drafted.length, 1, 'it drafts into the composer instead')
+    ok(drafted[0].includes(question), 'with the question already in it')
+  })
+  console.log('ok   a question is answered in one click, as an ordinary message on the same queue')
+}
+
+// The answer lands in the transcript the operator reads, so it is worded for
+// them - and the decision key it resolves is internal and stays off the page.
+async function checkTheAnswerMessageNamesTheQuestion() {
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  const text = dom.ANSWER_MESSAGE('Drop Node 18 support in beacon?', 'yes — it is out of upstream support')
+  ok(text.includes('Drop Node 18 support in beacon?'), 'the answer quotes the question')
+  ok(text.includes('yes — it is out of upstream support'), 'and carries the answer')
+  ok(!/worktree|task id|\bmeta\b|dm-[a-z]+\.sh|--options/i.test(text),
+    `the answer uses the operator's words, not the crew's: ${text}`)
+
+  // Free text out of the decision log: unbounded or multi-line, it would make
+  // the transcript unreadable and break the answer out of its own message.
+  const messy = dom.ANSWER_MESSAGE(`a "quoted"\nquestion ${'x'.repeat(500)}`, 'fine')
+  ok(!messy.includes('"'), 'a quote in the question cannot break the message open')
+  equal(messy.split('\n\n').length, 2, 'a newline in the question cannot fake a second paragraph')
+  ok(messy.length < 400, 'and an unbounded question is capped')
+  console.log('ok   an answer names its question, bounded and flattened')
 }
 
 async function main() {
@@ -808,6 +872,8 @@ async function main() {
   await checkRecentlyFinishedSortsNewestFirst()
   await checkRecentlyFinishedIsSortedInTheRenderedPanel()
   await checkAReviewOpensTheConsolesOwnPageFirst()
+  await checkADecisionIsAnsweredInOneClick()
+  await checkTheAnswerMessageNamesTheQuestion()
   checkShapeRefusesAHalfDocument()
   console.log(`\nconsole checks passed (${checks} assertions)`)
 }

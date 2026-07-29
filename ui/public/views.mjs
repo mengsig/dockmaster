@@ -12,7 +12,7 @@ import {
   plural, lookup, word, ago, clockTime, hoursSince,
   WORK_STATE, CHECKS, REVIEW_VERDICT, AUTHORITY, KIND, CHECK_STATUS, MODE,
   STAGE_LABEL, STAGE_STATE, SOURCE_WORD, PR_UNREADABLE, TESTS_RESULT,
-  CLEANUP_REQUEST, TRASH_REQUEST, APPROVE_REQUEST, REVISION_REQUEST,
+  CLEANUP_REQUEST, TRASH_REQUEST, APPROVE_REQUEST, REVISION_REQUEST, ANSWER_MESSAGE,
 } from './dom.mjs';
 
 // What a fold is remembered under. One owner for the format: the Tidy panel
@@ -404,7 +404,7 @@ const NEEDS = {
   decision: (item) => ({
     head: item.question,
     detail: item.options && item.options.length
-      ? 'Only you can answer this. Pick one to draft the reply, or write your own.'
+      ? 'Only you can answer this. One click sends the answer, or write your own.'
       : 'Only you can answer this. Write the answer in the conversation.',
   }),
   pr_red: (item) => ({ head: item.title, detail: 'Checks are failing on this pull request.', action: 'Open on GitHub' }),
@@ -452,6 +452,48 @@ function reviewRow(sub, ctx) {
   return row;
 }
 
+// Answering a question the dockmaster asked, in ONE click.
+//
+// No confirm strip, unlike the cleanup and trash controls: those enqueue a
+// REQUEST that changes the fleet, and an answer is a message. It still leaves
+// this page the only way anything does - as an ordinary operator message on the
+// same queue as a typed sentence.
+function choices(item, ctx) {
+  const box = el('div', 'choices');
+  const status = el('p', 'choice-status');
+  status.hidden = true;
+  const buttons = item.options.map((option) => {
+    const button = el('button', 'btn choice', option);
+    button.type = 'button';
+    return button;
+  });
+  const setDisabled = (disabled) => buttons.forEach((b) => { b.disabled = disabled; });
+  buttons.forEach((button, i) => {
+    button.addEventListener('click', () => {
+      setDisabled(true);
+      status.hidden = false;
+      status.textContent = 'Sending…';
+      ctx.ask(ANSWER_MESSAGE(item.question, item.options[i])).then(() => {
+        status.textContent = 'Answered. It is in the conversation, waiting to be picked up.';
+      }, (err) => {
+        // The answer was NOT sent, so the buttons come back: a row that looks
+        // answered when nothing left the page is the one failure that matters.
+        setDisabled(false);
+        status.textContent = `Not sent: ${err.message}`;
+      });
+    });
+    add(box, button);
+  });
+  // Anything that is not one of the options: the question is drafted into the
+  // composer for the operator to finish, which is what "or write your own"
+  // means. It sends nothing.
+  const own = el('button', 'btn btn-quiet choice', 'Write my own');
+  own.type = 'button';
+  own.addEventListener('click', () => ctx.compose(ANSWER_MESSAGE(item.question, '')));
+  add(box, own);
+  return add(el('div'), box, status);
+}
+
 function berth(item, ctx) {
   const words = needsWords(item);
   const row = el('div', 'row');
@@ -465,18 +507,7 @@ function berth(item, ctx) {
     item.items.forEach((sub) => add(list, reviewRow(sub, ctx)));
     add(body, list);
   }
-  if (item.options && item.options.length) {
-    const choices = el('div', 'choices');
-    // The answer goes into the composer rather than straight out: the operator
-    // confirms or edits it, and the reply is an ordinary message.
-    for (const option of item.options) {
-      const button = el('button', 'btn choice', option);
-      button.type = 'button';
-      button.addEventListener('click', () => ctx.compose(`${item.question} — ${option}`));
-      add(choices, button);
-    }
-    add(body, choices);
-  }
+  if (item.options && item.options.length) add(body, choices(item, ctx));
   // A single awaiting review already got its own "Open the review page" link
   // in the row above - repeating it here would be the same link twice. Several
   // still get the jump to In-flight, which the per-task rows do not replace.

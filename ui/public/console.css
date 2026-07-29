@@ -451,6 +451,10 @@ details[open] > .fold-body { animation: rise 240ms ease-out; }
 .choices { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
 .choice { font-family: var(--sans); letter-spacing: 0; }
 .choice:hover { border-color: var(--brass); color: var(--brass); }
+/* Whether the answer actually left the page. An author `display` would beat the
+   UA's `[hidden]` rule, so this carries its own. */
+.choice-status { margin: 0.5rem 0 0; font-size: 0.8125rem; color: var(--fg-dim); }
+.choice-status[hidden] { display: none; }
 
 /* One row per task behind an aggregated "N changes are waiting for your
  * review" beacon - see berth()/reviewRow() in views.mjs. */

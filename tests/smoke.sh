@@ -5709,6 +5709,40 @@ check "an unexpected console argument is refused" '! b dm-ui.sh start --wat >/de
 check "a non-numeric poll timeout is refused"  '! b dm-ui.sh poll --timeout soon >/dev/null 2>&1'
 check "an empty message is refused"            '! b dm-ui.sh say "" >/dev/null 2>&1'
 
+# A question asked THROUGH the page (#218). Durable by construction: it is a
+# decision hold, so it outlives both the console and the session that asked it,
+# and it needs no new store. The answer comes back on the ordinary poll queue.
+check "ask with no question is refused"        '! b dm-ui.sh ask onlykey >/dev/null 2>&1'
+check "an unexpected ask argument is refused"  '! b dm-ui.sh ask k "q?" --wat >/dev/null 2>&1'
+b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain page" >/dev/null 2>&1
+check "ask opens a decision hold"              'b dm-backlog.sh decisions | grep -q "ui-embed"'
+check "the hold carries the options the page renders" \
+  '[ "$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"ui-embed\") | .options")" = "panel | plain page" ]'
+check "ask puts the question in the conversation" \
+  'grep -q "Panel or plain page?" "$DM_HOME/state/ui/chat.jsonl"'
+# The question is the dockmaster speaking; only the ANSWER is queued back.
+check "ask queues nothing for the dockmaster to pick up" \
+  '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json" 2>/dev/null)" ]'
+# Asking the same thing twice must not stack up two open holds on the panel.
+b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain page" >/dev/null 2>&1
+check "asking again is the same hold, not a second one" \
+  '[ "$(b dm-backlog.sh decisions --json | jq "[.[] | select(.key==\"ui-embed\")] | length")" = "1" ]'
+# What the page sends back: an ordinary operator message. Poll's contract is
+# untouched by any of this - it is the same drain, quoting the question.
+DM_UI_CHAT="$ROOT/ui/chat.js" node -e 'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", "Answer — Panel or plain page?\n\nplain page")' \
+  >/dev/null 2>&1
+UI_ANSWER="$(b dm-ui.sh poll --timeout 5 2>/dev/null || true)"
+check "the answer arrives on the ordinary poll queue" \
+  'grep -q "Answer — Panel or plain page?" <<<"$UI_ANSWER" && grep -q "plain page" <<<"$UI_ANSWER"'
+b dm-backlog.sh resolve ui-embed "plain page" >/dev/null 2>&1
+check "answering closes the hold"              '! b dm-backlog.sh decisions | grep -q "ui-embed"'
+# `hold` upserts and KEEPS the answer, so reusing an answered key would post a
+# question into the conversation with nothing holding it open. Refused instead.
+check "reusing an answered key is refused, not silently closed" \
+  '! b dm-ui.sh ask ui-embed "Panel or plain page, again?" >/dev/null 2>&1'
+check "and the refusal added nothing to the conversation" \
+  '! grep -q "Panel or plain page, again?" "$DM_HOME/state/ui/chat.jsonl"'
+
 # The chat queue is files, not the server: `say` and `poll` round-trip with
 # nothing listening. Claiming is a rename, so a killed poll loses nothing.
 check "poll times out with nothing queued" \

@@ -28,6 +28,14 @@
 #                                  a killed poll (mid-drain included) loses
 #                                  nothing: re-run it and it arrives again.
 #   say "<text>" | say --file <p>  post the dockmaster's reply into the page
+#   ask <key> "<question>"         ask the operator a question through the PAGE
+#       [--options "A | B"]        rather than the terminal. Records it as a
+#                                  decision hold (durable: it outlives this
+#                                  session and the console) so the Needs-you
+#                                  panel holds it open, and posts it into the
+#                                  conversation. The answer comes back on `poll`
+#                                  as an ordinary operator message - no second
+#                                  transport, and nothing to resume.
 #
 # Port: 4877 by default (DM_UI_PORT overrides). Chosen clear of lavish (4387),
 # chrome-devtools (9224), and the verify gate's app/bridge/CDP ranges
@@ -51,7 +59,7 @@ PORT="${DM_UI_PORT:-4877}"
 URL="http://127.0.0.1:$PORT/"
 BOOT_TIMEOUT_SPINS=100   # 100 x 0.1s
 
-usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # running_pid - print the pid the file names, and return WHICH of three states
 # it is in. Callers must distinguish all three:
@@ -195,6 +203,49 @@ case "$cmd" in
         node "$UI_DIR/say.js" < "$2" ;;
       *) printf '%s' "$1" | node "$UI_DIR/say.js" ;;
     esac
+    ;;
+  ask)
+    # A question asked through the page, built out of the two stores that
+    # already exist rather than a third: the decision log holds it OPEN (the
+    # Needs-you panel reads exactly that, and it survives both this session and
+    # the console dying), and the transcript carries it into the conversation
+    # where the operator is reading. The answer comes back on `poll` as an
+    # ordinary operator message, so poll's contract is untouched.
+    key="${1:-}"; question="${2:-}"; shift 2 2>/dev/null || true
+    [ -n "$key" ] && [ -n "$question" ] \
+      || dm_die "usage: dm-ui.sh ask <key> \"<question>\" [--options \"A | B\"]"
+    options=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --options) options="${2:-}"; shift 2 || dm_die "console: --options needs a value" ;;
+        *) dm_die "console: unexpected argument '$1'" ;;
+      esac
+    done
+    # `hold` is an upsert that KEEPS an existing answer, so reusing an answered
+    # key would post a question into the conversation with nothing holding it
+    # open - the exact failure this command exists to prevent, and silent.
+    dm_need jq
+    answered="$("$BIN_DIR/dm-backlog.sh" decisions --json \
+      | jq -r --arg k "$key" '.[] | select(.key==$k and .status=="resolved") | .key')"
+    [ -z "$answered" ] || dm_die "console: '$key' is already answered - a new question needs a new key"
+    # Recorded before it is said. A question in the conversation that no panel
+    # is holding open is the one that scrolls away unanswered.
+    if [ -n "$options" ]; then
+      "$BIN_DIR/dm-backlog.sh" hold "$key" "$question" --options "$options" >/dev/null
+    else
+      "$BIN_DIR/dm-backlog.sh" hold "$key" "$question" >/dev/null
+    fi
+    # Two lines, always: a one-line dockmaster post renders as a terse log row,
+    # and a question is not a status line.
+    if [ -n "$options" ]; then
+      printf '%s\n\nPick one under Needs you to send it, or answer here: %s\n' "$question" "$options"
+    else
+      printf '%s\n\nOnly you can answer this - answer here.\n' "$question"
+    fi | node "$UI_DIR/say.js" >/dev/null
+    rc=0; running_pid >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] \
+      || dm_warn "console: not running - the question is recorded and shows the next time it starts"
+    dm_info "console: asked '$key'; the answer arrives on poll"
     ;;
   ''|help|-h|--help) usage ;;
   *) usage >&2; exit 2 ;;

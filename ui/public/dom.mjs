@@ -380,16 +380,20 @@ export const CLEANUP_REQUEST = {
   landed_backlog: (n) => `Cleanup request: clear the ${n} landed rows out of the backlog.`,
 };
 
-// A title reaches here as free text from the work's own record, not something
+// A title or a question reaches here as free text from a record, not something
 // this page validated. Quoted verbatim inside the sentence, a stray newline or
-// quote mark would break the sentence out of its quotes, and an unbounded title
+// quote mark would break the sentence out of its quotes, and an unbounded one
 // would make the transcript unreadable - so it is flattened and capped before
 // it goes anywhere near the message.
 const TITLE_MAX = 120;
-function sanitizeTitle(title) {
-  const flat = String(title).replace(/[\r\n"]+/g, ' ').trim();
-  return flat.length > TITLE_MAX ? `${flat.slice(0, TITLE_MAX - 1)}…` : flat;
+// A question is longer than a title by nature, and it is what the dockmaster
+// matches the answer back to, so it is cut later.
+const QUESTION_MAX = 300;
+function flatten(text, max) {
+  const flat = String(text).replace(/[\r\n"]+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
+const sanitizeTitle = (title) => flatten(title, TITLE_MAX);
 
 // The work is named the way the OPERATOR sees it - title, repo, state - because a
 // task id is exactly what this seam keeps off the page. Unambiguous enough for
@@ -405,6 +409,13 @@ export const APPROVE_REQUEST = (title, repo) =>
   `Approval: the work "${sanitizeTitle(title)}" in ${repo} — I approve this change.`;
 export const REVISION_REQUEST = (title, repo, notes) =>
   `Revision request: the work "${sanitizeTitle(title)}" in ${repo} — ${String(notes).trim()}`;
+
+// An answer is a MESSAGE, not an action, so it needs no confirm step - but it
+// still lands in the transcript and several questions can be open at once, so
+// it carries the question it answers. That is what the dockmaster resolves the
+// hold by; the key behind it is internal and stays off the page.
+export const ANSWER_MESSAGE = (question, answer) =>
+  `Answer — ${flatten(question, QUESTION_MAX)}\n\n${flatten(answer, QUESTION_MAX)}`;
 
 // A pull request that came back from the sweep unreadable. Kept in the list on
 // purpose - one that vanished would read as a fleet with one less problem.
