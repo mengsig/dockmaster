@@ -1,0 +1,1 @@
+- **[decision]** Fourth PR-pipeline tier 'standard' added between fast and default (one cold review pass, real logic, lavish gate still applies); rigorous's never-executed adversarial verify-findings gate cut (zero skeptic agents across the measured record) -- rigorous is now review(dimension-parallel) -> fix -> tests -> verify -> security -> pr.  _(2026-07-27T16:27:57Z)_

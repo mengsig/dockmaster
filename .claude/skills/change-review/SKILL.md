@@ -61,7 +61,10 @@ change; the PR-or-local decision and any pipeline come *after* approval.
 The full ceremony — lavish approval gate plus a two-pass PR pipeline — is right
 for real code but heavy for a typo or a doc line. A change that is **objectively
 trivial** MAY skip the lavish approval gate and use the single-pass `fast`
-pipeline (`config/pr-pipeline.fast.json`; see `pr-workflow`).
+pipeline (`config/pr-pipeline.fast.json`; see `pr-workflow`). Real logic that is
+merely small and low-blast-radius is not trivial — it still takes the lavish
+gate, just at a lighter pipeline tier; `pr-workflow` has the full `fast` <
+`standard` < `default` < `rigorous` ladder and tier selection.
 
 **A change is trivial only if it is one of:**
 - docs, comments, a config *value*, or string/copy text only; OR

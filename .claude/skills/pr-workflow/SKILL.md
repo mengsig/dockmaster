@@ -18,7 +18,11 @@ reorder, drop, or add gates by editing one array.
 ## Rigor tiers
 
 Scale review rigor to stakes. The tier is a **per-task** choice (not a per-repo
-default); when in doubt, use `default`.
+default). The ladder is `fast` < `standard` < `default` < `rigorous`; when in
+doubt, take the **higher** tier. Single-pass tiers (`fast`, `standard`) **never**
+apply to a change touching state, concurrency, safety, security, or a public
+contract — those always go to `default` or `rigorous` (recorded operator
+doctrine).
 
 **Right-size each pass, not just the tier.** Beyond picking the tier, set BOTH
 dials on every reviewer, verifier, and fix agent you spawn — `model=<tier>` and
@@ -31,10 +35,20 @@ at plain `haiku`. These passes are spawns, not tasks, so no dispatch record
 gates them — getting each one right is yours, every time; there is no computed
 recommendation to fall back on.
 
-- **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial** changes
-  only (see `change-review` for the criteria): one review pass instead of two,
-  the lavish approval gate may be skipped. Tests still run; merge authority
-  unchanged.
+- **`fast`** (`config/pr-pipeline.fast.json`) — **objectively trivial, non-logic**
+  changes only (see `change-review` for the criteria). One review pass instead
+  of two, the lavish approval gate may be skipped. Tests still run; merge
+  authority unchanged.
+- **`standard`** (`config/pr-pipeline.standard.json`) — **small, low-blast-radius
+  code changes**: a single subsystem, covered by tests, no state, concurrency,
+  safety, or security surface, and no public-contract change. One review pass,
+  but this is real logic — the lavish approval gate still applies (only `fast`
+  may skip it). Adds an optional `security` gate before `pr` (same as
+  `default`): skipped explicitly unless the change touches a security surface,
+  and a hit here is a fail-safe, not a green light — it means the tier was
+  mis-chosen (standard never covers a security surface), so escalate to
+  `default` or `rigorous` and re-run there instead of shipping on this one
+  cold pass.
 - **`default`** (`config/pr-pipeline.default.json`) — **the norm.** Two
   independent review passes (coldstart, then merge-gate), each followed by
   fix + tests.
@@ -42,29 +56,22 @@ recommendation to fall back on.
   Select it for: this distro's own merge-gate / safety-gate code, auth,
   migrations, concurrency or locking, anything touching money or secrets, or any
   change the operator is nervous about. It replaces the two generalist passes
-  with a dimension-parallel cold review, adversarially verifies every finding
-  before spending a fix round, and adds a behavioral `verify` gate.
+  with a dimension-parallel cold review and adds a behavioral `verify` gate.
 
 The tiers share one gate schema, so a tier is just a different ordered `gates`
-array. The two new mechanics the rigorous tier introduces are executable
-procedure the dockmaster drives agent-style:
+array. The rigorous tier's dimension-parallel review is executable procedure
+the dockmaster drives agent-style:
 
 - **dimension-parallel review** — instead of one generalist read, spawn one
   fresh reviewer per lens (`dimensions`: `correctness`, `security`,
   `concurrency`, `portability`, `tests`), each reading **only** the diff
   `git -C <worktree> diff <base>...HEAD`. Merge their findings. One cold pass,
   fanned out by lens.
-- **adversarial `verify-findings`** — before any fix round, each review finding
-  is independently checked by `voters` skeptics (default 3), **each prompted to
-  REFUTE it** by citing the actual code. A finding survives only if it is **not
-  refuted by a majority** (a tie is not a majority). This is the key quality
-  lever: it kills plausible-but-wrong findings before they cost a fix cycle. Only
-  the survivors go to `fix`.
 
 The rigorous gate order is
-`review (dimension-parallel) → verify-findings → fix → tests → verify → security
-→ pr`. The behavioral `verify` gate drives the changed behavior
-end to end (via the `e2e-verification` skill) and reports what was actually exercised — not
+`review (dimension-parallel) → fix → tests → verify → security → pr`. The
+behavioral `verify` gate drives the changed behavior end to end (via the
+`e2e-verification` skill) and reports what was actually exercised — not
 just that tests pass. `bin/dm-verify.sh gate <id> --json` decides from the diff and
 answers in `decision`: `required` runs it, `not-applicable` is an explicit no-surface
 skip, `undetermined` could not decide, `unavailable` means a surface moved but the
@@ -73,7 +80,7 @@ It is rigorous-only until every managed repo has app config. `security` is auto-
 then `security-review` only on a hit, else an explicit skip), and `pr` opens the
 PR. Waiting for CI is **not** a pipeline gate — it runs in the operator-mediated
 merge tail after the PR opens (see "Merge authority" below). The never-merge-red
-merge gate and the lavish-approval-first ordering are unchanged across all three
+merge gate and the lavish-approval-first ordering are unchanged across all four
 tiers.
 
 The file has a `gates` array. Run the gates top to bottom. A repo's delivery
@@ -125,6 +132,11 @@ worktree/branch from meta, communicates only through the task record, and
   the task's diff for those signals and answers in `surface` (the bare form uses
   exit 0 = signals, 1 = none); it is advisory only and never blocks. Skip
   explicitly when there is no security surface; do not stack it as a reflex.
+  **When this gate appears in a single-pass tier (currently `standard`), a
+  hit is a fail-safe, not clearance to proceed**: `standard` is defined to
+  exclude a security surface, so a hit means the tier was mis-chosen — stop
+  and re-run the change on `default` or `rigorous` instead of running the
+  scan and shipping on one pass.
 - **pr** — open the PR (below).
 
 Adding a gate: document it here with the same contract (single responsibility,
