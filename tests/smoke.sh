@@ -516,6 +516,18 @@ b dm-backlog.sh hold demo-1-decision-scope "ship v1 or v2?" --options "v1 | v2" 
 check "hold is open"     'OUT="$(b dm-backlog.sh list)"; grep -q "demo-1-decision-scope" <<<"$OUT"'
 b dm-backlog.sh resolve demo-1-decision-scope "v1" >/dev/null
 check "hold resolved"    'OUT="$(b dm-backlog.sh list)"; CTX="$(grep -A2 "demo-1-decision-scope" <<<"$OUT")"; grep -q "answer: v1" <<<"$CTX"'
+# PLAIN hold (no --only-if-free) is an upsert: re-holding an OPEN key must
+# OVERWRITE its question, options and origin, not refuse or merely coexist.
+# Every other plain-hold check here uses a fresh key, so nothing pins this - a
+# mutation that made --only-if-free's compare-and-set fire unconditionally
+# (killing the plain path's own upsert) would make every OTHER check here still
+# pass, and only bite a caller re-holding an existing open key: exactly what
+# the decision-hold skill does refining a question or adding --origin later.
+b dm-backlog.sh hold ovr-decision-key "first question?" --options "a | b" --origin "data/first/report.md" >/dev/null
+b dm-backlog.sh hold ovr-decision-key "second question?" --options "c | d" --origin "data/second/report.md" >/dev/null
+check "plain hold overwrites question, options and origin on a re-hold" \
+  '[ "$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"ovr-decision-key\") | [.question,.options,.origin] | @tsv")" \
+     = "$(printf "second question?\tc | d\tdata/second/report.md")" ]'
 
 echo "== dm dispatcher (additive convenience entrypoint) =="
 DM="$ROOT/bin/dm"
@@ -2311,6 +2323,7 @@ check "the distro fixture has no registry entry (as production has none)" \
   '[ "$(jq -r ".repos | keys | length" "$DISTRO_HOME/state/repos.json")" = 0 ]'
 check "the distro fixture is genuinely behind its origin" \
   'git -C "$DISTRO_HOME" fetch -q origin main && [ "$(git -C "$DISTRO_HOME" rev-parse origin/main)" != "$DISTRO_HEAD" ]'
+ORIGIN_HEAD="$(git -C "$DISTRO_HOME" rev-parse origin/main)"
 
 # A typo must still die at the resolver — the #119 fix, unchanged.
 check "a typo'd name does not resolve to the distro root" '! dlib dm_repo_dir dockmastr >/dev/null 2>&1'
@@ -2326,10 +2339,35 @@ check "the reserved name is refused as a new repo"    '! d dm-repo.sh add dockma
 RESERVEOUT="$(d dm-repo.sh add dockmaster "$DISTRO_ORIGIN" --no-memory 2>&1 || true)"
 check "the reserved-name refusal says why"            'grep -q "reserved for the dockmaster distro" <<<"$RESERVEOUT"'
 d dm-task.sh new self-1 --kind ship --repo dockmaster --mode local-only >/dev/null
-check "worktree create works for the distro's own task" 'd dm-worktree.sh create self-1 dockmaster feat/x/self-1 >/dev/null 2>&1'
+# THE REGRESSION (#dm-distro-stale-base): capture the operator's clone -
+# HEAD, tracked-file status, and current branch - before cutting the
+# worktree, so "untouched" below is verified, not assumed.
+DISTRO_STATUS_BEFORE="$(git -C "$DISTRO_HOME" status --porcelain)"
+DISTRO_BRANCH_BEFORE="$(git -C "$DISTRO_HOME" rev-parse --abbrev-ref HEAD)"
+if SELFCREATE_OUT="$(d dm-worktree.sh create self-1 dockmaster feat/x/self-1 2>&1)"; then SELFCREATE_RC=0; else SELFCREATE_RC=$?; fi
+check "worktree create works for the distro's own task" '[ "$SELFCREATE_RC" = 0 ]'
 SELFDIR="$DISTRO_HOME/state/worktrees/self-1"
 check "the distro worktree is real and isolated" \
   '[ -d "$SELFDIR" ] && [ "$(git -C "$SELFDIR" rev-parse --show-toplevel)" = "$SELFDIR" ] && [ "$(git -C "$SELFDIR" rev-parse --abbrev-ref HEAD)" = "feat/x/self-1" ]'
+# THE FIX: the worktree is cut from the fetched origin/main, not the stale
+# local main - branching off DISTRO_HEAD would silently drop "upstream
+# advance" (exactly what cost a whole task's work in production).
+check "the distro worktree bases off origin/main, not the stale local main" \
+  '[ "$(git -C "$SELFDIR" rev-parse HEAD)" = "$ORIGIN_HEAD" ] && [ "$(git -C "$SELFDIR" rev-parse HEAD)" != "$DISTRO_HEAD" ]'
+check "the distro worktree carries the upstream commit the stale base lacked" \
+  '[ "$(git -C "$SELFDIR" log --oneline -1 --format=%s)" = "upstream advance" ]'
+# THE REPORTING FIX: the base actually used is stated plainly (not a "may be
+# stale" warning easy to read past) and names the real ref and sha.
+check "create states the base plainly, naming origin/main and its sha" \
+  'grep -qF "base: origin/main @$(git -C "$DISTRO_HOME" rev-parse --short "$ORIGIN_HEAD")" <<<"$SELFCREATE_OUT"'
+check "create never claims the base may be stale" '! grep -qi "base may be stale" <<<"$SELFCREATE_OUT"'
+# THE SAFETY PROPERTY: cutting the worktree touched NOTHING in the operator's
+# clone - not just HEAD (already covered below), but its branch and its
+# tracked-file status too.
+check "cutting the worktree left the clone's branch untouched" \
+  '[ "$(git -C "$DISTRO_HOME" rev-parse --abbrev-ref HEAD)" = "$DISTRO_BRANCH_BEFORE" ]'
+check "cutting the worktree left the clone's tracked-file status untouched" \
+  '[ "$(git -C "$DISTRO_HOME" status --porcelain)" = "$DISTRO_STATUS_BEFORE" ]'
 check "assert accepts the distro worktree as isolated" 'd dm-worktree.sh assert "$SELFDIR" dockmaster >/dev/null 2>&1'
 printf 'self work\n' > "$SELFDIR/self.txt"
 git -C "$SELFDIR" -c user.email=c@c.co -c user.name=c add -A >/dev/null
@@ -2374,6 +2412,252 @@ check "worktree create refuses a hand-edited distro path"     '! d dm-worktree.s
 check "that refusal names the distro, not the reserved name"  'grep -q "dockmaster distro itself" <<<"$HANDOUT"'
 check "no worktree was cut off the distro"                    '[ ! -e "$DISTRO_HOME/state/worktrees/hand-1" ]'
 check "the distro head survived the class-guard sequence"     '[ "$(git -C "$DISTRO_HOME" rev-parse main)" = "$DISTRO_HEAD" ]'
+
+echo "== distro worktree base: a FAILED fetch fails closed, never falls back to stale (#dm-distro-stale-base) =="
+# A separate, fresh distro fixture whose origin goes UNREACHABLE right before
+# create, reproducing an offline/auth failure. The old behavior (a
+# dm_warn "base may be stale" nobody read) is exactly the bug that cost a
+# whole task's work in one day - this must now refuse outright, not warn.
+DISTRO2_ORIGIN="$TMP/distro2-origin.git"
+DISTRO2_HOME="$TMP/distro2-home"
+git init -q --bare -b main "$DISTRO2_ORIGIN"
+git init -q -b main "$DISTRO2_HOME"
+( cd "$DISTRO2_HOME"; git config user.email d2@d.co; git config user.name d2
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro2 init"
+  git remote add origin "$DISTRO2_ORIGIN"; git push -q origin main ) >/dev/null 2>&1
+d2() { DM_HOME="$DISTRO2_HOME" "$ROOT/bin/$@"; }
+d2 dm-doctor.sh >/dev/null
+DISTRO2_HEAD="$(git -C "$DISTRO2_HOME" rev-parse main)"
+d2 dm-task.sh new self-broken --kind ship --repo dockmaster --mode local-only >/dev/null
+# Break the remote AFTER setup (doctor/task-new need no network) so it fails
+# exactly at the fetch this fix adds.
+git -C "$DISTRO2_HOME" remote set-url origin "$TMP/no-such-remote.git"
+BROKEN_STATUS_BEFORE="$(git -C "$DISTRO2_HOME" status --porcelain)"
+BROKEN_BRANCH_BEFORE="$(git -C "$DISTRO2_HOME" rev-parse --abbrev-ref HEAD)"
+if BROKENOUT="$(d2 dm-worktree.sh create self-broken dockmaster feat/x/self-broken 2>&1)"; then BROKEN_RC=0; else BROKEN_RC=$?; fi
+check "a failed fetch refuses to create the distro's own worktree" '[ "$BROKEN_RC" -ne 0 ]'
+# Assert the LEVEL, not just the words. `grep -qi "could not fetch"` alone is
+# satisfied by dm_warn's output as happily as dm_die's, so downgrading the guard
+# back to warn-and-continue -- the exact pre-fix behavior this task removed --
+# left the suite fully green. dm_die prints "error: ", dm_warn prints "warning: ".
+check "the refusal is an error, not a soft warning" \
+  'grep -q "^error: could not fetch" <<<"$BROKENOUT" && ! grep -q "^warning:" <<<"$BROKENOUT"'
+# And assert it stopped HERE. A warn-and-continue reaches the base read below
+# and dies there instead, which keeps the exit code non-zero and every other
+# check green -- but only by accident of what is already in the ref store.
+check "the refusal stops at the fetch guard, never reaching the base read" \
+  '! grep -q "did not resolve" <<<"$BROKENOUT" && ! grep -qi "base may be stale" <<<"$BROKENOUT"'
+check "no worktree was cut off an unverifiable base"        '[ ! -e "$DISTRO2_HOME/state/worktrees/self-broken" ]'
+check "the failed fetch left the clone's head untouched"    '[ "$(git -C "$DISTRO2_HOME" rev-parse main)" = "$DISTRO2_HEAD" ]'
+check "the failed fetch left the clone's branch untouched"  '[ "$(git -C "$DISTRO2_HOME" rev-parse --abbrev-ref HEAD)" = "$BROKEN_BRANCH_BEFORE" ]'
+check "the failed fetch left the clone's status untouched"  '[ "$(git -C "$DISTRO2_HOME" status --porcelain)" = "$BROKEN_STATUS_BEFORE" ]'
+
+echo "== distro worktree base: DM_NO_FETCH still bypasses the guard, same convention as every other repo =="
+# DM_NO_FETCH=1 is the offline/smoke escape hatch (dm-status, this suite) -
+# never set by production dispatch. It must keep behaving like the non-distro
+# path below: no network, best-effort on whatever ref is already local, never
+# a hard failure.
+git -C "$DISTRO2_HOME" remote set-url origin "$DISTRO2_ORIGIN"
+# Populate a cached origin/main BEFORE the DM_NO_FETCH arm runs, so the arm has
+# something previously-fetched to prefer. Without this, origin/main was never
+# resolvable locally and the "prefer cached origin/<def>" branch of the offline
+# fallback was never actually exercised (F5).
+git -C "$DISTRO2_HOME" fetch -q origin main
+d2 dm-task.sh new self-nf --kind ship --repo dockmaster --mode local-only >/dev/null
+SELF_NF_OUT="$(DM_NO_FETCH=1 d2 dm-worktree.sh create self-nf dockmaster feat/x/self-nf 2>&1)"
+check "DM_NO_FETCH bypasses the distro fetch guard too" '[ -d "$DISTRO2_HOME/state/worktrees/self-nf" ]'
+check "DM_NO_FETCH prefers the previously-fetched origin/<def>, not bare local main (F5)" \
+  'grep -q "^base: origin/main @" <<<"$SELF_NF_OUT"'
+
+echo "== distro worktree base: a DIVERGED local main is refused, never silently dropped (F1) =="
+# The fetch-and-verify guard above only proves origin/<def> is known; it never
+# looked at whether the operator's local <def> carries commits origin doesn't
+# have (a hand commit, a local merge). Basing the new worktree on the fetched
+# commit would then silently drop them - the same loss class this task exists
+# to prevent, running the other way.
+DISTRO3_ORIGIN="$TMP/distro3-origin.git"
+DISTRO3_HOME="$TMP/distro3-home"
+git init -q --bare -b main "$DISTRO3_ORIGIN"
+git init -q -b main "$DISTRO3_HOME"
+( cd "$DISTRO3_HOME"; git config user.email d3@d.co; git config user.name d3
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro3 init"
+  git remote add origin "$DISTRO3_ORIGIN"; git push -q origin main
+  # a hand commit on main that was never pushed - exactly the loss class F1 exists to catch
+  printf 'hand edit\n' >> AGENTS.md; git commit -qam "local-only hand commit" ) >/dev/null 2>&1
+d3() { DM_HOME="$DISTRO3_HOME" "$ROOT/bin/$@"; }
+d3 dm-doctor.sh >/dev/null
+DISTRO3_HEAD="$(git -C "$DISTRO3_HOME" rev-parse main)"
+d3 dm-task.sh new self-diverged --kind ship --repo dockmaster --mode local-only >/dev/null
+if DIVERGEDOUT="$(d3 dm-worktree.sh create self-diverged dockmaster feat/x/self-diverged 2>&1)"; then DIVERGED_RC=0; else DIVERGED_RC=$?; fi
+check "a diverged local main refuses to create the distro's own worktree (F1)" '[ "$DIVERGED_RC" -ne 0 ]'
+check "the refusal names the divergence, not a soft warning" \
+  'grep -qi "carries commits not on origin" <<<"$DIVERGEDOUT"'
+check "no worktree was cut off a base that would drop the hand commit" \
+  '[ ! -e "$DISTRO3_HOME/state/worktrees/self-diverged" ]'
+check "the diverged local head survived the refusal" \
+  '[ "$(git -C "$DISTRO3_HOME" rev-parse main)" = "$DISTRO3_HEAD" ]'
+
+echo "== distro worktree base: a narrowed refspec leaving origin/<def> stale is still caught (F2) =="
+# A successful `git fetch origin main` does not prove the remote-tracking ref
+# moved: with a hand-narrowed remote.origin.fetch refspec, origin/main is never
+# touched by that fetch. Fetching into an explicit private destination
+# (refs/dm/base/<def>) and reading THAT ref -- rather than re-resolving
+# origin/<def> -- is what closes this.
+DISTRO4_ORIGIN="$TMP/distro4-origin.git"
+DISTRO4_HOME="$TMP/distro4-home"
+git init -q --bare -b main "$DISTRO4_ORIGIN"
+git init -q -b main "$DISTRO4_HOME"
+( cd "$DISTRO4_HOME"; git config user.email d4@d.co; git config user.name d4
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro4 init"
+  git remote add origin "$DISTRO4_ORIGIN"; git push -q origin main
+  git fetch -q origin main
+  # narrow the refspec so an explicit `fetch origin main` no longer updates origin/main
+  git config --unset-all remote.origin.fetch
+  git config remote.origin.fetch '+refs/heads/dm-narrow-sentinel:refs/remotes/origin/dm-narrow-sentinel' ) >/dev/null 2>&1
+DISTRO4_STALE_TRACKING="$(git -C "$DISTRO4_HOME" rev-parse origin/main)"
+git -C "$TMP" clone -q "$DISTRO4_ORIGIN" distro4-pusher
+( cd "$TMP/distro4-pusher"; git config user.email p4@p.co; git config user.name p4
+  printf 'origin advanced\n' >> AGENTS.md; git commit -qam "advance origin" )
+git -C "$TMP/distro4-pusher" push -q origin main
+DISTRO4_NEW_TIP="$(git -C "$TMP/distro4-pusher" rev-parse main)"
+d4() { DM_HOME="$DISTRO4_HOME" "$ROOT/bin/$@"; }
+d4 dm-doctor.sh >/dev/null
+d4 dm-task.sh new self-narrow --kind ship --repo dockmaster --mode local-only >/dev/null
+NARROWOUT="$(d4 dm-worktree.sh create self-narrow dockmaster feat/x/self-narrow 2>&1)"
+check "the narrowed-refspec fixture actually left origin/main stale (fixture sanity)" \
+  '[ "$(git -C "$DISTRO4_HOME" rev-parse origin/main)" = "$DISTRO4_STALE_TRACKING" ]'
+check "the new distro worktree bases on the FETCHED tip, not the stale tracking ref (F2)" \
+  '[ "$(git -C "$DISTRO4_HOME/state/worktrees/self-narrow" rev-parse HEAD)" = "$DISTRO4_NEW_TIP" ]'
+
+echo "== distro worktree base: a CONCURRENT fetch cannot substitute the base (F3) =="
+# FETCH_HEAD is ONE scratch file per clone that ANY fetch rewrites, so reading
+# the base from it is a read of shared mutable state with no lock. A second
+# fetch landing between our fetch and our read hands back an unrelated branch
+# tip wearing an "origin/main" label -- and `create --base`, dm-merge's
+# stacked-child rebase, and the operator's own `git fetch origin some-branch`
+# all fetch non-default refs against this very clone. Fetching into a private
+# refs/dm/base/<def> makes the ref we read the ref this fetch wrote.
+DISTRO5_ORIGIN="$TMP/distro5-origin.git"
+DISTRO5_HOME="$TMP/distro5-home"
+git init -q --bare -b main "$DISTRO5_ORIGIN"
+git init -q -b main "$DISTRO5_HOME"
+( cd "$DISTRO5_HOME"; git config user.email d5@d.co; git config user.name d5
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro5 init"
+  git remote add origin "$DISTRO5_ORIGIN"; git push -q origin main ) >/dev/null 2>&1
+git -C "$TMP" clone -q "$DISTRO5_ORIGIN" distro5-pusher
+( cd "$TMP/distro5-pusher"; git config user.email p5@p.co; git config user.name p5
+  printf 'advance\n' >> AGENTS.md; git commit -qam "TRUE MAIN TIP"; git push -q origin main
+  git checkout -q -b unrelated
+  printf 'unrelated\n' >> AGENTS.md; git commit -qam "UNRELATED BRANCH TIP"
+  git push -q origin unrelated ) >/dev/null 2>&1
+DISTRO5_MAIN_TIP="$(git -C "$TMP/distro5-pusher" rev-parse main)"
+DISTRO5_UNRELATED_TIP="$(git -C "$TMP/distro5-pusher" rev-parse unrelated)"
+# The race made deterministic: a `git` shim fires the competing fetch the
+# instant the distro arm's own fetch returns -- the exact window.
+RACE_SHIM="$TMP/race-shim"
+mkdir -p "$RACE_SHIM"
+RACE_REAL_GIT="$(command -v git)"
+cat > "$RACE_SHIM/git" <<RACESHIM
+#!/usr/bin/env bash
+REAL="$RACE_REAL_GIT"
+if [ "\${DM_RACE_SHIM_ACTIVE:-0}" != "1" ] && [ "\$1" = "-C" ] && [ "\$3" = "fetch" ]; then
+  racedir="\$2"; racerc=0
+  "\$REAL" "\$@" || racerc=\$?
+  case " \$* " in
+    *main*) DM_RACE_SHIM_ACTIVE=1 "\$REAL" -C "\$racedir" fetch --quiet origin unrelated >/dev/null 2>&1 || true ;;
+  esac
+  exit \$racerc
+fi
+exec "\$REAL" "\$@"
+RACESHIM
+chmod +x "$RACE_SHIM/git"
+d5() { DM_HOME="$DISTRO5_HOME" "$ROOT/bin/$@"; }
+d5 dm-doctor.sh >/dev/null
+d5 dm-task.sh new self-race --kind ship --repo dockmaster --mode local-only >/dev/null
+RACEOUT="$(PATH="$RACE_SHIM:$PATH" d5 dm-worktree.sh create self-race dockmaster feat/x/self-race 2>&1)"
+check "the shim really did land a competing fetch (fixture sanity)" \
+  '[ "$(git -C "$DISTRO5_HOME" rev-parse FETCH_HEAD)" = "$DISTRO5_UNRELATED_TIP" ]'
+check "a concurrent fetch cannot substitute the worktree's base (F3)" \
+  '[ "$(git -C "$DISTRO5_HOME/state/worktrees/self-race" rev-parse HEAD)" = "$DISTRO5_MAIN_TIP" ]'
+check "the stated base names the commit the worktree actually got (F3)" \
+  'grep -qF "base: origin/main @$(git -C "$DISTRO5_HOME" rev-parse --short "$DISTRO5_MAIN_TIP")" <<<"$RACEOUT"'
+# The companion guard: a fetch that reports success but leaves the ref it was
+# told to write missing must be refused BY NAME, not left to fail as a raw
+# `git worktree add ""`. No real git does this, which is why it needs a shim -
+# and why the refusal is otherwise indistinguishable from working code.
+VANISH_SHIM="$TMP/vanish-shim"
+mkdir -p "$VANISH_SHIM"
+cat > "$VANISH_SHIM/git" <<VANISHSHIM
+#!/usr/bin/env bash
+REAL="$RACE_REAL_GIT"
+if [ "\$1" = "-C" ] && [ "\$3" = "fetch" ]; then
+  vanishdir="\$2"; vanishrc=0
+  "\$REAL" "\$@" || vanishrc=\$?
+  "\$REAL" -C "\$vanishdir" update-ref -d refs/dm/base/main >/dev/null 2>&1 || true
+  exit \$vanishrc
+fi
+exec "\$REAL" "\$@"
+VANISHSHIM
+chmod +x "$VANISH_SHIM/git"
+d5 dm-task.sh new self-vanish --kind ship --repo dockmaster --mode local-only >/dev/null
+if VANISHOUT="$(PATH="$VANISH_SHIM:$PATH" d5 dm-worktree.sh create self-vanish dockmaster feat/x/self-vanish 2>&1)"; then VANISH_RC=0; else VANISH_RC=$?; fi
+check "a fetch reporting success but writing no base ref creates nothing (F3)" \
+  '[ "$VANISH_RC" -ne 0 ] && [ ! -e "$DISTRO5_HOME/state/worktrees/self-vanish" ]'
+check "that refusal is an error naming the missing base ref (F3)" \
+  'grep -q "^error: fetch of origin/main succeeded but refs/dm/base/main did not resolve" <<<"$VANISHOUT"'
+
+echo "== distro worktree base: a TAG named after the default branch cannot shadow it (F4) =="
+# `git rev-parse main` searches refs/tags/ BEFORE refs/heads/, so the divergence
+# guard asked its question about a tag and let the operator's unpushed commits
+# through. Address the branch by its full refs/heads/ path, as dm-sync.sh does.
+DISTRO6_ORIGIN="$TMP/distro6-origin.git"
+DISTRO6_HOME="$TMP/distro6-home"
+git init -q --bare -b main "$DISTRO6_ORIGIN"
+git init -q -b main "$DISTRO6_HOME"
+( cd "$DISTRO6_HOME"; git config user.email d6@d.co; git config user.name d6
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro6 init"
+  git remote add origin "$DISTRO6_ORIGIN"; git push -q origin main
+  # a tag named after the default branch, pinned to the PUSHED commit ...
+  git tag main
+  # ... and an unpushed hand commit on the real branch, which the guard exists
+  # to protect. `rev-parse main` answers with the tag, not this commit.
+  printf 'hand edit\n' >> AGENTS.md; git commit -qam "unpushed hand commit" ) >/dev/null 2>&1
+DISTRO6_BRANCH_HEAD="$(git -C "$DISTRO6_HOME" rev-parse refs/heads/main)"
+d6() { DM_HOME="$DISTRO6_HOME" "$ROOT/bin/$@"; }
+d6 dm-doctor.sh >/dev/null
+d6 dm-task.sh new self-tag --kind ship --repo dockmaster --mode local-only >/dev/null
+check "the tag really does shadow the branch (fixture sanity)" \
+  '[ "$(git -C "$DISTRO6_HOME" rev-parse main 2>/dev/null)" != "$DISTRO6_BRANCH_HEAD" ]'
+if TAGOUT="$(d6 dm-worktree.sh create self-tag dockmaster feat/x/self-tag 2>&1)"; then TAG_RC=0; else TAG_RC=$?; fi
+check "a tag named after the default branch does not shadow it in the guard (F4)" \
+  '[ "$TAG_RC" -ne 0 ] && grep -q "carries commits not on origin" <<<"$TAGOUT"'
+check "no worktree was cut off a base that would drop the hand commit (F4)" \
+  '[ ! -e "$DISTRO6_HOME/state/worktrees/self-tag" ]'
+check "the unpushed hand commit survived the refusal (F4)" \
+  '[ "$(git -C "$DISTRO6_HOME" rev-parse refs/heads/main)" = "$DISTRO6_BRANCH_HEAD" ]'
+
+# The DM_NO_FETCH fallback resolves a ref too, so it carries the same tag hazard.
+DISTRO7_ORIGIN="$TMP/distro7-origin.git"
+DISTRO7_HOME="$TMP/distro7-home"
+git init -q --bare -b main "$DISTRO7_ORIGIN"
+git init -q -b main "$DISTRO7_HOME"
+( cd "$DISTRO7_HOME"; git config user.email d7@d.co; git config user.name d7
+  printf 'contract\n' > AGENTS.md; git add -A; git commit -qm "distro7 init"
+  git remote add origin "$DISTRO7_ORIGIN"; git push -q origin main
+  git tag main
+  printf 'local work\n' >> AGENTS.md; git commit -qam "local commit"
+  # nothing was ever FETCHED: drop the tracking ref push created, so the offline
+  # arm falls through to the local branch -- the one a tag can shadow.
+  git update-ref -d refs/remotes/origin/main ) >/dev/null 2>&1
+DISTRO7_BRANCH_HEAD="$(git -C "$DISTRO7_HOME" rev-parse refs/heads/main)"
+d7() { DM_HOME="$DISTRO7_HOME" "$ROOT/bin/$@"; }
+d7 dm-doctor.sh >/dev/null
+d7 dm-task.sh new self-tag-nf --kind ship --repo dockmaster --mode local-only >/dev/null
+TAGNFOUT="$(DM_NO_FETCH=1 d7 dm-worktree.sh create self-tag-nf dockmaster feat/x/self-tag-nf 2>&1)"
+check "the DM_NO_FETCH fallback bases on the BRANCH, not a tag shadowing it (F4)" \
+  '[ "$(git -C "$DISTRO7_HOME/state/worktrees/self-tag-nf" rev-parse HEAD)" = "$DISTRO7_BRANCH_HEAD" ]'
+check "that fallback still names the local branch as the base (F4)" \
+  'grep -qF "base: main @$(git -C "$DISTRO7_HOME" rev-parse --short refs/heads/main)" <<<"$TAGNFOUT"'
 
 # shard:split
 echo "== teardown honesty: 'could not determine' is not 'unlanded' (#119) =="
@@ -4614,7 +4898,7 @@ check "an unknown field is still refused"   '! b dm-repo.sh set demo app_nonsens
 
 echo "== verify gate: does the gate fire? =="
 b dm-task.sh new vrf1 --kind ship --repo demo --title "verify gate" >/dev/null
-VWT="$(b dm-worktree.sh create vrf1 demo)"
+VWT="$(b dm-worktree.sh create vrf1 demo | tail -n1)"
 mkdir -p "$VWT/frontend"; printf 'console.log(1)\n' > "$VWT/frontend/app.js"
 # A user-facing surface moved but the repo cannot be booted. That is UNAVAILABLE
 # (exit 3) and must never read as a pass or a quiet skip.
@@ -5437,6 +5721,138 @@ check "an unexpected console argument is refused" '! b dm-ui.sh start --wat >/de
 check "a non-numeric poll timeout is refused"  '! b dm-ui.sh poll --timeout soon >/dev/null 2>&1'
 check "an empty message is refused"            '! b dm-ui.sh say "" >/dev/null 2>&1'
 
+# A question asked THROUGH the page (#218). Durable by construction: it is a
+# decision hold, so it outlives both the console and the session that asked it,
+# and it needs no new store. The answer comes back on the ordinary poll queue.
+check "ask with no question is refused"        '! b dm-ui.sh ask onlykey >/dev/null 2>&1'
+check "an unexpected ask argument is refused"  '! b dm-ui.sh ask k "q?" --wat >/dev/null 2>&1'
+b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain page" >/dev/null 2>&1
+check "ask opens a decision hold"              'b dm-backlog.sh decisions | grep -q "ui-embed"'
+check "the hold carries the options the page renders" \
+  '[ "$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"ui-embed\") | .options")" = "panel | plain page" ]'
+check "ask puts the question in the conversation" \
+  'grep -q "Panel or plain page?" "$DM_HOME/state/ui/chat.jsonl"'
+# The question is the dockmaster speaking; only the ANSWER is queued back.
+check "ask queues nothing for the dockmaster to pick up" \
+  '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json" 2>/dev/null)" ]'
+# Asking the same thing twice must not stack up two open holds on the panel:
+# the identical ask is the retry after a failed post, and writes nothing away.
+b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain page" >/dev/null 2>&1
+check "asking again is the same hold, not a second one" \
+  '[ "$(b dm-backlog.sh decisions --json | jq "[.[] | select(.key==\"ui-embed\")] | length")" = "1" ]'
+# THE KEY IS NOT A SCRATCHPAD. `hold` upserts: it keeps status/answer but
+# overwrites question, options and the --origin backlink dm-trash.sh resolves
+# holds through. Keys are invented per question, so an ask under a key another
+# task already holds would destroy that decision with no trace at all.
+b dm-backlog.sh hold cross-task "Land the importer tonight or Monday?" \
+  --options "tonight | Monday" --origin "data/other-task/report.md" >/dev/null 2>&1
+check "an ask cannot take over another decision's key" \
+  '! b dm-ui.sh ask cross-task "Bump the node floor?" >/dev/null 2>&1'
+check "and the decision it would have erased is untouched" \
+  '[ "$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"cross-task\") | \
+       [.question, .options, .origin] | @tsv")" \
+     = "$(printf "Land the importer tonight or Monday?\ttonight | Monday\tdata/other-task/report.md")" ]'
+check "nor was the question it refused to ask put in the conversation" \
+  '! grep -q "Bump the node floor?" "$DM_HOME/state/ui/chat.jsonl"'
+# Same key, same question, DIFFERENT options is still an overwrite.
+check "changing only the options under a held key is refused too" \
+  '! b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain | neither" >/dev/null 2>&1'
+# ORIGIN IS PART OF THE DECISION. Same key, same question, same options - only the
+# --origin backlink differs, and rewriting it to "" would sever the link
+# dm-trash.sh resolves that task's holds through. So origin alone must be enough
+# to refuse; without this case the refusal is always reached on the question, and
+# the origin clause could be deleted with the suite still green.
+b dm-backlog.sh hold origin-owned "Land the importer tonight or Monday?" \
+  --options "tonight | Monday" --origin "data/origin-task/report.md" >/dev/null 2>&1
+check "an ask is refused when ONLY the origin differs" \
+  '! b dm-ui.sh ask origin-owned "Land the importer tonight or Monday?" --options "tonight | Monday" >/dev/null 2>&1'
+check "and the backlink dm-trash.sh resolves that hold through survives" \
+  '[ "$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"origin-owned\") | .origin")" \
+     = "data/origin-task/report.md" ]'
+# THE RACE. `ask` used to READ the decision log and then write, with nothing
+# holding the backlog lock across the pair: two asks on one key both passed the
+# read, both posted their question, and the loser's hold was destroyed with no
+# trace. The write is a compare-and-set inside dm-backlog.sh now, decided in the
+# same locked pass that writes, so exactly one of them can win.
+UI_RACE_A_RC=0; UI_RACE_B_RC=0
+b dm-ui.sh ask race-key "Race question A?" --options "yes | no" >/dev/null 2>&1 &
+UI_RACE_A=$!
+b dm-ui.sh ask race-key "Race question B?" --options "20 | 22" >/dev/null 2>&1 &
+UI_RACE_B=$!
+wait "$UI_RACE_A" || UI_RACE_A_RC=$?
+wait "$UI_RACE_B" || UI_RACE_B_RC=$?
+check "concurrent asks on one key: exactly one succeeds" \
+  '[ $(( (UI_RACE_A_RC == 0) + (UI_RACE_B_RC == 0) )) -eq 1 ]'
+# A THIRD check used to sit here asserting "exactly one hold record for
+# race-key" on its own. Dropped: it carried no independent weight - a plain
+# upsert racing on one key ALSO ends at exactly one record (last writer wins),
+# so that assertion alone cannot tell a real compare-and-set from a check-
+# then-act upsert (confirmed: mutating the CAS to a plain upsert left it green
+# while 10 others went red). Its only real job - proving there is a SINGLE
+# winning record to read - is already load-bearing for the check below: it
+# selects .question by key and compares it to exactly one literal answer,
+# which breaks the moment two records (or a garbled merge of both) exist under
+# that key. The loser must also leave NOTHING behind - a question in the
+# conversation that no panel is holding open is one that scrolls away
+# unanswered.
+check "and only the question that was recorded reached the conversation" \
+  'UI_RACE_WON="$(b dm-backlog.sh decisions --json | jq -r ".[] | select(.key==\"race-key\") | .question")"; \
+   UI_RACE_LOST="Race question B?"; \
+   [ "$UI_RACE_WON" = "Race question A?" ] || UI_RACE_LOST="Race question A?"; \
+   grep -qF "$UI_RACE_WON" "$DM_HOME/state/ui/chat.jsonl" \
+     && ! grep -qF "$UI_RACE_LOST" "$DM_HOME/state/ui/chat.jsonl"'
+# One line per hold is what `decisions` and dm-status.sh print; a newline in the
+# question shreds both, and the answer echoes it back on one line as well. A TAB
+# survives both but breaks `decisions`' own tab-separated columns.
+check "a multi-line question is refused" \
+  '! b dm-ui.sh ask multiline "$(printf "first line\nsecond line")" >/dev/null 2>&1'
+check "a question containing a tab is refused" \
+  '! b dm-ui.sh ask tabbed "$(printf "before\tafter")" >/dev/null 2>&1'
+# The page identifies an answer by the question echoed in its header, cut at 300
+# characters. Two questions identical up to that cut produce byte-identical
+# answers and neither the page nor the dockmaster could say which was answered,
+# so a question that long is refused rather than asked ambiguously.
+UI_LONG_Q="AAAAAAAAAA"
+while [ "${#UI_LONG_Q}" -lt 301 ]; do UI_LONG_Q="$UI_LONG_Q$UI_LONG_Q"; done
+check "a question past the page's answer identity is refused" \
+  '! b dm-ui.sh ask toolong "$UI_LONG_Q" >/dev/null 2>&1'
+check "and one exactly at it is still asked" \
+  'b dm-ui.sh ask atcap "${UI_LONG_Q:0:300}" >/dev/null 2>&1'
+# What the page sends back: an ordinary operator message. Poll's contract is
+# untouched by any of this - it is the same drain, quoting the question.
+DM_UI_CHAT="$ROOT/ui/chat.js" node -e 'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", "Answer — Panel or plain page?\n\nplain page")' \
+  >/dev/null 2>&1
+UI_ANSWER="$(b dm-ui.sh poll --timeout 5 2>/dev/null || true)"
+check "the answer arrives on the ordinary poll queue" \
+  'grep -q "Answer — Panel or plain page?" <<<"$UI_ANSWER" && grep -q "plain page" <<<"$UI_ANSWER"'
+b dm-backlog.sh resolve ui-embed "plain page" >/dev/null 2>&1
+check "answering closes the hold"              '! b dm-backlog.sh decisions | grep -q "ui-embed"'
+# Re-asking the SAME question, unchanged, on a now-ANSWERED key must still be
+# refused - AS ANSWERED, not treated as "identical to what's already open" (it
+# is not open) and not silently reposted. A version of `hold` that checked
+# equality BEFORE checking status would let an identical re-ask through the
+# equality clause and re-post the question with the hold already resolved: the
+# question would show in the conversation a second time while the Needs-you
+# panel stays empty, since nothing holds it open. The check below on a
+# DIFFERENT question cannot catch that - a different question falls through to
+# "already holds a different open decision" either way and still refuses, for
+# the wrong reason.
+UI_REASK_SAME_BEFORE="$(grep -c "Panel or plain page?" "$DM_HOME/state/ui/chat.jsonl")"
+UI_REASK_SAME_RC=0
+UI_REASK_SAME_ERR="$(b dm-ui.sh ask ui-embed "Panel or plain page?" --options "panel | plain page" 2>&1 >/dev/null)" || UI_REASK_SAME_RC=$?
+check "re-asking the identical question on an answered key is refused" \
+  '[ "$UI_REASK_SAME_RC" -ne 0 ]'
+check "and refused as ANSWERED, not as a mismatched hold" \
+  'grep -q "already answered" <<<"$UI_REASK_SAME_ERR"'
+check "and no second copy of the question reached the conversation" \
+  '[ "$(grep -c "Panel or plain page?" "$DM_HOME/state/ui/chat.jsonl")" = "$UI_REASK_SAME_BEFORE" ]'
+# `hold` upserts and KEEPS the answer, so reusing an answered key would post a
+# question into the conversation with nothing holding it open. Refused instead.
+check "reusing an answered key is refused, not silently closed" \
+  '! b dm-ui.sh ask ui-embed "Panel or plain page, again?" >/dev/null 2>&1'
+check "and the refusal added nothing to the conversation" \
+  '! grep -q "Panel or plain page, again?" "$DM_HOME/state/ui/chat.jsonl"'
+
 # The chat queue is files, not the server: `say` and `poll` round-trip with
 # nothing listening. Claiming is a rename, so a killed poll loses nothing.
 check "poll times out with nothing queued" \
@@ -5969,6 +6385,21 @@ check "the resolution is recorded as DROPPED, not answered" \
    | jq -e "any(.[]; .key==\"review-tr-holds\" and .status==\"resolved\" and (.answer|startswith(\"trashed:\")))" >/dev/null'
 check "the unrelated hold is untouched, still open" \
   'b dm-backlog.sh decisions --json | jq -e "any(.[]; .key==\"other-task-decision-unrelated\" and .status==\"open\")" >/dev/null'
+
+# `ask`'s keys are free-form and it never set --origin, so an ask-created hold
+# matched NEITHER of trash's two conventions and stayed open forever once its
+# task was gone. `ask` now takes --origin, forwarded straight to the hold, so a
+# question filed against a task can be found and resolved the same as any
+# decision-hold-skill hold.
+TRASKWT="$(trash_task tr-ask-origin)"
+b dm-ui.sh ask tr-ask-free-key "ship the change now or wait?" --options "now | wait" \
+  --origin "data/tr-ask-origin/report.md" >/dev/null 2>&1
+TRASKOUT="$(b dm-trash.sh tr-ask-origin --reason "plan dropped" 2>/dev/null)"
+check "trashing the task resolves an ask hold carrying that task's origin" \
+  'grep -qx "resolved_hold=tr-ask-free-key" <<<"$TRASKOUT"'
+check "the ask hold is recorded as trashed, not left open" \
+  'b dm-backlog.sh decisions --json \
+   | jq -e "any(.[]; .key==\"tr-ask-free-key\" and .status==\"resolved\" and (.answer|startswith(\"trashed:\")))" >/dev/null'
 
 # The "no holds" case, on a run that actually went through this trash and this
 # section — not a reuse of an unrelated earlier $TROUT capture (that task never

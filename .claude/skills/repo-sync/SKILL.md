@@ -33,6 +33,16 @@ report it and let a human resolve the clone; do not force past it.
   worktree's base, and fails closed (never cuts a stale base) if the clone can't
   fast-forward. Under `DM_NO_FETCH=1` (offline/smoke) it skips the sync and does
   not block.
+- **The distro's own clone is the one exception** — `dm-sync.sh` refuses to
+  touch it at all (the control plane is the operator's checkout). `create`
+  instead fetches origin's default branch into a private ref of its own and
+  cuts the worktree off the commit THAT fetch wrote — never off local main, off
+  a remote-tracking ref, or off `FETCH_HEAD`, each of which can be stale or
+  belong to somebody else's concurrent fetch. The operator's checkout, index and
+  branches never move. Three ways to be wrong fail closed rather than warn: the
+  fetch failing, the fetched ref not resolving, and local main carrying commits
+  origin does not have. This covers default-branch worktrees only — `--base`
+  (stacked sub-PR children) still warns and reads the remote-tracking ref.
 - **After any merge** — `dm-pr.sh merge` now FF-syncs the clone automatically,
   best-effort, right after a successful merge. After an OUT-OF-BAND merge (the
   operator merged on GitHub directly, or a `local-only` landing happened outside

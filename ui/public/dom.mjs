@@ -380,16 +380,25 @@ export const CLEANUP_REQUEST = {
   landed_backlog: (n) => `Cleanup request: clear the ${n} landed rows out of the backlog.`,
 };
 
-// A title reaches here as free text from the work's own record, not something
-// this page validated. Quoted verbatim inside the sentence, a stray newline or
-// quote mark would break the sentence out of its quotes, and an unbounded title
-// would make the transcript unreadable - so it is flattened and capped before
-// it goes anywhere near the message.
+// A title or a question reaches here as free text from a record, not something
+// this page validated: unbounded or multi-line it would make the transcript
+// unreadable, so it is flattened onto one line and capped before it goes
+// anywhere near a message.
 const TITLE_MAX = 120;
-function sanitizeTitle(title) {
-  const flat = String(title).replace(/[\r\n"]+/g, ' ').trim();
-  return flat.length > TITLE_MAX ? `${flat.slice(0, TITLE_MAX - 1)}…` : flat;
+// A question is longer than a title by nature, and it is what the dockmaster
+// matches the answer back to, so it is cut later. Exported because `dm-ui.sh
+// ask` refuses a question this cut would shorten - two questions identical up to
+// the cut would produce indistinguishable answers - and the two numbers must be
+// the same one (tests/check-console.js pins them equal).
+export const QUESTION_MAX = 300;
+function flatten(text, max) {
+  const flat = String(text).replace(/[\r\n]+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
+// A title is quoted INSIDE a sentence, so a quote mark in it would break out of
+// those quotes. A question is not - it stands on its own line (ANSWER_HEADER),
+// and stripping quotes there only made the echo stop matching what was asked.
+const sanitizeTitle = (title) => flatten(title, TITLE_MAX).replace(/"/g, ' ').replace(/\s+/g, ' ').trim();
 
 // The work is named the way the OPERATOR sees it - title, repo, state - because a
 // task id is exactly what this seam keeps off the page. Unambiguous enough for
@@ -405,6 +414,57 @@ export const APPROVE_REQUEST = (title, repo) =>
   `Approval: the work "${sanitizeTitle(title)}" in ${repo} — I approve this change.`;
 export const REVISION_REQUEST = (title, repo, notes) =>
   `Revision request: the work "${sanitizeTitle(title)}" in ${repo} — ${String(notes).trim()}`;
+
+// An answer is a MESSAGE, not an action, so it needs no confirm step - but it
+// still lands in the transcript and several questions can be open at once, so
+// it carries the question it answers. That is what the dockmaster resolves the
+// hold by; the key behind it is internal and stays off the page.
+//
+// The header is its own export because it is also an IDENTITY: the page finds an
+// answer it already sent by matching this line in the transcript, which is the
+// only durable record either side has. `answerTo` below is the reader, kept
+// beside the writer so the two cannot drift.
+//
+// What that identity does NOT survive: two questions identical up to
+// QUESTION_MAX produce byte-identical headers and nothing here can tell their
+// answers apart. `dm-ui.sh ask` - the only writer of a hold meant to be answered
+// from this page - refuses a question that long for exactly that reason, so the
+// gap is confined to a hold recorded some other way; the answer to one of those
+// may be read as the answer to the other, silently.
+export const ANSWER_HEADER = (question) => `Answer — ${flatten(question, QUESTION_MAX)}`;
+export const ANSWER_MESSAGE = (question, answer) =>
+  `${ANSWER_HEADER(question)}\n\n${flatten(answer, QUESTION_MAX)}`;
+
+// answerTo(messages, question, sentHere) -> the answer already given to this
+// question, or null. The transcript is the one place an answer is durably
+// recorded - the hold stays OPEN until the dockmaster resolves it, so a panel's
+// own data cannot say - and `sentHere` covers the fraction of a second between
+// an answer's POST resolving and the poll carrying it back.
+//
+// The match is the FIRST LINE, whole: ANSWER_MESSAGE puts the header on its own
+// line, and a prefix match instead let an answer to a LONGER question satisfy a
+// SHORTER one whose text it starts with. Two open questions were enough - the
+// shorter one rendered as answered, quoting the other's tail, and became
+// unanswerable from the only surface offering its options.
+//
+// Newest wins: the operator may answer from the row and then say something else
+// in the conversation. Bounded by whatever the caller keeps, so an answer that
+// scrolled out of the kept transcript reads as unanswered again - the honest
+// thing for a question still open two thousand messages later.
+export function answerTo(messages, question, sentHere) {
+  const header = ANSWER_HEADER(question);
+  if (sentHere && sentHere.has(header)) return sentHere.get(header);
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.from !== 'operator') continue;
+    const text = String(message.text || '');
+    const cut = text.indexOf('\n');
+    const firstLine = cut === -1 ? text : text.slice(0, cut);
+    if (firstLine.trim() !== header) continue;
+    return text.slice(firstLine.length).trim() || 'in your own words';
+  }
+  return null;
+}
 
 // A pull request that came back from the sweep unreadable. Kept in the list on
 // purpose - one that vanished would read as a fleet with one less problem.

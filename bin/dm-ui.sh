@@ -28,6 +28,25 @@
 #                                  a killed poll (mid-drain included) loses
 #                                  nothing: re-run it and it arrives again.
 #   say "<text>" | say --file <p>  post the dockmaster's reply into the page
+#   ask <key> "<question>"         ask the operator a question through the PAGE
+#       [--options "A | B"]        rather than the terminal. Records it as a
+#       [--origin <path>]          decision hold (durable: it outlives this
+#                                  session and the console) so the Needs-you
+#                                  panel holds it open, and posts it into the
+#                                  conversation. The answer comes back on `poll`
+#                                  as an ordinary operator message - no second
+#                                  transport, and nothing to resume. --origin
+#                                  ties the question to a task's data/<id>/
+#                                  report, the backlink dm-trash.sh resolves
+#                                  that task's open holds through.
+#                                  <key> must be UNUSED: it will not write over
+#                                  a decision already on the board, and two asks
+#                                  racing on one key cannot both write. A question
+#                                  is one line, no tab, at most 300 characters
+#                                  (the length at which the page's answer stops
+#                                  identifying it); options split on '|', which is
+#                                  therefore not expressible inside one - reword
+#                                  the option.
 #
 # Port: 4877 by default (DM_UI_PORT overrides). Chosen clear of lavish (4387),
 # chrome-devtools (9224), and the verify gate's app/bridge/CDP ranges
@@ -50,8 +69,13 @@ LOG_FILE="$RUN_DIR/server.log"
 PORT="${DM_UI_PORT:-4877}"
 URL="http://127.0.0.1:$PORT/"
 BOOT_TIMEOUT_SPINS=100   # 100 x 0.1s
+# The longest question `ask` will take. It is the length at which the page cuts
+# the question in the answer header it matches an answer back by (dom.mjs
+# QUESTION_MAX); past it, two questions become one identity. The two numbers must
+# agree, and tests/check-console.js pins them equal.
+ASK_QUESTION_MAX=300
 
-usage() { sed -n '2,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 # running_pid - print the pid the file names, and return WHICH of three states
 # it is in. Callers must distinguish all three:
@@ -195,6 +219,89 @@ case "$cmd" in
         node "$UI_DIR/say.js" < "$2" ;;
       *) printf '%s' "$1" | node "$UI_DIR/say.js" ;;
     esac
+    ;;
+  ask)
+    # A question asked through the page, built out of the two stores that
+    # already exist rather than a third: the decision log holds it OPEN (the
+    # Needs-you panel reads exactly that, and it survives both this session and
+    # the console dying), and the transcript carries it into the conversation
+    # where the operator is reading. The answer comes back on `poll` as an
+    # ordinary operator message, so poll's contract is untouched.
+    key="${1:-}"; question="${2:-}"; shift 2 2>/dev/null || true
+    [ -n "$key" ] && [ -n "$question" ] \
+      || dm_die "usage: dm-ui.sh ask <key> \"<question>\" [--options \"A | B\"] [--origin <path>]"
+    options=""; origin=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --options) options="${2:-}"; shift 2 || dm_die "console: --options needs a value" ;;
+        # A question about a specific task's data/<id>/ report: passed straight
+        # through to the hold's --origin, the backlink dm-trash.sh resolves that
+        # task's open holds through. Without it, an ask's free-form key matches
+        # neither of dm-trash.sh's two conventions (<id>-decision-* key prefix,
+        # or this origin), and trashing the task leaves the question open forever.
+        --origin) origin="${2:-}"; shift 2 || dm_die "console: --origin needs a value" ;;
+        *) dm_die "console: unexpected argument '$1'" ;;
+      esac
+    done
+    # A question is ONE line with no tabs. The decision log prints one line per
+    # hold, tab-separated (dm-backlog.sh decisions, dm-status.sh), and the answer
+    # echoes the question as a single header line: a newline shreds both surfaces
+    # and a tab shreds the column layout of the first.
+    case "$question" in
+      *$'\n'*) dm_die "console: a question must be one line - the decision log and the answer both print it on one" ;;
+      *$'\t'*) dm_die "console: a question must not contain a tab - the decision log is tab-separated and a tab breaks its columns" ;;
+    esac
+    # The page identifies an answer by the question echoed back in its header, cut
+    # at ASK_QUESTION_MAX. Two questions identical up to that cut produce
+    # byte-identical answers, and neither the page nor the dockmaster could tell
+    # which one was answered - so a question that would be cut is refused here
+    # rather than asked ambiguously. (Characters, as bash counts them; the page
+    # cuts in UTF-16 units, so an astral character leaves less room than one.)
+    [ "${#question}" -le "$ASK_QUESTION_MAX" ] \
+      || dm_die "console: a question must be at most $ASK_QUESTION_MAX characters - the page matches an answer back by the question it echoes, and a longer one is cut, so two of them could not be told apart"
+    # Recorded before it is said. A question in the conversation that no panel
+    # is holding open is the one that scrolls away unanswered.
+    #
+    # Keys are free-form and invented per question, and `hold` is an upsert:
+    # reusing one would destroy whatever decision was already open under it - its
+    # question, its options and the --origin backlink dm-trash.sh resolves holds
+    # through - with nothing left to say it happened. --only-if-free is the
+    # compare-and-set that refuses that inside the backlog's own lock, so two asks
+    # racing on one key cannot both write; reading the log here and then writing
+    # was that race, and each collision cost a question. dm-backlog.sh owns the
+    # verdict; this only words it for the operator, and reports anything else that
+    # went wrong as itself rather than as a taken key.
+    hold_cmd=(hold "$key" "$question")
+    [ -n "$options" ] && hold_cmd=(hold "$key" "$question" --options "$options")
+    [ -n "$origin" ] && hold_cmd=("${hold_cmd[@]}" --origin "$origin")
+    hold_cmd=("${hold_cmd[@]}" --only-if-free)
+    hold_rc=0
+    hold_err="$("$BIN_DIR/dm-backlog.sh" "${hold_cmd[@]}" 2>&1 >/dev/null)" || hold_rc=$?
+    if [ "$hold_rc" -ne 0 ]; then
+      # Matched on the FIXED tail of dm-backlog.sh's own wording, not the
+      # `dm:hold-taken`/`dm:hold-answered` token: the token sits right next to the
+      # caller-chosen key in that message, so a key that happens to contain the
+      # OTHER token as literal text (e.g. a key of "dm:hold-taken-mykey" that is
+      # actually answered) used to match the first `case` arm on that substring
+      # alone and report the wrong reason. The tail phrase carries no key text.
+      case "$hold_err" in
+        *"is already answered"*) dm_die "console: '$key' is already answered - a new question needs a new key" ;;
+        *"already holds a different open decision"*) dm_die "console: '$key' already holds a different open decision - asking under it would erase that question. Use a new key." ;;
+        *) printf '%s\n' "$hold_err" >&2
+           dm_die "console: the decision hold for '$key' could not be recorded, so nothing was asked" ;;
+      esac
+    fi
+    # Two lines, always: a one-line dockmaster post renders as a terse log row,
+    # and a question is not a status line.
+    if [ -n "$options" ]; then
+      printf '%s\n\nPick one under Needs you to send it, or answer here: %s\n' "$question" "$options"
+    else
+      printf '%s\n\nOnly you can answer this - answer here.\n' "$question"
+    fi | node "$UI_DIR/say.js" >/dev/null
+    rc=0; running_pid >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] \
+      || dm_warn "console: not running - the question is recorded and shows the next time it starts"
+    dm_info "console: asked '$key'; the answer arrives on poll"
     ;;
   ''|help|-h|--help) usage ;;
   *) usage >&2; exit 2 ;;

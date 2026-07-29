@@ -19,6 +19,10 @@
 #                                    Refuses a <repo> resolving to the distro root;
 #                                    the reserved name `dockmaster` is the one
 #                                    exemption, for its own PR path (#119).
+#                                    Prints exactly two stdout lines: `base: <ref>
+#                                    @<sha>` then the worktree path. Every caller
+#                                    consumes only the LAST line -- treat that as
+#                                    the contract, not just today's convention.
 #   assert <path> <repo>            verify <path> is a real worktree root distinct
 #                                    from the primary clone (isolation invariant)
 #   landed <id> [--json]            is the worktree's committed work landed?
@@ -360,6 +364,7 @@ case "$cmd" in
     fi
     wt="$DM_WT/$id"
     [ -e "$wt" ] && dm_die "worktree already exists: $wt"
+    base_label=""
     if [ -n "$base_ref" ]; then
       # PARENT-AWARE freshness: a sub-PR child branches off a PARENT branch, not
       # the clone's default branch, so the base that must be current is the
@@ -373,6 +378,72 @@ case "$cmd" in
       # branch (a parent not yet pushed).
       base="$(git -C "$dir" rev-parse --verify --quiet "origin/$base_ref" 2>/dev/null || git -C "$dir" rev-parse --verify --quiet "$base_ref" 2>/dev/null)" \
         || dm_die "parent ref not found (checked origin/$base_ref and $base_ref): $base_ref"
+      base_label="$base_ref"
+    elif [ "$repo" = "$DM_DISTRO_REPO" ]; then
+      # The distro's own clone is the one case dm-sync.sh REFUSES to touch (the
+      # control plane is the operator's checkout; moving it unattended is the
+      # exact thing that must never happen) -- so its local default branch only
+      # advances when the operator pulls by hand, and the FF-sync guard below is
+      # a permanent no-op here. `fetch` only writes refs; it never touches the
+      # checked-out branch, index, or working tree, so fetching origin's <def>
+      # and cutting a NEW worktree off that commit gets a current base WITHOUT
+      # working around the refusal -- the refusal still holds, in full.
+      def="$(dm_default_branch "$dir")"
+      if [ "${DM_NO_FETCH:-0}" != "1" ]; then
+        # A failed fetch must not silently fall back to local main: that
+        # silence (a `dm_warn "base may be stale"` nobody read) is exactly what
+        # let three tasks branch off a base several commits stale in one day.
+        # Fail closed instead of warning and continuing.
+        #
+        # Fetch into a PRIVATE ref and read the base back from THAT ref, so the
+        # ref read is the ref this fetch wrote. Both alternatives can lie:
+        # origin/<def> is left stale by a hand-narrowed remote.origin.fetch even
+        # when the explicit fetch succeeds, and FETCH_HEAD is one scratch file
+        # per clone that ANY fetch rewrites -- `create --base`, dm-merge's
+        # stacked-child rebase and the operator's own `git fetch origin
+        # some-branch` all target this same clone, and one landing between the
+        # fetch and the read hands back an unrelated branch tip labelled
+        # origin/<def> (reproduced, not theorised). refs/dm/ is not a branch, a
+        # tag or a remote-tracking ref, so nothing in the checkout moves.
+        git -C "$dir" fetch --quiet origin "+refs/heads/$def:refs/dm/base/$def" \
+          || dm_die "could not fetch origin/$def for the distro's own worktree (offline, no remote, or auth failure). Refusing to cut a worktree off a base that cannot be verified current -- retry once network/auth is restored."
+        base="$(git -C "$dir" rev-parse --verify --quiet "refs/dm/base/$def")" \
+          || dm_die "fetch of origin/$def succeeded but refs/dm/base/$def did not resolve; cannot verify a fetched commit for the distro's own worktree"
+        base_label="origin/$def"
+        # A successful, current fetch only proves origin/<def> is known --
+        # it says nothing about whether the operator's LOCAL <def> already
+        # carries commits origin doesn't have (a hand commit, a local merge).
+        # Basing the worktree on the fetched commit would then silently drop
+        # them: the same loss class this fix exists to prevent, running the
+        # other way. Refuse rather than warn -- a warning nobody reads is
+        # exactly the failure mode this task replaced.
+        #
+        # Name the branch by its full refs/heads/ path, the same way dm-sync.sh
+        # does: `rev-parse main` searches refs/tags/ BEFORE refs/heads/, so a tag
+        # named after the default branch answers this question about the tag and
+        # lets the operator's unpushed commits through unprotected.
+        if git -C "$dir" show-ref --verify --quiet "refs/heads/$def" \
+          && ! git -C "$dir" merge-base --is-ancestor "refs/heads/$def" "$base" 2>/dev/null; then
+          dm_die "$repo: local '$def' carries commits not on origin/$def (diverged or ahead of origin) -- cutting a worktree off origin/$def would silently drop them. Reconcile '$def' with origin by hand (push, rebase, or fast-forward), then retry."
+        fi
+      else
+        # DM_NO_FETCH=1 (offline/smoke): no network is permitted here either, so
+        # neither the freshness fetch nor the divergence check above can run --
+        # same escape hatch as the non-distro path below. Prefer a
+        # previously-fetched origin/<def>; fall back to the local branch only
+        # if nothing was ever fetched. Both are addressed by full ref path for
+        # the same reason as the divergence guard above -- a tag named after the
+        # default branch must not decide where a worktree gets cut.
+        if git -C "$dir" show-ref --verify --quiet "refs/remotes/origin/$def"; then
+          base_label="origin/$def"
+          base_ref_path="refs/remotes/origin/$def"
+        else
+          base_label="$def"
+          base_ref_path="refs/heads/$def"
+        fi
+        base="$(git -C "$dir" rev-parse --verify --quiet "$base_ref_path")" \
+          || dm_die "$base_label does not resolve in $dir; cannot determine a base for the distro's own worktree"
+      fi
     else
       if [ "${DM_NO_FETCH:-0}" != "1" ]; then
         # Bring the clone's default branch current BEFORE cutting a worktree base
@@ -384,7 +455,9 @@ case "$cmd" in
         # unexpectedly (under set -e that would otherwise crash this command with
         # a raw git failure instead of failing closed through the STUCK path below).
         # dm_sync_reaction (dm-lib.sh) turns STUCK into dm_die here and SKIP into
-        # "base may be stale" (a warn, not fail-closed — no divergence was found).
+        # "base may be stale" (a warn, not fail-closed — no divergence was found;
+        # the repo isn't the distro, so a SKIP here means no origin remote, an
+        # unborn branch, etc., not the control-plane refusal above).
         sync_out="$("$(dirname "${BASH_SOURCE[0]}")/dm-sync.sh" one "$repo")" || sync_out="STUCK: sync failed unexpectedly"
         dm_sync_reaction "$repo" "$sync_out" die
       fi
@@ -392,6 +465,7 @@ case "$cmd" in
       # Branch from the LOCAL default: it holds local-only landings and is kept
       # fast-forwarded to origin for PR repos by dm-sync. Fall back to origin.
       base="$(git -C "$dir" rev-parse --verify --quiet "$def" 2>/dev/null || git -C "$dir" rev-parse "origin/$def")"
+      base_label="$def"
     fi
     if [ -n "$branch" ]; then
       git -C "$dir" worktree add -b "$branch" "$wt" "$base" >/dev/null
@@ -406,6 +480,11 @@ case "$cmd" in
     # it (the "main PR" this child stacks on). Not a landing field: it carries
     # no forge risk analogous to pr/pr_state/merge_state.
     [ -n "$base_ref" ] && dm_meta_set "$id" base "$base_ref"
+    # State the actual base PLAINLY. A warning read past ("base may be stale")
+    # is exactly how several tasks silently branched off a stale base in one
+    # day -- this line, not a softened warning, is the fix for that half of
+    # the bug.
+    dm_info "base: $base_label @$(git -C "$dir" rev-parse --short "$base")"
     dm_info "$wt"
     ;;
 
