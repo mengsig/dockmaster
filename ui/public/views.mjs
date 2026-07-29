@@ -679,7 +679,9 @@ export function viewRepos(state) {
 
 export function viewReviews(state, ctx) {
   const frag = document.createDocumentFragment();
-  add(frag, head('Reviews', 'Every review page the crew has produced. They stay openable after the work lands.'));
+  add(frag, head('Reviews', 'Every review page the crew has produced. They stay openable after the work lands. '
+    + 'Open shows the page the console keeps; the original is the annotatable session it was rendered in, '
+    + 'which is not always still open.'));
   const lost = lostHere(state, 'reviews');
   add(frag, lost);
   if (state.reviews.length === 0) {
@@ -695,10 +697,13 @@ export function viewReviews(state, ctx) {
       cell('mono nowrap', el('span', null, r.repo || '—')),
       cell('nowrap', stateCell(awaiting ? 'brass' : 'neutral', awaiting ? 'Waiting for you' : 'Reviewed')),
       cell('mono nowrap', el('span', null, ago(r.at))),
-      // A REAL link, so opening the tab is the click's own gesture: the server
-      // redirects it to the annotatable session - the same surface it was
-      // reviewed in - or to this row's raw page when there is no session.
-      cell('nowrap', link(r.open_href, 'Open')));
+      // The console's own page first, because it is the one that is always
+      // there; the annotatable session second, for annotating. Both are REAL
+      // links, so the tab is the click's own gesture.
+      cell('nowrap', add(el('div', 'review-open'),
+        link(r.href, 'Open'),
+        el('span', 'review-or', '·'),
+        link(r.session_href, 'the original', 'row-action'))));
   });
   // Waiting and reviewed are two different jobs: one is a queue, the other an
   // archive. The archive folds away; the queue never does.

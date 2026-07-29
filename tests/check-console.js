@@ -763,6 +763,30 @@ async function checkRecentlyFinishedIsSortedInTheRenderedPanel() {
   console.log('ok   the "Recently finished" render is wired to the completion-time sort, not just the helper')
 }
 
+// #219: the console's own review page is the PRIMARY destination and the
+// annotatable lavish session the secondary. Asserted off the rendered panel
+// rather than the document, because the bug was a panel that preferred the
+// session - the document carried both addresses all along.
+async function checkAReviewOpensTheConsolesOwnPageFirst() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const doc = await state.collect('fixture')
+  ok(doc.reviews.length > 0, 'the demo fleet has review pages to open')
+  const ctx = { fold: () => true, setFold() {} }
+  withCapturingDocument(() => {
+    const cells = collectByClass(views.viewReviews(doc, ctx), 'review-open')
+    equal(cells.length, doc.reviews.length, 'every review row offers both ways in')
+    for (const node of cells) {
+      const hrefs = collectByTag(node, 'a').map((a) => a.href)
+      equal(hrefs.length, 2, 'a review row has exactly two destinations')
+      ok(/^\/review\/[^/]+\/$/.test(hrefs[0]),
+        `the first destination is the console's own review page: ${hrefs[0]}`)
+      ok(hrefs[1].startsWith('/api/review-open?'),
+        `the second is the annotatable session, not the default: ${hrefs[1]}`)
+    }
+  })
+  console.log(`ok   ${doc.reviews.length} review rows open the console's own page first, the original second`)
+}
+
 async function main() {
   checkTrackShapes()
   checkNothingIsClaimedWithoutEvidence()
@@ -783,6 +807,7 @@ async function main() {
   await checkFixtureIsNeutral()
   await checkRecentlyFinishedSortsNewestFirst()
   await checkRecentlyFinishedIsSortedInTheRenderedPanel()
+  await checkAReviewOpensTheConsolesOwnPageFirst()
   checkShapeRefusesAHalfDocument()
   console.log(`\nconsole checks passed (${checks} assertions)`)
 }

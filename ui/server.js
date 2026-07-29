@@ -92,28 +92,46 @@ function fail(res, status, message, detail) {
   sendJson(res, status, { error: message });
 }
 
+// A worded page carries its own <style>, and the console CSP above has no
+// 'unsafe-inline' in style-src, so served under CSP the block is dropped and the
+// page renders as unstyled black-on-white text. It gets its own policy instead
+// of a hole in the shared one: STRICTER than CSP everywhere - no script at all,
+// no images, no connections - and relaxed on exactly one axis, the inline style
+// this server itself wrote. Nothing on these pages comes from the request except
+// through escapeHtml(), so there is no attacker markup for the relaxation to help.
+const WORDED_CSP = "default-src 'none'; style-src 'unsafe-inline'; "
+  + "base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 // Both GET NAVIGATIONS this server answers - `/` and `/review/...` - are
 // same-tab loads: there is no page script to word a failure, so the browser
 // renders whatever comes back as the body. They get a worded page rather than a
 // JSON blob in the tab.
-function wordedPage(heading, lines) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8">`
+//
+// `links` (optional) are the ways on from here. Without one the tab dead-ends,
+// and what it replaced was the operator's console.
+function sendWordedPage(res, status, heading, lines, links) {
+  const body = `<!doctype html><html lang="en"><head><meta charset="utf-8">`
     + `<meta name="viewport" content="width=device-width,initial-scale=1">`
     + `<meta name="color-scheme" content="dark light"><title>dockmaster</title>`
     + `<style>body{margin:0;display:grid;place-items:center;min-height:100vh;`
     + `background:#0a1014;color:#e6edf1;font:16px/1.6 system-ui,sans-serif}`
     + `div{max-width:32rem;padding:2rem;border-left:2px solid #c8a15c}`
     + `p{margin:.5rem 0;color:#93a6b1}b{color:#e6edf1;font-weight:600}`
+    + `a{display:inline-block;margin:.75rem .75rem 0 0;color:#c8a15c}`
     + `@media(prefers-color-scheme:light){body{background:#fff;color:#0a1014}p{color:#46585f}b{color:#0a1014}}`
     + `</style></head><body><div><p><b>${escapeHtml(heading)}</b></p>`
     + lines.map((line) => `<p>${escapeHtml(line)}</p>`).join('')
+    + (links || []).map((l) => `<a href="${escapeHtml(l.href)}">${escapeHtml(l.label)}</a>`).join('')
     + `</div></body></html>`;
+  send(res, status, 'text/html; charset=utf-8', body, { 'content-security-policy': WORDED_CSP });
 }
+
+const BACK_TO_CONSOLE = { href: '/#reviews', label: '← Back to the console' };
 
 function failReview(res, status, message, detail) {
   process.stderr.write(`console: review: ${message}${detail ? ` — ${detail}` : ''}\n`);
-  send(res, status, 'text/html; charset=utf-8',
-    wordedPage('This review page could not be opened.', [message, 'Ask the dockmaster to look into it.']));
+  sendWordedPage(res, status, 'This review page could not be opened.',
+    [message, 'Ask the dockmaster to look into it.'], [BACK_TO_CONSOLE]);
 }
 
 // The cross-site refusal on GET / (see handle()). It is a navigation like a
@@ -123,12 +141,15 @@ function failReview(res, status, message, detail) {
 // into some other page, or a link from another port on 127.0.0.1 - which is
 // same-SITE, not same-origin, and refused just the same. So the page says what
 // happened and how to get in, rather than accusing the operator of an attack.
+//
+// No link on: the refusal is that a link from elsewhere is exactly how this
+// address was reached, and one more of those lands right back here.
 function refuseConsolePage(res, port, detail) {
   process.stderr.write(`console: refused the console page: ${detail}\n`);
-  send(res, 403, 'text/html; charset=utf-8', wordedPage('The console did not open from there.', [
+  sendWordedPage(res, 403, 'The console did not open from there.', [
     'Another page asked for it - a link, a frame, or another port on this machine - and the console only opens as a tab of its own.',
     `Open http://127.0.0.1:${port}/ yourself and it will load.`,
-  ]));
+  ]);
 }
 
 const escapeHtml = (text) => String(text).replace(/[&<>"']/g,
@@ -199,8 +220,7 @@ function reviewShellHtml(basename, info) {
     repo: info ? info.repo : '',
     // The same invariant views.mjs holds on the fleet page: Approve and Request
     // changes exist only while the work is ACTUALLY awaiting review. The Reviews
-    // panel's archive rows link here for landed and dropped work too (through
-    // /api/review-open?...&redirect=1, which falls back to this address), so
+    // panel's archive rows link straight here for landed and dropped work too, so
     // without this the shell offered to approve a change that shipped weeks ago.
     // The state is decided here, on the reconciled record, so the page cannot
     // decide it from something softer like "there is an artifact".
@@ -220,6 +240,11 @@ function reviewShellHtml(basename, info) {
     + `<link rel="stylesheet" href="/console.css"></head>`
     + `<body class="review-shell">`
     + `<script type="application/json" id="review-data">${data}</script>`
+    // The way back, on the SHELL - our own markup, outside the sandboxed frame,
+    // never appended to the artifact. A review is reached by a bookmark, a pasted
+    // address or a tab the operator kept, and without this it dead-ends.
+    + `<a class="review-back" href="${escapeHtml(BACK_TO_CONSOLE.href)}">`
+    + `${escapeHtml(BACK_TO_CONSOLE.label)}</a>`
     + `<div class="review-frame"><iframe src="${iframeSrc}" title="The change" `
     + `sandbox="allow-scripts"></iframe></div>`
     + `<div class="review-panel" id="review-panel"></div>`
@@ -361,7 +386,13 @@ async function serveReview(res, cfg, pathname) {
     return failReview(res, 400, 'That address is not a review page.', pathname);
   }
   const found = await live.reviewDir(cfg.bin, id);
-  if (!found) return failReview(res, 404, 'There is no review page for that work.');
+  // This address serves the ARCHIVED review - the page the crew rendered and
+  // left behind. An annotatable lavish session is a different thing, on its own
+  // server, and its being open would not put a page here. Say which is missing.
+  if (!found) {
+    return failReview(res, 404, 'There is no archived review page for that work. '
+      + 'If the crew has an annotatable session open for it, that is a separate surface and is not served here.');
+  }
 
   if (isIndex) {
     // A wrapper this console builds itself, not the archived artifact: it
@@ -552,33 +583,43 @@ function handle(req, res, cfg, watchers) {
     return serveReview(res, cfg, url.pathname)
       .catch((err) => failReview(res, 500, 'The review archive could not be read.', err.message));
   }
-  // Opening the annotatable session runs a dm-* script, the same class of
-  // action the fleet sweep behind /api/state already is, so it takes the same
-  // cross-site refusal.
+  // The SECONDARY way into a review: the annotatable lavish session the crew
+  // rendered it in, on its own server. The console's own /review/<id>/ page is
+  // the primary one and needs nothing from here.
+  //
+  // Opening the session runs a dm-* script, the same class of action the fleet
+  // sweep behind /api/state already is, so it takes the same cross-site refusal.
   //
   // `redirect=1` is what the page's link actually uses: the browser's own
   // navigation of a real <a target=_blank>, landing here from the click's own
-  // user activation, then 302-ing on to wherever the session turned out to be
-  // - the session url, or the raw /review/<id>/ page when there is none. A
-  // window opened after an awaited fetch has NO such activation and can be
-  // silently popup-blocked; a redirect from the click itself cannot be. The
-  // plain JSON form (no `redirect`) stays for tests and any other local tool.
+  // user activation, then 302-ing on to the session. A window opened after an
+  // awaited fetch has NO such activation and can be silently popup-blocked; a
+  // redirect from the click itself cannot be. The plain JSON form (no
+  // `redirect`) stays for tests and any other local tool.
+  //
+  // No session is not a failure and it is not the archived page either: sending
+  // the operator on to /review/<id>/ would quietly present the archive AS the
+  // original. It gets said instead.
   if (req.method === 'GET' && url.pathname === '/api/review-open') {
     const refusal = crossSiteRefusal(req, cfg.port);
     if (refusal) return fail(res, refusal.status, refusal.message);
     const id = url.searchParams.get('id') || '';
     const redirect = url.searchParams.get('redirect') === '1';
-    const fallback = `/review/${encodeURIComponent(id)}/`;
-    const goTo = (location) => {
-      res.writeHead(302, { location, 'content-length': 0, 'cache-control': 'no-store' });
-      res.end();
-    };
     if (!id) return redirect ? fail(res, 400, 'missing id') : sendJson(res, 200, { url: null });
+    const noSession = () => sendWordedPage(res, 200, 'That review has no annotatable session open.',
+      ['The session the crew reviews in runs separately, and there is not one for this work right now.',
+        'The review page the console keeps is still here.'],
+      [{ href: `/review/${encodeURIComponent(id)}/`, label: 'Open the review page' }, BACK_TO_CONSOLE]);
     return live.openReviewSession(cfg.bin, id)
-      .then((result) => (redirect ? goTo(result.url || fallback) : sendJson(res, 200, result)))
+      .then((result) => {
+        if (!redirect) return sendJson(res, 200, result);
+        if (!result.url) return noSession();
+        res.writeHead(302, { location: result.url, 'content-length': 0, 'cache-control': 'no-store' });
+        return res.end();
+      })
       .catch((err) => {
         process.stderr.write(`console: /api/review-open: ${err.message}\n`);
-        return redirect ? goTo(fallback) : sendJson(res, 200, { url: null });
+        return redirect ? noSession() : sendJson(res, 200, { url: null });
       });
   }
   if (req.method === 'GET' && url.pathname === '/api/chat') return serveChat(res, cfg, url, watchers);

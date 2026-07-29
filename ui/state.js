@@ -29,7 +29,10 @@
 //                   tangle_note, notes[], notes_hidden }
 //   backlog       { in_flight[], queued[], done[] }
 //   decisions     { open[], resolved[] }
-//   reviews[]     { title, repo, state, at, href, open_href }
+//   reviews[]     { title, repo, state, at, href, session_href } - `href` is the
+//                 console's own review page (the primary destination);
+//                 `session_href` reaches the annotatable lavish session, which
+//                 may not exist and says so
 //   health        { verdict, checks[], cleanup[] }
 //
 // A stage `state` is done | active | ahead | unknown. `ahead` means the work has

@@ -442,6 +442,12 @@ details[open] > .fold-body { animation: rise 240ms ease-out; }
 .row-action { display: inline-block; margin-top: 0.5rem; font-size: 0.8125rem; }
 .row-action::after { content: " \2192"; }
 
+/* Two ways into one review - the console's own page, then the annotatable
+   original - kept on one baseline so the row does not grow a second line. */
+.review-open { display: flex; align-items: baseline; gap: 0.5rem; }
+.review-open .row-action { margin-top: 0; }
+.review-or { color: var(--fg-mute); }
+
 .choices { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
 .choice { font-family: var(--sans); letter-spacing: 0; }
 .choice:hover { border-color: var(--brass); color: var(--brass); }
@@ -907,6 +913,16 @@ body.review-shell {
   display: flex; flex-direction: column; min-height: 100vh; overflow: auto;
   max-width: 72rem; margin: 0 auto; padding: 1.5rem;
 }
+/* The way back out of a review, above the frame rather than floating over it:
+   the artifact owns the frame's whole surface and would scroll under an overlay. */
+.review-back {
+  flex: 0 0 auto; align-self: flex-start;
+  margin-bottom: 0.875rem; font-size: 0.8125rem;
+  color: var(--fg-dim); text-decoration: none;
+  transition: color var(--step);
+}
+.review-back:hover { color: var(--brass); }
+
 .review-frame {
   flex: 1 1 auto; min-height: 60vh;
   border: 1px solid var(--line); border-radius: var(--r);

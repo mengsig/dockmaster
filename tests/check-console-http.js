@@ -68,10 +68,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // --- the server under test ---------------------------------------------------
 
-function launch(home, port) {
+function launch(home, port, bin) {
   const child = spawn(process.execPath, [path.join(ROOT, 'ui', 'server.js')], {
     env: Object.assign({}, process.env, {
-      DM_HOME: home, DM_BIN: path.join(ROOT, 'bin'), DM_UI_PORT: String(port), DM_UI_SOURCE: 'fixture',
+      DM_HOME: home, DM_BIN: bin || path.join(ROOT, 'bin'), DM_UI_PORT: String(port), DM_UI_SOURCE: 'fixture',
     }),
     stdio: ['ignore', 'pipe', 'pipe'],
   })
@@ -85,11 +85,11 @@ function launch(home, port) {
 
 // Losing the race for a just-released port is the one flake this can have, so
 // it is retried on a fresh port rather than left to fail intermittently.
-async function boot(home) {
+async function boot(home, bin) {
   let last = ''
   for (let attempt = 0; attempt < BOOT_ATTEMPTS; attempt += 1) {
     const port = await freePort()
-    const { child, said } = launch(home, port)
+    const { child, said } = launch(home, port, bin)
     const started = Date.now()
     while (Date.now() - started < BOOT_TIMEOUT_MS) {
       if (said.out.includes(`http://127.0.0.1:${port}/`)) return { child, port, said }
@@ -317,6 +317,32 @@ async function checkReviewFailuresAreWorded(port, home) {
   console.log(`ok   ${cases.length} review-page failures render worded, with nothing internal in the body`)
 }
 
+// Every worded page styles itself with one inline <style>. Served under the
+// console CSP (style-src 'self', no 'unsafe-inline') a browser DROPS that block
+// and the operator gets unstyled black-on-white text, so these pages carry their
+// own policy - relaxed for the inline style this server wrote, and stricter than
+// the console's everywhere else. All three of them, on an operator's normal path.
+async function checkWordedPagesCanActuallyRender(port) {
+  const pages = [
+    [await request(port, 'GET', '/review/nothing-here/'), 404, 'a review page that is not there'],
+    [await request(port, 'GET', '/api/review-open?id=nothing-here&redirect=1'), 200, 'the no-session page'],
+    [await request(port, 'GET', '/', { 'sec-fetch-site': 'cross-site' }), 403, 'the console-page refusal'],
+  ]
+  for (const [res, status, what] of pages) {
+    equal(res.status, status, `${what} answers ${status}`)
+    ok(res.text.includes('<style>'), `${what} styles itself inline`)
+    const csp = res.headers['content-security-policy']
+    ok(/style-src [^;]*'unsafe-inline'/.test(csp), `${what} is served a policy that keeps its style: ${csp}`)
+    // The relaxation buys exactly one thing. Everything else stays shut - these
+    // pages need no script, no image and no connection at all.
+    ok(csp.includes("default-src 'none'"), `${what} allows nothing by default`)
+    ok(!/script-src/.test(csp), `${what} declares no script-src, so default-src 'none' bans script outright`)
+    ok(csp.includes("frame-ancestors 'none'"), `${what} still refuses to be framed`)
+    ok(csp.includes("form-action 'none'"), `${what} still has nowhere to post`)
+  }
+  console.log(`ok   ${pages.length} worded pages render styled, under a policy tighter than the console's`)
+}
+
 // --- 3. a review page can serve the screenshots it ships with ----------------
 
 // A review page references its assets relatively and puts them in
@@ -467,8 +493,7 @@ async function checkReviewShellWrapsTheArtifactAndCanEnqueue(port, home) {
 // The shell's Approve/Request-changes controls hold the same invariant the fleet
 // page's cards do (views.mjs approveControl): only while the work is ACTUALLY
 // awaiting review. The artifact outlives the work by design - the Reviews panel
-// keeps landed and dropped reviews and links to them, through
-// /api/review-open?...&redirect=1, whose fallback is this very address - so the
+// keeps landed and dropped reviews and links straight to this address - so the
 // shell is reachable for work there is nothing left to decide about. The state
 // crosses as data; what review.mjs renders from it is pinned in check-console.js.
 async function checkTheShellOffersApproveOnlyWhileAwaitingReview(port, home) {
@@ -623,7 +648,7 @@ async function checkReviewScriptsAreServed(port) {
 // Against the REAL dm-lavish.sh, no artifact behind the id: `open` refuses
 // before it ever touches lavish-axi, which is exactly the shape a real "no
 // session for this one" answer takes. The route must turn that into a plain
-// { url: null }, never a 500 - the page's fallback is what handles it.
+// { url: null }, never a 500 - the caller is what handles it.
 async function checkReviewOpenDegradesForAnUnknownId(port) {
   const res = await request(port, 'GET', '/api/review-open?id=not-a-real-review')
   equal(res.status, 200, 'an id with no artifact still answers 200')
@@ -635,22 +660,82 @@ async function checkReviewOpenDegradesForAnUnknownId(port) {
   console.log('ok   opening a review with no session behind it degrades to { url: null }, not a crash')
 }
 
-// What the page's Open link actually hits. It is a real navigation, so the
-// answer has to be a redirect the browser can follow on its own - the operator
-// lands on the review either way, and never on a JSON body. `{ url: null }`
-// would be the bug here: the tab has already opened by the time this answers.
-async function checkTheOpenLinkRedirectsRatherThanAnswering(port) {
+// The SECONDARY link, and the distinction #219 is about: a live lavish session
+// is not the archived directory. With no session to reach, sending the operator
+// on to /review/<id>/ would quietly present the archive AS the original, so the
+// route says which one is missing instead - as a page, because this address is
+// only ever reached by navigation.
+async function checkTheOpenLinkSaysWhenThereIsNoSession(port, home) {
   const res = await request(port, 'GET', '/api/review-open?id=not-a-real-review&redirect=1')
-  equal(res.status, 302, 'the link is answered with a redirect, not a document')
-  equal(res.headers.location, '/review/not-a-real-review/',
-    'and with no session to send it to, it falls back to the raw review page')
-  equal(res.text, '', 'a redirect carries no body for the browser to render')
+  equal(res.status, 200, 'no session is not a failure')
+  ok(!res.headers.location, 'and it is not silently redirected to the archived page')
+  ok(/^text\/html/.test(res.headers['content-type'] || ''), 'it renders as a page, not a JSON blob in the tab')
+  ok(/no annotatable session/i.test(res.text), `it says the session is what is missing: ${res.text.slice(0, 160)}`)
+  ok(res.text.includes('/review/not-a-real-review/'), 'and offers the review page the console does keep')
+  ok(!/dm-[a-z]+\.sh|--json|ENOENT|jq/.test(res.text), 'with nothing internal in the body')
+  ok(!res.text.includes(home), 'and no state directory in it')
 
   // A link the page built without an id is a bug in the page, and saying so is
-  // how it gets found - a 302 to /review// would send the operator nowhere.
+  // how it gets found - a page naming /review// would send the operator nowhere.
   const missing = await request(port, 'GET', '/api/review-open?redirect=1')
   equal(missing.status, 400, 'a redirect asked for with no id is refused outright')
-  console.log('ok   the review Open link is answered with a redirect, and degrades to the raw page')
+  console.log('ok   with no annotatable session, the secondary link says so rather than passing off the archive')
+}
+
+// And when there IS one, the link must land on it - a real 302 the browser
+// follows from the click's own activation. Driven against a stand-in toolbelt so
+// it does not depend on lavish-axi being installed.
+async function checkTheOpenLinkRedirectsToARealSession(home) {
+  const stubBin = fs.mkdtempSync(path.join(os.tmpdir(), 'dm-lavish-route-'))
+  try {
+    fs.writeFileSync(path.join(stubBin, 'dm-lavish.sh'), '#!/usr/bin/env bash\n'
+      + 'case "$1" in\n'
+      + '  list) printf \'[{"id":"demo-review","path":"/x/change.html","rendered_at":"","bytes":1}]\\n\' ;;\n'
+      + '  open) printf \'session:\\n  url: "http://127.0.0.1:4387/session/abc123"\\n  status: opened\\n\' ;;\n'
+      + 'esac\n')
+    fs.chmodSync(path.join(stubBin, 'dm-lavish.sh'), 0o755)
+    const server = await boot(home, stubBin)
+    try {
+      const res = await request(server.port, 'GET', '/api/review-open?id=demo-review&redirect=1')
+      equal(res.status, 302, 'a session that exists is reached by redirect')
+      equal(res.headers.location, 'http://127.0.0.1:4387/session/abc123', 'and it is the session lavish reported')
+      equal(res.text, '', 'a redirect carries no body for the browser to render')
+    } finally {
+      server.child.kill('SIGKILL')
+    }
+  } finally {
+    fs.rmSync(stubBin, { recursive: true, force: true })
+  }
+  console.log('ok   the secondary link 302s to the annotatable session when there is one')
+}
+
+// #219: the Reviews panel now sends Open to the console's own review page, so
+// that page may not dead-end. The way back lives on the shell - the
+// console's own markup, outside the sandbox - and never in the artifact: appended
+// markup would put the console's chrome inside crewmate-authored HTML, where an
+// unclosed <script> or <style> swallows it and the artifact's own DOM can move it.
+async function checkTheReviewPageCarriesAWayBack(port) {
+  const shell = await request(port, 'GET', '/review/demo-review/')
+  equal(shell.status, 200, 'the review page is served')
+  ok(shell.text.includes('Back to the console'), 'the shell offers a way back')
+  ok(shell.text.includes('href="/#reviews"'), 'and it points at the panel the operator came from')
+  // Before the iframe, so it is the shell's own child and not something a reader
+  // could mistake for part of the framed artifact.
+  ok(shell.text.indexOf('review-back') < shell.text.indexOf('<iframe'),
+    'the way back sits on the shell, ahead of the frame')
+
+  // The artifact is passed through BYTE FOR BYTE. This is the invariant the
+  // appended-strip design broke: the console does not edit crewmate HTML.
+  const artifact = await request(port, 'GET', '/review/demo-review/change.html')
+  equal(artifact.text, '<p>the change</p>', 'the artifact is served exactly as the crewmate wrote it')
+  ok(!artifact.text.includes('Back to the console'), 'with no console chrome woven into it')
+  equal(Number(artifact.headers['content-length']), Buffer.byteLength(artifact.text),
+    'the length announced is the length sent')
+
+  const shot = await request(port, 'GET', '/review/demo-review/shots/top.png')
+  equal(artifact.headers['content-security-policy'], shot.headers['content-security-policy'],
+    'and the artifact keeps exactly the policy its assets do - the way back relaxed nothing')
+  console.log('ok   the way back rides the shell; the archived artifact is served untouched')
 }
 
 // The route only WORDS what dm-lavish.sh said; the parsing itself is pinned
@@ -714,8 +799,11 @@ async function main() {
     await checkHostileTitleCannotBreakOutOfTheDataBlock(port, home)
     await checkReviewScriptsAreServed(port)
     await checkReviewFailuresAreWorded(port, home)
+    await checkWordedPagesCanActuallyRender(port)
+    await checkTheReviewPageCarriesAWayBack(port)
     await checkReviewOpenDegradesForAnUnknownId(port)
-    await checkTheOpenLinkRedirectsRatherThanAnswering(port)
+    await checkTheOpenLinkSaysWhenThereIsNoSession(port, home)
+    await checkTheOpenLinkRedirectsToARealSession(home)
     await checkReviewOpenParsesTheRealScriptsShape()
 
     // Every case above ran against ONE process. Had any of them killed it the
