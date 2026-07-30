@@ -1434,14 +1434,20 @@ check "OR recall keeps a line matching the first term"  'grep -q "alpha lions" <
 check "OR recall keeps a line matching the second term" 'grep -q "gamma bears" <<<"$ORQ"'
 check "OR recall drops a line matching neither term"    '! grep -q "beta tigers" <<<"$ORQ"'
 
-echo "== memory-context: soft line cap + tail pointer (F1) =="
+echo "== memory-context: soft byte cap + tail pointer (F1) =="
 for i in $(seq 1 12); do b dm-memory.sh remember memctx --private --kind routing "capfact-$i" >/dev/null; done
 # Direct invocation so the env-var prefix reaches the external script unambiguously.
-CAP="$(DM_RECALL_MAX_LINES=5 "$ROOT/bin/dm-memory.sh" recall memctx)"
-check "cap emits the omitted-lines tail pointer" 'grep -q "older line(s) omitted" <<<"$CAP"'
+# 200 bytes is well under 12 bullets' worth (~55B each), so some must be dropped.
+CAP="$(DM_RECALL_MAX_BYTES=200 "$ROOT/bin/dm-memory.sh" recall memctx)"
+check "cap emits the omitted bytes tail pointer" 'grep -q "older line(s) / .* bytes omitted" <<<"$CAP"'
 check "cap hides some bullets under the limit"   '[ "$(grep -c "capfact-" <<<"$CAP")" -lt 12 ]'
+# The cap keeps only WHOLE lines: every bullet line kept must carry its closing
+# date marker, never a line sliced off mid-fact.
+CAPBULLETS="$(grep -E '^- \*\*\[' <<<"$CAP" || true)"
+CAPCOMPLETE="$(grep -E '_\([0-9TZ:-]+\)_$' <<<"$CAPBULLETS" || true)"
+check "cap never truncates a bullet mid-line" '[ "$(grep -c . <<<"$CAPBULLETS")" -eq "$(grep -c . <<<"$CAPCOMPLETE")" ]'
 # Full content stays reachable on an explicit query (filtered BEFORE the cap).
-CAPQ="$(DM_RECALL_MAX_LINES=5 "$ROOT/bin/dm-memory.sh" recall memctx "capfact-7")"
+CAPQ="$(DM_RECALL_MAX_BYTES=200 "$ROOT/bin/dm-memory.sh" recall memctx "capfact-7")"
 check "explicit query still surfaces a capped-out fact" 'grep -q "capfact-7" <<<"$CAPQ"'
 
 echo "== memory-context: forget removes a bullet, fails on no-match (F2) =="
@@ -1462,13 +1468,16 @@ CREC="$(b dm-memory.sh recall memctx --crew)"
 check "dockmaster recall includes the dockmaster-only store" 'grep -q "DMONLY-crew-must-not-see" <<<"$MREC"'
 check "crew recall excludes the dockmaster-only store"       '! grep -q "DMONLY-crew-must-not-see" <<<"$CREC"'
 
-echo "== memory-context: brief relays private + fleet, excludes dockmaster-only (F3/F5) =="
+echo "== memory-context: brief relays private, excludes GLOBAL fleet + dockmaster-only (F3/F5, R1) =="
 b dm-task.sh new memctx-1 --kind ship --repo memctx >/dev/null
 b dm-worktree.sh create memctx-1 memctx >/dev/null 2>&1
 b dm-brief.sh memctx-1 >/dev/null 2>/dev/null
 BR="$DM_HOME/data/memctx-1/brief.md"
-check "brief injects the Fleet-wide context heading" 'grep -q "Fleet-wide context" "$BR"'
-check "brief relays a fleet learning"                'grep -q "fleet gotcha alpha" "$BR"'
+# The global fleet-learnings store is the ORCHESTRATOR's memory, not a
+# crewmate's (measured: 64% of an average brief's bytes, mostly irrelevant to
+# the task in front of the worker) - a brief must never inject it.
+check "brief omits the Fleet-wide context heading" '! grep -q "Fleet-wide context" "$BR"'
+check "brief omits the global fleet-learnings store" '! grep -q "fleet gotcha alpha" "$BR"'
 check "brief relays a private note"                  'grep -q "alpha lions" "$BR"'
 check "brief excludes the dockmaster-only note"      '! grep -q "DMONLY-crew-must-not-see" "$BR"'
 
@@ -1488,6 +1497,55 @@ b dm-worktree.sh create memblank-1 memblank >/dev/null 2>&1
 b dm-brief.sh memblank-1 >/dev/null 2>/dev/null
 check "empty repo brief shows the friendly single line"     'grep -q "no repository knowledge recorded yet" "$DM_HOME/data/memblank-1/brief.md"'
 check "empty repo brief injects no empty knowledge scaffold" '! grep -q "== shared knowledge" "$DM_HOME/data/memblank-1/brief.md"'
+
+echo "== memory-context: byte cap is a REAL guard, not vacuous (brief) =="
+# A fixture store far over DM_RECALL_MAX_BYTES (default 4096): if the cap code
+# were ever deleted, recall would emit the WHOLE store and every assertion
+# below would fail (size bound, late-fact absence) - not just the tail-pointer
+# text, which a no-op stub could fake.
+b dm-repo.sh add bytecap "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-memory.sh seed bytecap >/dev/null
+FILLER="filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler"
+for i in $(seq 1 60); do
+  n="$(printf '%02d' "$i")"
+  b dm-memory.sh remember bytecap --private --kind routing "briefcapguard-fact-$n $FILLER" >/dev/null
+done
+BYTECAP_STORE_BYTES="$(wc -c < "$DM_HOME/repos/bytecap/.dm/notes.md" | tr -d ' ')"
+check "fixture private-notes store is genuinely far over the default cap" '[ "$BYTECAP_STORE_BYTES" -gt 10000 ]'
+b dm-task.sh new bytecap-1 --kind ship --repo bytecap >/dev/null
+b dm-worktree.sh create bytecap-1 bytecap >/dev/null 2>&1
+b dm-brief.sh bytecap-1 >/dev/null 2>/dev/null
+BCBRIEF="$DM_HOME/data/bytecap-1/brief.md"
+check "brief carries the byte-cap truncation pointer"     'grep -q "bytes omitted" "$BCBRIEF"'
+check "brief keeps an early fixture fact"                 'grep -q "briefcapguard-fact-01 " "$BCBRIEF"'
+check "brief drops a late fixture fact (real truncation, not just the message)" '! grep -q "briefcapguard-fact-60 " "$BCBRIEF"'
+BCBRIEF_BYTES="$(wc -c < "$BCBRIEF" | tr -d ' ')"
+# Measured (dm-brief-bloat): fixed brief overhead (isolation + memory heading +
+# definition-of-done + baked coding standards + status protocol) alone is
+# ~13.4KB before any recall content - so "brief total" is not the right place to
+# pin the cap's effect; a fully uncapped dump of THIS fixture would run to
+# roughly overhead + the ~12-13KB raw store (~26KB). 20000 sits well below that
+# uncapped figure and well above the observed capped total, so this still fails
+# if the cap is ever deleted.
+check "capped brief stays far below an uncapped dump of the fixture" '[ "$BCBRIEF_BYTES" -lt 20000 ]'
+
+echo "== memory-context: byte cap is a REAL guard, not vacuous (session-start digest) =="
+# Same shape against state/learnings.md, routed through dm-session-start.sh's
+# digest instead of a brief.
+for i in $(seq 1 150); do
+  n="$(printf '%03d' "$i")"
+  printf -- '- **[routing]** sessioncapguard-fact-%s %s  _(2026-01-01T00:00:00Z)_\n' "$n" "$FILLER" >> "$DM_HOME/state/learnings.md"
+done
+LEARNINGS_BYTES="$(wc -c < "$DM_HOME/state/learnings.md" | tr -d ' ')"
+check "fixture learnings store is genuinely far over the default cap" '[ "$LEARNINGS_BYTES" -gt 20000 ]'
+SESSDIG="$(b dm-session-start.sh --no-sync 2>&1 || true)"
+check "session digest carries the byte-cap truncation pointer" 'grep -q "bytes omitted" <<<"$SESSDIG"'
+check "session digest keeps an early fixture fact"              'grep -q "sessioncapguard-fact-001 " <<<"$SESSDIG"'
+check "session digest drops a late fixture fact (real truncation)" '! grep -q "sessioncapguard-fact-150 " <<<"$SESSDIG"'
+FLEET_SECTION="$(awk '/^== fleet learnings/{f=1} /^== operator preferences/{f=0} f' <<<"$SESSDIG")"
+check "session digest's fleet-learnings section stays well under the raw fixture size" \
+  '[ "$(printf "%s" "$FLEET_SECTION" | wc -c | tr -d " ")" -lt 6000 ]'
+
 # === state-gate-integrity tests (#20 #21) ===
 # Kept in one clearly-marked block at the end so parallel branches union-merge
 # cleanly. All offline: GitHub-dependent paths are exercised via their pure

@@ -56,12 +56,14 @@ title="$(dm_meta_get "$id" title)"
 out="$DM_DATA/$id"; mkdir -p "$out"
 brief="$out/brief.md"
 
-# Inject the repo's known context (shared AGENTS.md dm:knowledge + private notes)
-# plus a bounded fleet-wide slice so the crewmate has it without a tool call.
-# Best-effort on CONTENT (an unregistered repo or empty store must not fail brief
-# generation), but recall's STDERR is surfaced, not swallowed: a truncated
-# knowledge-block warning must reach the dockmaster, or a crewmate is dispatched
-# context-blind. The dockmaster-only store is excluded from the brief via --crew.
+# Inject the repo's known context (shared AGENTS.md dm:knowledge + private
+# notes), byte-capped by dm-memory.sh, so the crewmate has it without a tool
+# call. Best-effort on CONTENT (an unregistered repo or empty store must not
+# fail brief generation), but recall's STDERR is surfaced, not swallowed: a
+# truncated knowledge-block warning must reach the dockmaster, or a crewmate is
+# dispatched context-blind. The dockmaster-only store is excluded via --crew.
+# The GLOBAL fleet-learnings store is deliberately NOT injected here - see the
+# note below, at the call site.
 memtool="$(dirname "${BASH_SOURCE[0]}")/dm-memory.sh"
 
 # recall_block <warn-tag> <friendly-empty-line> <recall-args...>  -- run recall,
@@ -89,7 +91,12 @@ if [ -n "$repo" ]; then
 else
   mem="(no repository knowledge recorded yet.)"
 fi
-fleet="$(recall_block "recall(--global)" "(no fleet-wide context recorded yet.)" --global)"
+# The global fleet-learnings store is the ORCHESTRATOR's memory, not a
+# crewmate's: measured, it was 64% of an average brief's bytes and almost
+# entirely irrelevant to the task in front of the worker (isolation rules the
+# crew actually needs are baked into the scaffold text below instead). If a
+# specific fleet fact bears on this task, the dockmaster pastes it into
+# {TASK} - where it is task-relevant instead of fleet-wide noise.
 
 # shared header ----------------------------------------------------------------
 {
@@ -140,13 +147,6 @@ commits, PR descriptions, code comments, or the repo's \`AGENTS.md\` — they mu
 not enter the project's history. Read it all before you start.
 
 $mem
-
-## Fleet-wide context (operator preferences + fleet learnings)
-
-Cross-repo context from the dockmaster's global memory. Same rule as private
-notes: for your awareness, never copied into this repo's history.
-
-$fleet
 
 When you learn something durable, non-obvious, and repo-specific, record it:
 - A SHARED, contributor-relevant fact (a build/test command, an invariant, a
