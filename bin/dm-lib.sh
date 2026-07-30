@@ -831,6 +831,44 @@ dm_assert_not_distro() {
   ! dm_is_distro_dir "$1" || dm_die "REFUSED: ${2:-this operation} would act on the dockmaster distro itself ($DM_HOME), not a managed repo. Check the repo name (dm-repo.sh list). The distro ships changes to itself through its own branch and PR, never through this path."
 }
 
+# --- worktree containment: never answer from the enclosing repo -------------
+# `git -C <path>` WALKS UP the filesystem when <path> has no working `.git`
+# (removed, or the directory survives but the link inside it is gone) and
+# silently answers from whatever repository it finds instead — and every
+# managed worktree lives under DM_WT, itself inside DM_HOME's own working
+# tree, so that walk lands on a REAL repo (the distro, or a sibling clone) and
+# never errors. #210/#181/#209 are one bug: a cleanup path trusted `git -C
+# "$wt"` on a broken worktree and recorded the wrong repo's answer as this
+# task's own. dm_worktree_contained is the single check every such call site
+# must pass first.
+#
+# Prints the physical toplevel of <path> and exits 0 ONLY when git resolves it
+# to <path> itself. Exits 1, printing nothing, when <path> does not exist, is
+# not inside a git worktree at all, or git walked up past it. Never dies: a
+# caller mid-diagnosis (dm-worktree.sh's `landed`, dm-trash.sh's snapshot)
+# needs to turn a failure into its OWN undetermined/refused answer, not have
+# the whole command die out from under it.
+dm_worktree_contained() {
+  local path="${1:-}" real top
+  [ -n "$path" ] || return 1
+  real="$(cd "$path" 2>/dev/null && pwd -P)" || return 1
+  top="$(git -C "$real" rev-parse --show-toplevel 2>/dev/null || true)"
+  top="$(cd "$top" 2>/dev/null && pwd -P || true)"
+  [ -n "$top" ] || return 1
+  [ "$top" = "$real" ] || return 1
+  printf '%s\n' "$real"
+}
+
+# dm_assert_worktree_contained <path> -> the same check, for a call site where
+# "not contained" is always a hard refusal rather than a soft undetermined
+# branch: dies with a reason instead of returning quietly.
+dm_assert_worktree_contained() {
+  local out
+  out="$(dm_worktree_contained "${1:-}")" \
+    || dm_die "REFUSED: '${1:-}' is not a real worktree root — it is missing, or git walked UP past it into an enclosing repository (a missing or broken .git record). Refusing rather than answering from the wrong repo."
+  printf '%s\n' "$out"
+}
+
 # dm_require_worktree <id>  -> print the task's recorded worktree path, or die
 # if none is recorded or the path no longer exists on disk (a stale/torn-down
 # record). Single owner of "resolve a task's worktree or refuse" so every

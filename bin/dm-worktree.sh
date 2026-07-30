@@ -64,19 +64,18 @@ dm_registry_require_valid
 mkdir -p "$DM_WT"
 
 # --- isolation assertion: the load-bearing safety invariant ------------------
+# The walk-up containment check (dm-lib.sh's dm_assert_worktree_contained) is
+# the shared mechanism; this adds the one thing specific to worktree creation
+# and removal — the resolved root must also not BE the primary clone.
 assert_isolated() {
   local path="$1" repo="$2" primary primary_dir top
-  path="$(cd "$path" 2>/dev/null && pwd -P)" || dm_die "worktree path does not exist: $1"
+  top="$(dm_assert_worktree_contained "$path")"
   # Resolve in its own step: nested in the `cd` substitution, a resolver dm_die
   # does not propagate — it yielded an empty primary, and an empty primary can
   # never equal $top, so the isolation assertion would PASS on a lookup failure.
   primary_dir="$(dm_repo_dir "$repo")" \
     || dm_die "cannot verify isolation: repo '$repo' did not resolve"
   primary="$(cd "$primary_dir" && pwd -P)" || dm_die "primary clone path does not exist: $primary_dir"
-  top="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)"
-  top="$(cd "$top" 2>/dev/null && pwd -P || true)"
-  [ -n "$top" ] || dm_die "not inside a git worktree: $path"
-  [ "$top" = "$path" ] || dm_die "path is not a worktree root: $path (root is $top)"
   [ "$top" != "$primary" ] || dm_die "REFUSED: task path equals the primary clone ($primary); crew work must be isolated"
   printf '%s\n' "$top"
 }
@@ -173,9 +172,17 @@ park_discarded_head() {
 # still in the clone. Falling back to it is what stops a real commit from being
 # discarded with no recovery ref at all. Same lookup ORDER as
 # clear_missing_worktree: derived managed path first, stored path second.
+#
+# A broken `.git` link is exactly the case that must NOT read `git -C "$wt"`
+# at all (#210): git would walk up into the enclosing repo and answer with
+# ITS head, plausible and wrong, so the fallback below would never fire.
+# Containment-check first; a failure is treated the same as an unreadable HEAD.
 preserve_discarded_head() {
   local id="$1" wt="$2" dir="$3" head
-  head="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null)" || head=""
+  head=""
+  if dm_worktree_contained "$wt" >/dev/null 2>&1; then
+    head="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null)" || head=""
+  fi
   if [ -z "$head" ]; then
     head="$(dm_admin_worktree_head "$dir" "$DM_WT/$id")"
     [ -n "$head" ] || head="$(dm_admin_worktree_head "$dir" "$wt")"
@@ -519,6 +526,12 @@ case "$cmd" in
     done
     [ "$want_json" -eq 0 ] || dm_need jq
     wt="$(dm_require_worktree "$id")"; repo="$(dm_meta_get "$id" repo)"
+    # A broken/missing `.git` inside $wt makes git walk UP into the enclosing
+    # repo and answer from there (#181): dm_require_worktree only proves the
+    # DIRECTORY exists, never that it is still a real worktree root. Prove
+    # containment before any git call touches $wt below.
+    dm_worktree_contained "$wt" >/dev/null \
+      || landed_answer "$want_json" "$id" undetermined "worktree at $wt is missing, broken, or its git record resolves outside itself; refusing to read its state from the wrong repository"
     # Refresh pr_state so an out-of-band merge is reflected in the pr_state
     # fallback below. Best-effort. No-op offline (DM_NO_FETCH) or with no/
     # already-merged PR (dm_should_refresh_pr_state).
