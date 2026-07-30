@@ -21,7 +21,9 @@
 //   needs_you[]   { lamp, kind, ... }  the operator's queue; `kind` selects how
 //                 the page words it, so no prose crosses this seam
 //   work[]        { title, repo, kind, state, since, last_signal_at,
-//                   quiet_after_hours, blocker, review_href, track }
+//                   quiet_after_hours, note_kind, note, review_href, track }
+//                 `note_kind` is the TOKEN the page words; `note` is free text
+//                 only when the kind is `reported` - the crewmate's own words.
 //   track         { mode, stages[{key,state,evidence}], gates[] } | null
 //   prs[]         { title, repo, url, checks, review, state, authority,
 //                   opened_at, cached, error }
