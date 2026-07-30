@@ -6655,6 +6655,62 @@ check "and the resume says the landed change is rollback territory" \
 TRCONF="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-again --reason "already closed upstream" 2>/dev/null)"
 check "a CONFIRMED closed PR needs no --close-pr"  'grep -qx "pr=already-closed" <<<"$TRCONF"'
 
+echo "== worktree containment: a broken .git must never answer from the enclosing repo (#210/#181/#209) =="
+# `tr-admin` earlier in this file breaks .git too, but this throwaway $DM_HOME is
+# not itself a git repo, so that walk-up had nowhere to land and only exercised
+# "git errored, fall back to the admin record". Reproduce the real defect:
+# make the ENCLOSING directory tree a real git repo — exactly $DM_HOME's own
+# shape in production, where state/worktrees lives inside the distro's own
+# working tree — so a broken worktree's `git -C` walk finds a plausible, WRONG
+# answer instead of erroring, and would return it silently without the guard.
+git init -q -b main "$DM_HOME" >/dev/null 2>&1
+( cd "$DM_HOME" && git -c user.email=e@e.co -c user.name=e commit -q --allow-empty -m "enclosing repo, not any task's work" ) >/dev/null 2>&1
+CT_ENCLOSING_HEAD="$(git -C "$DM_HOME" rev-parse HEAD)"
+
+# dm-worktree.sh landed(): must answer undetermined, never compare the
+# enclosing repo's HEAD against the base and call it landed or unlanded (#181).
+CTLWT="$(trash_task ct-landed)"
+rm -f "$CTLWT/.git"
+check "landed answers undetermined once .git is broken and walk-up would succeed" \
+  'b dm-worktree.sh landed ct-landed >/dev/null 2>&1; [ "$?" = 2 ]'
+CTLANDEDOUT="$(b dm-worktree.sh landed ct-landed 2>&1 || true)"
+check "landed names the containment breach, not a plain git error" \
+  'grep -qi "resolves outside itself" <<<"$CTLANDEDOUT"'
+check "landed never answers the question from the enclosing repo" \
+  '! grep -q "^landed" <<<"$CTLANDEDOUT" && ! grep -q "^unlanded" <<<"$CTLANDEDOUT"'
+b dm-worktree.sh remove ct-landed --force >/dev/null 2>&1
+
+# dm-worktree.sh remove --force -> preserve_discarded_head(): must fall back to
+# git's own admin record for the parked head, never park the enclosing repo's
+# HEAD as this task's discarded work.
+CTFWT="$(trash_task ct-force)"
+CTFHEAD="$(git -C "$CTFWT" rev-parse HEAD)"
+rm -f "$CTFWT/.git"
+CTFOUT="$(b dm-worktree.sh remove ct-force --force 2>&1)"
+check "forced removal never parks the enclosing repo's head as this task's" \
+  '! grep -q "$CT_ENCLOSING_HEAD" <<<"$CTFOUT"'
+check "it parks the worktree's OWN head instead" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/ct-force/$CTFHEAD" || true)" = "$CTFHEAD" ]'
+
+# dm-trash.sh's snapshot block: this is #210 exactly — a re-run reading a broken
+# worktree's HEAD from the enclosing repo and recording it as the discard head.
+CTTWT="$(trash_task ct-trash)"
+CTTHEAD="$(git -C "$CTTWT" rev-parse HEAD)"
+rm -f "$CTTWT/.git"
+CTTOUT="$(b dm-trash.sh ct-trash --reason "broken worktree" 2>"$TMP/ct-trash.err")"
+check "trash records the worktree's own head, never the enclosing repo's" \
+  'grep -qx "head=$CTTHEAD" <<<"$CTTOUT" && ! grep -q "head=$CT_ENCLOSING_HEAD" <<<"$CTTOUT"'
+check "the commit is preserved under its own sha, not the enclosing repo's" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/ct-trash/$CTTHEAD" || true)" = "$CTTHEAD" ]'
+
+# dm-trash.sh's dirty summary: uncommitted/untracked must read undetermined,
+# never a false "clean" answer read off the enclosing repo.
+CTDWT="$(trash_task ct-dirty)"
+rm -f "$CTDWT/.git"
+CTDOUT="$(b dm-trash.sh ct-dirty --reason "broken worktree, dirty check" 2>/dev/null)"
+check "a broken worktree's dirty state is undetermined, never a false clean" \
+  'grep -qx "uncommitted_tracked=undetermined" <<<"$CTDOUT" && grep -qx "untracked_paths=undetermined" <<<"$CTDOUT"'
+
 # shard:epilogue
 echo
 if [ -n "${SMOKE_SHARD:-}" ]; then

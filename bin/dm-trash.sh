@@ -348,12 +348,23 @@ else
 
   # --- snapshot what is about to be destroyed --------------------------------
   if [ -n "$wt" ] && [ -d "$wt" ]; then
-    branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-    branch="$(dm_first_line "$branch")"
-    [ -n "$branch" ] || branch=unknown
-    # A crew worktree starts detached; "HEAD" is git's name for that, not a branch.
-    [ "$branch" != HEAD ] || branch=detached
-    head="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+    # `-d "$wt"` proves the DIRECTORY survived, never that its `.git` record
+    # is still intact — a partially-failed removal leaves exactly that shape
+    # (#210/#181). A broken record makes `git -C "$wt"` walk UP into whatever
+    # enclosing repo it finds and answer with ITS branch/head, plausible and
+    # wrong, as this task's own. Prove containment first; a failure is treated
+    # the same as an unreadable branch/head, never trusted from the wrong repo.
+    if dm_worktree_contained "$wt" >/dev/null 2>&1; then
+      branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+      branch="$(dm_first_line "$branch")"
+      [ -n "$branch" ] || branch=unknown
+      # A crew worktree starts detached; "HEAD" is git's name for that, not a branch.
+      [ "$branch" != HEAD ] || branch=detached
+      head="$(git -C "$wt" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+    else
+      branch=unknown; head=""
+      dm_warn "$id's local copy at $wt is broken (missing or invalid git record); refusing to read its branch/head — it would answer from the wrong repository"
+    fi
     # An unreadable in-worktree HEAD (deleted or corrupt `.git` file) is NOT "no
     # commit": the clone's admin record still names the head and the object is
     # still there. dm-worktree.sh parks from the same fallback.
@@ -435,16 +446,24 @@ else
   # GitHub round-trip, and a count read before it would describe a tree that had
   # time to change. Still recorded BEFORE anything is destroyed.
   if [ -n "$wt" ] && [ -d "$wt" ]; then
-    if ! tracked="$(dm_tracked_state "$wt")"; then
-      dm_warn "cannot tell whether $id has uncommitted changes ($(dm_first_line "$tracked")); the summary reports it as undetermined"
-      tracked=undetermined
-    fi
-    untracked_out=""
-    if untracked_out="$(dm_untracked "$wt")"; then
-      untracked_count="$(printf '%s\n' "$untracked_out" | grep -c . || true)"
+    # Re-checked here, not reused from the snapshot: the worktree could have
+    # been broken between the two reads, and `dm_tracked_state`/`dm_untracked`
+    # would otherwise silently answer clean/empty from an enclosing repo.
+    if dm_worktree_contained "$wt" >/dev/null 2>&1; then
+      if ! tracked="$(dm_tracked_state "$wt")"; then
+        dm_warn "cannot tell whether $id has uncommitted changes ($(dm_first_line "$tracked")); the summary reports it as undetermined"
+        tracked=undetermined
+      fi
+      untracked_out=""
+      if untracked_out="$(dm_untracked "$wt")"; then
+        untracked_count="$(printf '%s\n' "$untracked_out" | grep -c . || true)"
+      else
+        untracked_count=undetermined
+        dm_warn "cannot inspect $id's untracked files ($(dm_first_line "$untracked_out")); the summary cannot say how many are being discarded"
+      fi
     else
-      untracked_count=undetermined
-      dm_warn "cannot inspect $id's untracked files ($(dm_first_line "$untracked_out")); the summary cannot say how many are being discarded"
+      tracked=undetermined; untracked_count=undetermined
+      dm_warn "$id's local copy at $wt is broken (missing or invalid git record); cannot tell whether it has uncommitted or untracked changes"
     fi
   fi
   tracked="$(snapshot_value "$id" trashed_tracked "$tracked")"
