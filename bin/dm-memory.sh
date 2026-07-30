@@ -69,13 +69,16 @@ DM_KNOWLEDGE_END='<!-- dm:knowledge:end -->'
 # from the git-excluded `.dm/`, so the notes are committed and travel with the repo.
 DM_KNOWLEDGE_DIR='.dm-knowledge'
 
-# Soft per-store line cap for recall output. Keeps an unbounded store from
+# Soft per-store BYTE cap for recall output. Keeps an unbounded store from
 # flooding a brief (dm-brief injects recall verbatim); a tail pointer tells the
 # reader how to see the rest with a query. Full content is always reachable via
-# an explicit query, which is filtered before the cap applies.
-DM_RECALL_MAX_LINES="${DM_RECALL_MAX_LINES:-40}"
-case "$DM_RECALL_MAX_LINES" in
-  ''|*[!0-9]*|0) dm_warn "DM_RECALL_MAX_LINES='$DM_RECALL_MAX_LINES' is not a positive integer; using 40"; DM_RECALL_MAX_LINES=40 ;;
+# an explicit query, which is filtered before the cap applies. Byte, not line,
+# because individual learnings run 400-1500+ bytes each - a 40-LINE cap let a
+# single store balloon to tens of KB while nominally "capped" (measured: a
+# 40-line fleet-learnings cap emitted 28KB).
+DM_RECALL_MAX_BYTES="${DM_RECALL_MAX_BYTES:-4096}"
+case "$DM_RECALL_MAX_BYTES" in
+  ''|*[!0-9]*|0) dm_warn "DM_RECALL_MAX_BYTES='$DM_RECALL_MAX_BYTES' is not a positive integer; using 4096"; DM_RECALL_MAX_BYTES=4096 ;;
 esac
 
 usage() {
@@ -88,9 +91,9 @@ dm-memory.sh - native plain-markdown context for the dockmaster
                                    DOCKMASTER-ONLY store; [query] filters to lines
                                    matching any whitespace-separated term as a
                                    literal, case-insensitive substring (grep -i -F,
-                                   OR of terms). Output is soft-capped per store
-                                   (DM_RECALL_MAX_LINES, default 40) with a tail
-                                   pointer; narrow with a query to see the rest.
+                                   OR of terms). Output is soft-capped per store by
+                                   BYTES (DM_RECALL_MAX_BYTES, default 4096) with a
+                                   tail pointer; narrow with a query to see the rest.
                                    --crew omits the dockmaster-only store (what
                                    dm-brief injects into a crewmate brief).
   recall --global [query]          print state/learnings.md + state/operator.md.
@@ -219,19 +222,32 @@ filter_query() {
   grep -i -F "$@" <<<"$content" || true
 }
 
-# emit_capped <content> <hint> - print at most DM_RECALL_MAX_LINES lines of
-# <content>; if more remain, print a tail pointer naming how many were omitted
-# and the recall invocation (<hint>) that narrows the view. Reads via here-string
-# (never a pipe into head) so an early-closing head cannot SIGPIPE the producer.
+# emit_capped <content> <hint> - print at most DM_RECALL_MAX_BYTES of <content>,
+# keeping only WHOLE lines (a bullet is never cut mid-sentence); if any lines
+# are dropped, print a tail pointer naming how many lines/bytes were omitted and
+# the recall invocation (<hint>) that narrows the view. Reads via here-string
+# (never a pipe into head/read) so an early consumer cannot SIGPIPE the producer.
 emit_capped() {
-  local content="$1" hint="$2" total omitted
-  total="$(grep -c '' <<<"$content")"
-  if [ "$total" -le "$DM_RECALL_MAX_LINES" ]; then
+  local content="$1" hint="$2" cap="$DM_RECALL_MAX_BYTES"
+  local total_bytes; total_bytes="$(printf '%s' "$content" | wc -c)"
+  if [ "$total_bytes" -le "$cap" ]; then
     printf '%s\n\n' "$content"; return 0
   fi
-  head -n "$DM_RECALL_MAX_LINES" <<<"$content"
-  omitted=$((total - DM_RECALL_MAX_LINES))
-  printf '  … %s older line(s) omitted — run `%s`\n\n' "$omitted" "$hint"
+  local kept="" kept_bytes=0 kept_lines=0 total_lines=0 capped=0 line lbytes
+  while IFS= read -r line; do
+    total_lines=$((total_lines + 1))
+    [ "$capped" -eq 1 ] && continue
+    lbytes=$(( $(printf '%s' "$line" | wc -c) + 1 ))
+    if [ "$((kept_bytes + lbytes))" -gt "$cap" ]; then
+      capped=1; continue
+    fi
+    kept="$kept$line"$'\n'
+    kept_bytes=$((kept_bytes + lbytes))
+    kept_lines=$((kept_lines + 1))
+  done <<<"$content"
+  printf '%s' "$kept"
+  printf '  … %s older line(s) / %s bytes omitted — run `%s`\n\n' \
+    "$((total_lines - kept_lines))" "$((total_bytes - kept_bytes))" "$hint"
 }
 
 # print_section <label> <content> <query> <hint> - render one store, filtered if
