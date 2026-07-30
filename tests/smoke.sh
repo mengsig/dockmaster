@@ -5690,6 +5690,57 @@ rm -rf "$EV_FLOWS"
 EV_NOEV="$("$E" block ev-run)"
 check "a verdict with no flow record reads unavailable" 'grep -q "evidence unavailable" <<<"$EV_NOEV"'
 
+# 4b. tests evidence is bound to the code state it tested (#185), and a gate
+# that never ran on a real code change is LOUD, not silent (#188). "demo"
+# already carries a real test_cmd (`test -f src/calc.py`), so a real
+# dm-test.sh run is used rather than seeded meta.
+EV_FRESH_WT="$(ev_task ev-fresh demo src/extra.py)"
+b dm-test.sh ev-fresh >/dev/null
+EV_FRESH_HEAD="$(b dm-task.sh get ev-fresh tests_head)"
+check "a pass records a code-state fingerprint" '[ -n "$EV_FRESH_HEAD" ]'
+EV_FRESH_SHA="${EV_FRESH_HEAD%%/*}"
+EV_FRESH="$("$E" block ev-fresh)"
+check "an unmoved pass renders pinned to its recorded sha" \
+  'grep -q "tests\*\* — pass @$EV_FRESH_SHA " <<<"$EV_FRESH"'
+check "an unmoved pass is never rendered STALE" '! grep -q "tests\*\* — STALE" <<<"$EV_FRESH"'
+
+# The exact #185 repro: run tests, commit more code, confirm the SAME recorded
+# pass no longer renders plain — it must read STALE instead.
+printf 'more\n' >> "$EV_FRESH_WT/src/extra.py"
+git -C "$EV_FRESH_WT" commit -qam "more after tests ran"
+EV_STALE="$("$E" block ev-fresh)"
+check "code committed after the run reads STALE, never plain pass" \
+  'grep -q "tests\*\* — STALE" <<<"$EV_STALE" && ! grep -q "tests\*\* — pass @" <<<"$EV_STALE"'
+check "the stale line still names the command that ran" 'grep -q "test -f src/calc.py" <<<"$EV_STALE"'
+# Mutation check (by hand, reverted): forcing dm-test.sh's `now="$head"`
+# unconditionally in tests_evidence — i.e. disabling the fingerprint
+# comparison — turned this same case back into a plain pass, so the check
+# above is exercising the comparison and not merely matching a static string.
+
+# An uncommitted edit after the run must ALSO read STALE — the pin covers
+# working-tree content, not just HEAD.
+printf 'dirty\n' >> "$EV_FRESH_WT/src/extra.py"
+EV_DIRTY="$("$E" block ev-fresh)"
+check "an uncommitted edit after the run also reads STALE" 'grep -q "tests\*\* — STALE" <<<"$EV_DIRTY"'
+git -C "$EV_FRESH_WT" checkout -q -- src/extra.py
+
+# A diff that touches real code but never ran the tests gate at all must say
+# so loudly (#188) — silence used to be indistinguishable from a docs-only PR.
+ev_task ev-untested demo src/untested.py >/dev/null
+EV_UNTESTED="$("$E" block ev-untested)"
+check "a code-touching diff with no tests record is reported, not silent" \
+  'grep -q "tests\*\* — NOT RUN . the tests gate was never invoked" <<<"$EV_UNTESTED"'
+# Mutation check (by hand, reverted): removing the `tests_never_ran_line` call
+# from `tests_evidence` (so an empty `result` just `return 0`s, #175's original
+# behavior) emptied this block, so the check above is exercising the new line
+# and not an inert always-true match.
+
+# The never-ran line must still say NOTHING for a genuinely docs-only diff —
+# the "docs-only PRs stay clean" property #175 established must survive #188.
+ev_task ev-untested-docs evrepo docs/again.md >/dev/null
+check "a docs-only diff with no tests record stays silent" \
+  '[ -z "$("$E" block ev-untested-docs)" ]'
+
 # 5. strip is what makes re-composing idempotent.
 EV_BODY="$TMP/ev-body.md"
 printf 'add multiply\n\nRisk: low.\n' > "$EV_BODY"
@@ -5808,6 +5859,8 @@ rm -f "$EV_STUB/mktemp"
 # come from the gate that produced it.
 check "tests result cannot be hand-set"  '! b dm-task.sh set ev-bare tests pass >/dev/null 2>&1'
 check "tests command cannot be hand-set" '! b dm-task.sh set ev-bare tests_cmd "true" >/dev/null 2>&1'
+check "the tests code-state fingerprint cannot be hand-set" \
+  '! b dm-task.sh set ev-bare tests_head "deadbeef/1-1" >/dev/null 2>&1'
 check "the tests gate records what it ran" \
   '[ "$(b dm-task.sh get ev-clean tests)" = "skip" ] && [ "$(b dm-task.sh get ev-run tests_cmd)" = "test -f src/calc.py" ]'
 
