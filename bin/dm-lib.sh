@@ -450,6 +450,79 @@ dm_is_disposable_cruft() {
   return 1
 }
 
+# --- code-state fingerprint: binds a verdict to code content, not just HEAD --
+# A verdict recorded against a commit is not a verdict: a green run can be
+# carried across the very edit that breaks it. HEAD alone is not enough either
+# — crew work is uncommitted for most of its life — so the fingerprint also
+# covers the dirty state. Single owner: dm-verify.sh's `up`/`flow`/`report` pin
+# an app boot to it, and dm-test.sh (#185) binds a recorded test pass to it too,
+# so a verdict cannot outlive the code it was produced against on either gate.
+
+# One content-digest tool, resolved once: sha256sum (Linux), shasum (macOS), and
+# cksum as the last resort. All three print "<digest...> <path>" for file
+# arguments, which is what binds a path to its own bytes.
+if command -v sha256sum >/dev/null 2>&1; then DM_DIGEST_CMD=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then DM_DIGEST_CMD=(shasum -a 256)
+else DM_DIGEST_CMD=(cksum); fi
+
+# dm_untracked_digests <worktree> -- "<digest>  <path>" per untracked file,
+# sorted. Each path is bound to ITS OWN content. Concatenating all the bytes
+# into one stream did not: moving a line from one untracked file to another
+# left the path list and the byte total identical, so the pin sat still while
+# the routes moved. Same root as `aa.js` containing the text `zz.js` hashing
+# like an empty pair.
+dm_untracked_digests() {
+  local wt="$1" paths
+  # Emptiness is checked FIRST: GNU xargs runs its command once on empty input,
+  # and a digest tool with no arguments reads stdin and hangs.
+  paths="$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null)" || return 1
+  [ -n "$paths" ] || return 0
+  # `--` is load-bearing: paths arrive as bare arguments, so an untracked file
+  # named `--help` or `-c` is read as an OPTION. sha256sum then prints usage,
+  # hashes NOTHING and exits 0 — the untracked digest set collapses to a
+  # constant and the pin stops moving on new uncommitted source entirely.
+  # No `|| true` either: a digest tool that fails must fail the pin, not empty it.
+  git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
+    | ( cd "$wt" && xargs -0 -n 50 "${DM_DIGEST_CMD[@]}" -- ) \
+    | LC_ALL=C sort
+}
+
+# dm_code_state <worktree> -- "<head>/<content-checksum>", or empty when the
+# worktree cannot be read.
+#
+# The checksum must cover file CONTENT, not the porcelain listing. `git status
+# --porcelain` emits status letters and paths and never CONTENT, so once a file
+# was dirty every further edit produced the identical line and checksum — and
+# crew work is dirty for most of its life, the exact case this pin exists for.
+#
+# Hash BOTH derivatives, never one instead of the other. Hashing content alone
+# was blind in the mirror direction: an untracked file RENAMED, or two untracked
+# files merged into one with the same bytes, left the checksum identical while
+# the app's routes moved. So the material is:
+#   - `git diff HEAD`  — tracked content AND tracked paths (renames included)
+#   - the untracked PATH list — structure
+#   - the untracked file CONTENTS — bytes
+# `git diff HEAD` also carries binary changes, via its `index <blob>..<blob>` line.
+dm_code_state() {
+  local wt="$1" head content udigests
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
+  [ -n "$head" ] || return 1
+  # Prove both reads work BEFORE hashing: a `return` inside the group below runs
+  # in a subshell, so a failed git would otherwise hash to a stable checksum of
+  # nothing — a pin that never moves, which is the failure this guards.
+  git -C "$wt" diff HEAD >/dev/null 2>&1 || return 1
+  git -C "$wt" ls-files --others --exclude-standard >/dev/null 2>&1 || return 1
+  udigests="$(dm_untracked_digests "$wt")" || return 1
+  # cksum's byte count is kept, not discarded: this is the security-critical pin
+  # and CRC-32 is linear, so length is a cheap independent term.
+  content="$( { git -C "$wt" diff HEAD 2>/dev/null
+                printf '%s\n' "$udigests"
+              } | cksum | awk '{print $1"-"$2}' )"
+  [ -n "$content" ] || return 1
+  printf '%s/%s\n' "$head" "$content"
+}
+
 # --- git helpers -------------------------------------------------------------
 # Resolve a repo's default branch: origin/HEAD -> main/master (local or remote)
 # -> current branch -> "main". Always prints exactly one line.
