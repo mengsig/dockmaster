@@ -3548,6 +3548,53 @@ printf '%03000d\n' 0 >> "$CHECK_FIXTURE/AGENTS.md"
 check "runtime performance guard fails on instruction bloat" \
   '! DM_CHECK_ROOT="$CHECK_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
 
+echo "== permission deny rails (#183, #161) =="
+# Config-presence pin, not a behavioral test: PreToolUse-style enforcement
+# fails open (see fleet learnings), so nothing inside a test can prove the
+# harness actually refuses these commands. This only proves the rule text
+# still ships, so a future edit cannot silently drop the rail.
+DENY_SETTINGS="$ROOT/.claude/settings.json"
+check "tracked settings.json parses as strict JSON" 'jq -e . "$DENY_SETTINGS" >/dev/null'
+DENY_EXPECTED="$TMP/deny-expected.json"
+cat > "$DENY_EXPECTED" <<'EOF'
+[
+  "Bash(pkill:*)",
+  "Bash(killall:*)",
+  "Bash(rm -rf repos*)",
+  "Bash(rm -fr repos*)",
+  "Bash(rm --recursive --force repos*)",
+  "Bash(rm --force --recursive repos*)",
+  "Bash(rm -rf /home/mengsig/dockmaster/repos*)",
+  "Bash(rm -fr /home/mengsig/dockmaster/repos*)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster/repos*)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster/repos*)",
+  "Bash(rm -rf state*)",
+  "Bash(rm -fr state*)",
+  "Bash(rm --recursive --force state*)",
+  "Bash(rm --force --recursive state*)",
+  "Bash(rm -rf /home/mengsig/dockmaster/state*)",
+  "Bash(rm -fr /home/mengsig/dockmaster/state*)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster/state*)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster/state*)",
+  "Bash(rm -rf /home/mengsig/dockmaster)",
+  "Bash(rm -rf /home/mengsig/dockmaster/)",
+  "Bash(rm -rf /home/mengsig/dockmaster *)",
+  "Bash(rm -fr /home/mengsig/dockmaster)",
+  "Bash(rm -fr /home/mengsig/dockmaster/)",
+  "Bash(rm -fr /home/mengsig/dockmaster *)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster/)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster *)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster/)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster *)"
+]
+EOF
+DENY_ACTUAL="$TMP/deny-actual.json"
+jq -c '.permissions.deny // []' "$DENY_SETTINGS" > "$DENY_ACTUAL"
+DENY_MISSING="$(jq -n --slurpfile expected "$DENY_EXPECTED" --slurpfile actual "$DENY_ACTUAL" '$expected[0] - $actual[0]')"
+check "deny rail carries every pkill/killall/rm-rf rule verbatim" '[ "$DENY_MISSING" = "[]" ]'
+
 echo "== dm-state (export/import: state portability, #106) =="
 SP="$TMP/state-portability"
 RESTORE="$TMP/restore-home"
