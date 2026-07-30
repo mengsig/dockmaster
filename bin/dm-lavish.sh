@@ -119,10 +119,16 @@ case "${1:-}" in
   poll)
     [ -f "$file" ] || dm_die "no artifact at $file"
     if have_lavish; then
-      lavish-axi poll "$file"
+      # exec, so the pid a caller captured IS the poller. Left as a child, a
+      # SIGTERM aimed at this script kills the wrapper and orphans the poll -
+      # the console stops one process and leaves the one that matters running.
+      exec lavish-axi poll "$file"
     else
+      # Both on stderr: poll's STDOUT is operator feedback and nothing else -
+      # the console relays every byte of it onto the operator's queue, where a
+      # line of this script's own guidance would arrive as something they said.
       dm_warn "lavish-axi not installed; live feedback polling is unavailable."
-      dm_info "Feedback should come directly in chat rather than through the lavish surface."
+      dm_warn "Feedback should come directly in chat rather than through the lavish surface."
     fi
     ;;
   end)  if have_lavish; then lavish-axi end "$file" 2>/dev/null || true; fi ;;

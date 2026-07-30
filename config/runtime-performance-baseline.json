@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "base_commit": "#177",
+  "base_commit": "#219",
   "shared_agents_bytes": 13126,
   "claude_settings_bytes": 3114,
-  "claude_skill_bytes": 111836,
+  "claude_skill_bytes": 112219,
   "claude_skill_description_bytes": 5264,
   "claude_files_sha256": {
     ".claude/agents/crew-high.md": "6ba9373cd62f942dfeae79ca3b7c1e26f29d71b51362862860b5943131f77001",
@@ -11,7 +11,7 @@
     ".claude/agents/crew-medium.md": "b2131bd11158d7687021879fb97c0aff6af54caf72f993c51c229f69ca4e9e38",
     ".claude/agents/crew-xhigh.md": "e71a1c1a1d98b2e2e66806a84fa33220bd2859b7334f4ccb34d770c5ae8f7eda",
     ".claude/settings.json": "105064a39bd282e8603f3bb376a800abf8888819033496c48f3fec2ce1ebabbb",
-    ".claude/skills/change-review/SKILL.md": "430b8e8a3f93d87b68486ab39138dcf9f621503dcdf96aecaf4061e1648eedee",
+    ".claude/skills/change-review/SKILL.md": "429950485f4421dd502e52c19f8976c3b7d729cf1becbf44bcbd177130dcd1ef",
     ".claude/skills/coding-guidelines/SKILL.md": "38e89cd6d4352fb30f148fc1b343063f3f4be9ba21bcd47098623f200a1b036d",
     ".claude/skills/credential-handoff/SKILL.md": "03bd5a829ee39de335263931599e0e5829798c0575d0507c39f39b135dd23b08",
     ".claude/skills/decision-hold/SKILL.md": "97fc71b15c8ea7e414d9abbfd1687b4a7df58124a6818cb0fa79f094c90665fb",

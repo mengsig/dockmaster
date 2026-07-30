@@ -25,6 +25,17 @@ const state = require(path.join(ROOT, 'ui', 'state.js'))
 
 let checks = 0
 
+// Every panel reaches the shell through ctx, and a review row reaches for these
+// two: opening a review in the page, and whether a listener is armed for it.
+// Each case supplies them the way console.mjs does, so a panel cannot go green
+// here on a ctx the shell does not actually offer.
+const REVIEW_CTX = {
+  opened: [],
+  liveHrefs: new Set(),
+  openReview(href) { REVIEW_CTX.opened.push(href); return Promise.resolve('listening') },
+  reviewIsLive: (href) => REVIEW_CTX.liveHrefs.has(href),
+}
+
 function ok(condition, message) {
   checks += 1
   if (!condition) throw new Error(message)
@@ -530,7 +541,7 @@ async function checkApproveAndChangesControlsShowOnlyWhenAwaitingReview() {
       row('Nothing rendered yet', 'ready_for_review', ''),
     ],
   }
-  const ctx = { filter: 'all', setFilter() {}, fold: () => false, setFold() {}, ask: () => Promise.resolve() }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, filter: 'all', setFilter() {}, fold: () => false, setFold() {}, ask: () => Promise.resolve() }
 
   await withCapturingDocument(() => {
     const frag = views.viewInFlight(docState, ctx)
@@ -649,7 +660,7 @@ async function checkNeedsYouReviewRowsActPerTaskAndEnqueueTheRightText() {
     }],
   }
   const asked = []
-  const ctx = { compose() {}, ask: (text) => { asked.push(text); return Promise.resolve() } }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, compose() {}, ask: (text) => { asked.push(text); return Promise.resolve() } }
 
   await withCapturingDocument(async () => {
     const frag = views.viewNeedsYou(state, ctx)
@@ -892,7 +903,7 @@ async function checkRecentlyFinishedIsSortedInTheRenderedPanel() {
       done('Second created, finished first', '2026-01-12T19:00:00Z'),
     ],
   }
-  const ctx = { filter: 'all', setFilter() {}, fold: () => false, setFold() {} }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, filter: 'all', setFilter() {}, fold: () => false, setFold() {} }
   await withCapturingDocument(() => {
     const frag = views.viewInFlight(state, ctx)
     const titles = collectByClass(frag, 'cell-title')
@@ -910,28 +921,98 @@ async function checkRecentlyFinishedIsSortedInTheRenderedPanel() {
   console.log('ok   the "Recently finished" render is wired to the completion-time sort, not just the helper')
 }
 
-// #219: the console's own review page is the PRIMARY destination and the
-// annotatable lavish session the secondary. Asserted off the rendered panel
-// rather than the document, because the bug was a panel that preferred the
-// session - the document carried both addresses all along.
-async function checkAReviewOpensTheConsolesOwnPageFirst() {
+// #219: a review OPENS IN THE CONSOLE. The console's own page is still the
+// primary destination and the annotatable lavish session still the secondary,
+// but the primary is no longer a navigation: it is a control that opens the
+// review in this page, which is what lets the console arm and stop the listener
+// around it. The session stays a real link - it is another origin on another
+// server, so it is not embedded and its tab must come from the click.
+async function checkAReviewOpensInsideTheConsole() {
   const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
   const doc = await state.collect('fixture')
   ok(doc.reviews.length > 0, 'the demo fleet has review pages to open')
-  const ctx = { fold: () => true, setFold() {} }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, fold: () => true, setFold() {} }
+  REVIEW_CTX.opened.length = 0
   await withCapturingDocument(() => {
     const cells = collectByClass(views.viewReviews(doc, ctx), 'review-open')
     equal(cells.length, doc.reviews.length, 'every review row offers both ways in')
     for (const node of cells) {
       const hrefs = collectByTag(node, 'a').map((a) => a.href)
-      equal(hrefs.length, 2, 'a review row has exactly two destinations')
-      ok(/^\/review\/[^/]+\/$/.test(hrefs[0]),
-        `the first destination is the console's own review page: ${hrefs[0]}`)
-      ok(hrefs[1].startsWith('/api/review-open?'),
-        `the second is the annotatable session, not the default: ${hrefs[1]}`)
+      equal(hrefs.length, 1, 'a review row navigates away exactly once - to the annotatable session')
+      ok(hrefs[0].startsWith('/api/review-open?'),
+        `the one link is the annotatable session: ${hrefs[0]}`)
+
+      // The primary is a button, not an anchor: nothing navigates, so the
+      // console keeps the page (and with it the listener) it opened.
+      const buttons = collectByTag(node, 'button')
+      equal(buttons.length, 1, 'and offers exactly one in-page opener')
+      ok(!buttons[0].href, 'the opener is not a destination the browser navigates to')
+      buttons[0].listeners.click()
+    }
+    equal(REVIEW_CTX.opened.length, doc.reviews.length, 'every opener asks the shell to open a review')
+    for (const href of REVIEW_CTX.opened) {
+      ok(/^\/review\/[^/]+\/$/.test(href), `it opens the console's own review page: ${href}`)
     }
   })
-  console.log(`ok   ${doc.reviews.length} review rows open the console's own page first, the original second`)
+  console.log(`ok   ${doc.reviews.length} review rows open in the console; the original stays a link out`)
+}
+
+// #219: which reviews have a live listener is VISIBLE, and only on the rows that
+// have one. A page that armed a poller and said nothing about it is how one gets
+// left running for a day.
+async function checkALiveListenerIsShownOnItsOwnRowOnly() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const doc = await state.collect('fixture')
+  const armed = doc.reviews[0].href
+  ok(typeof armed === 'string' && armed.length > 0, 'a review to listen to')
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: (href) => href === armed, fold: () => true, setFold() {} }
+  await withCapturingDocument(() => {
+    const frag = views.viewReviews(doc, ctx)
+    const marks = collectByClass(frag, 'review-listening')
+    equal(marks.length, 1, 'exactly the one review being listened to says so')
+    ok(collectByTag(marks[0], 'span').some((s) => s.textContent === 'Listening'),
+      'and it says so in words, not colour alone')
+  })
+  await withCapturingDocument(() => {
+    const quiet = { openReview: REVIEW_CTX.openReview, reviewIsLive: () => false, fold: () => true, setFold() {} }
+    equal(collectByClass(views.viewReviews(doc, quiet), 'review-listening').length, 0,
+      'with nothing armed, no row claims a listener')
+  })
+  console.log('ok   a live review listener is shown on its own row, in words, and nowhere else')
+}
+
+// Every surface that reaches a review reaches it the same way. A card or a
+// Needs-you row that still linked out would leave the console - and its
+// listener - behind, which is the whole defect #219 names.
+async function checkEveryWayIntoAReviewOpensInPage() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const doc = await state.collect('fixture')
+  const ctx = {
+    openReview: REVIEW_CTX.openReview,
+    reviewIsLive: () => false,
+    filter: 'all',
+    setFilter() {},
+    fold: () => true,
+    setFold() {},
+    ask: async () => {},
+    compose() {},
+    transcriptRead: () => true,
+    answered: () => null,
+    sendAnswer: async () => {},
+    updates: [],
+  }
+  await withCapturingDocument(() => {
+    for (const [name, render] of [['In flight', views.viewInFlight], ['Needs you', views.viewNeedsYou], ['Reviews', views.viewReviews]]) {
+      const frag = render(doc, ctx)
+      const links = collectByTag(frag, 'a').map((a) => a.href)
+      for (const href of links) {
+        ok(!/^\/review\//.test(href), `${name} still navigates to a review page: ${href}`)
+      }
+      ok(collectByClass(frag, 'review-open-control').length > 0,
+        `${name} offers no in-page way into a review`)
+    }
+  })
+  console.log('ok   every panel that reaches a review opens it in the console, never as a navigation')
 }
 
 // A panel only ever reaches the shell through `ctx`, and the two files are
@@ -984,7 +1065,7 @@ async function checkADecisionIsAnsweredInOneClick() {
   // dom.mjs's own `answerTo` - the function the browser actually runs - covered by
   // nothing: `return null` as its first statement kept every check green.
   const transcript = []
-  const ctx = {
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive,
     transcriptRead: () => true,
     answered: (q) => dom.answerTo(transcript, q, new Map()),
     sendAnswer: (q, a) => {
@@ -1077,7 +1158,7 @@ async function checkAnAnswerBelongsToOneQuestionOnly() {
       { lamp: 'brass', kind: 'decision', question: LONG, options: ['tonight', 'Monday'] },
     ],
   }
-  const ctx = {
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive,
     transcriptRead: () => true,
     answered: (q) => dom.answerTo(transcript, q, new Map()),
     sendAnswer: () => Promise.resolve(),
@@ -1222,7 +1303,7 @@ async function checkTheNeedsYouQueueIsOrderedByUrgency() {
       { lamp: 'port', kind: 'pr_red', title: 'Checks are red', at: '2026-01-13T09:00:00Z' },
     ],
   }
-  const ctx = { compose() {}, ask: async () => {}, transcriptRead: () => true }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, compose() {}, ask: async () => {}, transcriptRead: () => true }
   await withCapturingDocument(() => {
     const frag = views.viewNeedsYou(state, ctx)
     const heads = collectByClass(frag, 'row-head').map((p) => p.textContent)
@@ -1338,7 +1419,7 @@ async function checkAChangeSignatureNeverCarriesAnAge() {
     fleet: { in_flight: 1 },
     needs_you: [{ lamp: 'port', kind: 'pr_red', title: 'Red', at: '2026-01-13T09:00:00Z' }],
   }
-  const ctx = { compose() {}, ask: async () => {}, transcriptRead: () => true }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, compose() {}, ask: async () => {}, transcriptRead: () => true }
   const signatures = []
   for (const now of ['2026-01-14T09:00:00Z', '2026-02-20T09:00:00Z']) {
     const real = Date.now
@@ -1379,7 +1460,9 @@ async function main() {
   await checkFixtureIsNeutral()
   await checkRecentlyFinishedSortsNewestFirst()
   await checkRecentlyFinishedIsSortedInTheRenderedPanel()
-  await checkAReviewOpensTheConsolesOwnPageFirst()
+  await checkAReviewOpensInsideTheConsole()
+  await checkALiveListenerIsShownOnItsOwnRowOnly()
+  await checkEveryWayIntoAReviewOpensInPage()
   await checkTheShellSuppliesEveryCtxMemberThePanelsUse()
   await checkADecisionIsAnsweredInOneClick()
   await checkAnAnswerBelongsToOneQuestionOnly()

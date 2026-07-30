@@ -192,6 +192,38 @@ const WORK_STATE_LABEL = Object.keys(WORK_STATE).reduce((map, key) => {
   return map;
 }, {});
 
+// Open a review INSIDE the console (#219). A button, not a link: the review is
+// not somewhere the browser navigates to any more, and while it is on screen the
+// console holds a listener open for it - which is the shell's job (ctx.openReview),
+// so a panel only ever names which review.
+//
+// A failure gets said next to the control that was clicked. The alternative was
+// a click that does nothing, on the one control that leads to a decision.
+function reviewOpener(ctx, href, label) {
+  const box = el('span', 'review-open-control');
+  // Not `row-action`: that class writes an arrow after the label, and an arrow
+  // says the click leaves. This one opens the review right here.
+  const button = el('button', 'btn btn-quiet review-open-button');
+  button.type = 'button';
+  add(button, el('span', null, label));
+  const failed = el('span', 'review-open-failed');
+  button.addEventListener('click', () => {
+    failed.textContent = '';
+    button.disabled = true;
+    const done = () => { button.disabled = false; };
+    // Called straight out of the click, not from a later microtask: the open
+    // reads the operator's gesture, and a deferred call is how a control ends up
+    // looking dead for a frame.
+    try {
+      ctx.openReview(href).then(done, (err) => { failed.textContent = err.message; done(); });
+    } catch (err) {
+      failed.textContent = err.message;
+      done();
+    }
+  });
+  return add(box, button, failed);
+}
+
 // The trash affordance. It ENQUEUES a request - naming the work the way the
 // operator sees it, since a task id is the one thing this seam keeps off the page
 // - and the dockmaster carries it out under the usual gates. Two steps, and it is
@@ -270,7 +302,7 @@ function voyage(item, ctx) {
   const note = noteText(item);
   if (note) add(card, el('p', 'voyage-note', note));
   const foot = el('div', 'voyage-foot');
-  if (item.review_href) add(foot, link(item.review_href, 'Open the review page', 'row-action'));
+  if (item.review_href) add(foot, reviewOpener(ctx, item.review_href, 'Open the review'));
   add(foot, approveControl(item, ctx));
   add(foot, changesControl(item, ctx));
   add(foot, trashControl(item, ctx));
@@ -551,7 +583,7 @@ function reviewRow(sub, ctx) {
   const row = el('div', 'review-item');
   add(row, el('p', 'review-item-what', `${sub.title} — ${sub.repo}`));
   const actions = el('div', 'review-item-actions');
-  if (sub.review_href) add(actions, link(sub.review_href, 'Open the review page', 'row-action'));
+  if (sub.review_href) add(actions, reviewOpener(ctx, sub.review_href, 'Open the review'));
   // `state` is synthesized, always 'ready_for_review' - approveControl's/
   // changesControl's own gate on it is vacuous here. The real guarantee is
   // upstream: live.js only ever maps a task actually awaiting review into
@@ -896,18 +928,24 @@ export function viewReviews(state, ctx) {
   }
   const rowsOf = (rows) => table(['What', 'Repo', 'State', 'Rendered', ''], rows, (r) => {
     const awaiting = r.state === 'awaiting';
+    // Which reviews the console is holding a listener open for. One lamp on the
+    // row that has one; nothing at all on the rows that do not.
+    const listening = ctx.reviewIsLive(r.href)
+      ? add(el('span', 'review-listening'), lamp('starboard'), el('span', null, 'Listening'))
+      : null;
     return add(el('tr'),
       // A review page outlives the record that named it; when that is gone the
       // page says the title is not recorded rather than printing an internal id.
       cell('cell-title', el('span', r.title ? null : 'mono mono-mute', r.title || 'Title not recorded')),
       cell('mono nowrap', el('span', null, r.repo || '—')),
       cell('nowrap', stateCell(awaiting ? 'brass' : 'neutral', awaiting ? 'Waiting for you' : 'Reviewed')),
-      cell('mono nowrap', el('span', null, ago(r.at))),
-      // The console's own page first, because it is the one that is always
-      // there; the annotatable session second, for annotating. Both are REAL
-      // links, so the tab is the click's own gesture.
+      cell('mono nowrap', add(el('span', null, ago(r.at)), listening)),
+      // The console's own page first, and it opens HERE - the review is part of
+      // the console, not a tab beside it. The annotatable lavish session stays a
+      // real link: it is a different origin on a different server, so it is not
+      // embedded, and the tab has to come from the click's own gesture.
       cell('nowrap', add(el('div', 'review-open'),
-        link(r.href, 'Open'),
+        reviewOpener(ctx, r.href, 'Open'),
         el('span', 'review-or', '·'),
         link(r.session_href, 'the original', 'row-action'))));
   });

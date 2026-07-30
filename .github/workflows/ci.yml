@@ -150,6 +150,11 @@ jobs:
       - name: Check the console message queue
         run: node tests/check-console-queue.js
 
+      # The review listeners the console owns: armed on open, stopped on close,
+      # reaped when a page vanishes, and never leaked past the console itself.
+      - name: Check the console's review listeners
+        run: node tests/check-console-listeners.js
+
       - name: Check runtime context-performance guardrails
         run: bash tests/runtime-performance.sh
 
@@ -166,6 +171,7 @@ jobs:
           node --check tests/check-console.js
           node --check tests/check-console-http.js
           node --check tests/check-console-queue.js
+          node --check tests/check-console-listeners.js
           node --check tests/runtime-performance.js
 
   # The suite as a contributor runs it: bash 5, GNU userland. Sharded across
@@ -319,6 +325,7 @@ jobs:
           node tests/check-console.js
           node tests/check-console-http.js
           node tests/check-console-queue.js
+          node tests/check-console-listeners.js
           node tests/runtime-performance.js >/dev/null
 
   # The single required status for branch protection. `if: always()` so it runs

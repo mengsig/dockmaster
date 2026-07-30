@@ -1024,6 +1024,42 @@ body.review-shell {
 .review-panel .ask { margin-top: 0.75rem; }
 .review-missing { color: var(--fg-dim); max-width: 40rem; }
 
+/* A review opened INSIDE the console (#219). It covers the deck rather than
+ * floating in a small box: reading a change is the task, not a glance, and the
+ * page underneath is nothing the operator needs while doing it. Same flex
+ * distribution as the standalone review page, so the two read alike. */
+.review-overlay {
+  position: fixed; inset: 0; z-index: 20;
+  display: flex; flex-direction: column;
+  background: var(--hull); padding: 1.25rem 1.5rem;
+}
+body.has-review-open { overflow: hidden; }
+.review-overlay-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 1rem;
+  margin-bottom: 0.875rem; flex-wrap: wrap;
+}
+.review-overlay-what { margin: 0; font-size: 0.9375rem; font-weight: 500; flex: 1 1 16rem; }
+/* Calm by design: a lamp and four words, in the dimmed metadata voice. Whether
+ * anyone is listening is reference, not news. */
+.review-overlay-listening {
+  margin: 0; display: flex; align-items: center; gap: 0.4rem;
+  font-size: 0.8125rem; color: var(--fg-dim);
+}
+.review-overlay-close { flex: 0 0 auto; }
+.review-overlay-frame {
+  flex: 1 1 auto; min-height: 40vh; width: 100%; border: 1px solid var(--line);
+  border-radius: var(--r); background: var(--raise);
+}
+.review-overlay-foot { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+.review-overlay-note { margin: 0; font-size: 0.8125rem; color: var(--fg-dim); }
+.review-open-control { display: inline-flex; align-items: baseline; gap: 0.5rem; }
+.review-open-button { font-size: 0.8125rem; padding: 0.25rem 0.625rem; }
+.review-open-failed { font-size: 0.8125rem; color: var(--port); }
+.review-listening {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  margin-left: 0.5rem; font-family: var(--sans); color: var(--fg-dim);
+}
+
 /* One switch for every animation and transition in the file. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

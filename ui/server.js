@@ -21,6 +21,7 @@ const path = require('node:path');
 const chat = require('./chat');
 const state = require('./state');
 const live = require('./live');
+const { createListeners } = require('./listeners');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 // Allowlist, not a path resolver: traversal is unrepresentable rather than filtered.
@@ -32,10 +33,16 @@ const ROUTES = {
   '/dom.mjs': ['dom.mjs', 'text/javascript; charset=utf-8'],
   '/api.mjs': ['api.mjs', 'text/javascript; charset=utf-8'],
   '/review.mjs': ['review.mjs', 'text/javascript; charset=utf-8'],
+  '/overlay.mjs': ['overlay.mjs', 'text/javascript; charset=utf-8'],
   '/favicon.svg': ['favicon.svg', 'image/svg+xml'],
 };
+// frame-src 'self' is what lets a review open INSIDE the console (#219). It is
+// this origin only, and what renders in that frame is the archived artifact
+// alone, under sandbox="allow-scripts" - an opaque origin, exactly as on the
+// standalone review page. The console page keeps frame-ancestors 'none', so
+// nothing may frame IT.
 const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-  + "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  + "connect-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 const MAX_BODY_BYTES = 64 * 1024;
 const LONG_POLL_MS = 25000;
 // A review page ships beside its screenshots. One path segment, no slashes and
@@ -366,6 +373,103 @@ function serveStatic(res, route) {
   send(res, 200, type, fs.readFileSync(path.join(PUBLIC_DIR, file)));
 }
 
+// taskInfoOrNull(cfg, id) -> { title, repo, state } for the work behind a
+// review, or null when the record is gone or could not be read.
+//
+// `repo` is required at creation (dm-task.sh new --repo); missing it means the
+// record itself is gone. A title alone may legitimately be empty (dm-task.sh
+// allows titleless tasks), so it falls back to the same '(untitled)' the fleet
+// page uses rather than nulling the whole record - an Approval that names no
+// work at all is what the old `&&` here produced.
+async function taskInfoOrNull(cfg, id) {
+  let info;
+  try {
+    info = await live.taskInfo(cfg.bin, id);
+  } catch (err) {
+    process.stderr.write(`console: review: could not read the task record for this review: ${err.message}\n`);
+    return null;
+  }
+  if (!info.repo) return null;
+  if (!info.title) info.title = '(untitled)';
+  return info;
+}
+
+// The address of a review, as the page holds it: `/review/<id>/` and nothing
+// else. It is the ONLY key the page ever sends back, so no console panel and no
+// request body has to carry a task id - the id is decoded here and then only
+// ever SELECTS a row dm-lavish.sh already lists (live.reviewDir), never composes
+// a path. Anything that is not exactly that shape yields '' and is refused.
+const REVIEW_HREF = /^\/review\/([^/]+)\/$/;
+
+function reviewIdFromHref(href) {
+  if (typeof href !== 'string') return '';
+  const match = REVIEW_HREF.exec(href);
+  if (!match) return '';
+  try {
+    return decodeURIComponent(match[1]);
+  } catch (err) {
+    return '';
+  }
+}
+
+// GET /api/review-info?review=/review/<id>/ - what the console needs to render
+// that review INSIDE the page: the artifact's own address (framed under the
+// same sandbox the standalone page uses), and the work it belongs to.
+async function serveReviewInfo(res, cfg, url) {
+  const href = url.searchParams.get('review') || '';
+  const id = reviewIdFromHref(href);
+  if (!id) return fail(res, 400, 'that is not the address of a review');
+  const found = await live.reviewDir(cfg.bin, id);
+  if (!found) return fail(res, 404, 'there is no review page for that work');
+  const info = await taskInfoOrNull(cfg, id);
+  sendJson(res, 200, {
+    // Same directory, same asset route, same policy as the standalone page.
+    src: `${href}${encodeURIComponent(path.basename(found.file))}`,
+    title: info ? info.title : '',
+    repo: info ? info.repo : '',
+    known: Boolean(info),
+    awaiting: Boolean(info) && info.state === 'ready_for_review',
+  });
+}
+
+// POST /api/review-listen {review, action} - the console owning the listener
+// lifecycle: `start` when a review opens, `keepalive` while it is open, `stop`
+// when it closes. A page that stops checking in is reaped by the sweep in
+// listeners.js, so a refresh or a killed tab cannot leak a poller.
+async function postReviewListen(req, res, cfg, listeners) {
+  let parsed;
+  try {
+    parsed = JSON.parse(await readBody(req));
+  } catch (err) {
+    return fail(res, err instanceof RangeError ? 413 : 400, `review listener: ${err.message}`);
+  }
+  const action = parsed && parsed.action;
+  if (action !== 'start' && action !== 'keepalive' && action !== 'stop') {
+    return fail(res, 400, `review listener: unknown action '${shown(action)}'`);
+  }
+  const href = parsed && parsed.review;
+  const id = reviewIdFromHref(href);
+  if (!id) return fail(res, 400, 'that is not the address of a review');
+
+  // Stopping never needs the toolbelt: it must work even if the artifact has
+  // been swept away since, or the listener would be unkillable from the page.
+  if (action === 'stop') return sendJson(res, 200, { state: listeners.stop(href), live: listeners.live() });
+  if (action === 'keepalive') return sendJson(res, 200, { state: listeners.keepalive(href), live: listeners.live() });
+
+  const found = await live.reviewDir(cfg.bin, id);
+  if (!found) return fail(res, 404, 'there is no review page for that work');
+  const info = await taskInfoOrNull(cfg, id);
+  // Not `state`: that name is this module's fleet collector.
+  let armed;
+  try {
+    armed = listeners.arm(href, id, info);
+  } catch (err) {
+    process.stderr.write(`console: review listener: ${err.message}\n`);
+    return fail(res, 503, 'the review listener could not be started');
+  }
+  sendJson(res, 200, { state: armed, live: listeners.live() });
+}
+
 // GET /review/<id>/[<asset>] - an archived review page, and the screenshots
 // beside it. The directory comes from dm-lavish.sh; the URL only selects.
 //
@@ -410,21 +514,7 @@ async function serveReview(res, cfg, pathname) {
     // renders the artifact in an iframe (still served, unchanged, by the
     // branch below) and adds the notes box - see reviewShellCsp() for why that
     // split is what keeps the artifact's own isolation intact.
-    let info = null;
-    try {
-      info = await live.taskInfo(cfg.bin, id);
-      // `repo` is required at creation (dm-task.sh new --repo); missing it means
-      // the record itself is gone. A title alone may legitimately be empty
-      // (dm-task.sh allows titleless tasks) - the old `&&` here let an empty
-      // title through as-is, so an Approval could name no work at all. Falling
-      // back to the same '(untitled)' live.js:392 uses instead of nulling the
-      // whole record keeps this page and the fleet page agreeing on what a
-      // titleless task looks like.
-      if (!info.repo) info = null;
-      else if (!info.title) info.title = '(untitled)';
-    } catch (err) {
-      process.stderr.write(`console: review: could not read the task record for this review: ${err.message}\n`);
-    }
+    const info = await taskInfoOrNull(cfg, id);
     const basename = path.basename(found.file);
     return send(res, 200, 'text/html; charset=utf-8', reviewShellHtml(basename, info),
       { 'content-security-policy': reviewShellCsp() });
@@ -541,7 +631,7 @@ async function postChat(req, res, cfg, watchers) {
   wake(watchers);
 }
 
-function handle(req, res, cfg, watchers) {
+function handle(req, res, cfg, watchers, listeners) {
   if (!hostIsLocal(req, cfg.port)) return fail(res, 403, `refused a request for host '${req.headers.host}'`);
   const url = new URL(req.url, `http://127.0.0.1:${cfg.port}`);
 
@@ -633,6 +723,27 @@ function handle(req, res, cfg, watchers) {
         return redirect ? noSession() : sendJson(res, 200, { url: null });
       });
   }
+  if (req.method === 'GET' && url.pathname === '/api/review-info') {
+    const refusal = crossSiteRefusal(req, cfg.port);
+    if (refusal) return fail(res, refusal.status, refusal.message);
+    return serveReviewInfo(res, cfg, url)
+      .catch((err) => fail(res, 500, 'the review could not be read', err.message));
+  }
+  // Which reviews have a live listener right now - what the page's indicator is
+  // drawn from, and how a reloaded tab learns what it left armed.
+  if (req.method === 'GET' && url.pathname === '/api/review-listeners') {
+    const refusal = crossSiteRefusal(req, cfg.port);
+    if (refusal) return fail(res, refusal.status, refusal.message);
+    return sendJson(res, 200, { live: listeners.live() });
+  }
+  // Arming a listener spawns a process, so it takes the full write refusal -
+  // the same one a posted message does, for the same reason.
+  if (req.method === 'POST' && url.pathname === '/api/review-listen') {
+    const refusal = writeRefusal(req, cfg.port);
+    if (refusal) return fail(res, refusal.status, refusal.message);
+    return postReviewListen(req, res, cfg, listeners)
+      .catch((err) => fail(res, 500, `review listener: ${err.message}`));
+  }
   if (req.method === 'GET' && url.pathname === '/api/chat') return serveChat(res, cfg, url, watchers);
   if (req.method === 'POST' && url.pathname === '/api/chat') {
     const refusal = writeRefusal(req, cfg.port);
@@ -646,10 +757,23 @@ function main() {
   const cfg = config();
   chat.ensureDirs(cfg.dmHome);
   const watchers = new Set();
+  const listeners = createListeners({ dmHome: cfg.dmHome, bin: cfg.bin });
+
+  // A poller outliving the console that spawned it is unreachable: nothing left
+  // knows its pid, and the page that would have stopped it is gone. So every
+  // ordinary way out kills them first. SIGKILL is the one exit that cannot be
+  // caught, and the reaper cannot help there either - it dies with the process.
+  process.on('exit', () => listeners.stopAll());
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(signal, () => {
+      listeners.close();
+      process.exit(0);
+    });
+  }
 
   const server = http.createServer((req, res) => {
     try {
-      handle(req, res, cfg, watchers);
+      handle(req, res, cfg, watchers, listeners);
     } catch (err) {
       fail(res, 500, err.message);
     }
