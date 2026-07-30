@@ -6195,6 +6195,9 @@ check "a degradation carries tokens, not script output" \
 check "console checks pass"      'node "$ROOT/tests/check-console.js" >/dev/null 2>&1'
 check "console http checks pass" 'node "$ROOT/tests/check-console-http.js" >/dev/null 2>&1'
 check "console queue checks pass" 'node "$ROOT/tests/check-console-queue.js" >/dev/null 2>&1'
+# The review listeners: armed on open, stopped on close, reaped when the page
+# vanishes, and never outliving the console (lavish-axi stubbed on PATH).
+check "console review-listener checks pass" 'node "$ROOT/tests/check-console-listeners.js" >/dev/null 2>&1'
 
 echo "== trash: an operator-authorized discard with recoverable backend cleanup =="
 # The THIRD terminal path, and the one that was missing. Teardown is for work
