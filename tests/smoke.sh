@@ -5932,6 +5932,113 @@ printf '%s\n' "999999999" > "$DM_HOME/state/ui/server.pid"
 check "stop clears a pid file naming a dead process" 'b dm-ui.sh stop >/dev/null 2>&1'
 check "and the stale file is gone"             '[ ! -f "$DM_HOME/state/ui/server.pid" ]'
 
+echo "== the console watcher: arming is a property of the console, not memory =="
+# The defect this closes: a single `poll` answers what is queued and exits
+# (whether that is one message or a whole drain), and nothing re-armed it - an
+# operator message sat unclaimed for minutes across two dockmaster replies.
+# This is the gate: it must FAIL if `watch` is a no-op or silently disarms
+# after one drain, not just assert the command exists. (Verified by hand:
+# forcing `watch_cmd` to exit after its first delivered drain reproduces the
+# original defect and turns "a claim does not disarm it" red - the guard below
+# has real teeth.)
+post_operator_msg() {
+  DM_UI_CHAT="$ROOT/ui/chat.js" node -e \
+    'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", process.argv[1])' "$1" >/dev/null 2>&1
+}
+wait_for_text() {  # wait_for_text <file> <needle> <max_half_seconds>
+  local n=0
+  while [ "$n" -lt "$3" ]; do
+    grep -q -- "$2" "$1" 2>/dev/null && return 0
+    sleep 0.5; n=$((n + 1))
+  done
+  return 1
+}
+wait_for_file() {  # wait_for_file <path> <max_half_seconds>
+  local n=0
+  while [ "$n" -lt "$2" ]; do
+    [ -f "$1" ] && return 0
+    sleep 0.5; n=$((n + 1))
+  done
+  return 1
+}
+UI_WATCH_LOG="$DM_HOME/ui-watch.out"
+
+post_operator_msg "unclaimed with nobody watching"
+sleep 1
+check "with no watcher, a queued message sits unclaimed" \
+  '[ -n "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
+
+# Backgrounded directly (not through the `b` wrapper function): dm-ui.sh has
+# its own shebang and execs as one process, so $! is the watcher's own pid -
+# the same pid it writes to watch.pid. A wrapped/subshelled invocation would
+# make $! name the wrapper, not the process this test needs to identify.
+"$ROOT/bin/dm-ui.sh" watch >"$UI_WATCH_LOG" 2>&1 &
+UI_WATCH_PID=$!
+check "arming delivers the message that was already waiting" \
+  'wait_for_text "$UI_WATCH_LOG" "unclaimed with nobody watching" 20'
+check "delivery claimed it out of the inbox" \
+  '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
+
+post_operator_msg "second message after a claim"
+check "the SAME watcher delivers a second message - a claim does not disarm it" \
+  'wait_for_text "$UI_WATCH_LOG" "second message after a claim" 20'
+check "the watcher is still the same process, never restarted" 'kill -0 "$UI_WATCH_PID"'
+check "arming again while already armed is a no-op, not a second poller" \
+  '[ "$(b dm-ui.sh watch)" = "console: watcher already armed (pid $UI_WATCH_PID)" ]'
+
+kill "$UI_WATCH_PID" 2>/dev/null || true
+wait "$UI_WATCH_PID" 2>/dev/null || true
+check "killing the watcher cleans up its own pid file" '[ ! -f "$DM_HOME/state/ui/watch.pid" ]'
+
+# A single `poll` stops watching TWO ways, not one: it claims a message (exit
+# 0, covered above) or it times out with nothing queued (exit 3). Both must
+# re-arm the loop; only a genuine failure may not. DM_UI_WATCH_TIMEOUT makes
+# the idle slice short enough to provably cross inside a bounded wait, rather
+# than assuming an unbounded poll would have behaved the same way.
+DM_UI_WATCH_TIMEOUT=2 "$ROOT/bin/dm-ui.sh" watch >"$UI_WATCH_LOG" 2>&1 &
+UI_WATCH_PID=$!
+check "watcher for the idle-timeout case is armed" 'wait_for_file "$DM_HOME/state/ui/watch.pid" 10'
+sleep 5
+check "an idle timeout does not end the watcher" 'kill -0 "$UI_WATCH_PID"'
+post_operator_msg "arrived after an idle timeout, not just a claim"
+check "the watcher still delivers after surviving an idle timeout" \
+  'wait_for_text "$UI_WATCH_LOG" "arrived after an idle timeout, not just a claim" 20'
+kill "$UI_WATCH_PID" 2>/dev/null || true
+wait "$UI_WATCH_PID" 2>/dev/null || true
+check "and it cleans up its pid file on the idle-timeout path too" '[ ! -f "$DM_HOME/state/ui/watch.pid" ]'
+
+# Same identity discipline as the server's pid file: a live pid that is not
+# the watcher must never be adopted or killed.
+printf '%s\n' "$$" > "$DM_HOME/state/ui/watch.pid"
+check "watch refuses a pid file that is not its own" '! b dm-ui.sh watch >/dev/null 2>&1'
+check "watch leaves that pid file alone"             '[ -f "$DM_HOME/state/ui/watch.pid" ]'
+check "and this shell was not killed"                'kill -0 $$'
+rm -f "$DM_HOME/state/ui/watch.pid"
+
+# The watcher is its OWN process - a console that dies on its own (a crash, a
+# killed session, anything short of `stop`) does not necessarily take the
+# watcher with it. `status` must say so: a surviving watcher after the console
+# is gone is neither "armed" (nothing can reach it) nor silence (it still IS
+# running) - it must be named, or exactly the console-death gap this closes
+# stays open one level down.
+"$ROOT/bin/dm-ui.sh" watch >"$UI_WATCH_LOG" 2>&1 &
+UI_WATCH_PID=$!
+check "watcher armed with no console running is confirmed armed" 'wait_for_file "$DM_HOME/state/ui/watch.pid" 10'
+UI_ORPHAN_STATUS="$(b dm-ui.sh status 2>&1 || true)"
+check "status still says the console is not running" 'grep -q "console: not running" <<<"$UI_ORPHAN_STATUS"'
+check "status ALSO names the orphaned watcher, not silence" \
+  'grep -q "watcher is still armed with no console running" <<<"$UI_ORPHAN_STATUS"'
+
+# Stopping the console disarms its watcher too - the watcher exists to
+# deliver into an open console, so it is not left polling forever for a page
+# nobody can type into once the console itself is stopped.
+b dm-ui.sh stop >/dev/null 2>&1
+sleep 0.3
+check "stop disarms the watcher along with the console" '! kill -0 "$UI_WATCH_PID" 2>/dev/null'
+check "and its pid file is gone"                        '[ ! -f "$DM_HOME/state/ui/watch.pid" ]'
+check "status is quiet about the watcher once it is gone" \
+  '! b dm-ui.sh status 2>&1 | grep -q "watcher is still armed"'
+
 # Every --json emitter: valid JSON, and the human output it sits beside is
 # untouched. A second parser in the page is what these exist to prevent.
 UI_HUMAN_REPOS="$(b dm-repo.sh list)"
