@@ -425,7 +425,9 @@ function withStubDocument(fn) {
   const had = 'document' in global
   const previous = global.document
   global.document = {
-    createElement: (tag) => ({ tag, className: '', textContent: '', setAttribute() {}, appendChild() {} }),
+    createElement: (tag) => ({
+      tag, className: '', textContent: '', dataset: {}, setAttribute() {}, appendChild() {},
+    }),
   }
   try {
     return fn()
@@ -829,6 +831,10 @@ async function withCapturingDocument(fn) {
       disabled: false,
       children: [],
       listeners: {},
+      // Real enough to carry the change-marking attributes: views.mjs stamps
+      // data-key/data-sig on rows so the shell can tell a genuinely new row
+      // from the same row redrawn.
+      dataset: {},
       classList: { add() {}, remove() {} },
       setAttribute() {},
       focus() {},
@@ -1200,6 +1206,155 @@ async function checkTheAnswerMessageNamesTheQuestion() {
   console.log('ok   an answer echoes its question exactly, bounded and on one line')
 }
 
+// The queue is ASSEMBLED review-first, then decisions, then pull requests - so
+// without a sort a failing pull request routinely sits below two questions that
+// can wait. Pinned on the rendered panel, not the comparator, because a sort
+// that is not wired into the render is a sort the operator never sees.
+async function checkTheNeedsYouQueueIsOrderedByUrgency() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const state = {
+    degraded: [],
+    fleet: { in_flight: 0 },
+    needs_you: [
+      { lamp: 'starboard', kind: 'pr_yours', title: 'Green and yours', at: '2026-01-10T09:00:00Z' },
+      { lamp: 'brass', kind: 'blocked', title: 'Newer question', at: '2026-01-12T09:00:00Z' },
+      { lamp: 'brass', kind: 'blocked', title: 'Older question', at: '2026-01-11T09:00:00Z' },
+      { lamp: 'port', kind: 'pr_red', title: 'Checks are red', at: '2026-01-13T09:00:00Z' },
+    ],
+  }
+  const ctx = { compose() {}, ask: async () => {}, transcriptRead: () => true }
+  await withCapturingDocument(() => {
+    const frag = views.viewNeedsYou(state, ctx)
+    const heads = collectByClass(frag, 'row-head').map((p) => p.textContent)
+    equal(heads.join(' | '),
+      ['Checks are red', 'Older question', 'Newer question', 'Green and yours'].join(' | '),
+      'the queue renders most-severe first, and within one severity longest-waiting first')
+
+    // The severity that drives the order must also be visible without colour:
+    // 8px of red beside 8px of green is not a channel every operator has.
+    const standings = collectByClass(frag, 'row')
+      .map((row) => collectByClass(row, 'state')[0])
+      .map((cell) => cell.children.map((c) => c.textContent).join(''))
+    equal(standings.join(' | '),
+      ['Checks failing', 'Stopped', 'Stopped', 'Ready to merge'].join(' | '),
+      'each row states its standing in words, not only in the colour of its lamp')
+  })
+
+  // A lamp this page has never seen is a gap in its vocabulary, NOT the server
+  // marking a row deliberately calm - adding a severity server-side is the
+  // obvious way to add one. So it must sort above `neutral` rather than folding
+  // into it: a client that predates a new severity still surfaces it.
+  await withCapturingDocument(() => {
+    const withNew = Object.assign({}, state, {
+      needs_you: [
+        { lamp: 'neutral', kind: 'blocked', title: 'Deliberately calm', at: '2026-01-01T09:00:00Z' },
+        { lamp: 'catastrophe', kind: 'blocked', title: 'Severity this page cannot read', at: '2026-01-09T09:00:00Z' },
+      ],
+    })
+    const frag = views.viewNeedsYou(withNew, ctx)
+    const heads = collectByClass(frag, 'row-head').map((p) => p.textContent)
+    equal(heads[0], 'Severity this page cannot read',
+      'an unrecognised severity outranks a deliberately calm row despite waiting a shorter time')
+    // And it says so: claiming a standing this page cannot justify would be worse
+    // than the burial, because it would read as understood.
+    const standing = collectByClass(collectByClass(frag, 'row')[0], 'state')[0]
+    equal(standing.children.map((c) => c.textContent).join(''), 'Not known',
+      'and it states that its standing is not known rather than inventing one')
+  })
+
+  // An unvalidated lamp reaching className would let a stray value attach
+  // classes the row was never meant to carry.
+  await withCapturingDocument(() => {
+    const injected = Object.assign({}, state, {
+      needs_you: [{ lamp: 'neutral is-lead', kind: 'blocked', title: 'Injected', at: '2026-01-09T09:00:00Z' }],
+    })
+    const row = collectByClass(views.viewNeedsYou(injected, ctx), 'row')[0]
+    equal(row.className, 'row row-neutral',
+      'a lamp token that is not a known severity cannot smuggle a class onto the row')
+  })
+  console.log('ok   the needs-you queue is ordered by severity and states each standing in words')
+}
+
+// Motion on this page means "this moved", and nothing else. A panel is rebuilt
+// whole every 30 seconds, so anything that animates on render alone would fire
+// on work that did not move and teach the operator to ignore movement.
+async function checkMotionMarksOnlyWhatActuallyMoved() {
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  const marked = (node) => node.marks || []
+  const node = (key, sig) => ({
+    dataset: { key, sig }, marks: [],
+    classList: { add(c) { this.owner.marks.push(c) }, remove() {} },
+  })
+  const root = (...nodes) => {
+    nodes.forEach((n) => { n.classList.owner = n })
+    return { querySelectorAll: () => nodes }
+  }
+
+  const a1 = node('need:blocked:A:demo', 'brass|')
+  dom.markChanges('t-needs', root(a1))
+  equal(marked(a1).length, 0, 'the first sight of a panel animates nothing - the whole page would move')
+
+  const a2 = node('need:blocked:A:demo', 'brass|')
+  const b2 = node('need:pr_red:B:demo', 'port|')
+  dom.markChanges('t-needs', root(a2, b2))
+  equal(marked(a2).length, 0, 'a row that did not move on a later draw stays still')
+  equal(marked(b2).join(''), 'is-arriving', 'a row that was not there before is marked as arriving')
+
+  const a3 = node('need:blocked:A:demo', 'port|')
+  const b3 = node('need:pr_red:B:demo', 'port|')
+  dom.markChanges('t-needs', root(a3, b3))
+  equal(marked(a3).join(''), 'is-changed', 'a row whose standing moved is marked as changed')
+  equal(marked(b3).length, 0, 'and its unmoved neighbour is not')
+
+  // Two open tasks in one repo can share a title. Without an occurrence suffix
+  // both collapse onto one map key, so the first node's signature is never what
+  // got stored and it re-animates forever on data that never changed.
+  const dup = () => [node('work:demo:Same title', 'building|'), node('work:demo:Same title', 'review|')]
+  const [d1, d2] = dup()
+  dom.markChanges('t-dup', root(d1, d2))
+  const [e1, e2] = dup()
+  dom.markChanges('t-dup', root(e1, e2))
+  equal(marked(e1).length + marked(e2).length, 0,
+    'two rows sharing a key keep separate identities, so neither re-animates on an unchanged redraw')
+
+  // Panels are diffed independently: switching panels must not make the other
+  // one's rows look new when the operator comes back to it.
+  const other = node('need:blocked:A:demo', 'port|')
+  dom.markChanges('t-prs', root(other))
+  equal(marked(other).join(''), '', 'a panel drawn for the first time is still silent, even after another was drawn')
+
+  let threw = ''
+  try { dom.markChanges('t', null) } catch (err) { threw = err.message }
+  ok(threw !== '', 'marking a panel with no root is a programmer error, not a silent no-op')
+  console.log('ok   motion marks only rows that arrived or actually moved, per panel')
+}
+
+// A signature that contains an age "changes" on its own every minute, so the
+// once-a-minute clock redraw would wash the whole page in change highlights.
+async function checkAChangeSignatureNeverCarriesAnAge() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const state = {
+    degraded: [],
+    fleet: { in_flight: 1 },
+    needs_you: [{ lamp: 'port', kind: 'pr_red', title: 'Red', at: '2026-01-13T09:00:00Z' }],
+  }
+  const ctx = { compose() {}, ask: async () => {}, transcriptRead: () => true }
+  const signatures = []
+  for (const now of ['2026-01-14T09:00:00Z', '2026-02-20T09:00:00Z']) {
+    const real = Date.now
+    Date.now = () => Date.parse(now)
+    try {
+      await withCapturingDocument(() => {
+        const row = collectByClass(views.viewNeedsYou(state, ctx), 'row')[0]
+        signatures.push(`${row.dataset.key}::${row.dataset.sig}`)
+      })
+    } finally { Date.now = real }
+  }
+  equal(signatures[0], signatures[1],
+    'a row five weeks older has the same key and signature, so ageing alone never reads as change')
+  console.log('ok   a row identity and signature hold no age, so the clock redraw moves nothing')
+}
+
 async function main() {
   checkTrackShapes()
   checkNothingIsClaimedWithoutEvidence()
@@ -1232,6 +1387,9 @@ async function main() {
   await checkTheArrivalsThatChangeAPanelAreTheOnesThatRedrawIt()
   await checkTheAskCapMatchesThePagesAnswerIdentity()
   await checkTheAnswerMessageNamesTheQuestion()
+  await checkTheNeedsYouQueueIsOrderedByUrgency()
+  await checkMotionMarksOnlyWhatActuallyMoved()
+  await checkAChangeSignatureNeverCarriesAnAge()
   checkShapeRefusesAHalfDocument()
   console.log(`\nconsole checks passed (${checks} assertions)`)
 }
