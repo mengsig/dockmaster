@@ -50,8 +50,27 @@ today: an earlier destructive-command parser was attempted and reverted
 (arming it as a `PreToolUse` hook refused ordinary compound shell, and a hook
 that times out fails open — a control that disarms itself on exactly the
 inputs that take longest is not a control worth carrying), and it was later
-removed rather than re-attempted. This repo's `.claude/settings.json` carries
-`permissions.allow` only.
+removed rather than re-attempted.
+
+This repo's tracked `.claude/settings.json` carries a `permissions.deny` list:
+`pkill`/`killall` are refused outright (the standing rule is to kill only a PID
+you captured yourself), and `rm -rf`/`rm -fr`/the two `--recursive --force`
+orderings are refused against `repos/`, `state/` (which holds every worktree),
+and the distro root itself, in both relative and this operator's absolute path
+forms.
+
+These are literal-text pattern rules, not a filesystem-aware guard, so the
+coverage is real but partial. They do **not** see: a `cd` into the target
+followed by a relative `rm -rf` (or any relative spelling other than the exact
+ones listed — `../repos`, `~/dockmaster/repos`); `-Rf`/`-fR` or a mixed
+short/long flag combination (`-r --force`); a wrapped invocation
+(`bash -c "rm -rf repos"`) or a runner Claude Code does not unwrap; a command
+built from a variable at runtime; or `rm -rf .` run with the distro root as the
+working directory. They also do not bind a command run as a subprocess of a
+`bin/dm-*.sh` script — only a direct Bash tool call — which is why the
+toolbelt's own maintenance operations against `state/` are unaffected. Treat
+this as a rail against the ordinary, typed-out mistake, not a hard security
+boundary.
 
 ## Reporting a vulnerability
 

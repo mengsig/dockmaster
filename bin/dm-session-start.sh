@@ -54,10 +54,11 @@ fi
 section "BACKLOG"
 if [ -f "$DM_STATE/backlog.md" ]; then "$here/dm-backlog.sh" list; else echo "  ABSENT (no backlog yet)"; fi
 
-for f in operator.md learnings.md; do
-  section "$(printf '%s' "$f" | tr '[:lower:].' '[:upper:] ' )"
-  if [ -f "$DM_STATE/$f" ]; then cat "$DM_STATE/$f"; else echo "  ABSENT (template defaults; create $DM_STATE/$f when you have content)"; fi
-done
+section "MEMORY (operator preferences + fleet learnings, byte-capped)"
+# Route through dm-memory.sh's capped recall rather than a bare `cat`: this
+# store grows unboundedly (learnings.md alone measured 41.5KB uncapped), and a
+# raw cat put the whole thing on every session's first turn regardless of size.
+"$here/dm-memory.sh" recall --global 2>/dev/null || echo "  (memory unavailable — see TOOLING above)"
 
 section "NEXT"
 echo "  Reconcile any STUCK clones and non-pending in-flight tasks before taking new work."

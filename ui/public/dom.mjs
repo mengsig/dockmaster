@@ -34,6 +34,44 @@ export function stateCell(kind, label) {
   return add(el('span', 'state'), lamp(kind), el('span', null, label));
 }
 
+// Motion that explains CHANGE and nothing else. A panel is rebuilt whole on
+// every refresh, so an entrance animation applied on render fires every 30
+// seconds on work that did not move - which teaches the operator to ignore
+// movement, and that costs the one channel that should mean "look here".
+//
+// A node opts in with data-key (what it is, stably) and data-sig (where it
+// stands). It animates only when its key is new to the panel, or its signature
+// moved since the panel was last drawn. Neither may contain an age, or the
+// once-a-minute clock redraw would move everything on its own.
+const drawnPanels = new Map();
+
+export function markChanges(panelId, root) {
+  if (typeof panelId !== 'string' || panelId === '') throw new Error('markChanges needs a panel id');
+  if (!root || typeof root.querySelectorAll !== 'function') throw new Error('markChanges needs a root element');
+  const before = drawnPanels.get(panelId);
+  const now = new Map();
+  const seen = new Map();
+  for (const node of root.querySelectorAll('[data-key]')) {
+    // data-key is not unique on its own: two open tasks in one repo can share a
+    // title. Without the occurrence suffix both nodes collapse onto one map key,
+    // so the first node's signature is never what got stored and it re-animates
+    // on every refresh forever, on data that never changed. Render order is
+    // stable across draws because each panel is built from the same list.
+    const raw = node.dataset.key;
+    const nth = (seen.get(raw) || 0) + 1;
+    seen.set(raw, nth);
+    const key = nth > 1 ? `${raw}#${nth}` : raw;
+    const sig = node.dataset.sig || '';
+    now.set(key, sig);
+    // First sight of a panel is not a change: the whole thing would animate.
+    if (!before) continue;
+    if (!before.has(key)) node.classList.add('is-arriving');
+    else if (before.get(key) !== sig) node.classList.add('is-changed');
+  }
+  drawnPanels.set(panelId, now);
+  return now;
+}
+
 export function meta(...parts) {
   const line = el('p', 'row-meta');
   parts.filter(Boolean).forEach((part, i) => {

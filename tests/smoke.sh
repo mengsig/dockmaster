@@ -1434,14 +1434,20 @@ check "OR recall keeps a line matching the first term"  'grep -q "alpha lions" <
 check "OR recall keeps a line matching the second term" 'grep -q "gamma bears" <<<"$ORQ"'
 check "OR recall drops a line matching neither term"    '! grep -q "beta tigers" <<<"$ORQ"'
 
-echo "== memory-context: soft line cap + tail pointer (F1) =="
+echo "== memory-context: soft byte cap + tail pointer (F1) =="
 for i in $(seq 1 12); do b dm-memory.sh remember memctx --private --kind routing "capfact-$i" >/dev/null; done
 # Direct invocation so the env-var prefix reaches the external script unambiguously.
-CAP="$(DM_RECALL_MAX_LINES=5 "$ROOT/bin/dm-memory.sh" recall memctx)"
-check "cap emits the omitted-lines tail pointer" 'grep -q "older line(s) omitted" <<<"$CAP"'
+# 200 bytes is well under 12 bullets' worth (~55B each), so some must be dropped.
+CAP="$(DM_RECALL_MAX_BYTES=200 "$ROOT/bin/dm-memory.sh" recall memctx)"
+check "cap emits the omitted bytes tail pointer" 'grep -q "older line(s) / .* bytes omitted" <<<"$CAP"'
 check "cap hides some bullets under the limit"   '[ "$(grep -c "capfact-" <<<"$CAP")" -lt 12 ]'
+# The cap keeps only WHOLE lines: every bullet line kept must carry its closing
+# date marker, never a line sliced off mid-fact.
+CAPBULLETS="$(grep -E '^- \*\*\[' <<<"$CAP" || true)"
+CAPCOMPLETE="$(grep -E '_\([0-9TZ:-]+\)_$' <<<"$CAPBULLETS" || true)"
+check "cap never truncates a bullet mid-line" '[ "$(grep -c . <<<"$CAPBULLETS")" -eq "$(grep -c . <<<"$CAPCOMPLETE")" ]'
 # Full content stays reachable on an explicit query (filtered BEFORE the cap).
-CAPQ="$(DM_RECALL_MAX_LINES=5 "$ROOT/bin/dm-memory.sh" recall memctx "capfact-7")"
+CAPQ="$(DM_RECALL_MAX_BYTES=200 "$ROOT/bin/dm-memory.sh" recall memctx "capfact-7")"
 check "explicit query still surfaces a capped-out fact" 'grep -q "capfact-7" <<<"$CAPQ"'
 
 echo "== memory-context: forget removes a bullet, fails on no-match (F2) =="
@@ -1462,13 +1468,16 @@ CREC="$(b dm-memory.sh recall memctx --crew)"
 check "dockmaster recall includes the dockmaster-only store" 'grep -q "DMONLY-crew-must-not-see" <<<"$MREC"'
 check "crew recall excludes the dockmaster-only store"       '! grep -q "DMONLY-crew-must-not-see" <<<"$CREC"'
 
-echo "== memory-context: brief relays private + fleet, excludes dockmaster-only (F3/F5) =="
+echo "== memory-context: brief relays private, excludes GLOBAL fleet + dockmaster-only (F3/F5, R1) =="
 b dm-task.sh new memctx-1 --kind ship --repo memctx >/dev/null
 b dm-worktree.sh create memctx-1 memctx >/dev/null 2>&1
 b dm-brief.sh memctx-1 >/dev/null 2>/dev/null
 BR="$DM_HOME/data/memctx-1/brief.md"
-check "brief injects the Fleet-wide context heading" 'grep -q "Fleet-wide context" "$BR"'
-check "brief relays a fleet learning"                'grep -q "fleet gotcha alpha" "$BR"'
+# The global fleet-learnings store is the ORCHESTRATOR's memory, not a
+# crewmate's (measured: 64% of an average brief's bytes, mostly irrelevant to
+# the task in front of the worker) - a brief must never inject it.
+check "brief omits the Fleet-wide context heading" '! grep -q "Fleet-wide context" "$BR"'
+check "brief omits the global fleet-learnings store" '! grep -q "fleet gotcha alpha" "$BR"'
 check "brief relays a private note"                  'grep -q "alpha lions" "$BR"'
 check "brief excludes the dockmaster-only note"      '! grep -q "DMONLY-crew-must-not-see" "$BR"'
 
@@ -1488,6 +1497,55 @@ b dm-worktree.sh create memblank-1 memblank >/dev/null 2>&1
 b dm-brief.sh memblank-1 >/dev/null 2>/dev/null
 check "empty repo brief shows the friendly single line"     'grep -q "no repository knowledge recorded yet" "$DM_HOME/data/memblank-1/brief.md"'
 check "empty repo brief injects no empty knowledge scaffold" '! grep -q "== shared knowledge" "$DM_HOME/data/memblank-1/brief.md"'
+
+echo "== memory-context: byte cap is a REAL guard, not vacuous (brief) =="
+# A fixture store far over DM_RECALL_MAX_BYTES (default 4096): if the cap code
+# were ever deleted, recall would emit the WHOLE store and every assertion
+# below would fail (size bound, late-fact absence) - not just the tail-pointer
+# text, which a no-op stub could fake.
+b dm-repo.sh add bytecap "$TMP/origin.git" --mode local-only --no-memory >/dev/null 2>&1
+b dm-memory.sh seed bytecap >/dev/null
+FILLER="filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler filler"
+for i in $(seq 1 60); do
+  n="$(printf '%02d' "$i")"
+  b dm-memory.sh remember bytecap --private --kind routing "briefcapguard-fact-$n $FILLER" >/dev/null
+done
+BYTECAP_STORE_BYTES="$(wc -c < "$DM_HOME/repos/bytecap/.dm/notes.md" | tr -d ' ')"
+check "fixture private-notes store is genuinely far over the default cap" '[ "$BYTECAP_STORE_BYTES" -gt 10000 ]'
+b dm-task.sh new bytecap-1 --kind ship --repo bytecap >/dev/null
+b dm-worktree.sh create bytecap-1 bytecap >/dev/null 2>&1
+b dm-brief.sh bytecap-1 >/dev/null 2>/dev/null
+BCBRIEF="$DM_HOME/data/bytecap-1/brief.md"
+check "brief carries the byte-cap truncation pointer"     'grep -q "bytes omitted" "$BCBRIEF"'
+check "brief keeps an early fixture fact"                 'grep -q "briefcapguard-fact-01 " "$BCBRIEF"'
+check "brief drops a late fixture fact (real truncation, not just the message)" '! grep -q "briefcapguard-fact-60 " "$BCBRIEF"'
+BCBRIEF_BYTES="$(wc -c < "$BCBRIEF" | tr -d ' ')"
+# Measured (dm-brief-bloat): fixed brief overhead (isolation + memory heading +
+# definition-of-done + baked coding standards + status protocol) alone is
+# ~13.4KB before any recall content - so "brief total" is not the right place to
+# pin the cap's effect; a fully uncapped dump of THIS fixture would run to
+# roughly overhead + the ~12-13KB raw store (~26KB). 20000 sits well below that
+# uncapped figure and well above the observed capped total, so this still fails
+# if the cap is ever deleted.
+check "capped brief stays far below an uncapped dump of the fixture" '[ "$BCBRIEF_BYTES" -lt 20000 ]'
+
+echo "== memory-context: byte cap is a REAL guard, not vacuous (session-start digest) =="
+# Same shape against state/learnings.md, routed through dm-session-start.sh's
+# digest instead of a brief.
+for i in $(seq 1 150); do
+  n="$(printf '%03d' "$i")"
+  printf -- '- **[routing]** sessioncapguard-fact-%s %s  _(2026-01-01T00:00:00Z)_\n' "$n" "$FILLER" >> "$DM_HOME/state/learnings.md"
+done
+LEARNINGS_BYTES="$(wc -c < "$DM_HOME/state/learnings.md" | tr -d ' ')"
+check "fixture learnings store is genuinely far over the default cap" '[ "$LEARNINGS_BYTES" -gt 20000 ]'
+SESSDIG="$(b dm-session-start.sh --no-sync 2>&1 || true)"
+check "session digest carries the byte-cap truncation pointer" 'grep -q "bytes omitted" <<<"$SESSDIG"'
+check "session digest keeps an early fixture fact"              'grep -q "sessioncapguard-fact-001 " <<<"$SESSDIG"'
+check "session digest drops a late fixture fact (real truncation)" '! grep -q "sessioncapguard-fact-150 " <<<"$SESSDIG"'
+FLEET_SECTION="$(awk '/^== fleet learnings/{f=1} /^== operator preferences/{f=0} f' <<<"$SESSDIG")"
+check "session digest's fleet-learnings section stays well under the raw fixture size" \
+  '[ "$(printf "%s" "$FLEET_SECTION" | wc -c | tr -d " ")" -lt 6000 ]'
+
 # === state-gate-integrity tests (#20 #21) ===
 # Kept in one clearly-marked block at the end so parallel branches union-merge
 # cleanly. All offline: GitHub-dependent paths are exercised via their pure
@@ -3489,6 +3547,53 @@ cp "$ROOT/.claude/skills/task-lifecycle/SKILL.md" "$CLAUDE_TASK"
 printf '%03000d\n' 0 >> "$CHECK_FIXTURE/AGENTS.md"
 check "runtime performance guard fails on instruction bloat" \
   '! DM_CHECK_ROOT="$CHECK_FIXTURE" node "$ROOT/tests/runtime-performance.js" >/dev/null 2>&1'
+
+echo "== permission deny rails (#183, #161) =="
+# Config-presence pin, not a behavioral test: PreToolUse-style enforcement
+# fails open (see fleet learnings), so nothing inside a test can prove the
+# harness actually refuses these commands. This only proves the rule text
+# still ships, so a future edit cannot silently drop the rail.
+DENY_SETTINGS="$ROOT/.claude/settings.json"
+check "tracked settings.json parses as strict JSON" 'jq -e . "$DENY_SETTINGS" >/dev/null'
+DENY_EXPECTED="$TMP/deny-expected.json"
+cat > "$DENY_EXPECTED" <<'EOF'
+[
+  "Bash(pkill:*)",
+  "Bash(killall:*)",
+  "Bash(rm -rf repos*)",
+  "Bash(rm -fr repos*)",
+  "Bash(rm --recursive --force repos*)",
+  "Bash(rm --force --recursive repos*)",
+  "Bash(rm -rf /home/mengsig/dockmaster/repos*)",
+  "Bash(rm -fr /home/mengsig/dockmaster/repos*)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster/repos*)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster/repos*)",
+  "Bash(rm -rf state*)",
+  "Bash(rm -fr state*)",
+  "Bash(rm --recursive --force state*)",
+  "Bash(rm --force --recursive state*)",
+  "Bash(rm -rf /home/mengsig/dockmaster/state*)",
+  "Bash(rm -fr /home/mengsig/dockmaster/state*)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster/state*)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster/state*)",
+  "Bash(rm -rf /home/mengsig/dockmaster)",
+  "Bash(rm -rf /home/mengsig/dockmaster/)",
+  "Bash(rm -rf /home/mengsig/dockmaster *)",
+  "Bash(rm -fr /home/mengsig/dockmaster)",
+  "Bash(rm -fr /home/mengsig/dockmaster/)",
+  "Bash(rm -fr /home/mengsig/dockmaster *)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster/)",
+  "Bash(rm --recursive --force /home/mengsig/dockmaster *)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster/)",
+  "Bash(rm --force --recursive /home/mengsig/dockmaster *)"
+]
+EOF
+DENY_ACTUAL="$TMP/deny-actual.json"
+jq -c '.permissions.deny // []' "$DENY_SETTINGS" > "$DENY_ACTUAL"
+DENY_MISSING="$(jq -n --slurpfile expected "$DENY_EXPECTED" --slurpfile actual "$DENY_ACTUAL" '$expected[0] - $actual[0]')"
+check "deny rail carries every pkill/killall/rm-rf rule verbatim" '[ "$DENY_MISSING" = "[]" ]'
 
 echo "== dm-state (export/import: state portability, #106) =="
 SP="$TMP/state-portability"
@@ -5585,6 +5690,57 @@ rm -rf "$EV_FLOWS"
 EV_NOEV="$("$E" block ev-run)"
 check "a verdict with no flow record reads unavailable" 'grep -q "evidence unavailable" <<<"$EV_NOEV"'
 
+# 4b. tests evidence is bound to the code state it tested (#185), and a gate
+# that never ran on a real code change is LOUD, not silent (#188). "demo"
+# already carries a real test_cmd (`test -f src/calc.py`), so a real
+# dm-test.sh run is used rather than seeded meta.
+EV_FRESH_WT="$(ev_task ev-fresh demo src/extra.py)"
+b dm-test.sh ev-fresh >/dev/null
+EV_FRESH_HEAD="$(b dm-task.sh get ev-fresh tests_head)"
+check "a pass records a code-state fingerprint" '[ -n "$EV_FRESH_HEAD" ]'
+EV_FRESH_SHA="${EV_FRESH_HEAD%%/*}"
+EV_FRESH="$("$E" block ev-fresh)"
+check "an unmoved pass renders pinned to its recorded sha" \
+  'grep -q "tests\*\* — pass @$EV_FRESH_SHA " <<<"$EV_FRESH"'
+check "an unmoved pass is never rendered STALE" '! grep -q "tests\*\* — STALE" <<<"$EV_FRESH"'
+
+# The exact #185 repro: run tests, commit more code, confirm the SAME recorded
+# pass no longer renders plain — it must read STALE instead.
+printf 'more\n' >> "$EV_FRESH_WT/src/extra.py"
+git -C "$EV_FRESH_WT" commit -qam "more after tests ran"
+EV_STALE="$("$E" block ev-fresh)"
+check "code committed after the run reads STALE, never plain pass" \
+  'grep -q "tests\*\* — STALE" <<<"$EV_STALE" && ! grep -q "tests\*\* — pass @" <<<"$EV_STALE"'
+check "the stale line still names the command that ran" 'grep -q "test -f src/calc.py" <<<"$EV_STALE"'
+# Mutation check (by hand, reverted): forcing dm-test.sh's `now="$head"`
+# unconditionally in tests_evidence — i.e. disabling the fingerprint
+# comparison — turned this same case back into a plain pass, so the check
+# above is exercising the comparison and not merely matching a static string.
+
+# An uncommitted edit after the run must ALSO read STALE — the pin covers
+# working-tree content, not just HEAD.
+printf 'dirty\n' >> "$EV_FRESH_WT/src/extra.py"
+EV_DIRTY="$("$E" block ev-fresh)"
+check "an uncommitted edit after the run also reads STALE" 'grep -q "tests\*\* — STALE" <<<"$EV_DIRTY"'
+git -C "$EV_FRESH_WT" checkout -q -- src/extra.py
+
+# A diff that touches real code but never ran the tests gate at all must say
+# so loudly (#188) — silence used to be indistinguishable from a docs-only PR.
+ev_task ev-untested demo src/untested.py >/dev/null
+EV_UNTESTED="$("$E" block ev-untested)"
+check "a code-touching diff with no tests record is reported, not silent" \
+  'grep -q "tests\*\* — NOT RUN . the tests gate was never invoked" <<<"$EV_UNTESTED"'
+# Mutation check (by hand, reverted): removing the `tests_never_ran_line` call
+# from `tests_evidence` (so an empty `result` just `return 0`s, #175's original
+# behavior) emptied this block, so the check above is exercising the new line
+# and not an inert always-true match.
+
+# The never-ran line must still say NOTHING for a genuinely docs-only diff —
+# the "docs-only PRs stay clean" property #175 established must survive #188.
+ev_task ev-untested-docs evrepo docs/again.md >/dev/null
+check "a docs-only diff with no tests record stays silent" \
+  '[ -z "$("$E" block ev-untested-docs)" ]'
+
 # 5. strip is what makes re-composing idempotent.
 EV_BODY="$TMP/ev-body.md"
 printf 'add multiply\n\nRisk: low.\n' > "$EV_BODY"
@@ -5703,6 +5859,8 @@ rm -f "$EV_STUB/mktemp"
 # come from the gate that produced it.
 check "tests result cannot be hand-set"  '! b dm-task.sh set ev-bare tests pass >/dev/null 2>&1'
 check "tests command cannot be hand-set" '! b dm-task.sh set ev-bare tests_cmd "true" >/dev/null 2>&1'
+check "the tests code-state fingerprint cannot be hand-set" \
+  '! b dm-task.sh set ev-bare tests_head "deadbeef/1-1" >/dev/null 2>&1'
 check "the tests gate records what it ran" \
   '[ "$(b dm-task.sh get ev-clean tests)" = "skip" ] && [ "$(b dm-task.sh get ev-run tests_cmd)" = "test -f src/calc.py" ]'
 
@@ -5932,6 +6090,113 @@ printf '%s\n' "999999999" > "$DM_HOME/state/ui/server.pid"
 check "stop clears a pid file naming a dead process" 'b dm-ui.sh stop >/dev/null 2>&1'
 check "and the stale file is gone"             '[ ! -f "$DM_HOME/state/ui/server.pid" ]'
 
+echo "== the console watcher: arming is a property of the console, not memory =="
+# The defect this closes: a single `poll` answers what is queued and exits
+# (whether that is one message or a whole drain), and nothing re-armed it - an
+# operator message sat unclaimed for minutes across two dockmaster replies.
+# This is the gate: it must FAIL if `watch` is a no-op or silently disarms
+# after one drain, not just assert the command exists. (Verified by hand:
+# forcing `watch_cmd` to exit after its first delivered drain reproduces the
+# original defect and turns "a claim does not disarm it" red - the guard below
+# has real teeth.)
+post_operator_msg() {
+  DM_UI_CHAT="$ROOT/ui/chat.js" node -e \
+    'require(process.env.DM_UI_CHAT).append(process.env.DM_HOME, "operator", process.argv[1])' "$1" >/dev/null 2>&1
+}
+wait_for_text() {  # wait_for_text <file> <needle> <max_half_seconds>
+  local n=0
+  while [ "$n" -lt "$3" ]; do
+    grep -q -- "$2" "$1" 2>/dev/null && return 0
+    sleep 0.5; n=$((n + 1))
+  done
+  return 1
+}
+wait_for_file() {  # wait_for_file <path> <max_half_seconds>
+  local n=0
+  while [ "$n" -lt "$2" ]; do
+    [ -f "$1" ] && return 0
+    sleep 0.5; n=$((n + 1))
+  done
+  return 1
+}
+UI_WATCH_LOG="$DM_HOME/ui-watch.out"
+
+post_operator_msg "unclaimed with nobody watching"
+sleep 1
+check "with no watcher, a queued message sits unclaimed" \
+  '[ -n "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
+
+# Backgrounded directly (not through the `b` wrapper function): dm-ui.sh has
+# its own shebang and execs as one process, so $! is the watcher's own pid -
+# the same pid it writes to watch.pid. A wrapped/subshelled invocation would
+# make $! name the wrapper, not the process this test needs to identify.
+"$ROOT/bin/dm-ui.sh" watch >"$UI_WATCH_LOG" 2>&1 &
+UI_WATCH_PID=$!
+check "arming delivers the message that was already waiting" \
+  'wait_for_text "$UI_WATCH_LOG" "unclaimed with nobody watching" 20'
+check "delivery claimed it out of the inbox" \
+  '[ -z "$(find "$DM_HOME/state/ui/inbox" -name "*.json")" ]'
+
+post_operator_msg "second message after a claim"
+check "the SAME watcher delivers a second message - a claim does not disarm it" \
+  'wait_for_text "$UI_WATCH_LOG" "second message after a claim" 20'
+check "the watcher is still the same process, never restarted" 'kill -0 "$UI_WATCH_PID"'
+check "arming again while already armed is a no-op, not a second poller" \
+  '[ "$(b dm-ui.sh watch)" = "console: watcher already armed (pid $UI_WATCH_PID)" ]'
+
+kill "$UI_WATCH_PID" 2>/dev/null || true
+wait "$UI_WATCH_PID" 2>/dev/null || true
+check "killing the watcher cleans up its own pid file" '[ ! -f "$DM_HOME/state/ui/watch.pid" ]'
+
+# A single `poll` stops watching TWO ways, not one: it claims a message (exit
+# 0, covered above) or it times out with nothing queued (exit 3). Both must
+# re-arm the loop; only a genuine failure may not. DM_UI_WATCH_TIMEOUT makes
+# the idle slice short enough to provably cross inside a bounded wait, rather
+# than assuming an unbounded poll would have behaved the same way.
+DM_UI_WATCH_TIMEOUT=2 "$ROOT/bin/dm-ui.sh" watch >"$UI_WATCH_LOG" 2>&1 &
+UI_WATCH_PID=$!
+check "watcher for the idle-timeout case is armed" 'wait_for_file "$DM_HOME/state/ui/watch.pid" 10'
+sleep 5
+check "an idle timeout does not end the watcher" 'kill -0 "$UI_WATCH_PID"'
+post_operator_msg "arrived after an idle timeout, not just a claim"
+check "the watcher still delivers after surviving an idle timeout" \
+  'wait_for_text "$UI_WATCH_LOG" "arrived after an idle timeout, not just a claim" 20'
+kill "$UI_WATCH_PID" 2>/dev/null || true
+wait "$UI_WATCH_PID" 2>/dev/null || true
+check "and it cleans up its pid file on the idle-timeout path too" '[ ! -f "$DM_HOME/state/ui/watch.pid" ]'
+
+# Same identity discipline as the server's pid file: a live pid that is not
+# the watcher must never be adopted or killed.
+printf '%s\n' "$$" > "$DM_HOME/state/ui/watch.pid"
+check "watch refuses a pid file that is not its own" '! b dm-ui.sh watch >/dev/null 2>&1'
+check "watch leaves that pid file alone"             '[ -f "$DM_HOME/state/ui/watch.pid" ]'
+check "and this shell was not killed"                'kill -0 $$'
+rm -f "$DM_HOME/state/ui/watch.pid"
+
+# The watcher is its OWN process - a console that dies on its own (a crash, a
+# killed session, anything short of `stop`) does not necessarily take the
+# watcher with it. `status` must say so: a surviving watcher after the console
+# is gone is neither "armed" (nothing can reach it) nor silence (it still IS
+# running) - it must be named, or exactly the console-death gap this closes
+# stays open one level down.
+"$ROOT/bin/dm-ui.sh" watch >"$UI_WATCH_LOG" 2>&1 &
+UI_WATCH_PID=$!
+check "watcher armed with no console running is confirmed armed" 'wait_for_file "$DM_HOME/state/ui/watch.pid" 10'
+UI_ORPHAN_STATUS="$(b dm-ui.sh status 2>&1 || true)"
+check "status still says the console is not running" 'grep -q "console: not running" <<<"$UI_ORPHAN_STATUS"'
+check "status ALSO names the orphaned watcher, not silence" \
+  'grep -q "watcher is still armed with no console running" <<<"$UI_ORPHAN_STATUS"'
+
+# Stopping the console disarms its watcher too - the watcher exists to
+# deliver into an open console, so it is not left polling forever for a page
+# nobody can type into once the console itself is stopped.
+b dm-ui.sh stop >/dev/null 2>&1
+sleep 0.3
+check "stop disarms the watcher along with the console" '! kill -0 "$UI_WATCH_PID" 2>/dev/null'
+check "and its pid file is gone"                        '[ ! -f "$DM_HOME/state/ui/watch.pid" ]'
+check "status is quiet about the watcher once it is gone" \
+  '! b dm-ui.sh status 2>&1 | grep -q "watcher is still armed"'
+
 # Every --json emitter: valid JSON, and the human output it sits beside is
 # untouched. A second parser in the page is what these exist to prevent.
 UI_HUMAN_REPOS="$(b dm-repo.sh list)"
@@ -5983,6 +6248,9 @@ check "a degradation carries tokens, not script output" \
 check "console checks pass"      'node "$ROOT/tests/check-console.js" >/dev/null 2>&1'
 check "console http checks pass" 'node "$ROOT/tests/check-console-http.js" >/dev/null 2>&1'
 check "console queue checks pass" 'node "$ROOT/tests/check-console-queue.js" >/dev/null 2>&1'
+# The review listeners: armed on open, stopped on close, reaped when the page
+# vanishes, and never outliving the console (lavish-axi stubbed on PATH).
+check "console review-listener checks pass" 'node "$ROOT/tests/check-console-listeners.js" >/dev/null 2>&1'
 
 echo "== trash: an operator-authorized discard with recoverable backend cleanup =="
 # The THIRD terminal path, and the one that was missing. Teardown is for work
@@ -6654,6 +6922,62 @@ check "and the resume says the landed change is rollback territory" \
 # The confirmed-CLOSED path: with the live check succeeding, no --close-pr needed.
 TRCONF="$(PATH="$TRSTUB:$NOAXI_PATH" b dm-trash.sh tr-pr-again --reason "already closed upstream" 2>/dev/null)"
 check "a CONFIRMED closed PR needs no --close-pr"  'grep -qx "pr=already-closed" <<<"$TRCONF"'
+
+echo "== worktree containment: a broken .git must never answer from the enclosing repo (#210/#181/#209) =="
+# `tr-admin` earlier in this file breaks .git too, but this throwaway $DM_HOME is
+# not itself a git repo, so that walk-up had nowhere to land and only exercised
+# "git errored, fall back to the admin record". Reproduce the real defect:
+# make the ENCLOSING directory tree a real git repo — exactly $DM_HOME's own
+# shape in production, where state/worktrees lives inside the distro's own
+# working tree — so a broken worktree's `git -C` walk finds a plausible, WRONG
+# answer instead of erroring, and would return it silently without the guard.
+git init -q -b main "$DM_HOME" >/dev/null 2>&1
+( cd "$DM_HOME" && git -c user.email=e@e.co -c user.name=e commit -q --allow-empty -m "enclosing repo, not any task's work" ) >/dev/null 2>&1
+CT_ENCLOSING_HEAD="$(git -C "$DM_HOME" rev-parse HEAD)"
+
+# dm-worktree.sh landed(): must answer undetermined, never compare the
+# enclosing repo's HEAD against the base and call it landed or unlanded (#181).
+CTLWT="$(trash_task ct-landed)"
+rm -f "$CTLWT/.git"
+check "landed answers undetermined once .git is broken and walk-up would succeed" \
+  'b dm-worktree.sh landed ct-landed >/dev/null 2>&1; [ "$?" = 2 ]'
+CTLANDEDOUT="$(b dm-worktree.sh landed ct-landed 2>&1 || true)"
+check "landed names the containment breach, not a plain git error" \
+  'grep -qi "resolves outside itself" <<<"$CTLANDEDOUT"'
+check "landed never answers the question from the enclosing repo" \
+  '! grep -q "^landed" <<<"$CTLANDEDOUT" && ! grep -q "^unlanded" <<<"$CTLANDEDOUT"'
+b dm-worktree.sh remove ct-landed --force >/dev/null 2>&1
+
+# dm-worktree.sh remove --force -> preserve_discarded_head(): must fall back to
+# git's own admin record for the parked head, never park the enclosing repo's
+# HEAD as this task's discarded work.
+CTFWT="$(trash_task ct-force)"
+CTFHEAD="$(git -C "$CTFWT" rev-parse HEAD)"
+rm -f "$CTFWT/.git"
+CTFOUT="$(b dm-worktree.sh remove ct-force --force 2>&1)"
+check "forced removal never parks the enclosing repo's head as this task's" \
+  '! grep -q "$CT_ENCLOSING_HEAD" <<<"$CTFOUT"'
+check "it parks the worktree's OWN head instead" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/ct-force/$CTFHEAD" || true)" = "$CTFHEAD" ]'
+
+# dm-trash.sh's snapshot block: this is #210 exactly — a re-run reading a broken
+# worktree's HEAD from the enclosing repo and recording it as the discard head.
+CTTWT="$(trash_task ct-trash)"
+CTTHEAD="$(git -C "$CTTWT" rev-parse HEAD)"
+rm -f "$CTTWT/.git"
+CTTOUT="$(b dm-trash.sh ct-trash --reason "broken worktree" 2>"$TMP/ct-trash.err")"
+check "trash records the worktree's own head, never the enclosing repo's" \
+  'grep -qx "head=$CTTHEAD" <<<"$CTTOUT" && ! grep -q "head=$CT_ENCLOSING_HEAD" <<<"$CTTOUT"'
+check "the commit is preserved under its own sha, not the enclosing repo's" \
+  '[ "$(git -C "$DM_HOME/repos/demo" rev-parse --verify --quiet "refs/dm-discarded/ct-trash/$CTTHEAD" || true)" = "$CTTHEAD" ]'
+
+# dm-trash.sh's dirty summary: uncommitted/untracked must read undetermined,
+# never a false "clean" answer read off the enclosing repo.
+CTDWT="$(trash_task ct-dirty)"
+rm -f "$CTDWT/.git"
+CTDOUT="$(b dm-trash.sh ct-dirty --reason "broken worktree, dirty check" 2>/dev/null)"
+check "a broken worktree's dirty state is undetermined, never a false clean" \
+  'grep -qx "uncommitted_tracked=undetermined" <<<"$CTDOUT" && grep -qx "untracked_paths=undetermined" <<<"$CTDOUT"'
 
 # shard:epilogue
 echo

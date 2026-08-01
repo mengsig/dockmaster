@@ -91,12 +91,6 @@ LEASE_TIMEOUT="${DM_VERIFY_LEASE_TIMEOUT:-600}"
 LEASE_DIR="$DM_STATE/browser.lease"
 # A screenshot smaller than this, or without PNG magic, is not evidence.
 MIN_SHOT_BYTES=512
-# One content-digest tool, resolved once: sha256sum (Linux), shasum (macOS), and
-# cksum as the last resort. All three print "<digest...> <path>" for file
-# arguments, which is what binds a path to its own bytes.
-if command -v sha256sum >/dev/null 2>&1; then DIGEST_CMD=(sha256sum)
-elif command -v shasum >/dev/null 2>&1; then DIGEST_CMD=(shasum -a 256)
-else DIGEST_CMD=(cksum); fi
 # Paths that cannot change what a user sees. With no `verify_surfaces` set, a
 # repo that HAS app config verifies any change outside this set — under-firing
 # is the one failure mode a verification gate cannot afford, so the default is
@@ -145,64 +139,8 @@ allocate_port() {
 # A verdict that is not bound to a revision is not a verdict: a green run could
 # be carried across the very edit that breaks the app. HEAD alone is not enough
 # either — crew work is uncommitted for most of its life — so the fingerprint
-# also covers the dirty state.
-
-# code_state <worktree> -- "<head>/<content-checksum>", or empty when the
-# worktree cannot be read.
-#
-# The checksum must cover file CONTENT, not the porcelain listing. `git status
-# --porcelain` emits status letters and paths and never CONTENT, so once a file
-# was dirty every further edit produced the identical line and checksum — and
-# crew work is dirty for most of its life, the exact case this pin exists for.
-#
-# Hash BOTH derivatives, never one instead of the other. Hashing content alone
-# was blind in the mirror direction: an untracked file RENAMED, or two untracked
-# files merged into one with the same bytes, left the checksum identical while
-# the app's routes moved. So the material is:
-#   - `git diff HEAD`  — tracked content AND tracked paths (renames included)
-#   - the untracked PATH list — structure
-#   - the untracked file CONTENTS — bytes
-# `git diff HEAD` also carries binary changes, via its `index <blob>..<blob>` line.
-# untracked_digests <worktree> -- "<digest>  <path>" per untracked file, sorted.
-# Each path is bound to ITS OWN content. Concatenating all the bytes into one
-# stream did not: moving a line from one untracked file to another left the path
-# list and the byte total identical, so the pin sat still while the routes moved.
-# Same root as `aa.js` containing the text `zz.js` hashing like an empty pair.
-untracked_digests() {
-  local wt="$1" paths
-  # Emptiness is checked FIRST: GNU xargs runs its command once on empty input,
-  # and a digest tool with no arguments reads stdin and hangs.
-  paths="$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null)" || return 1
-  [ -n "$paths" ] || return 0
-  # `--` is load-bearing: paths arrive as bare arguments, so an untracked file
-  # named `--help` or `-c` is read as an OPTION. sha256sum then prints usage,
-  # hashes NOTHING and exits 0 — the untracked digest set collapses to a
-  # constant and the pin stops moving on new uncommitted source entirely.
-  # No `|| true` either: a digest tool that fails must fail the pin, not empty it.
-  git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
-    | ( cd "$wt" && xargs -0 -n 50 "${DIGEST_CMD[@]}" -- ) \
-    | LC_ALL=C sort
-}
-
-code_state() {
-  local wt="$1" head content udigests
-  [ -n "$wt" ] && [ -d "$wt" ] || return 1
-  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
-  [ -n "$head" ] || return 1
-  # Prove both reads work BEFORE hashing: a `return` inside the group below runs
-  # in a subshell, so a failed git would otherwise hash to a stable checksum of
-  # nothing — a pin that never moves, which is the failure this guards.
-  git -C "$wt" diff HEAD >/dev/null 2>&1 || return 1
-  git -C "$wt" ls-files --others --exclude-standard >/dev/null 2>&1 || return 1
-  udigests="$(untracked_digests "$wt")" || return 1
-  # cksum's byte count is kept, not discarded: this is the security-critical pin
-  # and CRC-32 is linear, so length is a cheap independent term.
-  content="$( { git -C "$wt" diff HEAD 2>/dev/null
-                printf '%s\n' "$udigests"
-              } | cksum | awk '{print $1"-"$2}' )"
-  [ -n "$content" ] || return 1
-  printf '%s/%s\n' "$head" "$content"
-}
+# also covers the dirty state. `dm_code_state` (dm-lib.sh) is the single owner
+# of that fingerprint; dm-test.sh (#185) pins a recorded test pass to it too.
 
 # require_app_serving <id> <what> -- refuse unless the app is serving RIGHT NOW.
 # `verify_app_state` is a stamp `up` wrote and nothing re-checks, so a crashed or
@@ -251,7 +189,7 @@ require_unmoved_code() {
   pinned="$(dm_meta_get "$id" verify_head)"
   [ -n "$pinned" ] || dm_die "no verified code state recorded for '$id'; the app was never brought up (dm-verify.sh up $id)"
   wt="$(dm_meta_get "$id" worktree)"
-  now="$(code_state "$wt")" || dm_die "cannot read the worktree for '$id' to confirm the code has not moved"
+  now="$(dm_code_state "$wt")" || dm_die "cannot read the worktree for '$id' to confirm the code has not moved"
   [ "$now" = "$pinned" ] && return 0
   if [ "${now%%/*}" = "${pinned%%/*}" ]; then
     what="its working tree was edited (HEAD is still ${pinned%%/*})"
@@ -941,7 +879,7 @@ case "$cmd" in
     [ -n "$ready_cmd" ] || dm_die "repo '$repo' registers app_start_cmd but no app_ready_cmd. The readiness probe is what proves the process on \$DM_VERIFY_PORT is the instance THIS task started: it must check the app AND copy \"\$DM_VERIFY_DIR/token\" to \"\$DM_VERIFY_DIR/ready-proof\". A bare url fetch proves liveness, not ownership."
     [ "$(dm_meta_get "$id" verify_app_state)" = "up" ] \
       && dm_die "the app for '$id' is already recorded up on port $(dm_meta_get "$id" verify_port); stop it first: dm-verify.sh down $id"
-    pinned="$(code_state "$wt")" || dm_die "cannot read the worktree HEAD for '$id'"
+    pinned="$(dm_code_state "$wt")" || dm_die "cannot read the worktree HEAD for '$id'"
     port="$(allocate_port "$id" "$APP_PORT_BASE" "$APP_PORT_SPAN")"
     url="$(app_url_for "$repo" "$port")"
     vdir="$(verify_dir "$id")"

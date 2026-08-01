@@ -25,6 +25,17 @@ const state = require(path.join(ROOT, 'ui', 'state.js'))
 
 let checks = 0
 
+// Every panel reaches the shell through ctx, and a review row reaches for these
+// two: opening a review in the page, and whether a listener is armed for it.
+// Each case supplies them the way console.mjs does, so a panel cannot go green
+// here on a ctx the shell does not actually offer.
+const REVIEW_CTX = {
+  opened: [],
+  liveHrefs: new Set(),
+  openReview(href) { REVIEW_CTX.opened.push(href); return Promise.resolve('listening') },
+  reviewIsLive: (href) => REVIEW_CTX.liveHrefs.has(href),
+}
+
 function ok(condition, message) {
   checks += 1
   if (!condition) throw new Error(message)
@@ -142,29 +153,169 @@ function checkGatesAreAPlanNotProgress() {
 // --- 2. nothing internal reaches the screen ----------------------------------
 
 function checkReconcileProseNeverCrosses() {
-  // dm-task.sh's detail names status lines and review artifacts. Only a blocker
-  // a worker was asked to name is meant for the operator.
-  const internal = [
-    'reported ready but not yet landed: done: PR https://example.test/pull/9',
-    'lavish artifact ready for the operator: review-ready: rendered',
-    'committed work not yet landed',
-    'not yet dispatched',
-    'discard recorded but local copy still present',
+  // The FIXED prose dm-task.sh wraps a real event in ('reported ready but not
+  // yet landed: ', 'lavish artifact ready for the operator: ') must never reach
+  // the operator - only the crewmate's own words, after the verb marker, may.
+  const wrapped = [
+    { last_event: 'done', state_detail: 'reported ready but not yet landed: done: PR https://example.test/pull/9',
+      wrapper: 'reported ready but not yet landed', want: 'PR https://example.test/pull/9' },
+    { last_event: 'review-ready', state_detail: 'lavish artifact ready for the operator: review-ready: rendered',
+      wrapper: 'lavish artifact ready for the operator', want: 'rendered' },
   ]
-  for (const detail of internal) {
-    const note = live.progressNote(task({ state: 'in_progress', state_detail: detail }))
-    equal(note.text, '', `no prose crosses for: ${detail}`)
-    ok(note.kind === '' || ['unlanded', 'not_started', 'undeterminable'].includes(note.kind),
-      `an internal detail becomes a token, not text: ${detail}`)
+  for (const { last_event, state_detail, wrapper, want } of wrapped) {
+    const note = live.progressNote(task({ state: 'in_progress', last_event, state_detail }))
+    equal(note.kind, 'reported', `a real event behind reconcile prose still surfaces: ${state_detail}`)
+    equal(note.text, want, `only the crewmate's own words survive: ${state_detail}`)
+    ok(!note.text.includes(wrapper), `dockmaster's own wrapping prose does not leak: ${state_detail}`)
   }
+
+  // Purely synthetic details - dm-task.sh's own words, no event behind them -
+  // stay tokens, never text.
+  const synthetic = [
+    { last_event: '', state_detail: 'committed work not yet landed', kind: 'unlanded' },
+    { last_event: '', state_detail: 'not yet dispatched', kind: 'not_started' },
+    { last_event: '', state_detail: 'could not determine whether its work landed (repo unresolvable)', kind: 'undeterminable' },
+  ]
+  for (const { last_event, state_detail, kind } of synthetic) {
+    const note = live.progressNote(task({ state: 'in_progress', last_event, state_detail }))
+    equal(note.kind, kind, `a synthetic detail becomes its token: ${state_detail}`)
+    equal(note.text, '', `a synthetic detail carries no text: ${state_detail}`)
+  }
+
+  // An event WAS posted ('discarded') but this specific reconcile branch
+  // discards it in favour of synthetic prose - the note is genuinely
+  // unrecoverable here. That is a distinct, honest TOKEN ('unreadable'), never
+  // the synthetic sentence relayed as if it were the crewmate's own words.
+  const unrecoverable = live.progressNote(task({
+    state: 'in_progress', last_event: 'discarded',
+    state_detail: 'discard recorded but local copy still present',
+  }))
+  equal(unrecoverable.kind, 'unreadable', 'a note that exists but cannot be located becomes its own token')
+  equal(unrecoverable.text, '', 'no prose is invented in its place - the page words the token')
+
   const blocked = live.progressNote(task({
-    state: 'blocked',
+    state: 'blocked', last_event: 'blocked',
     state_detail: 'blocked: the runner host needs its build user in the docker group',
   }))
   equal(blocked.kind, 'reported', 'a stopped task reports its blocker')
   equal(blocked.text, 'the runner host needs its build user in the docker group',
     'the verb prefix is stripped, the operator-facing half survives')
-  console.log('ok   reconcile prose becomes a token; only a named blocker crosses as text')
+  console.log('ok   reconcile prose becomes a token; only the crewmate\'s own words cross as text')
+}
+
+// A cleanly landed task (a merged PR, or a scout's report.md) reconciles
+// through an early exit in `dm-task.sh state` that never reaches the
+// crewmate's status log - `state_detail` is landing evidence, not a status
+// line, and `last_event` is whatever the crewmate last posted regardless (it
+// need not even say "done"). All three of dm-task.sh's early-exit "done"
+// branches (bin/dm-task.sh:313, :317, :327) forced here against their real
+// shapes: none may ever read as a failed read.
+function checkTerminalEvidenceNeverClaimsUnreadable() {
+  const merged = live.progressNote(task({
+    state: 'done', last_event: 'merged',
+    state_detail: 'https://github.com/example-org/demo/pull/9 merged',
+  }))
+  equal(merged.kind, '', 'a merged PR is landing evidence, not a status line - it says nothing, never a claimed read failure')
+  equal(merged.text, '', 'no prose invented for a cleanly landed task')
+
+  const reported = live.progressNote(task({
+    state: 'done', kind: 'scout', last_event: 'working',
+    state_detail: 'data/demo/report.md',
+  }))
+  equal(reported.kind, '', 'a scout report is landing evidence too, regardless of what its last event verb was')
+  equal(reported.text, '', 'no prose invented for a finished scout')
+
+  const landedViaLog = live.progressNote(task({
+    state: 'done', last_event: 'merged', state_detail: 'landed',
+  }))
+  equal(landedViaLog.kind, '', 'the third done branch (a "merged:" status-log grep, not the pr/report fields) is landing evidence too')
+  equal(landedViaLog.text, '', 'no prose invented here either')
+  console.log('ok   a cleanly finished task never claims its status log could not be read')
+}
+
+// The gate the brief asked for: a task with a REAL status note must never
+// render an empty one. Pin the exact text, not just non-emptiness - a
+// regression back to the old "note_kind derived from reconciled prose alone"
+// bug returns '' here, which is exactly what this must catch.
+function checkRealNoteSurfacesForInProgressWork() {
+  const working = live.progressNote(task({
+    state: 'in_progress', last_event: 'working',
+    state_detail: 'working: rebuilding the migration after the collision report',
+  }))
+  equal(working.kind, 'reported', 'a real progress note is reported, not a synthetic token')
+  equal(working.text, 'rebuilding the migration after the collision report',
+    'the exact text the crewmate wrote survives - an empty string here is the bug this task fixes')
+
+  const awaitingReview = live.progressNote(task({
+    state: 'ready_for_review', last_event: 'review-ready',
+    state_detail: 'lavish artifact ready for the operator: review-ready: change.html is up',
+  }))
+  equal(awaitingReview.text, 'change.html is up', 'a review-ready note also survives, not just blocked/failed/paused')
+  console.log('ok   a task with a real status note never renders an empty one')
+}
+
+// The other half of the same gate: a task with NO note must SAY so (a distinct
+// TOKEN the page words), never render something a reader takes as calm
+// progress. Force the detector against a task with genuinely nothing recorded
+// and a task whose note exists but could not be located, and confirm neither
+// goes quiet nor gets confused with the other.
+function checkNoSignalNeverReadsAsCalm() {
+  const neverReported = live.progressNote(task({
+    state: 'in_progress', last_event: '', state_detail: '',
+    created: '2026-01-01T00:00:00Z', last_event_at: '',
+  }))
+  equal(neverReported.kind, 'silent', 'silence is its own token, not a blank')
+  equal(neverReported.text, '', 'the page words the token - no server-composed sentence, no raw timestamp')
+
+  // A real event exists (verb is known) but this collector could not locate it
+  // in the reconciled sentence - a distinct token from "nothing to report",
+  // because a note may genuinely exist and only the parse failed.
+  const unreadable = live.progressNote(task({
+    state: 'in_progress', last_event: 'working', state_detail: 'some future dm-task.sh sentence shape',
+  }))
+  equal(unreadable.kind, 'unreadable', 'an unreadable log is its own token')
+  ok(unreadable.kind !== neverReported.kind, 'an unreadable log is a distinct claim from "nothing was ever reported"')
+  console.log('ok   a task with no note says so, and is never confused with an unreadable one')
+}
+
+// Every kind progressNote can hand back must be one the page's REAL NOTE table
+// (ui/public/views.mjs) renders as non-empty text - imported, not hand-copied,
+// so this cannot pass against a NOTE table missing an entry the way a
+// hand-transcribed list can. Covers every branch, including both terminal-done
+// shapes, so the HIGH finding that slipped through has a permanent regression test.
+async function checkEveryNoteKindIsRenderable() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const cases = [
+    task({ state: 'in_progress', last_event: 'working', state_detail: 'working: on it' }),
+    task({ state: 'queued', last_event: '', state_detail: 'not yet dispatched' }),
+    task({ state: 'in_progress', last_event: '', state_detail: 'committed work not yet landed' }),
+    task({ state: 'in_progress', last_event: '',
+      state_detail: 'could not determine whether its work landed (repo unresolvable)' }),
+    task({ state: 'in_progress', last_event: '', state_detail: '' }),
+    task({ state: 'blocked', last_event: 'blocked', state_detail: 'blocked: waiting on a decision' }),
+    task({ state: 'in_progress', last_event: 'working', state_detail: 'some future dm-task.sh sentence shape' }),
+    task({ state: 'done', last_event: 'merged', state_detail: 'https://github.com/example-org/demo/pull/9 merged' }),
+    task({ state: 'done', kind: 'scout', last_event: '', state_detail: 'data/demo/report.md' }),
+    task({ state: 'done', last_event: 'merged', state_detail: 'landed' }),
+  ]
+  const seenKinds = new Set()
+  for (const t of cases) {
+    const note = live.progressNote(t)
+    seenKinds.add(note.kind)
+    if (t.state === 'done') {
+      equal(note.kind, '', 'terminal evidence renders nothing, the one deliberate exception to "never blank"')
+      continue
+    }
+    ok(note.kind in views.NOTE,
+      `progressNote emitted kind '${note.kind}' that ui/public/views.mjs's NOTE table cannot render`)
+    const rendered = views.NOTE[note.kind](note.text)
+    ok(typeof rendered === 'string' && rendered.length > 0,
+      `NOTE.${note.kind} rendered "${rendered}" - a task the page must never show as blank`)
+  }
+  for (const must of ['reported', 'unlanded', 'not_started', 'undeterminable', 'unreadable', 'silent', '']) {
+    ok(seenKinds.has(must), `no case above exercised the '${must}' kind - coverage gap`)
+  }
+  console.log(`ok   every note_kind progressNote can emit is one the real NOTE table renders as non-empty text`)
 }
 
 function checkMemoryFramingIsNotShown() {
@@ -285,7 +436,9 @@ function withStubDocument(fn) {
   const had = 'document' in global
   const previous = global.document
   global.document = {
-    createElement: (tag) => ({ tag, className: '', textContent: '', setAttribute() {}, appendChild() {} }),
+    createElement: (tag) => ({
+      tag, className: '', textContent: '', dataset: {}, setAttribute() {}, appendChild() {},
+    }),
   }
   try {
     return fn()
@@ -388,7 +541,7 @@ async function checkApproveAndChangesControlsShowOnlyWhenAwaitingReview() {
       row('Nothing rendered yet', 'ready_for_review', ''),
     ],
   }
-  const ctx = { filter: 'all', setFilter() {}, fold: () => false, setFold() {}, ask: () => Promise.resolve() }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, filter: 'all', setFilter() {}, fold: () => false, setFold() {}, ask: () => Promise.resolve() }
 
   await withCapturingDocument(() => {
     const frag = views.viewInFlight(docState, ctx)
@@ -507,7 +660,7 @@ async function checkNeedsYouReviewRowsActPerTaskAndEnqueueTheRightText() {
     }],
   }
   const asked = []
-  const ctx = { compose() {}, ask: (text) => { asked.push(text); return Promise.resolve() } }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, compose() {}, ask: (text) => { asked.push(text); return Promise.resolve() } }
 
   await withCapturingDocument(async () => {
     const frag = views.viewNeedsYou(state, ctx)
@@ -689,6 +842,10 @@ async function withCapturingDocument(fn) {
       disabled: false,
       children: [],
       listeners: {},
+      // Real enough to carry the change-marking attributes: views.mjs stamps
+      // data-key/data-sig on rows so the shell can tell a genuinely new row
+      // from the same row redrawn.
+      dataset: {},
       classList: { add() {}, remove() {} },
       setAttribute() {},
       focus() {},
@@ -746,7 +903,7 @@ async function checkRecentlyFinishedIsSortedInTheRenderedPanel() {
       done('Second created, finished first', '2026-01-12T19:00:00Z'),
     ],
   }
-  const ctx = { filter: 'all', setFilter() {}, fold: () => false, setFold() {} }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, filter: 'all', setFilter() {}, fold: () => false, setFold() {} }
   await withCapturingDocument(() => {
     const frag = views.viewInFlight(state, ctx)
     const titles = collectByClass(frag, 'cell-title')
@@ -764,28 +921,98 @@ async function checkRecentlyFinishedIsSortedInTheRenderedPanel() {
   console.log('ok   the "Recently finished" render is wired to the completion-time sort, not just the helper')
 }
 
-// #219: the console's own review page is the PRIMARY destination and the
-// annotatable lavish session the secondary. Asserted off the rendered panel
-// rather than the document, because the bug was a panel that preferred the
-// session - the document carried both addresses all along.
-async function checkAReviewOpensTheConsolesOwnPageFirst() {
+// #219: a review OPENS IN THE CONSOLE. The console's own page is still the
+// primary destination and the annotatable lavish session still the secondary,
+// but the primary is no longer a navigation: it is a control that opens the
+// review in this page, which is what lets the console arm and stop the listener
+// around it. The session stays a real link - it is another origin on another
+// server, so it is not embedded and its tab must come from the click.
+async function checkAReviewOpensInsideTheConsole() {
   const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
   const doc = await state.collect('fixture')
   ok(doc.reviews.length > 0, 'the demo fleet has review pages to open')
-  const ctx = { fold: () => true, setFold() {} }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, fold: () => true, setFold() {} }
+  REVIEW_CTX.opened.length = 0
   await withCapturingDocument(() => {
     const cells = collectByClass(views.viewReviews(doc, ctx), 'review-open')
     equal(cells.length, doc.reviews.length, 'every review row offers both ways in')
     for (const node of cells) {
       const hrefs = collectByTag(node, 'a').map((a) => a.href)
-      equal(hrefs.length, 2, 'a review row has exactly two destinations')
-      ok(/^\/review\/[^/]+\/$/.test(hrefs[0]),
-        `the first destination is the console's own review page: ${hrefs[0]}`)
-      ok(hrefs[1].startsWith('/api/review-open?'),
-        `the second is the annotatable session, not the default: ${hrefs[1]}`)
+      equal(hrefs.length, 1, 'a review row navigates away exactly once - to the annotatable session')
+      ok(hrefs[0].startsWith('/api/review-open?'),
+        `the one link is the annotatable session: ${hrefs[0]}`)
+
+      // The primary is a button, not an anchor: nothing navigates, so the
+      // console keeps the page (and with it the listener) it opened.
+      const buttons = collectByTag(node, 'button')
+      equal(buttons.length, 1, 'and offers exactly one in-page opener')
+      ok(!buttons[0].href, 'the opener is not a destination the browser navigates to')
+      buttons[0].listeners.click()
+    }
+    equal(REVIEW_CTX.opened.length, doc.reviews.length, 'every opener asks the shell to open a review')
+    for (const href of REVIEW_CTX.opened) {
+      ok(/^\/review\/[^/]+\/$/.test(href), `it opens the console's own review page: ${href}`)
     }
   })
-  console.log(`ok   ${doc.reviews.length} review rows open the console's own page first, the original second`)
+  console.log(`ok   ${doc.reviews.length} review rows open in the console; the original stays a link out`)
+}
+
+// #219: which reviews have a live listener is VISIBLE, and only on the rows that
+// have one. A page that armed a poller and said nothing about it is how one gets
+// left running for a day.
+async function checkALiveListenerIsShownOnItsOwnRowOnly() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const doc = await state.collect('fixture')
+  const armed = doc.reviews[0].href
+  ok(typeof armed === 'string' && armed.length > 0, 'a review to listen to')
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: (href) => href === armed, fold: () => true, setFold() {} }
+  await withCapturingDocument(() => {
+    const frag = views.viewReviews(doc, ctx)
+    const marks = collectByClass(frag, 'review-listening')
+    equal(marks.length, 1, 'exactly the one review being listened to says so')
+    ok(collectByTag(marks[0], 'span').some((s) => s.textContent === 'Listening'),
+      'and it says so in words, not colour alone')
+  })
+  await withCapturingDocument(() => {
+    const quiet = { openReview: REVIEW_CTX.openReview, reviewIsLive: () => false, fold: () => true, setFold() {} }
+    equal(collectByClass(views.viewReviews(doc, quiet), 'review-listening').length, 0,
+      'with nothing armed, no row claims a listener')
+  })
+  console.log('ok   a live review listener is shown on its own row, in words, and nowhere else')
+}
+
+// Every surface that reaches a review reaches it the same way. A card or a
+// Needs-you row that still linked out would leave the console - and its
+// listener - behind, which is the whole defect #219 names.
+async function checkEveryWayIntoAReviewOpensInPage() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const doc = await state.collect('fixture')
+  const ctx = {
+    openReview: REVIEW_CTX.openReview,
+    reviewIsLive: () => false,
+    filter: 'all',
+    setFilter() {},
+    fold: () => true,
+    setFold() {},
+    ask: async () => {},
+    compose() {},
+    transcriptRead: () => true,
+    answered: () => null,
+    sendAnswer: async () => {},
+    updates: [],
+  }
+  await withCapturingDocument(() => {
+    for (const [name, render] of [['In flight', views.viewInFlight], ['Needs you', views.viewNeedsYou], ['Reviews', views.viewReviews]]) {
+      const frag = render(doc, ctx)
+      const links = collectByTag(frag, 'a').map((a) => a.href)
+      for (const href of links) {
+        ok(!/^\/review\//.test(href), `${name} still navigates to a review page: ${href}`)
+      }
+      ok(collectByClass(frag, 'review-open-control').length > 0,
+        `${name} offers no in-page way into a review`)
+    }
+  })
+  console.log('ok   every panel that reaches a review opens it in the console, never as a navigation')
 }
 
 // A panel only ever reaches the shell through `ctx`, and the two files are
@@ -838,7 +1065,7 @@ async function checkADecisionIsAnsweredInOneClick() {
   // dom.mjs's own `answerTo` - the function the browser actually runs - covered by
   // nothing: `return null` as its first statement kept every check green.
   const transcript = []
-  const ctx = {
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive,
     transcriptRead: () => true,
     answered: (q) => dom.answerTo(transcript, q, new Map()),
     sendAnswer: (q, a) => {
@@ -931,7 +1158,7 @@ async function checkAnAnswerBelongsToOneQuestionOnly() {
       { lamp: 'brass', kind: 'decision', question: LONG, options: ['tonight', 'Monday'] },
     ],
   }
-  const ctx = {
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive,
     transcriptRead: () => true,
     answered: (q) => dom.answerTo(transcript, q, new Map()),
     sendAnswer: () => Promise.resolve(),
@@ -1060,12 +1287,165 @@ async function checkTheAnswerMessageNamesTheQuestion() {
   console.log('ok   an answer echoes its question exactly, bounded and on one line')
 }
 
+// The queue is ASSEMBLED review-first, then decisions, then pull requests - so
+// without a sort a failing pull request routinely sits below two questions that
+// can wait. Pinned on the rendered panel, not the comparator, because a sort
+// that is not wired into the render is a sort the operator never sees.
+async function checkTheNeedsYouQueueIsOrderedByUrgency() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const state = {
+    degraded: [],
+    fleet: { in_flight: 0 },
+    needs_you: [
+      { lamp: 'starboard', kind: 'pr_yours', title: 'Green and yours', at: '2026-01-10T09:00:00Z' },
+      { lamp: 'brass', kind: 'blocked', title: 'Newer question', at: '2026-01-12T09:00:00Z' },
+      { lamp: 'brass', kind: 'blocked', title: 'Older question', at: '2026-01-11T09:00:00Z' },
+      { lamp: 'port', kind: 'pr_red', title: 'Checks are red', at: '2026-01-13T09:00:00Z' },
+    ],
+  }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, compose() {}, ask: async () => {}, transcriptRead: () => true }
+  await withCapturingDocument(() => {
+    const frag = views.viewNeedsYou(state, ctx)
+    const heads = collectByClass(frag, 'row-head').map((p) => p.textContent)
+    equal(heads.join(' | '),
+      ['Checks are red', 'Older question', 'Newer question', 'Green and yours'].join(' | '),
+      'the queue renders most-severe first, and within one severity longest-waiting first')
+
+    // The severity that drives the order must also be visible without colour:
+    // 8px of red beside 8px of green is not a channel every operator has.
+    const standings = collectByClass(frag, 'row')
+      .map((row) => collectByClass(row, 'state')[0])
+      .map((cell) => cell.children.map((c) => c.textContent).join(''))
+    equal(standings.join(' | '),
+      ['Checks failing', 'Stopped', 'Stopped', 'Ready to merge'].join(' | '),
+      'each row states its standing in words, not only in the colour of its lamp')
+  })
+
+  // A lamp this page has never seen is a gap in its vocabulary, NOT the server
+  // marking a row deliberately calm - adding a severity server-side is the
+  // obvious way to add one. So it must sort above `neutral` rather than folding
+  // into it: a client that predates a new severity still surfaces it.
+  await withCapturingDocument(() => {
+    const withNew = Object.assign({}, state, {
+      needs_you: [
+        { lamp: 'neutral', kind: 'blocked', title: 'Deliberately calm', at: '2026-01-01T09:00:00Z' },
+        { lamp: 'catastrophe', kind: 'blocked', title: 'Severity this page cannot read', at: '2026-01-09T09:00:00Z' },
+      ],
+    })
+    const frag = views.viewNeedsYou(withNew, ctx)
+    const heads = collectByClass(frag, 'row-head').map((p) => p.textContent)
+    equal(heads[0], 'Severity this page cannot read',
+      'an unrecognised severity outranks a deliberately calm row despite waiting a shorter time')
+    // And it says so: claiming a standing this page cannot justify would be worse
+    // than the burial, because it would read as understood.
+    const standing = collectByClass(collectByClass(frag, 'row')[0], 'state')[0]
+    equal(standing.children.map((c) => c.textContent).join(''), 'Not known',
+      'and it states that its standing is not known rather than inventing one')
+  })
+
+  // An unvalidated lamp reaching className would let a stray value attach
+  // classes the row was never meant to carry.
+  await withCapturingDocument(() => {
+    const injected = Object.assign({}, state, {
+      needs_you: [{ lamp: 'neutral is-lead', kind: 'blocked', title: 'Injected', at: '2026-01-09T09:00:00Z' }],
+    })
+    const row = collectByClass(views.viewNeedsYou(injected, ctx), 'row')[0]
+    equal(row.className, 'row row-neutral',
+      'a lamp token that is not a known severity cannot smuggle a class onto the row')
+  })
+  console.log('ok   the needs-you queue is ordered by severity and states each standing in words')
+}
+
+// Motion on this page means "this moved", and nothing else. A panel is rebuilt
+// whole every 30 seconds, so anything that animates on render alone would fire
+// on work that did not move and teach the operator to ignore movement.
+async function checkMotionMarksOnlyWhatActuallyMoved() {
+  const dom = await import(`file://${path.join(ROOT, 'ui', 'public', 'dom.mjs')}`)
+  const marked = (node) => node.marks || []
+  const node = (key, sig) => ({
+    dataset: { key, sig }, marks: [],
+    classList: { add(c) { this.owner.marks.push(c) }, remove() {} },
+  })
+  const root = (...nodes) => {
+    nodes.forEach((n) => { n.classList.owner = n })
+    return { querySelectorAll: () => nodes }
+  }
+
+  const a1 = node('need:blocked:A:demo', 'brass|')
+  dom.markChanges('t-needs', root(a1))
+  equal(marked(a1).length, 0, 'the first sight of a panel animates nothing - the whole page would move')
+
+  const a2 = node('need:blocked:A:demo', 'brass|')
+  const b2 = node('need:pr_red:B:demo', 'port|')
+  dom.markChanges('t-needs', root(a2, b2))
+  equal(marked(a2).length, 0, 'a row that did not move on a later draw stays still')
+  equal(marked(b2).join(''), 'is-arriving', 'a row that was not there before is marked as arriving')
+
+  const a3 = node('need:blocked:A:demo', 'port|')
+  const b3 = node('need:pr_red:B:demo', 'port|')
+  dom.markChanges('t-needs', root(a3, b3))
+  equal(marked(a3).join(''), 'is-changed', 'a row whose standing moved is marked as changed')
+  equal(marked(b3).length, 0, 'and its unmoved neighbour is not')
+
+  // Two open tasks in one repo can share a title. Without an occurrence suffix
+  // both collapse onto one map key, so the first node's signature is never what
+  // got stored and it re-animates forever on data that never changed.
+  const dup = () => [node('work:demo:Same title', 'building|'), node('work:demo:Same title', 'review|')]
+  const [d1, d2] = dup()
+  dom.markChanges('t-dup', root(d1, d2))
+  const [e1, e2] = dup()
+  dom.markChanges('t-dup', root(e1, e2))
+  equal(marked(e1).length + marked(e2).length, 0,
+    'two rows sharing a key keep separate identities, so neither re-animates on an unchanged redraw')
+
+  // Panels are diffed independently: switching panels must not make the other
+  // one's rows look new when the operator comes back to it.
+  const other = node('need:blocked:A:demo', 'port|')
+  dom.markChanges('t-prs', root(other))
+  equal(marked(other).join(''), '', 'a panel drawn for the first time is still silent, even after another was drawn')
+
+  let threw = ''
+  try { dom.markChanges('t', null) } catch (err) { threw = err.message }
+  ok(threw !== '', 'marking a panel with no root is a programmer error, not a silent no-op')
+  console.log('ok   motion marks only rows that arrived or actually moved, per panel')
+}
+
+// A signature that contains an age "changes" on its own every minute, so the
+// once-a-minute clock redraw would wash the whole page in change highlights.
+async function checkAChangeSignatureNeverCarriesAnAge() {
+  const views = await import(`file://${path.join(ROOT, 'ui', 'public', 'views.mjs')}`)
+  const state = {
+    degraded: [],
+    fleet: { in_flight: 1 },
+    needs_you: [{ lamp: 'port', kind: 'pr_red', title: 'Red', at: '2026-01-13T09:00:00Z' }],
+  }
+  const ctx = { openReview: REVIEW_CTX.openReview, reviewIsLive: REVIEW_CTX.reviewIsLive, compose() {}, ask: async () => {}, transcriptRead: () => true }
+  const signatures = []
+  for (const now of ['2026-01-14T09:00:00Z', '2026-02-20T09:00:00Z']) {
+    const real = Date.now
+    Date.now = () => Date.parse(now)
+    try {
+      await withCapturingDocument(() => {
+        const row = collectByClass(views.viewNeedsYou(state, ctx), 'row')[0]
+        signatures.push(`${row.dataset.key}::${row.dataset.sig}`)
+      })
+    } finally { Date.now = real }
+  }
+  equal(signatures[0], signatures[1],
+    'a row five weeks older has the same key and signature, so ageing alone never reads as change')
+  console.log('ok   a row identity and signature hold no age, so the clock redraw moves nothing')
+}
+
 async function main() {
   checkTrackShapes()
   checkNothingIsClaimedWithoutEvidence()
   checkUndeterminableIsNotNotStarted()
   checkGatesAreAPlanNotProgress()
   checkReconcileProseNeverCrosses()
+  checkTerminalEvidenceNeverClaimsUnreadable()
+  checkRealNoteSurfacesForInProgressWork()
+  checkNoSignalNeverReadsAsCalm()
+  await checkEveryNoteKindIsRenderable()
   checkMemoryFramingIsNotShown()
   checkAFailedSweepIsNeverAnEmptyFleet()
   await checkDegradationCarriesTokensNotProse()
@@ -1080,7 +1460,9 @@ async function main() {
   await checkFixtureIsNeutral()
   await checkRecentlyFinishedSortsNewestFirst()
   await checkRecentlyFinishedIsSortedInTheRenderedPanel()
-  await checkAReviewOpensTheConsolesOwnPageFirst()
+  await checkAReviewOpensInsideTheConsole()
+  await checkALiveListenerIsShownOnItsOwnRowOnly()
+  await checkEveryWayIntoAReviewOpensInPage()
   await checkTheShellSuppliesEveryCtxMemberThePanelsUse()
   await checkADecisionIsAnsweredInOneClick()
   await checkAnAnswerBelongsToOneQuestionOnly()
@@ -1088,6 +1470,9 @@ async function main() {
   await checkTheArrivalsThatChangeAPanelAreTheOnesThatRedrawIt()
   await checkTheAskCapMatchesThePagesAnswerIdentity()
   await checkTheAnswerMessageNamesTheQuestion()
+  await checkTheNeedsYouQueueIsOrderedByUrgency()
+  await checkMotionMarksOnlyWhatActuallyMoved()
+  await checkAChangeSignatureNeverCarriesAnAge()
   checkShapeRefusesAHalfDocument()
   console.log(`\nconsole checks passed (${checks} assertions)`)
 }

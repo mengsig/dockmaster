@@ -13,13 +13,16 @@
 
 import {
   el, add, lamp, plural, clockTime, word, storedTheme, THEME_KEY, SOURCE_WORD,
-  ANSWER_HEADER, ANSWER_MESSAGE, answerTo,
+  ANSWER_HEADER, ANSWER_MESSAGE, answerTo, markChanges,
 } from './dom.mjs';
 import { VIEWS, needsWords, panelNeedsRedraw } from './views.mjs';
 // The one writer of the wire format: a console-served review page (review.mjs)
 // shares this same module, so the composer and every enqueue-only control on
 // either page post through the exact same function.
 import { postMessage } from './api.mjs';
+// A review opens INSIDE this page, and the console - not the page showing it -
+// owns the listener armed while it is open (#219).
+import { initReviews, openReview, isListening } from './overlay.mjs';
 
 const shell = {
   state: null,
@@ -123,7 +126,10 @@ function renderPulse() {
   if (urgent > 0) headline = plural(urgent, 'thing needs you', 'things need you');
   else if (partial) headline = 'nothing else needs you';
   add(pulse, lamp(urgent > 0 || partial ? 'brass' : 'starboard'));
-  add(pulse, el('span', null, headline));
+  // The headline is the sentence; the counts after it are reference. Four facts
+  // at one weight in one monospace ribbon read as a terminal status bar, where
+  // the one that matters is no easier to find than the three that do not.
+  add(pulse, el('span', 'pulse-head', headline));
   const parts = [
     plural(s.fleet.in_flight, 'change under way', 'changes under way'),
     // A count over a source that was never read is not a count. "0 open pull
@@ -195,6 +201,10 @@ function panelContext() {
       return postMessage(ANSWER_MESSAGE(question, answer))
         .then((sent) => { shell.answeredHere.set(ANSWER_HEADER(question), answer); return sent; });
     },
+    // A review opens in this page rather than a tab of its own, and arming its
+    // listener is the shell's job - a panel only says which review.
+    openReview,
+    reviewIsLive: isListening,
     filter: ui.filter,
     setFilter(id) {
       ui.filter = id;
@@ -237,6 +247,10 @@ function show(id, keepScroll, animate) {
   main.textContent = '';
   main.classList.toggle('is-entering', animate !== false);
   add(main, view.render(shell.state, panelContext()));
+  // Marks only what actually moved since this panel was last drawn. The panel
+  // entrance above is about arriving HERE; this is about what changed while the
+  // operator was looking elsewhere.
+  markChanges(view.id, main);
   // A background refresh must not throw the operator back to the top of a list.
   main.scrollTop = keepScroll ? top : 0;
   renderRail();
@@ -567,6 +581,10 @@ function wire() {
   byId('chat-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(e); }
   });
+  // Escape-to-close and the going-away stop, plus what is already armed - a
+  // reload lands on a console that may still be listening for a review the
+  // previous page had open.
+  initReviews(() => { if (shell.state) redraw(); });
   window.addEventListener('hashchange', () => {
     const id = location.hash.replace('#', '') || 'needs';
     if (id !== shell.current) show(id, false, true);

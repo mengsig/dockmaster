@@ -314,6 +314,11 @@ async function collectTasks(bin) {
   return mustRead('work', async () => {
     const tasks = await runJson(bin, 'dm-task.sh', ['list', '--json']);
     if (!Array.isArray(tasks)) throw new TypeError('dm-task.sh list --json did not emit an array');
+    // withArtifacts joins on `id` and review_href is built from it, so a row
+    // without one is a malformed record - it would silently link to /review/undefined/.
+    if (tasks.some((task) => !task || typeof task.id !== 'string' || task.id.length === 0)) {
+      throw new TypeError('dm-task.sh list --json emitted a task row with no id');
+    }
     return tasks.map((task) => Object.assign({}, task, { state: STATE_WORDS[task.state] || 'unknown' }));
   });
 }
@@ -365,24 +370,57 @@ async function collectPipelines(bin, repoNames, degraded) {
 
 // --- assembling the panels ---------------------------------------------------
 
-// The reconcile detail dm-task.sh prints is written FOR the dockmaster: it names
-// status lines, local copies and review artifacts. So it never reaches the page
-// as prose. It becomes a TOKEN the page words itself, and free text crosses only
-// where the crewmate was required to name a concrete blocker - the one case that
-// is genuinely for the operator to read and act on.
-const REPORTED_STATES = ['blocked', 'needs_decision', 'failed', 'paused'];
+// The exact prefixes `bin/dm-task.sh state` can wrap around the raw
+// "verb: note" status line (keep in sync with that script). Anchoring on these
+// - rather than a free substring search for "verb: " anywhere in the sentence -
+// is what keeps this correct if a crewmate's own note ever repeats "verb: ", or
+// a wrapping sentence happens to contain it ahead of the real one.
+const RECONCILE_WRAPPERS = [
+  '',
+  'lavish artifact ready for the operator: ',
+  'reported ready but not yet landed: ',
+];
 
-function progressNote(task) {
-  const detail = String(task.state_detail || '');
-  if (REPORTED_STATES.includes(task.state)) {
-    // The status line is "<verb>: <note>"; the note is the operator-facing half.
-    const split = detail.indexOf(': ');
-    return { kind: 'reported', text: (split >= 0 ? detail.slice(split + 2) : detail).trim() };
+// extractReportedNote(detail, verb) -> the crewmate's own words, '' if an event
+// was posted with none, or null if there is no verb or no anchor matched (the
+// note may exist but this could not locate it).
+function extractReportedNote(detail, verb) {
+  if (!verb) return null;
+  const marker = `${verb}: `;
+  for (const wrapper of RECONCILE_WRAPPERS) {
+    const anchor = wrapper + marker;
+    if (detail.startsWith(anchor)) return detail.slice(anchor.length).trim();
   }
+  return null;
+}
+
+// The reconcile detail dm-task.sh prints is written FOR the dockmaster; it
+// reaches the page only as a TOKEN, except the crewmate's own words, located by
+// `last_event` (dm-task.sh's own tail -n1 parse of its status log).
+function progressNote(task) {
+  // Terminal evidence (a merged PR, or a scout's report.md) comes from an early
+  // exit in `dm-task.sh state` that never reaches the crewmate's own last
+  // event - it is not a status line, so there is nothing to read or fail
+  // reading. Say nothing, exactly as the page did before this task touched it.
+  if (task.state === 'done') return { kind: '', text: '' };
+
+  const detail = String(task.state_detail || '');
+  const verb = String(task.last_event || '');
+  const extracted = extractReportedNote(detail, verb);
+  if (extracted !== null) {
+    return extracted ? { kind: 'reported', text: extracted } : { kind: 'silent', text: '' };
+  }
+  // Purely synthetic reconcile prose - dm-task.sh's own words, no event note
+  // behind them at all. These stay tokens; the page already has wording for them.
   if (/could not determine/i.test(detail)) return { kind: 'undeterminable', text: '' };
   if (/not yet dispatched/i.test(detail)) return { kind: 'not_started', text: '' };
   if (/not yet landed/i.test(detail)) return { kind: 'unlanded', text: '' };
-  return { kind: '', text: '' };
+  // A verb IS on record but this branch overrode it with synthetic prose (e.g.
+  // a 'discarded' event whose worktree is still present) - the note may exist,
+  // this collector just could not locate it.
+  if (verb) return { kind: 'unreadable', text: '' };
+  // No event was ever posted for this task.
+  return { kind: 'silent', text: '' };
 }
 
 function toWork(tasks, pipelines) {

@@ -35,6 +35,11 @@ change; the PR-or-local decision and any pipeline come *after* approval.
    ```
    bin/dm-lavish.sh poll <id>     # run in background; a notification returns feedback
    ```
+   With the console running, the operator can open the review IN the page instead
+   (Reviews → Open), and the console arms that poll itself while the review is on
+   screen: the annotations arrive as ordinary operator messages on the queue you
+   already read. Do not also poll from here for a review opened that way — two
+   pollers on one file deliver every annotation twice.
 
 3. **Back-and-forth.** Feedback from the poll is relayed by the dockmaster to the
    crewmate as one clear instruction. The crewmate revises the code, updates the

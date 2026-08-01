@@ -450,6 +450,79 @@ dm_is_disposable_cruft() {
   return 1
 }
 
+# --- code-state fingerprint: binds a verdict to code content, not just HEAD --
+# A verdict recorded against a commit is not a verdict: a green run can be
+# carried across the very edit that breaks it. HEAD alone is not enough either
+# — crew work is uncommitted for most of its life — so the fingerprint also
+# covers the dirty state. Single owner: dm-verify.sh's `up`/`flow`/`report` pin
+# an app boot to it, and dm-test.sh (#185) binds a recorded test pass to it too,
+# so a verdict cannot outlive the code it was produced against on either gate.
+
+# One content-digest tool, resolved once: sha256sum (Linux), shasum (macOS), and
+# cksum as the last resort. All three print "<digest...> <path>" for file
+# arguments, which is what binds a path to its own bytes.
+if command -v sha256sum >/dev/null 2>&1; then DM_DIGEST_CMD=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then DM_DIGEST_CMD=(shasum -a 256)
+else DM_DIGEST_CMD=(cksum); fi
+
+# dm_untracked_digests <worktree> -- "<digest>  <path>" per untracked file,
+# sorted. Each path is bound to ITS OWN content. Concatenating all the bytes
+# into one stream did not: moving a line from one untracked file to another
+# left the path list and the byte total identical, so the pin sat still while
+# the routes moved. Same root as `aa.js` containing the text `zz.js` hashing
+# like an empty pair.
+dm_untracked_digests() {
+  local wt="$1" paths
+  # Emptiness is checked FIRST: GNU xargs runs its command once on empty input,
+  # and a digest tool with no arguments reads stdin and hangs.
+  paths="$(git -C "$wt" ls-files --others --exclude-standard 2>/dev/null)" || return 1
+  [ -n "$paths" ] || return 0
+  # `--` is load-bearing: paths arrive as bare arguments, so an untracked file
+  # named `--help` or `-c` is read as an OPTION. sha256sum then prints usage,
+  # hashes NOTHING and exits 0 — the untracked digest set collapses to a
+  # constant and the pin stops moving on new uncommitted source entirely.
+  # No `|| true` either: a digest tool that fails must fail the pin, not empty it.
+  git -C "$wt" ls-files --others --exclude-standard -z 2>/dev/null \
+    | ( cd "$wt" && xargs -0 -n 50 "${DM_DIGEST_CMD[@]}" -- ) \
+    | LC_ALL=C sort
+}
+
+# dm_code_state <worktree> -- "<head>/<content-checksum>", or empty when the
+# worktree cannot be read.
+#
+# The checksum must cover file CONTENT, not the porcelain listing. `git status
+# --porcelain` emits status letters and paths and never CONTENT, so once a file
+# was dirty every further edit produced the identical line and checksum — and
+# crew work is dirty for most of its life, the exact case this pin exists for.
+#
+# Hash BOTH derivatives, never one instead of the other. Hashing content alone
+# was blind in the mirror direction: an untracked file RENAMED, or two untracked
+# files merged into one with the same bytes, left the checksum identical while
+# the app's routes moved. So the material is:
+#   - `git diff HEAD`  — tracked content AND tracked paths (renames included)
+#   - the untracked PATH list — structure
+#   - the untracked file CONTENTS — bytes
+# `git diff HEAD` also carries binary changes, via its `index <blob>..<blob>` line.
+dm_code_state() {
+  local wt="$1" head content udigests
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null)" || return 1
+  [ -n "$head" ] || return 1
+  # Prove both reads work BEFORE hashing: a `return` inside the group below runs
+  # in a subshell, so a failed git would otherwise hash to a stable checksum of
+  # nothing — a pin that never moves, which is the failure this guards.
+  git -C "$wt" diff HEAD >/dev/null 2>&1 || return 1
+  git -C "$wt" ls-files --others --exclude-standard >/dev/null 2>&1 || return 1
+  udigests="$(dm_untracked_digests "$wt")" || return 1
+  # cksum's byte count is kept, not discarded: this is the security-critical pin
+  # and CRC-32 is linear, so length is a cheap independent term.
+  content="$( { git -C "$wt" diff HEAD 2>/dev/null
+                printf '%s\n' "$udigests"
+              } | cksum | awk '{print $1"-"$2}' )"
+  [ -n "$content" ] || return 1
+  printf '%s/%s\n' "$head" "$content"
+}
+
 # --- git helpers -------------------------------------------------------------
 # Resolve a repo's default branch: origin/HEAD -> main/master (local or remote)
 # -> current branch -> "main". Always prints exactly one line.
@@ -829,6 +902,44 @@ dm_assert_not_distro() {
   # points it the wrong way. Refuse independently of what the callers happen to do.
   [ -n "${1:-}" ] || dm_die "internal: dm_assert_not_distro called with an empty directory (${2:-unknown action}); the caller's repo resolution failed silently"
   ! dm_is_distro_dir "$1" || dm_die "REFUSED: ${2:-this operation} would act on the dockmaster distro itself ($DM_HOME), not a managed repo. Check the repo name (dm-repo.sh list). The distro ships changes to itself through its own branch and PR, never through this path."
+}
+
+# --- worktree containment: never answer from the enclosing repo -------------
+# `git -C <path>` WALKS UP the filesystem when <path> has no working `.git`
+# (removed, or the directory survives but the link inside it is gone) and
+# silently answers from whatever repository it finds instead — and every
+# managed worktree lives under DM_WT, itself inside DM_HOME's own working
+# tree, so that walk lands on a REAL repo (the distro, or a sibling clone) and
+# never errors. #210/#181/#209 are one bug: a cleanup path trusted `git -C
+# "$wt"` on a broken worktree and recorded the wrong repo's answer as this
+# task's own. dm_worktree_contained is the single check every such call site
+# must pass first.
+#
+# Prints the physical toplevel of <path> and exits 0 ONLY when git resolves it
+# to <path> itself. Exits 1, printing nothing, when <path> does not exist, is
+# not inside a git worktree at all, or git walked up past it. Never dies: a
+# caller mid-diagnosis (dm-worktree.sh's `landed`, dm-trash.sh's snapshot)
+# needs to turn a failure into its OWN undetermined/refused answer, not have
+# the whole command die out from under it.
+dm_worktree_contained() {
+  local path="${1:-}" real top
+  [ -n "$path" ] || return 1
+  real="$(cd "$path" 2>/dev/null && pwd -P)" || return 1
+  top="$(git -C "$real" rev-parse --show-toplevel 2>/dev/null || true)"
+  top="$(cd "$top" 2>/dev/null && pwd -P || true)"
+  [ -n "$top" ] || return 1
+  [ "$top" = "$real" ] || return 1
+  printf '%s\n' "$real"
+}
+
+# dm_assert_worktree_contained <path> -> the same check, for a call site where
+# "not contained" is always a hard refusal rather than a soft undetermined
+# branch: dies with a reason instead of returning quietly.
+dm_assert_worktree_contained() {
+  local out
+  out="$(dm_worktree_contained "${1:-}")" \
+    || dm_die "REFUSED: '${1:-}' is not a real worktree root — it is missing, or git walked UP past it into an enclosing repository (a missing or broken .git record). Refusing rather than answering from the wrong repo."
+  printf '%s\n' "$out"
 }
 
 # dm_require_worktree <id>  -> print the task's recorded worktree path, or die

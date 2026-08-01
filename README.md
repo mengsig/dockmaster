@@ -324,7 +324,7 @@ defaults are the supported configuration.
 | `DM_HOME` | the clone containing `bin/` | Distro root. `state/`, `data/`, `repos/` and `config/` are all derived from it, so setting it relocates the whole runtime — a throwaway root for dogfooding, or a state directory outside the clone. Script paths follow `bin/` itself, not this. |
 | `DM_NO_FETCH` | unset | `1` makes every reconcile offline: no `git fetch`, no GitHub read. `dm-status.sh` sets it for its own read-only snapshot. |
 | `DM_STUCK_AGE_HOURS` | `4` | Age at which `dm-status.sh` flags a non-terminal task as possibly stuck. A non-positive or non-numeric value warns and falls back to the default. |
-| `DM_RECALL_MAX_LINES` | `40` | Per-store soft cap on `dm-memory.sh recall` output. Over the cap, recall prints a tail pointer naming how to see the rest. |
+| `DM_RECALL_MAX_BYTES` | `4096` | Per-store soft byte cap on `dm-memory.sh recall` output. Over the cap, recall prints a tail pointer naming how to see the rest. |
 | `DM_GH_RETRY_MAX` | `4` | Attempts `dm-pr.sh` makes against a retryable GitHub failure. |
 | `DM_GH_RETRY_BASE_SECS` | `2` | Backoff base for those retries. |
 | `DM_GH_CIRCUIT_BREAKER_MAX` | `5` | Consecutive GitHub failures after which `dm-pr.sh` stops calling out. |
@@ -335,6 +335,7 @@ defaults are the supported configuration.
 | `DM_VERIFY_BROWSER_SHARED` | unset | `1` forces the degraded shared-browser path (exclusive lease instead of a per-task browser). Used by the tests; set it only to reproduce that path. |
 | `DM_RUNTIME_STARTUP_SAMPLE` | unset | `1` enables the opt-in CLI startup timing diagnostic in `tests/runtime-performance.sh`. |
 | `DM_UI_PORT` | `4877` | Loopback port `bin/dm-ui.sh` serves the console on. Chosen clear of lavish (4387), chrome-devtools (9224) and the verify gate's app/bridge/CDP ranges; change it only if something else already holds 4877. |
+| `DM_UI_WATCH_TIMEOUT` | `300` | Seconds `bin/dm-ui.sh watch` blocks per idle poll slice before looping again. Bounds how long any one underlying poll process runs unproven-alive; lower it (a test does) to make the idle-timeout path fast to exercise. |
 
 ## License
 

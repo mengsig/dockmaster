@@ -11,9 +11,25 @@ so it can never disagree with the toolbelt, and it carries the conversation.
 
 ## Open it
 
-    bin/dm-ui.sh open            # start (idempotent) and open a browser
+    bin/dm-ui.sh open            # start (idempotent), open a browser
     bin/dm-ui.sh start           # start only; prints the URL
     bin/dm-ui.sh status | stop
+
+Opening the console is **two actions, not one followed by remembering a second**:
+`start`/`open` always print whether the watcher (below) is armed, and the exact
+command to arm it when it is not — read that line off the output you already
+have, and arm it before doing anything else. `status` reports the same line at
+any later check-in. `stop` disarms the watcher along with the server, so the two
+share one lifecycle: stopping the console is the only thing that disarms it.
+
+The watcher is its own process, though, so a console that dies on its own — a
+crash, a killed session, anything short of `stop` — does not necessarily take
+the watcher with it. `status` says so explicitly when it happens: "not running"
+plus a named, still-armed watcher, never silence. Restarting the console after
+that is safe either way — a surviving watcher is still valid (it just watches
+`state/ui/inbox`, unrelated to which server process is up) and `start` reports
+it already armed; a watcher that died with the console gets the normal "not
+armed, arm it now" reminder.
 
 Defaults to `--source live`, the real fleet. `--source fixture` serves the
 committed demo fleet — for design work on the page, never to show the operator
@@ -22,28 +38,49 @@ it and says so. Port via `DM_UI_PORT`.
 
 ## Talk through it
 
-The page cannot BE this session, so it uses the same shape as `lavish-axi poll`:
+The page cannot BE this session. A single `poll` stops watching TWO ways, not
+one — it drains everything queued and exits 0, or it times out with nothing
+queued and exits 3 — and left unarmed after either, both reproduce the exact
+defect this closed: messages sat unclaimed because nothing re-armed after a
+drain, or nothing re-armed after a quiet stretch. Arm `watch` instead: it
+keeps calling `poll` in bounded slices for as long as it runs, treating a
+drain and an idle timeout the same way — keep going — so delivery survives
+both a drain and a quiet hour.
 
-    bin/dm-ui.sh poll [--timeout <seconds>]   # BLOCKS at zero idle cost until the
-                                              # operator sends something, prints
-                                              # EVERYTHING queued, exits 0. Exit 3
-                                              # = timed out, nothing queued.
+    bin/dm-ui.sh watch                        # blocks in DM_UI_WATCH_TIMEOUT-second
+                                              # slices (default 300), printing
+                                              # everything queued per drain -
+                                              # oldest first, each numbered
+                                              # `[n/total]` and stamped -
+                                              # forever, until stopped. Refuses
+                                              # to double-arm; exits loudly
+                                              # (never silently) if the inbox
+                                              # breaks.
     bin/dm-ui.sh say "<reply>"                # posts your reply; the open page shows
     bin/dm-ui.sh say --file <path>            # it without a refresh
 
-One read **drains the queue**: it prints a count line, then each message as
-`[n/total] <stamp> operator:` followed by its text, oldest first. Bounded at 50 —
-past that it says how many are still queued, so poll again. Answer them all
-before polling again; the page shows how many are still unpicked-up.
+One drain is bounded at 50 messages — past that it says how many are still
+queued, and the next slice picks them up, no separate action needed.
 
-Claiming a message is a **rename**, and it is only marked delivered once the text
-is written out — so a poll killed at any point, mid-drain included, loses nothing:
-the next poll offers the same messages again. The one thing to expect is the
-mirror image, rarely: a message delivered twice, if the poller died between
-printing and recording it.
+Arm it with a **persistent Monitor**, immediately after `start`/`open` (or the
+moment `status` reports it not armed) — this is the one step nothing can do FOR
+you, since only this session can register a wake, so treat it as part of opening
+the console rather than a separate thing to recall later:
 
-Poll it the way you already wait on work: run it in the background and let the
-completion wake you (see `supervision`). Do not busy-loop it.
+    Monitor({ command: "bin/dm-ui.sh watch", description: "console: operator messages", persistent: true })
+
+Each drain `watch` prints — one message or several — is its own wake, the same
+completion-wakes-the-supervisor model as any other background work (see
+`supervision`). Do **not** back it with a bare `&` shell background job instead
+of Monitor: it claims messages exactly as well, but produces no wake at all, so
+a message would be claimed and then sit invisibly in the log — silence that
+reads as covered when it is not.
+
+Claiming a message is a **rename**, and it is only marked delivered once the
+text is written out — so a watcher killed at any point, mid-drain included,
+loses nothing: re-arming it delivers anything still queued. The one thing to
+expect is the mirror image, rarely: a message delivered twice, if the process
+died between printing and recording it.
 
 ## Ask through the page, never the terminal
 

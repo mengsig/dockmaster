@@ -100,13 +100,7 @@ function evidenceChip(stage) {
   return null;
 }
 
-// The declared gates this change must still clear. A PLAN, not progress: only
-// the tests gate records anything, so every other one says so plainly rather
-// than being drawn as passed.
-function gateStrip(gates) {
-  if (!gates || gates.length === 0) return null;
-  const wrap = el('div', 'gates');
-  add(wrap, el('span', 'eyebrow', 'Still to clear'));
+function gateList(gates) {
   const list = el('ul', 'gate-list');
   for (const gate of gates) {
     // The sentence the pipeline writes for the gate, never its token. A gate
@@ -119,17 +113,46 @@ function gateStrip(gates) {
     if (gate.optional) add(item, el('span', 'chip chip-faint', 'only if needed'));
     add(list, item);
   }
-  return add(wrap, list);
+  return list;
+}
+
+// The declared gates this change must still clear. A PLAN, not progress: only
+// the tests gate records anything, so every other one says so plainly rather
+// than being drawn as passed.
+//
+// The unreported ones are the majority and every one makes the SAME claim, so
+// they are counted in the open and read on request. Folded, never dropped -
+// "nothing has reported on this" is a claim the page has to keep making, and
+// the summary states how many there are before it is opened.
+function gateStrip(gates) {
+  if (!gates || gates.length === 0) return null;
+  const recorded = gates.filter((g) => g.state !== 'unrecorded');
+  const silent = gates.filter((g) => g.state === 'unrecorded');
+  const wrap = el('div', 'gates');
+  add(wrap, el('span', 'eyebrow', 'Still to clear'));
+  if (recorded.length) add(wrap, gateList(recorded));
+  if (silent.length) {
+    const fold = el('details', 'gate-fold');
+    add(fold, el('summary', 'gate-summary',
+      `${plural(silent.length, 'step has', 'steps have')} nothing reported yet`));
+    add(fold, gateList(silent));
+    add(wrap, fold);
+  }
+  return wrap;
 }
 
 // The document carries a token for where a piece of work stands; the sentence is
-// chosen here. Free text crosses only as `reported` - a blocker a worker was
-// asked to name, which is written for the operator to act on.
-const NOTE = {
+// chosen here. Free text crosses only as `reported` - a worker's own words,
+// written for the operator to read. Exported so a test can prove every kind the
+// collector emits actually has a word here, instead of a second hand-copied list
+// silently drifting out of sync with this one.
+export const NOTE = {
   reported: (text) => text,
   undeterminable: () => 'Could not tell how far this got — its repo could not be read.',
   not_started: () => 'Not started yet.',
   unlanded: () => 'Committed, but not landed yet.',
+  unreadable: () => 'Something was reported, but its note could not be read.',
+  silent: () => 'Nothing has been reported yet.',
 };
 
 function noteText(item) {
@@ -168,6 +191,38 @@ const WORK_STATE_LABEL = Object.keys(WORK_STATE).reduce((map, key) => {
   map[key] = WORK_STATE[key][1];
   return map;
 }, {});
+
+// Open a review INSIDE the console (#219). A button, not a link: the review is
+// not somewhere the browser navigates to any more, and while it is on screen the
+// console holds a listener open for it - which is the shell's job (ctx.openReview),
+// so a panel only ever names which review.
+//
+// A failure gets said next to the control that was clicked. The alternative was
+// a click that does nothing, on the one control that leads to a decision.
+function reviewOpener(ctx, href, label) {
+  const box = el('span', 'review-open-control');
+  // Not `row-action`: that class writes an arrow after the label, and an arrow
+  // says the click leaves. This one opens the review right here.
+  const button = el('button', 'btn btn-quiet review-open-button');
+  button.type = 'button';
+  add(button, el('span', null, label));
+  const failed = el('span', 'review-open-failed');
+  button.addEventListener('click', () => {
+    failed.textContent = '';
+    button.disabled = true;
+    const done = () => { button.disabled = false; };
+    // Called straight out of the click, not from a later microtask: the open
+    // reads the operator's gesture, and a deferred call is how a control ends up
+    // looking dead for a frame.
+    try {
+      ctx.openReview(href).then(done, (err) => { failed.textContent = err.message; done(); });
+    } catch (err) {
+      failed.textContent = err.message;
+      done();
+    }
+  });
+  return add(box, button, failed);
+}
 
 // The trash affordance. It ENQUEUES a request - naming the work the way the
 // operator sees it, since a task id is the one thing this seam keeps off the page
@@ -214,14 +269,25 @@ function changesControl(item, ctx) {
   });
 }
 
+// Where this work stands, as one string. It is what the shell diffs between
+// renders to decide whether anything actually moved - so it holds only stable
+// facts, never an age, which would "change" every minute on its own.
+function voyageSignature(item) {
+  const active = item.track ? (item.track.stages.find((s) => s.state === 'active') || {}).key : '';
+  return `${item.state}|${active || ''}`;
+}
+
 function voyage(item, ctx) {
   const [lampKind, stateWord] = lookup(WORK_STATE, item.state);
   const card = el('article', `voyage is-${item.state}`);
+  card.dataset.key = `work:${item.repo}:${item.title}`;
+  card.dataset.sig = voyageSignature(item);
   const header = el('div', 'voyage-head');
   const left = el('div');
+  // Title above its metadata, for the same reason the queue rows read that way.
   add(left,
-    meta(item.repo, word(KIND, item.kind), `started ${ago(item.since)}`),
-    el('h3', 'voyage-title', item.title));
+    el('h3', 'voyage-title', item.title),
+    meta(item.repo, word(KIND, item.kind), `started ${ago(item.since)}`));
   add(header, left, add(el('div', 'voyage-state'), stateCell(lampKind, stateWord), movement(item)));
   add(card, header);
 
@@ -236,7 +302,7 @@ function voyage(item, ctx) {
   const note = noteText(item);
   if (note) add(card, el('p', 'voyage-note', note));
   const foot = el('div', 'voyage-foot');
-  if (item.review_href) add(foot, link(item.review_href, 'Open the review page', 'row-action'));
+  if (item.review_href) add(foot, reviewOpener(ctx, item.review_href, 'Open the review'));
   add(foot, approveControl(item, ctx));
   add(foot, changesControl(item, ctx));
   add(foot, trashControl(item, ctx));
@@ -395,10 +461,16 @@ export function viewInFlight(state, ctx) {
 
 // One renderer per kind. The document carries a token and the data; the sentence
 // the operator reads is chosen here.
+//
+// `state` is the row's standing printed beside its lamp. Chosen per KIND rather
+// than per lamp because one lamp serves several: `port` is both a pull request
+// whose checks are failing and a piece of work that failed outright, and
+// "Failing" is only true of one of them.
 const NEEDS = {
   review: (item) => ({
     head: `${plural(item.count, 'change is', 'changes are')} waiting for your review`,
     detail: `In ${item.repos.join(', ')}.`,
+    state: 'Waiting for review',
     action: item.count === 1 ? 'Open the review page' : 'See what is waiting',
   }),
   decision: (item) => ({
@@ -406,18 +478,74 @@ const NEEDS = {
     detail: item.options && item.options.length
       ? 'Only you can answer this. One click sends the answer, or write your own.'
       : 'Only you can answer this. Write the answer in the conversation.',
+    state: 'Waiting on you',
   }),
-  pr_red: (item) => ({ head: item.title, detail: 'Checks are failing on this pull request.', action: 'Open on GitHub' }),
-  pr_changes: (item) => ({ head: item.title, detail: 'A review asked for changes.', action: 'Open on GitHub' }),
+  pr_red: (item) => ({
+    head: item.title, detail: 'Checks are failing on this pull request.',
+    state: 'Checks failing', action: 'Open on GitHub',
+  }),
+  pr_changes: (item) => ({
+    head: item.title, detail: 'A review asked for changes.',
+    state: 'Changes requested', action: 'Open on GitHub',
+  }),
   pr_yours: (item) => ({
     head: item.title,
     detail: 'Green and ready. This repo is yours to merge — the dockmaster never merges it.',
+    state: 'Ready to merge',
     action: 'Merge on GitHub',
   }),
-  blocked: (item) => ({ head: item.title, detail: item.detail || 'Stopped, waiting on you.' }),
-  needs_decision: (item) => ({ head: item.title, detail: item.detail || 'Waiting on a choice only you can make.' }),
-  failed: (item) => ({ head: item.title, detail: item.detail || 'This did not complete.' }),
+  blocked: (item) => ({ head: item.title, detail: item.detail || 'Stopped, waiting on you.', state: 'Stopped' }),
+  needs_decision: (item) => ({
+    head: item.title, detail: item.detail || 'Waiting on a choice only you can make.',
+    state: 'Waiting on you',
+  }),
+  failed: (item) => ({ head: item.title, detail: item.detail || 'This did not complete.', state: 'Failed' }),
 };
+
+// The queue arrives in the order it was ASSEMBLED - every review, then every
+// decision, then the pull requests - so a failing pull request routinely sits
+// below two questions that can wait. Ranked on the severity the server already
+// assigned each row, which is exactly what `lamp` is for: no fleet fact is
+// derived in the browser, the existing one is only read in a better order.
+const LAMP_RANK = { port: 0, brass: 1, starboard: 2, neutral: 4 };
+const KNOWN_LAMPS = new Set(Object.keys(LAMP_RANK));
+
+// A lamp this page has never seen is a DIFFERENT claim from `neutral` - not the
+// server marking a row deliberately calm, but a gap in this page's vocabulary.
+// Adding a lamp server-side is the obvious way to add a severity, so a gap must
+// not read as calm: it floats above `neutral` rather than folding into it, so a
+// client predating a new severity still surfaces it instead of burying it.
+const UNCLASSIFIED_RANK = 3;
+const rankOf = (item) => (KNOWN_LAMPS.has(item.lamp) ? LAMP_RANK[item.lamp] : UNCLASSIFIED_RANK);
+
+function byUrgency(a, b) {
+  if (rankOf(a) !== rankOf(b)) return rankOf(a) - rankOf(b);
+  // Same severity: the one waiting longest is the one to answer. An unreadable
+  // stamp sorts to the end of its group - comparing it equal to everything is
+  // not transitive, and would let it invert two dated rows depending only on
+  // which pair the sort happened to compare first.
+  const at = Date.parse(a.at || '');
+  const bt = Date.parse(b.at || '');
+  if (Number.isNaN(at) && Number.isNaN(bt)) return 0;
+  if (Number.isNaN(at)) return 1;
+  if (Number.isNaN(bt)) return -1;
+  return at - bt;
+}
+
+// The fallback standing, for a kind NEEDS has no entry for. A colour carrying
+// rank has to say what rank it is: red and green are the two an operator is most
+// likely to be unable to tell apart, and 8px of it is below the size at which
+// colour works as a channel at all.
+const URGENCY = {
+  port: 'Failing',
+  brass: 'Waiting on you',
+  starboard: 'Ready',
+  neutral: 'Waiting on you',
+};
+
+// Identity across renders, so the shell can tell a genuinely new row from the
+// same row redrawn. Deliberately free of anything that ages on its own.
+const berthKey = (item) => `need:${item.kind}:${item.title || item.question || ''}:${item.repo || ''}`;
 
 // The fallback never prints `kind`: an unrecognised kind is a gap in NEEDS, and
 // its token is exactly the sort of word that must not reach the screen. Exported
@@ -455,7 +583,7 @@ function reviewRow(sub, ctx) {
   const row = el('div', 'review-item');
   add(row, el('p', 'review-item-what', `${sub.title} — ${sub.repo}`));
   const actions = el('div', 'review-item-actions');
-  if (sub.review_href) add(actions, link(sub.review_href, 'Open the review page', 'row-action'));
+  if (sub.review_href) add(actions, reviewOpener(ctx, sub.review_href, 'Open the review'));
   // `state` is synthesized, always 'ready_for_review' - approveControl's/
   // changesControl's own gate on it is vacuous here. The real guarantee is
   // upstream: live.js only ever maps a task actually awaiting review into
@@ -539,26 +667,40 @@ function choices(item, ctx) {
 
 function berth(item, ctx) {
   const words = needsWords(item);
-  const row = el('div', 'row');
-  const body = el('div');
-  const where = item.repo || (item.repos || []).join(', ');
-  const when = item.at ? ago(item.at) : '';
-  if (where || when) add(body, meta(where, when));
-  add(body, el('p', 'row-head', words.head), el('p', 'row-detail', words.detail));
+  // `item.lamp` is a token from the server, not a class name: an unvalidated
+  // lamp interpolated straight into className lets a stray value attach classes
+  // this row was never meant to carry. It always falls back to `neutral`, and
+  // the written standing below says plainly when that fallback fired.
+  const known = KNOWN_LAMPS.has(item.lamp);
+  const rank = known ? item.lamp : 'neutral';
+  const row = el('div', `row row-${rank}`);
+  row.dataset.key = berthKey(item);
+  row.dataset.sig = `${item.lamp || ''}|${item.count || ''}|${words.detail || ''}`;
+  // The headline goes FIRST. A monospace repo line above it delayed the answer
+  // by one line on every row, so the eye landed on metadata before the news.
+  add(row, el('p', 'row-head', words.head), el('p', 'row-detail', words.detail));
   if (item.kind === 'review' && item.items && item.items.length) {
     const list = el('div', 'review-items');
     item.items.forEach((sub) => add(list, reviewRow(sub, ctx)));
-    add(body, list);
+    add(row, list);
   }
-  if (item.options && item.options.length) add(body, choices(item, ctx));
+  if (item.options && item.options.length) add(row, choices(item, ctx));
   // A single awaiting review already got its own "Open the review page" link
   // in the row above - repeating it here would be the same link twice. Several
   // still get the jump to In-flight, which the per-task rows do not replace.
   const oneReviewAlready = item.kind === 'review' && item.items && item.items.length === 1;
   if (item.href && words.action && !oneReviewAlready) {
-    add(body, link(item.href, words.action, 'row-action'));
+    add(row, link(item.href, words.action, 'row-action'));
   }
-  return add(row, lamp(item.lamp), body);
+  // The standing, its lamp, and the where/when - reference, so it sits last.
+  const where = item.repo || (item.repos || []).join(', ');
+  const when = item.at ? ago(item.at) : '';
+  const foot = el('p', 'row-meta');
+  add(foot, stateCell(rank, known ? (words.state || word(URGENCY, rank)) : 'Not known'));
+  [where, when].filter(Boolean).forEach((part) => {
+    add(foot, el('span', 'mono mono-mute', '·'), el('span', 'mono', part));
+  });
+  return add(row, foot);
 }
 
 // This queue is assembled from the work, the pull-request sweep and the open
@@ -586,11 +728,21 @@ export function viewNeedsYou(state, ctx) {
       el('span', 'hero-sub', 'Each one is stopped until you act.')));
   add(frag, hero);
   const rows = el('div', 'rows');
-  state.needs_you.forEach((item) => add(rows, berth(item, ctx)));
+  // Most urgent first, then longest-waiting. The hero above already says how
+  // many; this decides which one the eye reaches first.
+  state.needs_you.slice().sort(byUrgency).forEach((item) => add(rows, berth(item, ctx)));
   return add(frag, rows);
 }
 
 // --- pull requests -----------------------------------------------------------
+
+// owner/repo#number, the way the operator says it out loud. Anything that is
+// not a pull-request address is shown whole rather than guessed at.
+const PR_URL = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/(\d+)/;
+function shortRef(url) {
+  const parts = PR_URL.exec(url || '');
+  return parts ? `${parts[1]}/${parts[2]}#${parts[3]}` : (url || '');
+}
 
 export function viewPullRequests(state) {
   const frag = document.createDocumentFragment();
@@ -613,11 +765,23 @@ export function viewPullRequests(state) {
     const [checkLamp, checkLabel] = lookup(CHECKS, pr.checks);
     const yours = pr.authority === 'never';
     const title = cell('cell-title col-what');
-    add(title, link(pr.url, pr.title || 'Title not read'), el('span', 'cell-sub link-url', pr.url));
+    const anchor = link(pr.url, pr.title || 'Title not read');
+    // The address is the link and its tooltip. Printed in full under every row
+    // it pushed the Repo column off the deck at the ordinary window size, and
+    // Repo is the column the operator came for.
+    anchor.title = pr.url;
+    const ref = el('span', 'cell-sub link-url', shortRef(pr.url));
+    ref.title = pr.url;
+    add(title, anchor, ref);
     if (pr.unreadable) add(title, el('span', 'cell-sub cell-warn', word(PR_UNREADABLE, pr.unreadable)));
     else if (pr.cached) add(title, el('span', 'cell-sub', 'Last known — not re-read just now'));
     else if (pr.opened_at) add(title, el('span', 'cell-sub', `Opened ${ago(pr.opened_at)}`));
-    return add(el('tr'),
+    const row = el('tr');
+    row.dataset.key = `pr:${pr.url}`;
+    // Checks flipping is the change this panel exists to show, so it is the
+    // signature: the shell marks exactly that row when it moves.
+    row.dataset.sig = `${pr.checks}|${pr.review}`;
+    return add(row,
       title,
       cell('nowrap', stateCell(yours ? 'brass' : 'neutral', word(AUTHORITY, pr.authority))),
       cell('nowrap', stateCell(checkLamp, checkLabel)),
@@ -764,18 +928,24 @@ export function viewReviews(state, ctx) {
   }
   const rowsOf = (rows) => table(['What', 'Repo', 'State', 'Rendered', ''], rows, (r) => {
     const awaiting = r.state === 'awaiting';
+    // Which reviews the console is holding a listener open for. One lamp on the
+    // row that has one; nothing at all on the rows that do not.
+    const listening = ctx.reviewIsLive(r.href)
+      ? add(el('span', 'review-listening'), lamp('starboard'), el('span', null, 'Listening'))
+      : null;
     return add(el('tr'),
       // A review page outlives the record that named it; when that is gone the
       // page says the title is not recorded rather than printing an internal id.
       cell('cell-title', el('span', r.title ? null : 'mono mono-mute', r.title || 'Title not recorded')),
       cell('mono nowrap', el('span', null, r.repo || '—')),
       cell('nowrap', stateCell(awaiting ? 'brass' : 'neutral', awaiting ? 'Waiting for you' : 'Reviewed')),
-      cell('mono nowrap', el('span', null, ago(r.at))),
-      // The console's own page first, because it is the one that is always
-      // there; the annotatable session second, for annotating. Both are REAL
-      // links, so the tab is the click's own gesture.
+      cell('mono nowrap', add(el('span', null, ago(r.at)), listening)),
+      // The console's own page first, and it opens HERE - the review is part of
+      // the console, not a tab beside it. The annotatable lavish session stays a
+      // real link: it is a different origin on a different server, so it is not
+      // embedded, and the tab has to come from the click's own gesture.
       cell('nowrap', add(el('div', 'review-open'),
-        link(r.href, 'Open'),
+        reviewOpener(ctx, r.href, 'Open'),
         el('span', 'review-or', '·'),
         link(r.session_href, 'the original', 'row-action'))));
   });

@@ -47,6 +47,41 @@
       "Bash(git ls-files:*)",
       "Bash(git worktree list:*)",
       "Bash(git fetch:*)"
+    ],
+    "deny": [
+      "Bash(pkill:*)",
+      "Bash(killall:*)",
+
+      "Bash(rm -rf repos*)",
+      "Bash(rm -fr repos*)",
+      "Bash(rm --recursive --force repos*)",
+      "Bash(rm --force --recursive repos*)",
+      "Bash(rm -rf /home/mengsig/dockmaster/repos*)",
+      "Bash(rm -fr /home/mengsig/dockmaster/repos*)",
+      "Bash(rm --recursive --force /home/mengsig/dockmaster/repos*)",
+      "Bash(rm --force --recursive /home/mengsig/dockmaster/repos*)",
+
+      "Bash(rm -rf state*)",
+      "Bash(rm -fr state*)",
+      "Bash(rm --recursive --force state*)",
+      "Bash(rm --force --recursive state*)",
+      "Bash(rm -rf /home/mengsig/dockmaster/state*)",
+      "Bash(rm -fr /home/mengsig/dockmaster/state*)",
+      "Bash(rm --recursive --force /home/mengsig/dockmaster/state*)",
+      "Bash(rm --force --recursive /home/mengsig/dockmaster/state*)",
+
+      "Bash(rm -rf /home/mengsig/dockmaster)",
+      "Bash(rm -rf /home/mengsig/dockmaster/)",
+      "Bash(rm -rf /home/mengsig/dockmaster *)",
+      "Bash(rm -fr /home/mengsig/dockmaster)",
+      "Bash(rm -fr /home/mengsig/dockmaster/)",
+      "Bash(rm -fr /home/mengsig/dockmaster *)",
+      "Bash(rm --recursive --force /home/mengsig/dockmaster)",
+      "Bash(rm --recursive --force /home/mengsig/dockmaster/)",
+      "Bash(rm --recursive --force /home/mengsig/dockmaster *)",
+      "Bash(rm --force --recursive /home/mengsig/dockmaster)",
+      "Bash(rm --force --recursive /home/mengsig/dockmaster/)",
+      "Bash(rm --force --recursive /home/mengsig/dockmaster *)"
     ]
   }
 }

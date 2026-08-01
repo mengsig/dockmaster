@@ -196,11 +196,17 @@ body.is-refreshing .topbar::after { opacity: 1; animation: watch 1.5s ease-in-ou
 .pulse {
   margin: 0; min-width: 0; flex: 1 1 auto;
   font-family: var(--mono); font-size: 0.75rem; font-variant-numeric: tabular-nums;
-  color: var(--fg-dim);
+  color: var(--fg-mute);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.pulse .sep { color: var(--fg-mute); padding: 0 0.5rem; }
-.pulse .lamp { margin-right: 0.4375rem; }
+/* The sentence, in the reading face and at full contrast. What follows it is
+ * reference and stays quiet - one line, two voices, one of them clearly first. */
+.pulse-head {
+  font-family: var(--sans); font-size: 0.875rem; font-weight: 500;
+  color: var(--fg); letter-spacing: -0.005em;
+}
+.pulse .sep { color: var(--line); padding: 0 0.5rem; }
+.pulse .lamp { margin-right: 0.5rem; }
 
 .topbar-actions { display: flex; gap: 0.5rem; flex: 0 0 auto; }
 
@@ -424,21 +430,36 @@ details[open] > .fold-body { animation: rise 240ms ease-out; }
 .rows { margin-top: 1rem; display: grid; gap: 0.625rem; }
 .row {
   position: relative; overflow: hidden;
-  display: grid; grid-template-columns: 0.75rem minmax(0, 1fr); gap: 0 1rem;
   padding: 1rem 1.25rem; background: var(--raise);
   border: 1px solid var(--line-soft); border-radius: var(--r);
   transition: background var(--step), border-color var(--step);
 }
 .row:hover { background: var(--raise-hi); border-color: var(--line); }
-/* The edge: this one is claiming your attention. */
+/* The edge: this one is claiming your attention, and at what rank. An 8px dot
+ * is below the size at which colour works as a fast channel, so severity is
+ * also drawn as a rule the eye catches down the left of the whole queue - and
+ * the written standing in the footer carries it without colour at all. */
 .row::before {
   content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px;
   background: var(--brass);
 }
-.row .lamp { margin-top: 0.4375rem; }
-.row-meta { display: flex; flex-wrap: wrap; gap: 0 0.5rem; margin: 0; }
-.row-head { margin: 0.125rem 0 0; font-size: 0.9375rem; font-weight: 500; }
-.row-detail { margin: 0.25rem 0 0; color: var(--fg-dim); max-width: 42rem; }
+.row-port::before { background: var(--port); }
+.row-starboard::before { background: var(--starboard); }
+.row-neutral::before { background: var(--line); }
+
+/* Headline first: a monospace repo line above it delayed the answer by one line
+ * on every row, so the eye landed on metadata before the news. */
+.row-head { margin: 0; font-size: 0.9375rem; font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; }
+.row-detail { margin: 0.375rem 0 0; color: var(--fg-dim); max-width: 42rem; }
+.row-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0 0.5rem; margin: 0; }
+/* The queue row's own footer: standing, then where and when. Reference, so it
+ * sits last and stays quiet. Scoped to a direct child so the shared `meta()`
+ * line used inside cards elsewhere keeps its own spacing. */
+.row > .row-meta {
+  margin-top: 0.75rem; color: var(--fg-mute); font-size: 0.6875rem;
+}
+.row > .row-meta .state { color: var(--fg-dim); }
+.row-port > .row-meta .state { color: var(--port); }
 .row-action { display: inline-block; margin-top: 0.5rem; font-size: 0.8125rem; }
 .row-action::after { content: " \2192"; }
 
@@ -498,7 +519,19 @@ details[open] > .fold-body { animation: rise 240ms ease-out; }
 .voyage.is-needs_decision::before { opacity: 1; }
 .voyage.is-failed::before { background: var(--port); opacity: 1; }
 .voyage-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1.5rem; }
-.voyage-title { margin: 0.125rem 0 0; font-size: 0.9375rem; font-weight: 500; }
+/* A flex item's default min-width is `auto`, which floors it at its content's
+ * intrinsic width - so one long unbreakable token in the title (now the first
+ * line in this box) refuses to shrink and pushes the state cell out past the
+ * card instead of wrapping. The title itself must be able to break too: below
+ * the narrow breakpoint this row becomes a column, where `align-items:
+ * flex-start` sizes the box to its content regardless of min-width. */
+.voyage-head > div:first-child { min-width: 0; }
+/* Title above its metadata, for the same reason the queue rows read that way. */
+.voyage-title {
+  margin: 0; font-size: 0.9375rem; font-weight: 500; line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.voyage-head .row-meta { margin-top: 0.375rem; }
 .voyage-state { display: flex; align-items: center; gap: 0.875rem; flex: 0 0 auto; white-space: nowrap; }
 .voyage-note { margin: 0.875rem 0 0; color: var(--fg-dim); max-width: 44rem; }
 .voyage-foot {
@@ -593,6 +626,52 @@ details[open] > .fold-body { animation: rise 240ms ease-out; }
 }
 .gate-step.is-unrecorded .gate-mark { background: transparent; border: 1px dashed var(--fg-mute); }
 .gate-note { flex: 1 1 auto; min-width: 0; }
+
+/* The steps nothing has reported on are the majority of the list and every one
+ * makes the same claim. Counted in the open, read on request - so the claim
+ * survives while nine near-identical grey lines stop owning the card. */
+.gate-fold { margin-top: 0.5rem; }
+.gate-summary {
+  cursor: pointer; list-style: none;
+  font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.04em;
+  color: var(--fg-mute); padding: 0.25rem 0;
+  transition: color var(--step);
+}
+.gate-summary::-webkit-details-marker { display: none; }
+.gate-summary::before {
+  content: "\203a "; display: inline-block; margin-right: 0.4375rem;
+  transition: transform var(--step);
+}
+.gate-fold[open] > .gate-summary::before { transform: rotate(90deg); }
+.gate-summary:hover { color: var(--fg-dim); }
+
+/* --- motion that explains change ----------------------------------------- */
+
+/* These fire ONLY on a row whose identity is new to the panel, or whose state
+ * actually moved since the panel was last drawn (see markChanges in dom.mjs).
+ * Movement on a timer teaches the operator to ignore movement, and that costs
+ * the one channel that should mean "look here".
+ *
+ * The transform stays on the ROW. A transformed ancestor becomes the containing
+ * block for any position:fixed descendant, so no container here is animated. */
+.is-arriving { animation: arrive 320ms cubic-bezier(0.2, 0.7, 0.3, 1); }
+@keyframes arrive {
+  from { opacity: 0; transform: translateY(-0.375rem); }
+  to { opacity: 1; transform: none; }
+}
+/* A change is a wash across the row that fades out, not a new resting state:
+ * afterwards the row looks exactly like its neighbours again. */
+.is-changed { animation: noticed 1.4s ease-out; }
+tr.is-changed > td { animation: noticed 1.4s ease-out; }
+@keyframes noticed {
+  from { background: var(--halo-brass); }
+  to { background: transparent; }
+}
+.row-port.is-changed { animation: noticed-port 1.4s ease-out; }
+@keyframes noticed-port {
+  from { background: var(--halo-port); }
+  to { background: transparent; }
+}
 
 /* --- controls that ASK rather than do ------------------------------------ */
 
@@ -710,10 +789,11 @@ td:last-child, th:last-child { padding-right: 0; }
 .nowrap { white-space: nowrap; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 
-/* The full URL stays on one line - a pull-request link broken mid-token is
- * unreadable and unusable for copying. The table scrolls instead. */
+/* owner/repo#number on one line. The full address is the link and its tooltip -
+ * printed out in full here it pushed the Repo column off the deck at the
+ * ordinary window size, and Repo is the column the operator came for. */
 .link-url { font-family: var(--mono); font-size: 0.6875rem; white-space: nowrap; }
-.col-what { min-width: 19rem; }
+.col-what { min-width: 17rem; }
 
 /* --- repo blocks --------------------------------------------------------- */
 
@@ -943,6 +1023,42 @@ body.review-shell {
 .review-panel-head { margin: 0 0 0.75rem; font-size: 0.9375rem; font-weight: 500; }
 .review-panel .ask { margin-top: 0.75rem; }
 .review-missing { color: var(--fg-dim); max-width: 40rem; }
+
+/* A review opened INSIDE the console (#219). It covers the deck rather than
+ * floating in a small box: reading a change is the task, not a glance, and the
+ * page underneath is nothing the operator needs while doing it. Same flex
+ * distribution as the standalone review page, so the two read alike. */
+.review-overlay {
+  position: fixed; inset: 0; z-index: 20;
+  display: flex; flex-direction: column;
+  background: var(--hull); padding: 1.25rem 1.5rem;
+}
+body.has-review-open { overflow: hidden; }
+.review-overlay-head {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 1rem;
+  margin-bottom: 0.875rem; flex-wrap: wrap;
+}
+.review-overlay-what { margin: 0; font-size: 0.9375rem; font-weight: 500; flex: 1 1 16rem; }
+/* Calm by design: a lamp and four words, in the dimmed metadata voice. Whether
+ * anyone is listening is reference, not news. */
+.review-overlay-listening {
+  margin: 0; display: flex; align-items: center; gap: 0.4rem;
+  font-size: 0.8125rem; color: var(--fg-dim);
+}
+.review-overlay-close { flex: 0 0 auto; }
+.review-overlay-frame {
+  flex: 1 1 auto; min-height: 40vh; width: 100%; border: 1px solid var(--line);
+  border-radius: var(--r); background: var(--raise);
+}
+.review-overlay-foot { flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+.review-overlay-note { margin: 0; font-size: 0.8125rem; color: var(--fg-dim); }
+.review-open-control { display: inline-flex; align-items: baseline; gap: 0.5rem; }
+.review-open-button { font-size: 0.8125rem; padding: 0.25rem 0.625rem; }
+.review-open-failed { font-size: 0.8125rem; color: var(--port); }
+.review-listening {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  margin-left: 0.5rem; font-family: var(--sans); color: var(--fg-dim);
+}
 
 /* One switch for every animation and transition in the file. */
 @media (prefers-reduced-motion: reduce) {
